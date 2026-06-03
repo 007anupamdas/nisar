@@ -1,0 +1,14 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Pipeline outputs / caches (not source)
+output/
+temp_cache/
+temp_coregistered/
+*.log
+
+# imcui offline weight cache bundle
+imw_cache/
+imw_cache.tgz
