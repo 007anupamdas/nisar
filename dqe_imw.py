@@ -442,15 +442,28 @@ if __name__ == '__main__':
     input_      = sys.argv[3].split(',')
     scene_dir   = input_[0]
     base_output = sys.argv[2]
+
+    # Where to store / read intermediate pair{NNN}_*.tif chips.
+    #   NISAR_TEMP_DIR=/abs/path  → reuse an existing kornia-pipeline cache.
+    #   unset                     → write fresh chips inside <base_output>/temp_cache.
+    # Either way, references are auto-fetched on the first run; subsequent
+    # runs against the same temp_dir reuse the cached chips.
     shared_temp = os.environ.get(
         'NISAR_TEMP_DIR',
-        '/maintenance/ICIGDev/GPUPOC/inter/dqe/set3/'
+        os.path.join(base_output, 'temp_cache'),
     )
+    os.makedirs(shared_temp, exist_ok=True)
 
-    # Reuse the existing pair cache by pointing temp_dir at the same location;
-    # IMW reads the same pair{NNN}_{nisar,s1}.tif files written by the
-    # base pipeline. If you haven't run the base pipeline first, set
-    # check_existing_pairs=False so this run produces them.
+    # If NISAR_FORCE_REFETCH=1 is set, ignore any cached pairs and re-fetch
+    # references from scratch. Useful when the cache is from a different scene
+    # or a different reference catalog.
+    force_refetch = os.environ.get('NISAR_FORCE_REFETCH', '0') == '1'
+
+    print(f'[IMW] scene_dir   = {scene_dir}')
+    print(f'[IMW] base_output = {base_output}')
+    print(f'[IMW] temp_dir    = {shared_temp}')
+    print(f'[IMW] force_refetch = {force_refetch}')
+
     WINDOW_SIZES = [int(x) for x in os.environ.get(
         'NISAR_IMW_WIN_SIZES', '1024'
     ).split(',')]
@@ -474,7 +487,7 @@ if __name__ == '__main__':
             target_resolution    = 10,
             use_disk_cache       = True,
             cleanup_after_pair   = False,
-            check_existing_pairs = True,
+            check_existing_pairs = (not force_refetch),
             use_amp              = True,
             debug_mode           = (win > 2000),
 
