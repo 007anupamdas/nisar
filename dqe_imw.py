@@ -72,84 +72,10 @@ def _load_imw():
 # =============================================================================
 # IMW CONFIG CATALOG
 # =============================================================================
-# Each entry: (short_tag, conf_dict, dense_flag).
-# short_tag MUST NOT contain '_' -- we use '-' instead so file_id parsing works.
-# Add / remove rows here to choose which detector-matcher combos to A/B test.
-# The conf dicts follow imcui's published schema (see imcui/hloc/configs/*).
-
-def _sparse_conf(feat_name: str, matcher_name: str,
-                 max_kp: int = 4096, resize_max: int = 1600,
-                 keypoint_threshold: float = 0.005) -> Dict:
-    return {
-        'feature': {
-            'output': f'feats-{feat_name}-n{max_kp}-rmax{resize_max}',
-            'model': {
-                'name': feat_name,
-                'max_keypoints': max_kp,
-                'keypoint_threshold': keypoint_threshold,
-            },
-            'preprocessing': {
-                'grayscale': True,
-                'force_resize': False,
-                'resize_max': resize_max,
-                'dfactor': 8,
-            },
-        },
-        'matcher': {
-            'output': f'matches-{matcher_name}',
-            'model': {
-                'name': matcher_name,
-                'match_threshold': 0.2,
-            },
-        },
-        'dense': False,
-    }
-
-
-def _dense_conf(matcher_name: str, weights: Optional[str] = None,
-                max_kp: int = 4000, resize_max: int = 1024) -> Dict:
-    model_cfg = {
-        'name': matcher_name,
-        'max_keypoints': max_kp,
-        'match_threshold': 0.2,
-    }
-    if weights is not None:
-        model_cfg['weights'] = weights
-    return {
-        'matcher': {
-            'output': f'matches-{matcher_name}',
-            'model': model_cfg,
-            'preprocessing': {
-                'grayscale': True,
-                'force_resize': False,
-                'resize_max': resize_max,
-                'dfactor': 8,
-            },
-            'max_error': 1,
-            'cell_size': 1,
-        },
-        'dense': True,
-    }
-
-
-# Curated catalog. Comment out rows you don't want to evaluate to save time.
-# Tag rules: lower-case, alphanumeric + '-' only.  No underscores.
-IMW_CONFIGS: List[Tuple[str, Dict, bool]] = [
-    # ── Sparse: detector + matcher ──────────────────────────────────────────
-    ('sp-lg',         _sparse_conf('superpoint', 'lightglue', max_kp=8192), False),
-    ('aliked-lg',     _sparse_conf('aliked',     'lightglue', max_kp=8192), False),
-    ('disk-lg',       _sparse_conf('disk',       'lightglue', max_kp=8192), False),
-    ('xfeat-lg',      _sparse_conf('xfeat',      'lightglue', max_kp=8192), False),
-    ('sp-sg',         _sparse_conf('superpoint', 'superglue', max_kp=4096), False),
-    # ── Dense / end-to-end matchers ─────────────────────────────────────────
-    ('eloftr',        _dense_conf('eloftr',      weights='outdoor'),        True),
-    ('aspanformer',   _dense_conf('aspanformer', weights='outdoor'),        True),
-    ('roma',          _dense_conf('roma',        weights='outdoor',
-                                  max_kp=2000, resize_max=864),             True),
-    ('dkm',           _dense_conf('dkm',         weights='outdoor',
-                                  max_kp=2000, resize_max=864),             True),
-    ('xfeat-dense',   _dense_conf('xfeat_dense',                            ), True),
-]
+# The catalog and its conf-builder helpers live in imw_configs.py, which has
+# no heavy imports so it can be reused by prefetch_imw_weights.py on an
+# internet-connected (download-only) machine. Edit the catalog THERE.
+from imw_configs import IMW_CONFIGS  # noqa: E402
 
 
 # =============================================================================
