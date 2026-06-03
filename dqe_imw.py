@@ -171,6 +171,36 @@ class IMWMatcher(DiskBasedMatcher):
         self.imw_conf = imw_conf
         self.dense = dense
         self.api = None
+        self._load_failed = False  # set True after a failed load to stop retrying
+
+    # ---- model loading (once per matcher) ------------------------------------
+    def _ensure_api(self) -> bool:
+        """Load the imcui model once. Returns True if usable, False if the
+        load has failed (so the caller can short-circuit every window instead
+        of re-attempting a doomed HuggingFace download thousands of times)."""
+        if self.api is not None:
+            return True
+        if self._load_failed:
+            return False
+        try:
+            ImageMatchingAPI = _load_imw()
+            print(f'[{self.get_detector_name()}] Loading model...')
+            self.api = ImageMatchingAPI(
+                conf=self.imw_conf,
+                device=str(self.device) if not isinstance(self.device, str) else self.device,
+                detect_threshold=0.015,
+                max_keypoints=self.config.num_features,
+                match_threshold=0.2,
+            )
+            return True
+        except Exception as e:
+            self._load_failed = True
+            print(f'[{self.get_detector_name()}] MODEL LOAD FAILED: '
+                  f'{type(e).__name__}: {e}')
+            print(f'[{self.get_detector_name()}] Aborting this matcher '
+                  f'(no per-window retry). If this is a network/HuggingFace '
+                  f'error, pre-download checkpoints and set HF_HUB_OFFLINE=1.')
+            return False
 
     # ---- DiskBasedMatcher hooks ----------------------------------------------
     def detect_and_describe(self, img1, img2):
@@ -198,6 +228,10 @@ class IMWMatcher(DiskBasedMatcher):
                                nisar_x, nisar_y, s1_x, s1_y,
                                metadata, matcher_name, matcher_param,
                                nisar_nodata=None, s1_nodata=None):
+        # Short-circuit immediately if the model could not be loaded, so a
+        # network/checkpoint failure does not retry on every single window.
+        if self._load_failed:
+            return None
         try:
             img1, mask1 = self._norm_img(nisar_data, nodata=nisar_nodata, return_mask=True)
             img2, mask2 = self._norm_img(s1_data,    nodata=s1_nodata,    return_mask=True)
@@ -223,16 +257,8 @@ class IMWMatcher(DiskBasedMatcher):
             rgb1 = cv2.cvtColor(u1, cv2.COLOR_GRAY2RGB)
             rgb2 = cv2.cvtColor(u2, cv2.COLOR_GRAY2RGB)
 
-            if self.api is None:
-                ImageMatchingAPI = _load_imw()
-                print(f'[{self.get_detector_name()}] Loading model...')
-                self.api = ImageMatchingAPI(
-                    conf=self.imw_conf,
-                    device=str(self.device) if not isinstance(self.device, str) else self.device,
-                    detect_threshold=0.015,
-                    max_keypoints=self.config.num_features,
-                    match_threshold=0.2,
-                )
+            if not self._ensure_api():
+                return None
 
             if not self._has_gpu_headroom(min_free_gb=5.0):
                 safe_cuda_empty_cache()
