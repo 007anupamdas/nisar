@@ -71,6 +71,19 @@ def main() -> int:
     print(f'[prefetch] device={device}')
     print(f'[prefetch] HF_HOME={os.environ.get("HF_HOME", "(default ~/.cache/huggingface)")}')
     print(f'[prefetch] TORCH_HOME={os.environ.get("TORCH_HOME", "(default ~/.cache/torch)")}')
+
+    # Behind a corporate TLS-inspection proxy, torch.hub's plain-urllib calls
+    # (used by xfeat etc.) fail cert verification ("self-signed certificate in
+    # certificate chain"). On a TRUSTED internal download box you can disable
+    # verification just for this prefetch. Gated behind an explicit env var.
+    if os.environ.get('PREFETCH_INSECURE_SSL') == '1':
+        import ssl
+        ssl._create_default_https_context = ssl._create_unverified_context
+        os.environ.setdefault('GIT_SSL_NO_VERIFY', 'true')
+        os.environ.setdefault('CURL_CA_BUNDLE', '')
+        print('[prefetch] WARNING: TLS verification DISABLED '
+              '(PREFETCH_INSECURE_SSL=1) -- use only on a trusted network.')
+
     print(f'[prefetch] {len(IMW_CONFIGS)} configs to fetch\n')
 
     from imcui.api import ImageMatchingAPI
