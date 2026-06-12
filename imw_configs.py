@@ -2,90 +2,148 @@
 """
 imcui (image-matching-webui) configuration catalog.
 
-Kept deliberately free of heavy imports (no torch / kornia / rasterio) so it
-can be imported on a download-only / internet-connected machine that only has
-`imcui` installed, for weight prefetching (see prefetch_imw_weights.py), as
-well as inside the full NISAR pipeline (dqe_imw.py).
+Configs are resolved from imcui's OWN registry (imcui/hloc/configs/{extractors,
+matchers}.py, exposed as extract_features.confs / match_features.confs /
+match_dense.confs) instead of being hand-written here. That guarantees each
+model gets the exact conf the webui itself uses -- critically:
 
-Each catalog entry is: (short_tag, conf_dict, dense_flag)
+  * the LightGlue confs carry `features` + `model_name` (e.g. disk-lightglue
+    -> disk_lightglue.pth). A bare {'name': 'lightglue'} silently loads the
+    SuperPoint-LightGlue weights, which cannot match DISK/ALIKED/xfeat
+    descriptors.
+  * eloftr wants `model_name: eloftr_outdoor.ckpt` (not weights='outdoor').
+  * roma / dkm / xfeat expect RGB input (grayscale: False), loftr/superpoint
+    expect grayscale.
+
+This module therefore needs `imcui` importable (both the prefetch box and the
+pipeline box have it). If imcui is missing, IMW_CONFIGS resolves to [] with a
+loud warning instead of crashing the import.
+
+Each resolved entry is: (short_tag, conf_dict, dense_flag)
   short_tag : lower-case, alphanumeric + '-' only.  NO underscores
               (underscores break the CSV file_id parser in dqe_imw.py).
-  conf_dict : imcui ImageMatchingAPI conf (see imcui/hloc/configs/*).
+  conf_dict : imcui ImageMatchingAPI conf
+              sparse: {'feature': ..., 'matcher': ..., 'dense': False}
+              dense:  {'matcher': ..., 'dense': True}
   dense     : True for end-to-end dense matchers, False for detector+matcher.
+
+Tuning via environment variables:
+  NISAR_IMW_RESIZE_MAX    long-side cap fed to imcui preprocessing
+                          (default 2048; window chips of 1024 px pass through
+                          unresized, which preserves the 10 m/px geometry)
+  NISAR_IMW_DENSE_MAX_KP  max matches kept by dense matchers (default 4096)
+  NISAR_IMW_ONLY          comma list of tags to keep, e.g. "sp-lg,roma"
 """
 
+import copy
+import os
 from typing import Dict, List, Optional, Tuple
 
+RESIZE_MAX = int(os.environ.get('NISAR_IMW_RESIZE_MAX', '2048'))
+DENSE_MAX_KP = int(os.environ.get('NISAR_IMW_DENSE_MAX_KP', '4096'))
 
-def sparse_conf(feat_name: str, matcher_name: str,
-                max_kp: int = 4096, resize_max: int = 1600,
-                keypoint_threshold: float = 0.005) -> Dict:
-    return {
-        'feature': {
-            'output': f'feats-{feat_name}-n{max_kp}-rmax{resize_max}',
-            'model': {
-                'name': feat_name,
-                'max_keypoints': max_kp,
-                'keypoint_threshold': keypoint_threshold,
-            },
-            'preprocessing': {
-                'grayscale': True,
-                'force_resize': False,
-                'resize_max': resize_max,
-                'dfactor': 8,
-            },
-        },
-        'matcher': {
-            'output': f'matches-{matcher_name}',
-            'model': {
-                'name': matcher_name,
-                'match_threshold': 0.2,
-            },
-        },
-        'dense': False,
-    }
-
-
-def dense_conf(matcher_name: str, weights: Optional[str] = None,
-               max_kp: int = 4000, resize_max: int = 1024) -> Dict:
-    model_cfg = {
-        'name': matcher_name,
-        'max_keypoints': max_kp,
-        'match_threshold': 0.2,
-    }
-    if weights is not None:
-        model_cfg['weights'] = weights
-    return {
-        'matcher': {
-            'output': f'matches-{matcher_name}',
-            'model': model_cfg,
-            'preprocessing': {
-                'grayscale': True,
-                'force_resize': False,
-                'resize_max': resize_max,
-                'dfactor': 8,
-            },
-            'max_error': 1,
-            'cell_size': 1,
-        },
-        'dense': True,
-    }
-
-
-# Curated catalog. Comment out rows you don't want to evaluate to save time.
-IMW_CONFIGS: List[Tuple[str, Dict, bool]] = [
-    # ── Sparse: detector + matcher ──────────────────────────────────────────
-    ('sp-lg',         sparse_conf('superpoint', 'lightglue', max_kp=8192), False),
-    ('aliked-lg',     sparse_conf('aliked',     'lightglue', max_kp=8192), False),
-    ('disk-lg',       sparse_conf('disk',       'lightglue', max_kp=8192), False),
-    ('xfeat-lg',      sparse_conf('xfeat',      'lightglue', max_kp=8192), False),
-    ('sp-sg',         sparse_conf('superpoint', 'superglue', max_kp=4096), False),
-    # ── Dense / end-to-end matchers ─────────────────────────────────────────
-    ('eloftr',        dense_conf('eloftr',      weights='outdoor'),        True),
-    ('aspanformer',   dense_conf('aspanformer', weights='outdoor'),        True),
-    ('roma',          dense_conf('roma',        weights='outdoor',
-                                 max_kp=2000, resize_max=864),             True),
-    ('dkm',           dense_conf('dkm',         weights='outdoor',
-                                 max_kp=2000, resize_max=864),             True),
-    ('xfeat-dense',   dense_conf('xfeat_dense'),                           True),
+# ─────────────────────────────────────────────────────────────────────────────
+# Catalog: (tag, extractor conf name | None, matcher conf name)
+#   extractor None  -> dense / end-to-end matcher (match_dense.confs)
+#   extractor given -> sparse pair (extract_features.confs + match_features.confs)
+# Conf names must exist in YOUR installed imcui version; unknown names are
+# skipped with a warning that lists what IS available, so version drift shows
+# up at startup instead of after hours of matching.
+# ─────────────────────────────────────────────────────────────────────────────
+CATALOG: List[Tuple[str, Optional[str], str]] = [
+    # ── Sparse: detector + matcher ───────────────────────────────────────────
+    ('sp-lg',       'superpoint_max', 'superpoint-lightglue'),
+    ('aliked-lg',   'aliked-n16',     'aliked-lightglue'),
+    ('disk-lg',     'disk',           'disk-lightglue'),
+    ('xfeat-lg',    'xfeat',          'xfeat_lightglue'),
+    ('sp-sg',       'superpoint_max', 'superglue'),
+    ('sift-lg',     'sift',           'sift-lightglue'),
+    # ── Dense / end-to-end matchers ──────────────────────────────────────────
+    ('loftr',       None,             'loftr'),
+    ('eloftr',      None,             'eloftr'),
+    ('aspanformer', None,             'aspanformer'),
+    ('roma',        None,             'roma'),
+    ('dkm',         None,             'dkm'),
+    ('xfeat-dense', None,             'xfeat_dense'),
 ]
+
+
+def _override_preprocessing(conf_section: Dict) -> None:
+    """Keep native chip resolution: no forced WxH resize, generous long-side
+    cap. grayscale/dfactor stay whatever the model's registry conf says."""
+    pp = conf_section.setdefault('preprocessing', {})
+    pp['force_resize'] = False
+    pp['resize_max'] = RESIZE_MAX
+
+
+def build_conf(feature_name: Optional[str], matcher_name: str) -> Tuple[Dict, bool]:
+    """Resolve one catalog row into an ImageMatchingAPI conf dict."""
+    from imcui.hloc import extract_features, match_dense, match_features
+
+    dense = feature_name is None
+    if dense:
+        if matcher_name not in match_dense.confs:
+            raise KeyError(
+                f"dense matcher conf '{matcher_name}' not in this imcui. "
+                f"Available: {sorted(match_dense.confs.keys())}"
+            )
+        mconf = copy.deepcopy(match_dense.confs[matcher_name])
+        _override_preprocessing(mconf)
+        mconf.setdefault('model', {})['max_keypoints'] = DENSE_MAX_KP
+        return {'matcher': mconf, 'dense': True}, True
+
+    if feature_name not in extract_features.confs:
+        raise KeyError(
+            f"extractor conf '{feature_name}' not in this imcui. "
+            f"Available: {sorted(extract_features.confs.keys())}"
+        )
+    if matcher_name not in match_features.confs:
+        raise KeyError(
+            f"matcher conf '{matcher_name}' not in this imcui. "
+            f"Available: {sorted(match_features.confs.keys())}"
+        )
+    fconf = copy.deepcopy(extract_features.confs[feature_name])
+    mconf = copy.deepcopy(match_features.confs[matcher_name])
+    _override_preprocessing(fconf)
+    _override_preprocessing(mconf)
+    # max_keypoints / keypoint_threshold are injected per-run by
+    # ImageMatchingAPI(_update_config) from the dqe_imw.py side.
+    return {'feature': fconf, 'matcher': mconf, 'dense': False}, False
+
+
+def build_catalog(catalog: Optional[List[Tuple[str, Optional[str], str]]] = None
+                  ) -> List[Tuple[str, Dict, bool]]:
+    only = os.environ.get('NISAR_IMW_ONLY', '').strip()
+    keep = {t.strip() for t in only.split(',') if t.strip()} if only else None
+
+    entries: List[Tuple[str, Dict, bool]] = []
+    failures: List[Tuple[str, str]] = []
+    for tag, feat, match in (catalog if catalog is not None else CATALOG):
+        if '_' in tag:
+            failures.append((tag, "tag contains '_' (breaks file_id parser)"))
+            continue
+        if keep is not None and tag not in keep:
+            continue
+        try:
+            conf, dense = build_conf(feat, match)
+            entries.append((tag, conf, dense))
+        except Exception as e:
+            failures.append((tag, f'{type(e).__name__}: {e}'))
+
+    if failures:
+        print('[imw_configs] WARNING: skipped configs (not available in this '
+              'imcui install):')
+        for tag, err in failures:
+            print(f'[imw_configs]   - {tag}: {err}')
+    print(f'[imw_configs] {len(entries)} configs resolved: '
+          f'{", ".join(t for t, _, _ in entries) or "(none)"}')
+    return entries
+
+
+try:
+    IMW_CONFIGS: List[Tuple[str, Dict, bool]] = build_catalog()
+except ImportError as _e:
+    print(f'[imw_configs] ERROR: imcui not importable ({_e}). '
+          f'IMW_CONFIGS is empty -- install image-matching-webui '
+          f'(pip install -e <repo>) first.')
+    IMW_CONFIGS = []
