@@ -90,7 +90,8 @@ DENSE_SPECS: List[Tuple[str, str]] = [
     ('rdd-dense',    'rdd_dense'),
     ('xfeat-lg',     'xfeat_lightglue'), # self-contained xfeat + lightglue
     ('xfeat-dense',  'xfeat_dense'),
-    ('jamma',        'jamma'),
+    # ('jamma',      'jamma'),  # disabled: imcui ships the conf but not the
+    #                            matcher module (ModuleNotFoundError).
 
     # ---- heavy / experimental (enable deliberately) ------------------------
     # ('mast3r',     'mast3r'),     # 3D recon backbone, very heavy
