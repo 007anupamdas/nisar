@@ -141,6 +141,18 @@ def normalize_uri(uri: str) -> str:
     if uri.startswith(("http://", "https://")):
         return "/vsicurl/" + uri
     if uri.startswith("s3://"):
+        # An Earthdata bucket is readable over S3 only from inside its region,
+        # so resolve to the HTTPS equivalent when we are not there. /vsis3/
+        # would otherwise fail on credentials in a way that looks like a bug.
+        try:
+            import nisar_h5 as nh
+            mode, resolved = nh.resolve_uri(uri)
+            if mode == "http":
+                return "/vsicurl/" + resolved
+        except SystemExit:
+            raise
+        except Exception:
+            pass
         return "/vsis3/" + uri[len("s3://"):]
     if uri.startswith("gs://"):
         return "/vsigs/" + uri[len("gs://"):]

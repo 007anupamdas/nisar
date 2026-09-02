@@ -15,7 +15,7 @@ cog_viewer.py     builds the self-contained HTML viewer
 nisar_h5.py       streams NISAR HDF5 products over HTTP range requests
 ```
 
-Requires `numpy` and `rasterio`, plus `h5py` for NISAR HDF5 products. PNG encoding is done with `zlib` alone, so
+Requires `numpy` and `rasterio`, plus `h5py` for NISAR HDF5 products and `boto3` only for `s3://` direct access from inside AWS `us-west-2`. PNG encoding is done with `zlib` alone, so
 Pillow and matplotlib are not needed — one less thing to prefetch onto an
 air-gapped box. `python cog_locate.py selftest` builds a synthetic viewer with
 no network and no rasterio at all, which is the quickest way to check the page
@@ -130,6 +130,45 @@ command line, where they would land in your shell history and the process table:
 
 Nothing here logs, echoes or persists a credential. You must also have accepted
 the NISAR EULA once by downloading any granule through the Earthdata web UI.
+
+### The `s3://` URL: in-region only
+
+CMR advertises a `GET DATA VIA DIRECT ACCESS` link like
+`s3://sds-n-cumulus-prod-nisar-products/...`. It is real — the bucket is in
+`us-west-2` and is not public (an anonymous GET returns 403) — but ASF's own
+[`s3credentialsREADME`](https://cumulus.asf.alaska.edu/s3credentialsREADME) is
+blunt about the catch:
+
+> the credentials are only valid for in-region requests, so using them with your
+> AWS CLI will not work! You must make your requests from an AWS service such as
+> Lambda or EC2 in the same region as the source bucket
+
+So `s3://` is the *fast* path from an EC2 instance or Lambda in `us-west-2`, and
+useless anywhere else. The credentials also expire after an hour.
+
+Pass an `s3://` URL anyway and the tool works it out:
+
+- **Inside `us-west-2`** (checked via EC2 instance metadata, or `$AWS_REGION`) —
+  reads directly from S3 with temporary credentials from the DAAC's
+  `/s3credentials` endpoint, refreshed before they expire. Needs `boto3`.
+- **Anywhere else** — translates to the HTTPS URL for the same object, tells you
+  it did, and carries on:
+
+```
+note: s3:// direct access only works from inside AWS us-west-2 (ASF issues
+      in-region-only credentials).
+      Falling back to the HTTPS URL for the same object:
+      https://nisar.asf.earthdatacloud.nasa.gov/NISAR/…/….h5
+```
+
+The translation is a bucket-to-host convention, so it is verified with a HEAD
+before being used — a wrong guess would otherwise surface later as a confusing
+404. For a bucket with no known mapping you get a clear refusal naming the
+in-region restriction, not a credential error.
+
+The same applies to a COG at an `s3://` Earthdata URL: it is resolved to HTTPS
+rather than handed to GDAL's `/vsis3/`, which would fail on credentials in a way
+that looks like a bug in this tool.
 
 **GSLC is complex.** Geocoded SLC stores complex amplitude; the tool converts to
 intensity (`|z|²`) before the dB stretch, which is the right quantity both for
