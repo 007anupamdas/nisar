@@ -177,6 +177,64 @@ display and for locating a point target's peak.
 `--freq A|B` selects the frequency sub-band, `--pol HH` a single polarization,
 `--h5-block KB` tunes the range-request size.
 
+## QGIS, and the browse imagery
+
+**Neither the `.h5` URL nor the `s3://` URL will open in QGIS.** GDAL's HDF5
+driver cannot read a `/vsicurl/` path — it fails immediately with
+`No such file or directory` — and QGIS is GDAL. The `s3://` form needs
+`/vsis3/` plus in-region AWS credentials. A *local* `.h5` does open as HDF5
+subdatasets, but that means downloading the whole granule.
+
+The bridge is `--gtiff`: a georeferenced GeoTIFF chip you drag straight in.
+
+```bash
+python cog_locate.py chip https://…/GRANULE.h5 --rgb auto \
+    --center 16.80,78.03 --size 5km --out chip.png --gtiff chip.tif
+```
+
+It writes **physical values, not the display stretch** — dB, one band per
+channel, band descriptions set to the polarization names — so QGIS can style it
+and the pixel values stay measurable. Tiled with overviews, i.e. a COG, so it is
+also a valid input to `view`, `info` and anything else that reads a COG.
+
+### The browse PNGs
+
+Every granule has public browse imagery under `/BROWSE/` (no login needed),
+alongside the login-gated data:
+
+| file | what it is |
+|---|---|
+| `…_LATLON.png` | colour composite resampled to a **north-up geographic grid**, transparent outside the swath |
+| `…_NATIVE_A_HH.png` | single polarization in the product's **own grid** |
+
+They carry **no georeferencing at all** — no world file, no `.aux.xml`, no geo
+chunks in the PNG. ASF ships a `…_NATIVE.kml` next to the data (under `/NISAR/`,
+so Earthdata Login applies); that is the authoritative placement, and the right
+thing to open in Google Earth.
+
+**Do not georeference the browse by assuming it spans the granule's CMR bounding
+box.** Measured on a real granule, that puts the corners **15–25 km out**.
+Least-squares fitting the swath corners to the CMR footprint gets it to ~370 m,
+which is better and still only a fit.
+
+Either way the browse is for **orientation only**: ~172 m pixels and
+several-hundred-metre placement. It cannot support metre-level location
+accuracy — that needs the actual data, which is what the rest of this tool
+streams.
+
+## Working in Colab / on S3
+
+`s3://` direct access needs to run inside AWS `us-west-2` (see above).
+**Google Colab runs on Google Cloud, not AWS**, so S3 direct access is not
+available there regardless of credentials — it is a different cloud, not a
+permissions problem.
+
+In Colab, use the HTTPS URL. This tool works there as-is, and NASA's
+[`earthaccess`](https://earthaccess.readthedocs.io/) is the general-purpose
+alternative: it handles Earthdata Login, uses direct S3 when genuinely
+in-region, and falls back to HTTPS otherwise. `earthaccess.open()` returns
+file-like objects h5py reads directly — the same approach `nisar_h5.py` takes.
+
 ## Multispectral composites
 
 ```bash

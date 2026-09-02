@@ -36,7 +36,10 @@ What you get
   1. `info`  -- georeferencing, CRS, overview pyramid, pixel spacing in metres,
                 and the bytes actually read off the wire.
   2. `chip`  -- a window (centred on lat/lon, map X/Y, or a bbox) written as a
-                PNG plus a sidecar JSON carrying the affine transform.
+                PNG plus a sidecar JSON carrying the affine transform, and with
+                --gtiff a georeferenced GeoTIFF for QGIS. (Neither a remote .h5
+                nor an s3:// URL opens in QGIS directly: GDAL's HDF5 driver
+                refuses a /vsicurl path.)
   3. `view`  -- a single self-contained HTML file: pan/zoom the chip, and the
                 cursor reads out lat/lon, map X/Y and source pixel live. Click
                 to drop points, snap them to the local backscatter peak, and
@@ -1050,6 +1053,49 @@ def build_panel(chips: List[Chip], label: str, stretch_mode: str,
     }
 
 
+def write_gtiff(path: str, chips: List["Chip"], labels: List[str],
+                stretch_mode: str = "db", as_cog: bool = True) -> str:
+    """Write the chip as a georeferenced GeoTIFF for QGIS/ArcGIS.
+
+    Physical values are written, not the 8-bit display stretch -- QGIS should do
+    its own styling, and a dB raster stays measurable. Written tiled with
+    overviews, i.e. as a COG, so it also works as an input to everything else
+    here.
+    """
+    rasterio = _require_rasterio()
+    from rasterio.enums import Resampling
+
+    disps = []
+    for ch in chips:
+        d, _scaled, _sm = stretch(ch.data, stretch_mode, (2.0, 98.0), None, None)
+        disps.append(d.astype(np.float32))
+
+    chip = chips[0]
+    profile = {
+        "driver": "GTiff", "height": chip.height, "width": chip.width,
+        "count": len(disps), "dtype": "float32",
+        "crs": chip.crs, "transform": chip.transform,
+        "nodata": float("nan"),
+        "tiled": True, "blockxsize": 256, "blockysize": 256,
+        "compress": "deflate", "predictor": 3,
+    }
+    with rasterio.open(path, "w", **profile) as dst:
+        for i, d in enumerate(disps, start=1):
+            dst.write(d, i)
+            dst.set_band_description(i, labels[i - 1])
+        units = "dB" if stretch_mode in ("db", "amp-db") else ""
+        if units:
+            dst.update_tags(UNITS=units)
+        dst.update_tags(SOURCE=chip.uri, CHANNELS=",".join(labels),
+                        STRETCH=stretch_mode)
+        if as_cog and min(chip.height, chip.width) >= 512:
+            factors = [f for f in (2, 4, 8, 16)
+                       if min(chip.height, chip.width) // f >= 64]
+            if factors:
+                dst.build_overviews(factors, Resampling.average)
+    return path
+
+
 def write_kml(path: str, panel: Dict, overlay: List[Dict],
               image_png: Optional[bytes] = None) -> str:
     """Write KML (or KMZ, if the path ends .kmz) for Google Earth.
@@ -1405,6 +1451,10 @@ def cmd_chip(args) -> int:
 
     print(f"wrote {out_png}  ({chip.width} x {chip.height} px, {_fmt_bytes(len(png))})")
     print(f"wrote {out_json}")
+    if args.gtiff:
+        write_gtiff(args.gtiff, chips, labels, args.stretch)
+        print(f"wrote {args.gtiff}  ({len(chips)} band(s): {', '.join(labels)}; "
+              f"open directly in QGIS)")
     print(f"  decimation   : {chip.dec}x  (window {chip.window[2]} x {chip.window[3]} "
           f"full-res px)")
     print(f"  display range: {smeta['vmin']:.2f} .. {smeta['vmax']:.2f} {smeta['units']}"
@@ -1538,6 +1588,11 @@ def cmd_view(args) -> int:
         if not inside:
             print("          none fall inside the chip -- check the CSV coordinates "
                   "or widen --size")
+
+    if args.gtiff:
+        write_gtiff(args.gtiff, chips_a, labels_a, args.stretch)
+        print(f"\nwrote {args.gtiff}  ({len(chips_a)} band(s): "
+              f"{', '.join(labels_a)}; open directly in QGIS)")
 
     if args.kml:
         import base64 as _b64
@@ -1729,6 +1784,10 @@ def build_parser() -> argparse.ArgumentParser:
     pc.add_argument("uri")
     pc.add_argument("--band", type=int, default=1)
     pc.add_argument("--out", help="output PNG path (default chip.png)")
+    pc.add_argument("--gtiff", metavar="PATH",
+                    help="also write a georeferenced GeoTIFF (tiled + overviews, "
+                         "i.e. a COG) carrying physical values -- drag it "
+                         "straight into QGIS")
     _add_window_args(pc)
     _add_source_args(pc)
     _add_render_args(pc)
@@ -1760,6 +1819,9 @@ def build_parser() -> argparse.ArgumentParser:
                          "'none'")
     pv.add_argument("--no-values", action="store_true",
                     help="alias for --values none")
+    pv.add_argument("--gtiff", metavar="PATH",
+                    help="also write a georeferenced GeoTIFF (COG) of panel A "
+                         "for QGIS")
     pv.add_argument("--kml", metavar="PATH",
                     help="also write a KML of the chip footprint and any overlay "
                          "points, to open in Google Earth alongside the viewer")
