@@ -43,6 +43,49 @@ coordinates, `--bbox minx,miny,maxx,maxy` for an explicit footprint, or
 Accepted inputs: an `https://` URL, `s3://`, `gs://`, a local path, a NISAR
 `.h5` (local or remote — see below), or a GDAL connection string.
 
+## Finding granules (and why the ASF API can't give you a COG)
+
+The **ASF Search API** is a *search* API. It finds granules and returns their
+download URLs; it does not transform, subset or reformat anything. Asking it
+for a COG is asking the wrong service — for a NISAR granule it returns exactly
+one `downloadUrl`, the same HDF5.
+
+The adjacent ASF/Earthdata services that *could* have produced one do not cover
+NISAR either, as of this writing:
+
+| service | verdict |
+|---|---|
+| ASF Search API | search only, no transformation |
+| HyP3 (ASF on-demand) | job types are `RTC_GAMMA`, `INSAR_*`, `AUTORIFT`, `ARIA_S1_GUNW`, `OPERA_DISP_TMS` — all Sentinel-1/OPERA, **no NISAR** |
+| Harmony / OPeNDAP subsetting | CMR reports the collection with `associations: {}`, `has-transforms: false`, `has-formats: false` — **no services attached** |
+
+Re-check these before trusting the table: `curl -s https://hyp3-api.asf.alaska.edu/openapi.json`
+lists current HyP3 job types, and the collection's service associations are in
+`https://cmr.earthdata.nasa.gov/search/collections.umm_json?short_name=NISAR_L2_GSLC_PROVISIONAL_V1`.
+
+What the search API *is* good for is turning "this point, these dates" into
+URLs the streaming reader opens directly, which is what `find` does:
+
+```bash
+python cog_locate.py find --center 34.80,-118.07 --product GSLC --max 5
+```
+
+```
+NISAR_L2_PR_GSLC_029_034_A_019_4005_DHDH_A_20260827T130823_…
+    2026-08-27T13:08:23Z  |  ASCENDING  |  freqA HH+HV
+    https://nisar.asf.earthdatacloud.nasa.gov/NISAR/…/….h5
+    -> python cog_locate.py info 'https://…/….h5'
+```
+
+The polarizations are decoded from the granule name (`DHDH` → HH+HV), so you
+can see a dual-pol acquisition has no VV before streaming anything; `info` on
+the granule itself remains the authority. `--bbox`, `--start`/`--end`,
+`--flight-direction`, `--path` and `--dataset` narrow the search.
+
+One argparse wrinkle: a value starting with `-` is read as an option, so write
+`--bbox=-118.5,34.5,-117.5,35.0` (with the `=`) when the first number is
+negative. Same for `--center=-34.5,138.6`.
+
 ## NISAR products from ASF
 
 **There is no COG.** ASF publishes NISAR L2 as a single HDF5 and nothing else —

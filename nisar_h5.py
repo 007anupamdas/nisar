@@ -131,7 +131,14 @@ class HttpRangeFile(io.RawIOBase):
             token, basic = _find_credentials(url)
             self.s = _EarthdataSession(token, basic)
 
-        r = self.s.head(url, allow_redirects=True, timeout=timeout)
+        try:
+            r = self.s.head(url, allow_redirects=True, timeout=timeout)
+        except Exception as exc:
+            raise OSError(
+                f"cannot reach {url}\n"
+                f"  {type(exc).__name__}: {exc}\n"
+                "  Check the URL, your network, and any proxy settings "
+                "(HTTPS_PROXY / NO_PROXY).") from None
         if r.status_code in (401, 403):
             raise PermissionError(_auth_hint(url, r.status_code))
         r.raise_for_status()

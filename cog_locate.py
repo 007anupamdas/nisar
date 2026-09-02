@@ -28,6 +28,11 @@ so the co/cross ratio takes the third slot.
 
 What you get
 ------------
+  0. `find`  -- search ASF for granules over a point or box and print URLs the
+                rest of this tool can open directly. (The ASF Search API finds
+                granules; it does not convert them. There is no COG to ask it
+                for -- HyP3 has no NISAR job type and the collection has no
+                Harmony/OPeNDAP service attached.)
   1. `info`  -- georeferencing, CRS, overview pyramid, pixel spacing in metres,
                 and the bytes actually read off the wire.
   2. `chip`  -- a window (centred on lat/lon, map X/Y, or a bbox) written as a
@@ -545,7 +550,12 @@ def open_nisar(uri: str, freq: Optional[str] = None, block: int = 1 << 20):
     """Open a NISAR product and pick a frequency. Returns (h5, freq_info, tf, crs)."""
     import nisar_h5 as nh
 
-    h5, backing = nh.open_h5(uri, block=block)
+    try:
+        h5, backing = nh.open_h5(uri, block=block)
+    except (OSError, PermissionError) as exc:
+        # Auth and reachability failures already carry an actionable message;
+        # a traceback on top of it just buries the useful part.
+        raise SystemExit(str(exc)) from None
     info = nh.describe(h5)
     freqs = info.get("frequencies") or {}
     if not freqs:
@@ -1249,6 +1259,106 @@ def _read_from_args(args, uri, band):
                      zero_is_nodata=not getattr(args, "keep_zeros", False))
 
 
+# =============================================================================
+# ASF granule search
+# =============================================================================
+# The ASF Search API finds granules; it does not transform them. There is no
+# COG to ask it for -- see README_cog_locate.md. What it is good for is turning
+# "this point, these dates" into URLs the streaming reader can open directly.
+ASF_SEARCH = "https://api.daac.asf.alaska.edu/services/search/param"
+
+# The 4-character mode field in a NISAR granule name, e.g. ..._4005_DHDH_A_...
+# Two 2-character codes, one per frequency sub-band.
+_MODE_POLS = {
+    "SH": "HH", "SV": "VV",
+    "DH": "HH+HV", "DV": "VV+VH",
+    "QP": "HH+HV+VH+VV", "QQ": "HH+HV+VH+VV",
+    "CP": "RH+RV", "DP": "dual",
+}
+
+
+def decode_nisar_pols(product_id: str) -> str:
+    """Read the polarization mode out of a NISAR granule name.
+
+    Inferred from the filename, so `info` on the granule itself remains the
+    authority -- but it is enough to see at a glance that a DH acquisition
+    carries no VV before you go and stream it.
+    """
+    parts = product_id.split("_")
+    for p in parts:
+        if len(p) == 4 and p[:2] in _MODE_POLS and p[2:] in _MODE_POLS:
+            a, b = _MODE_POLS[p[:2]], _MODE_POLS[p[2:]]
+            return f"freqA {a}" + (f", freqB {b}" if b != a else "")
+    return "?"
+
+
+def cmd_find(args) -> int:
+    import json as _json
+    import urllib.parse
+    import urllib.request
+
+    params = {"output": "jsonlite", "maxResults": str(args.max)}
+    if args.dataset:
+        params["dataset"] = args.dataset
+    if args.product:
+        params["processingLevel"] = args.product
+    if args.start:
+        params["start"] = args.start
+    if args.end:
+        params["end"] = args.end
+    if args.flight_direction:
+        params["flightDirection"] = args.flight_direction
+    if args.path:
+        params["relativeOrbit"] = str(args.path)
+
+    if args.center:
+        lat, lon = _numbers(args.center, 2, "--center", "lat,lon in degrees")
+        params["intersectsWith"] = f"point({lon} {lat})"
+    elif args.bbox:
+        w, s, e, n = _numbers(args.bbox, 4, "--bbox", "minlon,minlat,maxlon,maxlat")
+        params["intersectsWith"] = (
+            f"polygon(({w} {s},{e} {s},{e} {n},{w} {n},{w} {s}))")
+    else:
+        raise SystemExit("find needs --center lat,lon or --bbox "
+                         "minlon,minlat,maxlon,maxlat")
+
+    url = ASF_SEARCH + "?" + urllib.parse.urlencode(params)
+    try:
+        with urllib.request.urlopen(url, timeout=args.timeout) as r:
+            payload = _json.loads(r.read().decode("utf-8"))
+    except Exception as exc:
+        raise SystemExit(f"ASF search failed: {type(exc).__name__}: {exc}\n  {url}")
+
+    results = payload.get("results", payload if isinstance(payload, list) else [])
+    if not results:
+        raise SystemExit(
+            "no granules matched.\n"
+            "  Widen the dates, drop --product, or check the point is on land "
+            "inside an acquired swath.")
+
+    print(f"{len(results)} granule(s):\n")
+    for r in results:
+        pid = r.get("productID") or r.get("fileName", "?")
+        durl = r.get("downloadUrl", "")
+        print(f"  {pid}")
+        bits = [str(r.get("startTime", "?"))]
+        if r.get("flightDirection"):
+            bits.append(str(r["flightDirection"]))
+        if r.get("pathNumber"):
+            bits.append(f"path {r['pathNumber']}")
+        if durl.lower().endswith((".h5", ".hdf5")):
+            bits.append(decode_nisar_pols(pid))
+        print(f"      {'  |  '.join(bits)}")
+        print(f"      {durl}")
+        if durl:
+            print(f"      -> python cog_locate.py info '{durl}'")
+        print()
+
+    print("Note: ASF Search finds granules, it does not convert them. For NISAR "
+          "the\n      only file is the HDF5 -- stream it directly, no COG needed.")
+    return 0
+
+
 def cmd_chip(args) -> int:
     chips, labels, _meta = load_channels(args, args.uri, args.band, args.rgb)
     chip = chips[0]
@@ -1536,9 +1646,12 @@ def cmd_selftest(args) -> int:
 # =============================================================================
 def _add_window_args(p):
     g = p.add_argument_group("window")
-    g.add_argument("--center", help="chip centre as lat,lon (WGS84)")
-    g.add_argument("--center-xy", help="chip centre as x,y in the raster's own CRS")
-    g.add_argument("--bbox", help="minx,miny,maxx,maxy in the raster's own CRS")
+    g.add_argument("--center", help="chip centre as lat,lon (WGS84); write "
+                                    "--center=LAT,LON if latitude is negative")
+    g.add_argument("--center-xy", help="chip centre as x,y in the raster's own "
+                                       "CRS; write --center-xy=... if x is negative")
+    g.add_argument("--bbox", help="minx,miny,maxx,maxy in the raster's own CRS; "
+                                  "write --bbox=... if the first number is negative")
     g.add_argument("--full", action="store_true",
                    help="whole scene (decimated to --max-px; cheap on a real COG)")
     g.add_argument("--size", default="2000m",
@@ -1644,6 +1757,27 @@ def build_parser() -> argparse.ArgumentParser:
     _add_source_args(pv)
     _add_render_args(pv)
     pv.set_defaults(func=cmd_view)
+
+    pf = sub.add_parser("find",
+                        help="search ASF for granules over a point/box and print "
+                             "streamable URLs")
+    pf.add_argument("--center", help="lat,lon to search over "
+                                     "(use --center=LAT,LON if lat is negative)")
+    pf.add_argument("--bbox", help="minlon,minlat,maxlon,maxlat -- write it as "
+                                   "--bbox=-118.5,34.5,-117.5,35.0 when the "
+                                   "first number is negative, or argparse reads "
+                                   "it as an option")
+    pf.add_argument("--dataset", default="NISAR",
+                    help="ASF dataset name (default NISAR; e.g. SENTINEL-1)")
+    pf.add_argument("--product", default=None,
+                    help="processing level, e.g. GSLC, GCOV, RSLC")
+    pf.add_argument("--start", help="ISO date, e.g. 2026-08-01")
+    pf.add_argument("--end", help="ISO date")
+    pf.add_argument("--flight-direction", choices=("ASCENDING", "DESCENDING"))
+    pf.add_argument("--path", type=int, help="relative orbit / path number")
+    pf.add_argument("--max", type=int, default=10, help="max results (default 10)")
+    pf.add_argument("--timeout", type=int, default=90)
+    pf.set_defaults(func=cmd_find)
 
     ps = sub.add_parser("selftest",
                         help="build a synthetic viewer (no network, no rasterio)")
