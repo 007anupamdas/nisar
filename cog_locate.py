@@ -15,6 +15,17 @@ Nothing here downloads a granule. A COG is read with HTTP range requests
 (GDAL /vsicurl), so pulling a 2 km x 2 km chip out of a 30 GB scene costs a
 few hundred kilobytes -- overviews and internal tiling do the work.
 
+ASF ships NISAR L2 as a single HDF5 and no COG (a GSLC granule is ~22 GB), and
+GDAL will not open an HDF5 over /vsicurl. So a NISAR .h5 is streamed directly
+by nisar_h5.py, which hands h5py a file-like object backed by range requests;
+HDF5's chunked layout means only the chunks your window touches come over the
+wire. Point it at a .h5 and everything below works the same way.
+
+Polarizations can be composited: --rgb HH,HV,HH/HV maps three channels (or
+ratios) to red/green/blue, each stretched on its own percentiles. --rgb auto
+picks whatever the product actually carries -- a dual-pol granule has no VV,
+so the co/cross ratio takes the third slot.
+
 What you get
 ------------
   1. `info`  -- georeferencing, CRS, overview pyramid, pixel spacing in metres,
@@ -54,6 +65,13 @@ Examples
   # NISAR against a Sentinel-1 reference, side by side
   python cog_locate.py view nisar_HH.tif --b s1_vv.tif \\
       --center 34.80,-118.07 --size 4000m --out pair.html
+
+  # straight off an ASF NISAR granule, as a polarimetric composite, with a
+  # KMZ to drape over Google Earth (needs Earthdata Login -- see nisar_h5.py)
+  python cog_locate.py info https://nisar.asf.earthdatacloud.nasa.gov/...h5
+  python cog_locate.py view https://nisar.asf.earthdatacloud.nasa.gov/...h5 \\
+      --rgb auto --center 34.8021,-118.0765 --size 3km \\
+      --values all --out gslc.html --kml gslc.kmz
 """
 
 from __future__ import annotations
@@ -309,6 +327,64 @@ class Chip:
         return min(xs), min(ys), max(xs), max(ys)
 
 
+def solve_window(transform, width: int, height: int, crs,
+                 center_lonlat=None, center_xy=None, bbox=None,
+                 size: str = "2000m", full: bool = False,
+                 px_hint: Optional[Tuple[float, float]] = None):
+    """Work out the full-resolution pixel window to read.
+
+    Shared by the COG and the NISAR HDF5 paths so a `--center`/`--size` means
+    exactly the same footprint whichever the source is.
+    """
+    clat = 0.0
+    try:
+        if crs and crs.is_geographic:
+            clat = float(transform.f + transform.e * height / 2.0)
+    except Exception:
+        pass
+    px_x, px_y = px_hint or pixel_size_m(crs, transform, clat)
+
+    if full:
+        return 0, 0, width, height
+
+    if bbox is not None:
+        minx, miny, maxx, maxy = bbox
+        inv = ~transform
+        cs, rs = [], []
+        for x, y in ((minx, miny), (minx, maxy), (maxx, miny), (maxx, maxy)):
+            cc, rr = inv * (x, y)
+            cs.append(cc)
+            rs.append(rr)
+        return (int(math.floor(min(cs))), int(math.floor(min(rs))),
+                max(1, int(math.ceil(max(cs) - min(cs)))),
+                max(1, int(math.ceil(max(rs) - min(rs)))))
+
+    if center_xy is not None:
+        cx, cy = center_xy
+    elif center_lonlat is not None:
+        lon, lat = center_lonlat
+        (cx,), (cy,) = from_lonlat(crs, [lon], [lat])
+    else:
+        cx = transform.c + transform.a * width / 2.0
+        cy = transform.f + transform.e * height / 2.0
+
+    win_w, win_h = _parse_size(size, px_x, px_y)
+    ccol, crow = ~transform * (cx, cy)
+    return (int(round(ccol - win_w / 2.0)), int(round(crow - win_h / 2.0)),
+            win_w, win_h)
+
+
+def _check_window(col_off, row_off, win_w, win_h, width, height, uri, crs, bounds):
+    if (col_off + win_w <= 0 or row_off + win_h <= 0
+            or col_off >= width or row_off >= height):
+        raise SystemExit(
+            f"requested window is entirely outside {uri}\n"
+            f"  window (full-res px): col {col_off}..{col_off + win_w}, "
+            f"row {row_off}..{row_off + win_h}\n"
+            f"  raster is {width} x {height} px, bounds {bounds}\n"
+            f"  CRS {crs}")
+
+
 def _parse_size(size: str, px_x: float, px_y: float) -> Tuple[int, int]:
     """`--size` accepts 3000m, 3km, 2048px, or WxH in either unit."""
     s = str(size).strip().lower().replace(" ", "")
@@ -453,6 +529,128 @@ def read_chip(uri: str,
     finally:
         ds.close()
         env.__exit__(None, None, None)
+
+
+# =============================================================================
+# NISAR HDF5 source
+# =============================================================================
+# ASF ships NISAR L2 as one HDF5 and no COG, so this is not an alternative path
+# so much as the only one for a NISAR granule. It reads over range requests the
+# same way the COG path does -- see nisar_h5.py.
+def is_h5(uri: str) -> bool:
+    return uri.lower().split("?")[0].endswith((".h5", ".hdf5", ".he5"))
+
+
+def open_nisar(uri: str, freq: Optional[str] = None, block: int = 1 << 20):
+    """Open a NISAR product and pick a frequency. Returns (h5, freq_info, tf, crs)."""
+    import nisar_h5 as nh
+
+    h5, backing = nh.open_h5(uri, block=block)
+    info = nh.describe(h5)
+    freqs = info.get("frequencies") or {}
+    if not freqs:
+        raise SystemExit(
+            f"{uri}: no NISAR image grids found. Expected datasets under\n"
+            "  /science/<L|S>SAR/<PRODUCT>/grids/frequency<A|B>/<POL>")
+    key = freq or ("A" if "A" in freqs else sorted(freqs)[0])
+    if key not in freqs:
+        raise SystemExit(f"frequency {key} not in this product; "
+                         f"available: {', '.join(sorted(freqs))}")
+    fi = freqs[key]
+    if not fi["pols"]:
+        raise SystemExit(f"frequency{key} carries no polarization datasets")
+    tf, crs, _ = nh.grid_transform(h5, fi)
+    return h5, backing, info, key, fi, tf, crs
+
+
+def read_nisar_channels(uri: str, channels: List[str], args,
+                        freq: Optional[str] = None) -> Tuple[List["Chip"], Dict]:
+    """Read one or more polarization channels over the same window, one open.
+
+    A channel is a polarization ("HH") or a ratio of two ("HH/HV"). Ratios are
+    the usual stand-in for a missing third polarization in a dual-pol product,
+    where they carry real information: the co- to cross-pol ratio separates
+    surface scattering from volume scattering.
+    """
+    import nisar_h5 as nh
+
+    h5, backing, info, key, fi, tf, crs = open_nisar(
+        uri, freq, block=args.h5_block * 1024)
+    pols = fi["pols"]
+    try:
+        needed: List[str] = []
+        for ch in channels:
+            for part in ch.split("/"):
+                part = part.strip().upper()
+                if part not in pols:
+                    raise SystemExit(
+                        f"{uri}: polarization '{part}' is not in frequency{key}.\n"
+                        f"  available: {', '.join(sorted(pols))}\n"
+                        "  (a DH/dual-pol acquisition carries HH and HV only -- "
+                        "there is no VV to show)")
+                if part not in needed:
+                    needed.append(part)
+
+        shape = pols[needed[0]]["shape"]
+        height, width = int(shape[0]), int(shape[1])
+        center_lonlat, center_xy, bbox = _center_from_args(args)
+        col_off, row_off, win_w, win_h = solve_window(
+            tf, width, height, crs, center_lonlat, center_xy, bbox,
+            args.size, args.full)
+        bounds = (tf.c, tf.f + tf.e * height, tf.c + tf.a * width, tf.f)
+        _check_window(col_off, row_off, win_w, win_h, width, height, uri, crs, bounds)
+
+        dec = max(1, int(math.ceil(max(win_w, win_h) / float(args.max_px))))
+
+        from affine import Affine
+        raw: Dict[str, np.ndarray] = {}
+        origin = None
+        for pol in needed:
+            arr, (r0, c0) = nh.read_window(h5, pols[pol]["path"],
+                                           row_off, col_off, win_h, win_w, dec)
+            raw[pol] = arr
+            origin = (r0, c0)
+
+        # Clip to the smallest common shape; a strided read at an array edge can
+        # come back one row or column short.
+        hmin = min(a.shape[0] for a in raw.values())
+        wmin = min(a.shape[1] for a in raw.values())
+        for k in raw:
+            raw[k] = raw[k][:hmin, :wmin]
+
+        r0, c0 = origin
+        chip_tf = (Affine(tf.a, tf.b, tf.c + tf.a * c0 + tf.b * r0,
+                          tf.d, tf.e, tf.f + tf.d * c0 + tf.e * r0)
+                   * Affine.scale(float(dec), float(dec)))
+
+        chips = []
+        for ch in channels:
+            parts = [p.strip().upper() for p in ch.split("/")]
+            if len(parts) == 1:
+                data = raw[parts[0]].copy()
+            else:
+                num, den = raw[parts[0]], raw[parts[1]]
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    data = np.where(den > 0, num / den, np.nan).astype(np.float32)
+            data = np.asarray(data, dtype=np.float32)
+            data[~np.isfinite(data)] = np.nan
+            data[data == 0] = np.nan          # GSLC fill is exact zero
+            chips.append(Chip(
+                data=data, transform=chip_tf, crs=crs, src_transform=tf, dec=dec,
+                window=(c0, r0, wmin * dec, hmin * dec), uri=uri, band=1,
+                units="", stats={"src_width": width, "src_height": height,
+                                 "src_dtype": pols[parts[0]]["dtype"],
+                                 "chunks": pols[parts[0]]["chunks"],
+                                 "overviews": [],
+                                 "product": f"{info['band']} {info['product']} "
+                                            f"frequency{key}",
+                                 "channel": ch}))
+
+        meta = {"product": info, "freq": key, "pols": sorted(pols),
+                "transfer": dict(backing.stats) if backing else None}
+        return chips, meta
+    finally:
+        h5.close()
 
 
 # =============================================================================
@@ -607,6 +805,21 @@ def encode_png(scaled: np.ndarray, valid: np.ndarray,
     return png
 
 
+def encode_png_rgb(rgb: np.ndarray, valid: np.ndarray, level: int = 6) -> bytes:
+    """Encode an HxWx3 uint8 composite with an alpha channel for nodata."""
+    h, w, _ = rgb.shape
+    alpha = np.where(valid, 255, 0).astype(np.uint8)
+    raw = np.dstack([rgb, alpha])
+    stride = w * 4
+    body = np.zeros((h, stride + 1), dtype=np.uint8)
+    body[:, 1:] = raw.reshape(h, stride)
+    png = b"\x89PNG\r\n\x1a\n"
+    png += _png_chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0))
+    png += _png_chunk(b"IDAT", zlib.compress(body.tobytes(), level))
+    png += _png_chunk(b"IEND", b"")
+    return png
+
+
 def quantize_values(disp: np.ndarray) -> Dict:
     """Pack the displayed physical values into uint16 for the viewer.
 
@@ -714,24 +927,73 @@ def load_points_csv(path: str, crs=None) -> List[Dict]:
 # =============================================================================
 # Panel payload (what the viewer actually consumes)
 # =============================================================================
-def build_panel(chip: Chip, label: str, stretch_mode: str,
+def build_panel(chips: List[Chip], label: str, stretch_mode: str,
                 pct: Tuple[float, float], vmin, vmax, cmap: str,
-                embed_values: bool = True,
+                channel_labels: Optional[List[str]] = None,
+                embed_values: str = "first",
                 grid_n: int = 17) -> Dict:
-    """Turn a Chip into the JSON-able blob the HTML viewer renders."""
+    """Turn one or three Chips into the JSON-able blob the viewer renders.
+
+    One chip renders greyscale (or through a colour table); three render as an
+    RGB composite, each channel stretched on its own percentiles so a weak
+    cross-pol channel is not crushed by a strong co-pol one.
+    """
     import base64
 
-    disp, scaled, smeta = stretch(chip.data, stretch_mode, pct, vmin, vmax)
-    valid = np.isfinite(disp)
-    png = encode_png(scaled, valid, cmap=cmap)
+    if len(chips) not in (1, 3):
+        raise SystemExit(f"a panel needs 1 or 3 channels, got {len(chips)}")
+    labels = channel_labels or [f"ch{i+1}" for i in range(len(chips))]
 
+    disps, smetas = [], []
+    for i, ch in enumerate(chips):
+        # vmin/vmax pin the first channel only; the others follow their own
+        # percentiles, which is what keeps a composite balanced.
+        d, _scaled, sm = stretch(ch.data, stretch_mode, pct,
+                                 vmin if i == 0 else None,
+                                 vmax if i == 0 else None)
+        disps.append(d)
+        smetas.append(sm)
+
+    # A pixel is valid only where every channel is.
+    valid = np.ones(disps[0].shape, dtype=bool)
+    for d in disps:
+        valid &= np.isfinite(d)
+
+    if len(chips) == 1:
+        norm = (disps[0] - smetas[0]["vmin"]) / max(
+            smetas[0]["vmax"] - smetas[0]["vmin"], 1e-9)
+        scaled = np.zeros(norm.shape, dtype=np.uint8)
+        np.clip(norm, 0, 1, out=norm)
+        scaled[valid] = (norm[valid] * 255.0 + 0.5).astype(np.uint8)
+        png = encode_png(scaled, valid, cmap=cmap)
+        mode = "gray"
+    else:
+        rgb = np.zeros(disps[0].shape + (3,), dtype=np.uint8)
+        for i, (d, sm) in enumerate(zip(disps, smetas)):
+            n = (d - sm["vmin"]) / max(sm["vmax"] - sm["vmin"], 1e-9)
+            np.clip(n, 0, 1, out=n)
+            plane = np.zeros(n.shape, dtype=np.uint8)
+            plane[valid] = (n[valid] * 255.0 + 0.5).astype(np.uint8)
+            rgb[:, :, i] = plane
+        png = encode_png_rgb(rgb, valid)
+        mode = "rgb"
+
+    chip = chips[0]
     t = chip.transform
     st = chip.src_transform
     grid = lonlat_grid(chip.crs, t, chip.width, chip.height, grid_n)
     clat = float(np.nanmean(np.asarray(grid["lat"], dtype=float))) if grid["lat"] else 0.0
     px_x, px_y = pixel_size_m(chip.crs, t, clat)
 
-    values = quantize_values(disp) if embed_values else {"encoding": "none", "b64": ""}
+    if embed_values == "none":
+        planes = []
+    elif embed_values == "all":
+        planes = [quantize_values(d) for d in disps]
+    else:
+        planes = [quantize_values(disps[0])]
+    for i, pl in enumerate(planes):
+        pl["label"] = labels[i]
+        pl["units"] = smetas[i]["units"]
 
     try:
         crs_name = chip.crs.to_string() if chip.crs else "(none)"
@@ -741,15 +1003,14 @@ def build_panel(chip: Chip, label: str, stretch_mode: str,
 
     return {
         "label": label,
+        "mode": mode,
+        "channels": labels,
         "uri": chip.uri,
         "band": chip.band,
         "width": chip.width,
         "height": chip.height,
         "png": "data:image/png;base64," + base64.b64encode(png).decode("ascii"),
-        # chip pixel -> map coords
         "transform": [t.a, t.b, t.c, t.d, t.e, t.f],
-        # map coords -> full-res source pixel, so a picked point can be quoted
-        # in the same pixel space the dqe pipeline works in
         "src_inv": list((~st)[:6]),
         "src_transform": [st.a, st.b, st.c, st.d, st.e, st.f],
         "dec": chip.dec,
@@ -759,11 +1020,84 @@ def build_panel(chip: Chip, label: str, stretch_mode: str,
         "px_x_m": px_x,
         "px_y_m": px_y,
         "grid": grid,
-        "stretch": smeta,
-        "values": values,
+        "stretch": smetas[0],
+        "stretches": smetas,
+        "values": planes,
         "cmap": cmap,
         "src": chip.stats,
     }
+
+
+def write_kml(path: str, panel: Dict, overlay: List[Dict],
+              image_png: Optional[bytes] = None) -> str:
+    """Write KML (or KMZ, if the path ends .kmz) for Google Earth.
+
+    A .kmz embeds the chip itself as a GroundOverlay, so you can drape the NISAR
+    image over Google Earth's basemap and see directly whether a feature lands
+    where it should. The overlay is placed with <gx:LatLonQuad>, which takes the
+    four true corners -- exact for any projection, unlike a LatLonBox, which can
+    only model a north-up rectangle plus a single rotation.
+    """
+    g = panel["grid"]
+    n = g["n"]
+    def node(j, i):
+        return (g["lon"][j * n + i], g["lat"][j * n + i])
+    # gx:LatLonQuad wants counter-clockwise from the lower-left.
+    ll, lr = node(n - 1, 0), node(n - 1, n - 1)
+    ur, ul = node(0, n - 1), node(0, 0)
+    quad = " ".join(f"{x:.9f},{y:.9f},0" for x, y in (ll, lr, ur, ul))
+
+    def esc(s):
+        return (str(s).replace("&", "&amp;").replace("<", "&lt;")
+                .replace(">", "&gt;"))
+
+    marks = []
+    for p in overlay:
+        marks.append(
+            f'    <Placemark><name>{esc(p["name"])}</name>'
+            f'<styleUrl>#truth</styleUrl>'
+            f'<description>surveyed position from the overlay CSV</description>'
+            f'<Point><coordinates>{p["lon"]:.9f},{p["lat"]:.9f},0</coordinates>'
+            f'</Point></Placemark>')
+
+    img_block = ""
+    if image_png is not None:
+        img_block = (
+            '  <GroundOverlay><name>' + esc(panel["label"]) + '</name>\n'
+            '    <color>ccffffff</color>\n'
+            '    <Icon><href>chip.png</href></Icon>\n'
+            f'    <gx:LatLonQuad><coordinates>{quad}</coordinates></gx:LatLonQuad>\n'
+            '  </GroundOverlay>\n')
+
+    kml = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<kml xmlns="http://www.opengis.net/kml/2.2" '
+        'xmlns:gx="http://www.google.com/kml/ext/2.2">\n'
+        '<Document>\n'
+        f'  <name>{esc(panel["label"])}</name>\n'
+        f'  <description>{esc(panel["uri"])}</description>\n'
+        '  <Style id="truth"><IconStyle><color>ff7272ff</color><scale>1.1</scale>'
+        '<Icon><href>http://maps.google.com/mapfiles/kml/shapes/placemark_circle.png'
+        '</href></Icon></IconStyle></Style>\n'
+        + img_block +
+        '  <Placemark><name>chip footprint</name><Style><LineStyle>'
+        '<color>ff00d9ff</color><width>2</width></LineStyle></Style>\n'
+        '    <LineString><tessellate>1</tessellate><coordinates>'
+        + " ".join(f"{x:.9f},{y:.9f},0" for x, y in (ll, lr, ur, ul, ll)) +
+        '</coordinates></LineString></Placemark>\n'
+        + "\n".join(marks) + "\n"
+        '</Document></kml>\n')
+
+    if path.lower().endswith(".kmz"):
+        import zipfile
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("doc.kml", kml)
+            if image_png is not None:
+                z.writestr("chip.png", image_png)
+    else:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(kml)
+    return path
 
 
 def _fmt_bytes(n: float) -> str:
@@ -777,7 +1111,54 @@ def _fmt_bytes(n: float) -> str:
 # =============================================================================
 # Commands
 # =============================================================================
+def cmd_info_nisar(args) -> int:
+    """Inventory a NISAR HDF5 without pulling the imagery."""
+    import nisar_h5 as nh
+
+    h5, backing, info, key, fi, tf, crs = open_nisar(
+        args.uri, args.freq, block=args.h5_block * 1024)
+    try:
+        print(f"URI          : {args.uri}")
+        print(f"product      : {info['band']} {info['product']}")
+        if backing:
+            print(f"file size    : {backing.size / 1e9:.2f} GB  (streamed, not downloaded)")
+        for fk in sorted(info["frequencies"]):
+            f = info["frequencies"][fk]
+            print(f"frequency{fk}   : pols {', '.join(sorted(f['pols']))}"
+                  f"   EPSG:{f['epsg']}")
+            for pol in sorted(f["pols"]):
+                m = f["pols"][pol]
+                print(f"    {pol:5s} {m['shape'][0]} x {m['shape'][1]} px, "
+                      f"{m['dtype']}, chunks {m['chunks']}"
+                      f"{', complex' if m['complex'] else ''}")
+        shape = fi["pols"][sorted(fi["pols"])[0]]["shape"]
+        h, w = int(shape[0]), int(shape[1])
+        px_x, px_y = pixel_size_m(crs, tf, 0.0)
+        left, top = tf.c, tf.f
+        right, bottom = tf.c + tf.a * w, tf.f + tf.e * h
+        lons, lats = to_lonlat(crs, [left, right, right, left],
+                               [bottom, bottom, top, top])
+        print(f"selected     : frequency{key}")
+        print(f"pixel size   : {px_x:.4g} x {px_y:.4g} m")
+        print(f"transform    : {tuple(round(v, 6) for v in tf[:6])}")
+        print(f"bounds (map) : left={left:.3f} bottom={bottom:.3f} "
+              f"right={right:.3f} top={top:.3f}")
+        print(f"bounds (ll)  : lon {min(lons):.6f}..{max(lons):.6f}  "
+              f"lat {min(lats):.6f}..{max(lats):.6f}")
+        print(f"center (ll)  : {sum(lats) / 4:.6f}, {sum(lons) / 4:.6f}")
+        print(f"suggested    : --rgb {','.join(_default_rgb(sorted(fi['pols'])))}")
+        if backing:
+            s = backing.stats
+            print(f"cost so far  : {s['bytes'] / 1e6:.1f} MB in {s['requests']} "
+                  f"range requests")
+    finally:
+        h5.close()
+    return 0
+
+
 def cmd_info(args) -> int:
+    if is_h5(args.uri):
+        return cmd_info_nisar(args)
     rasterio = _require_rasterio()
     ds, env = open_raster(args.uri)
     try:
@@ -869,10 +1250,14 @@ def _read_from_args(args, uri, band):
 
 
 def cmd_chip(args) -> int:
-    chip = _read_from_args(args, args.uri, args.band)
-    disp, scaled, smeta = stretch(chip.data, args.stretch,
-                                  tuple(args.pct), args.vmin, args.vmax)
-    png = encode_png(scaled, np.isfinite(disp), cmap=args.cmap)
+    chips, labels, _meta = load_channels(args, args.uri, args.band, args.rgb)
+    chip = chips[0]
+    panel = build_panel(chips, "", args.stretch, tuple(args.pct),
+                        args.vmin, args.vmax, args.cmap,
+                        channel_labels=labels, embed_values="none", grid_n=3)
+    smeta = panel["stretch"]
+    import base64 as _b64
+    png = _b64.b64decode(panel["png"].split(",", 1)[1])
 
     out_png = args.out or "chip.png"
     if not out_png.lower().endswith(".png"):
@@ -881,9 +1266,9 @@ def cmd_chip(args) -> int:
         fh.write(png)
 
     t = chip.transform
-    grid = lonlat_grid(chip.crs, t, chip.width, chip.height, 3)
+    grid = {"lon": panel["grid"]["lon"], "lat": panel["grid"]["lat"]}
     sidecar = {
-        "uri": chip.uri, "band": chip.band,
+        "uri": chip.uri, "band": chip.band, "channels": labels,
         "width": chip.width, "height": chip.height,
         "transform": [t.a, t.b, t.c, t.d, t.e, t.f],
         "crs": str(chip.crs),
@@ -905,35 +1290,110 @@ def cmd_chip(args) -> int:
     return 0
 
 
+def _default_rgb(pols: List[str]) -> List[str]:
+    """Pick a sensible composite for whatever polarizations exist.
+
+    Quad-pol gets the conventional HH/HV/VV. Dual-pol has no third channel, so
+    the co- to cross-pol ratio stands in for it -- the standard dual-pol
+    composite, and an informative one: bright red is rough surface scattering,
+    green is volume scattering from vegetation.
+    """
+    up = [p.upper() for p in pols]
+    for trio in (["HH", "HV", "VV"], ["VV", "VH", "HH"],
+                 ["HHHH", "HVHV", "VVVV"]):
+        if all(p in up for p in trio):
+            return trio
+    for co, cross in (("HH", "HV"), ("VV", "VH"), ("HHHH", "HVHV")):
+        if co in up and cross in up:
+            return [co, cross, f"{co}/{cross}"]
+    return [up[0]]
+
+
+def load_channels(args, uri: str, band: int, rgb: Optional[str]
+                  ) -> Tuple[List[Chip], List[str], Dict]:
+    """Read the channels for one panel, from a COG or a NISAR HDF5."""
+    if is_h5(uri):
+        h5, backing, info, key, fi, _tf, _crs = open_nisar(
+            uri, args.freq, block=args.h5_block * 1024)
+        avail = sorted(fi["pols"])
+        h5.close()
+        if rgb:
+            chans = ([c.strip() for c in rgb.split(",")]
+                     if rgb.lower() != "auto" else _default_rgb(avail))
+        else:
+            chans = [args.pol.strip()] if args.pol else [_default_rgb(avail)[0]]
+        if len(chans) == 2 or len(chans) > 3:
+            raise SystemExit(f"--rgb needs exactly 3 channels, got {len(chans)}")
+        chips, meta = read_nisar_channels(uri, chans, args, args.freq)
+        meta["available"] = avail
+        return chips, chans, meta
+
+    if rgb:
+        if rgb.lower() == "auto":
+            raise SystemExit("--rgb auto only works for a NISAR HDF5; for a COG "
+                             "name the bands, e.g. --rgb 1,2,3")
+        parts = [p.strip() for p in rgb.split(",")]
+        if len(parts) != 3:
+            raise SystemExit(f"--rgb needs exactly 3 bands, got {len(parts)}")
+        chips = []
+        for p in parts:
+            try:
+                bnum = int(p)
+            except ValueError:
+                raise SystemExit(f"--rgb: '{p}' is not a band number. For a COG, "
+                                 "--rgb takes band numbers such as 1,2,3")
+            chips.append(_read_from_args(args, uri, bnum))
+        return chips, [f"band{p}" for p in parts], {}
+
+    return [_read_from_args(args, uri, band)], [f"band{band}"], {}
+
+
 def cmd_view(args) -> int:
     from cog_viewer import build_viewer_html
 
+    values_mode = "none" if args.no_values else args.values
     panels = []
-    chip_a = _read_from_args(args, args.uri, args.band)
-    panels.append(build_panel(chip_a, args.label_a or os.path.basename(args.uri),
+    chips_a, labels_a, meta_a = load_channels(args, args.uri, args.band, args.rgb)
+    chip_a = chips_a[0]
+    panels.append(build_panel(chips_a, args.label_a or os.path.basename(args.uri),
                               args.stretch, tuple(args.pct), args.vmin, args.vmax,
-                              args.cmap, embed_values=not args.no_values,
-                              grid_n=args.grid_nodes))
-    print(f"[A] {args.uri}\n    {chip_a.width} x {chip_a.height} px, dec {chip_a.dec}x, "
-          f"{panels[0]['px_x_m']:.3g} m/px, {panels[0]['stretch']['valid_fraction'] * 100:.1f}% valid")
+                              args.cmap, channel_labels=labels_a,
+                              embed_values=values_mode, grid_n=args.grid_nodes))
+    print(f"[A] {args.uri}")
+    if meta_a.get("product"):
+        pi = meta_a["product"]
+        print(f"    {pi['band']} {pi['product']} frequency{meta_a['freq']}, "
+              f"pols available: {', '.join(meta_a['available'])}")
+    print(f"    {chip_a.width} x {chip_a.height} px, dec {chip_a.dec}x, "
+          f"{panels[0]['px_x_m']:.3g} m/px, "
+          f"{panels[0]['stretch']['valid_fraction'] * 100:.1f}% valid, "
+          f"channels: {', '.join(labels_a)}")
+    if meta_a.get("transfer"):
+        t = meta_a["transfer"]
+        print(f"    streamed {t['bytes'] / 1e6:.1f} MB in {t['requests']} range "
+              f"requests from a {t['file_size'] / 1e9:.2f} GB file")
 
     if args.b:
         # The reference is read over the SAME map footprint, not the same pixel
         # window: the two products rarely share a grid, and it is the ground
         # footprint that has to match for the comparison to mean anything.
-        bnds = chip_a.bounds()
-        chip_b = read_chip(args.b, band=args.band_b,
-                           bbox=_bbox_in_crs(bnds, chip_a.crs, args.b),
-                           max_px=args.max_px, resample=args.resample,
-                           zero_is_nodata=not args.keep_zeros)
-        panels.append(build_panel(chip_b, args.label_b or os.path.basename(args.b),
+        import copy
+        bargs = copy.copy(args)
+        bargs.bbox = ",".join(str(v) for v in _bbox_in_crs(
+            chip_a.bounds(), chip_a.crs, args.b))
+        bargs.center = bargs.center_xy = None
+        bargs.full = False
+        chips_b, labels_b, meta_b = load_channels(bargs, args.b, args.band_b, args.rgb_b)
+        chip_b = chips_b[0]
+        panels.append(build_panel(chips_b, args.label_b or os.path.basename(args.b),
                                   args.stretch_b or args.stretch, tuple(args.pct),
-                                  None, None, args.cmap,
-                                  embed_values=not args.no_values,
+                                  None, None, args.cmap, channel_labels=labels_b,
+                                  embed_values=values_mode,
                                   grid_n=args.grid_nodes))
         print(f"[B] {args.b}\n    {chip_b.width} x {chip_b.height} px, dec {chip_b.dec}x, "
               f"{panels[1]['px_x_m']:.3g} m/px, "
-              f"{panels[1]['stretch']['valid_fraction'] * 100:.1f}% valid")
+              f"{panels[1]['stretch']['valid_fraction'] * 100:.1f}% valid, "
+              f"channels: {', '.join(labels_b)}")
 
     overlay = load_points_csv(args.overlay, chip_a.crs) if args.overlay else []
     if overlay:
@@ -956,6 +1416,15 @@ def cmd_view(args) -> int:
         if not inside:
             print("          none fall inside the chip -- check the CSV coordinates "
                   "or widen --size")
+
+    if args.kml:
+        import base64 as _b64
+        png = (_b64.b64decode(panels[0]["png"].split(",", 1)[1])
+               if args.kml.lower().endswith(".kmz") else None)
+        write_kml(args.kml, panels[0], overlay, png)
+        print(f"\nwrote {args.kml}"
+              + ("  (chip draped as a GroundOverlay + footprint + overlay points)"
+                 if png else "  (footprint + overlay points)"))
 
     html = build_viewer_html(
         panels=panels,
@@ -1036,8 +1505,9 @@ def cmd_selftest(args) -> int:
 
     chip = Chip(data=data, transform=tf, crs=crs, src_transform=tf, dec=1,
                 window=(0, 0, w, h), uri="selftest://synthetic", band=1)
-    panel = build_panel(chip, "synthetic", "db", (2.0, 98.0), None, None,
-                        args.cmap, embed_values=True, grid_n=5)
+    panel = build_panel([chip], "synthetic", "db", (2.0, 98.0), None, None,
+                        args.cmap, channel_labels=["intensity"],
+                        embed_values="first", grid_n=5)
 
     overlay = []
     for i, (pr, pc) in enumerate(truth):
@@ -1085,8 +1555,23 @@ def _add_window_args(p):
                         "Use nearest when locating point targets.")
 
 
+def _add_source_args(p):
+    g = p.add_argument_group("source selection (NISAR HDF5)")
+    g.add_argument("--pol", help="polarization to display, e.g. HH (default: the "
+                                 "first co-pol present)")
+    g.add_argument("--freq", choices=("A", "B"),
+                   help="NISAR frequency sub-band (default A)")
+    g.add_argument("--h5-block", type=int, default=1024, metavar="KB",
+                   help="HDF5 range-request block size in kB (default 1024). "
+                        "Smaller fetches less per read but makes more requests.")
+
+
 def _add_render_args(p):
     g = p.add_argument_group("rendering")
+    g.add_argument("--rgb", metavar="R,G,B",
+                   help="multispectral composite. For NISAR: polarizations or "
+                        "ratios, e.g. 'HH,HV,HH/HV', or 'auto' to pick the best "
+                        "available. For a COG: band numbers, e.g. '1,2,3'.")
     g.add_argument("--stretch", default="db", choices=STRETCH_CHOICES,
                    help="db=10log10 (power, the NISAR GCOV case), "
                         "amp-db=20log10 (amplitude), default db")
@@ -1107,9 +1592,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    pi = sub.add_parser("info", help="georeferencing + overview pyramid of a raster")
+    pi = sub.add_parser("info",
+                        help="georeferencing, overviews, and (for NISAR HDF5) "
+                             "the frequency/polarization inventory")
     pi.add_argument("uri")
     pi.add_argument("--tags", action="store_true", help="also dump GDAL metadata tags")
+    _add_source_args(pi)
     pi.set_defaults(func=cmd_info)
 
     pc = sub.add_parser("chip", help="write a PNG + georeferencing sidecar")
@@ -1117,6 +1605,7 @@ def build_parser() -> argparse.ArgumentParser:
     pc.add_argument("--band", type=int, default=1)
     pc.add_argument("--out", help="output PNG path (default chip.png)")
     _add_window_args(pc)
+    _add_source_args(pc)
     _add_render_args(pc)
     pc.set_defaults(func=cmd_chip)
 
@@ -1125,6 +1614,7 @@ def build_parser() -> argparse.ArgumentParser:
     pv.add_argument("--band", type=int, default=1)
     pv.add_argument("--b", help="second raster to compare against (e.g. an S1 reference)")
     pv.add_argument("--band-b", type=int, default=1)
+    pv.add_argument("--rgb-b", help="channels for panel B (same syntax as --rgb)")
     pv.add_argument("--label-a", help="panel A caption")
     pv.add_argument("--label-b", help="panel B caption")
     pv.add_argument("--stretch-b", choices=STRETCH_CHOICES,
@@ -1138,12 +1628,20 @@ def build_parser() -> argparse.ArgumentParser:
                     help="pixels: search radius for snap-to-peak (default 6)")
     pv.add_argument("--grid-nodes", type=int, default=17,
                     help="lon/lat interpolation grid density (default 17)")
+    pv.add_argument("--values", default="first", choices=("first", "all", "none"),
+                    help="which channels' raw values to embed: 'first' (default, "
+                         "drives the readout and snap-to-peak), 'all' (every "
+                         "channel's dB under the cursor, ~3x the page size), "
+                         "'none'")
     pv.add_argument("--no-values", action="store_true",
-                    help="do not embed raw values (smaller page; disables the "
-                         "dB readout and snap-to-peak)")
+                    help="alias for --values none")
+    pv.add_argument("--kml", metavar="PATH",
+                    help="also write a KML of the chip footprint and any overlay "
+                         "points, to open in Google Earth alongside the viewer")
     pv.add_argument("--title", help="page title")
     pv.add_argument("--out", help="output HTML path (default cog_locate_view.html)")
     _add_window_args(pv)
+    _add_source_args(pv)
     _add_render_args(pv)
     pv.set_defaults(func=cmd_view)
 

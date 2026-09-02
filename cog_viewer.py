@@ -168,6 +168,7 @@ _TEMPLATE = r"""<!doctype html>
     <button id="bDelSel">Delete selected</button>
     <button id="bCopy">Copy CSV</button>
     <button id="bDown">Download CSV</button>
+    <button id="bKml" title="Open the picked points in Google Earth">Download KML</button>
     <span class="note" id="pointsHint"></span>
   </div>
   <div class="wrap"><table id="tPoints"></table></div>
@@ -209,6 +210,22 @@ _TEMPLATE = r"""<!doctype html>
     reported. Sign convention matches the dqe_imw CSVs:
     <code>across = &Delta;X (easting)</code>, <code>along = &Delta;Y (northing)</code>,
     both computed as <em>this image minus the reference</em>.
+  </p>
+  <p class="note">
+    <b>Multispectral.</b> A three-channel composite maps each polarization to a
+    colour, stretched on its own percentiles so a weak cross-pol channel is not
+    crushed by a strong co-pol one. For a dual-pol product there is no third
+    polarization to show, so the co/cross ratio stands in for it: bright red is
+    surface scattering, green is volume scattering from vegetation. Rebuild with
+    <code>--values all</code> to get every channel's dB under the cursor rather
+    than just the first.
+  </p>
+  <p class="note">
+    <b>Google Earth.</b> <kbd>Download KML</kbd> writes your picked points as
+    placemarks, each carrying its map coordinate, source pixel and channel
+    values in its description. Build the page with <code>--kml out.kmz</code> to
+    also get the chip itself as a GroundOverlay, placed by its four true corners,
+    so you can drape it over Google Earth's basemap and compare directly.
   </p>
   <p class="note">
     <b>Keys.</b>
@@ -259,9 +276,14 @@ class Panel {
       d: -this.t.d / det, e: this.t.a / det,
     };
     this.si = spec.src_inv;
-    this.vals = (spec.values && spec.values.b64) ? b64ToU16(spec.values.b64) : null;
-    this.vlo = spec.values ? spec.values.lo : 0;
-    this.vhi = spec.values ? spec.values.hi : 1;
+    // One quantized plane per embedded channel: [{vals, lo, hi, label, units}].
+    const planes = Array.isArray(spec.values) ? spec.values
+                 : (spec.values && spec.values.b64 ? [spec.values] : []);
+    this.planes = planes.filter(p => p && p.b64).map(p => ({
+      vals: b64ToU16(p.b64), lo: p.lo, hi: p.hi,
+      label: p.label || "value", units: p.units || "",
+    }));
+    this.vals = this.planes.length ? this.planes[0].vals : null;   // snap channel
     // Ground aspect: how many metres a vertical pixel covers per horizontal one.
     // 1 for a projected CRS with square pixels; ~1.2 for a geographic grid.
     this.ar = (spec.px_y_m && spec.px_x_m) ? (spec.px_y_m / spec.px_x_m) : 1;
@@ -316,13 +338,19 @@ class Panel {
     }
     return { u, v };
   }
-  valueAt(u, v) {
-    if (!this.vals) return NaN;
+  /* Value of one channel, or of the snap channel by default. */
+  valueAt(u, v, k = 0) {
+    const pl = this.planes[k];
+    if (!pl) return NaN;
     const i = Math.floor(u), j = Math.floor(v);
     if (i < 0 || j < 0 || i >= this.spec.width || j >= this.spec.height) return NaN;
-    const q = this.vals[j * this.spec.width + i];
+    const q = pl.vals[j * this.spec.width + i];
     if (q === 0) return NaN;
-    return this.vlo + (q - 1) / 65534 * (this.vhi - this.vlo);
+    return pl.lo + (q - 1) / 65534 * (pl.hi - pl.lo);
+  }
+  /* Every embedded channel at a point, for the readout and the points table. */
+  valuesAt(u, v) {
+    return this.planes.map((_, k) => this.valueAt(u, v, k));
   }
 
   /* --- snap to the local peak, refined to sub-pixel --------------------- */
@@ -715,7 +743,8 @@ function describe(p, u, v) {
   const ll = p.toLonLat(u, v);
   const sp = p.toSrcPixel(m.x, m.y);
   return { u, v, x: m.x, y: m.y, lon: ll.lon, lat: ll.lat,
-           srcCol: sp.col, srcRow: sp.row, val: p.valueAt(u, v) };
+           srcCol: sp.col, srcRow: sp.row,
+           val: p.valueAt(u, v), vals: p.valuesAt(u, v) };
 }
 
 function updateHud(p, sx, sy) {
@@ -725,13 +754,25 @@ function updateHud(p, sx, sy) {
     return;
   }
   const d = describe(p, c.u, c.v);
-  const u = p.spec.stretch.units || "";
-  p.hud.textContent =
+  let lines =
     `lat ${d.lat.toFixed(7)}   ${dms(d.lat, true)}\n` +
     `lon ${d.lon.toFixed(7)}   ${dms(d.lon, false)}\n` +
     `X   ${d.x.toFixed(3)}   Y ${d.y.toFixed(3)}\n` +
-    `src px  col ${d.srcCol.toFixed(1)}  row ${d.srcRow.toFixed(1)}\n` +
-    `value   ${isFinite(d.val) ? (d.val.toFixed(2) + (u ? " " + u : "")) : "nodata"}`;
+    `src px  col ${d.srcCol.toFixed(1)}  row ${d.srcRow.toFixed(1)}`;
+  if (p.planes.length) {
+    for (let k = 0; k < p.planes.length; k++) {
+      const pl = p.planes[k], val = d.vals[k];
+      lines += `\n${pl.label.padEnd(7)} ${isFinite(val)
+        ? (val.toFixed(2) + (pl.units ? " " + pl.units : "")) : "nodata"}`;
+    }
+    if (p.spec.mode === "rgb" && p.planes.length < p.spec.channels.length) {
+      lines += `\n(R,G,B = ${p.spec.channels.join(", ")};`
+             + ` --values all for each)`;
+    }
+  } else {
+    lines += "\n(values not embedded)";
+  }
+  p.hud.textContent = lines;
 }
 
 function setPointAt(pt, p, u, v, useSnap) {
@@ -854,10 +895,12 @@ function renderTables() {
 
 function renderPoints() {
   const t = $("#tPoints");
-  const u = PANELS[0].spec.stretch.units || "";
+  const planes = PANELS[0].planes;
+  const valCols = planes.map(pl =>
+    `<th>${escapeHtml(pl.label)}${pl.units ? " (" + escapeHtml(pl.units) + ")" : ""}</th>`).join("");
   let h = `<thead><tr><th class="l">pane</th><th class="l">name</th>
     <th>latitude</th><th>longitude</th><th>X</th><th>Y</th>
-    <th>src col</th><th>src row</th><th>value${u ? " (" + escapeHtml(u) + ")" : ""}</th>
+    <th>src col</th><th>src row</th>${valCols}
     <th class="l">snap</th></tr></thead><tbody>`;
   for (const pt of points) {
     h += `<tr data-id="${pt.id}" class="${selected === pt.id ? "sel" : ""}">
@@ -866,7 +909,8 @@ function renderPoints() {
       <td>${pt.lat.toFixed(7)}</td><td>${pt.lon.toFixed(7)}</td>
       <td>${pt.x.toFixed(3)}</td><td>${pt.y.toFixed(3)}</td>
       <td>${pt.srcCol.toFixed(2)}</td><td>${pt.srcRow.toFixed(2)}</td>
-      <td>${isFinite(pt.val) ? pt.val.toFixed(2) : "--"}</td>
+      ${planes.map((_, k) => `<td>${(pt.vals && isFinite(pt.vals[k]))
+          ? pt.vals[k].toFixed(2) : "--"}</td>`).join("")}
       <td class="l">${pt.snapped ? "peak" : "manual"}</td></tr>`;
   }
   t.innerHTML = h + "</tbody>";
@@ -883,11 +927,11 @@ function renderPoints() {
     });
   });
 
-  const nA = points.filter(p => p.panel === 0).length;
+  const nA0 = points.filter(p => p.panel === 0).length;
   const nB = points.filter(p => p.panel === 1).length;
   $("#pointsHint").textContent = PANELS.length > 1
-    ? `${nA} in A, ${nB} in B — points sharing a name are paired on the Accuracy tab.`
-    : `${nA} point${nA === 1 ? "" : "s"}.`;
+    ? `${nA0} in A, ${nB} in B — points sharing a name are paired on the Accuracy tab.`
+    : `${nA0} point${nA0 === 1 ? "" : "s"}.`;
 }
 
 function renderAccuracy() {
@@ -953,19 +997,51 @@ function renderAccuracy() {
 
 /* ------------------------------------------------------------------- CSV */
 function pointsCsv() {
-  const u = PANELS[0].spec.stretch.units || "";
+  const planes = PANELS[0].planes;
+  const cols = planes.map(pl => (pl.label + (pl.units ? "_" + pl.units : ""))
+                                 .replace(/[^A-Za-z0-9_.\/-]/g, "_"));
   let s = `panel,name,latitude,longitude,map_x,map_y,crs,src_col,src_row,` +
-          `chip_u,chip_v,value_${u || "raw"},snapped,source\n`;
+          `chip_u,chip_v${cols.length ? "," + cols.join(",") : ""},snapped,source\n`;
   for (const pt of points) {
     const p = PANELS[pt.panel];
+    const vals = planes.map((_, k) =>
+      (pt.vals && isFinite(pt.vals[k])) ? pt.vals[k].toFixed(4) : "");
     s += [p.name, pt.name, pt.lat.toFixed(9), pt.lon.toFixed(9),
           pt.x.toFixed(4), pt.y.toFixed(4), p.spec.epsg ? "EPSG:" + p.spec.epsg : p.spec.crs,
           pt.srcCol.toFixed(3), pt.srcRow.toFixed(3),
-          pt.u.toFixed(3), pt.v.toFixed(3),
-          isFinite(pt.val) ? pt.val.toFixed(4) : "",
+          pt.u.toFixed(3), pt.v.toFixed(3), ...vals,
           pt.snapped ? "peak" : "manual", p.spec.uri].join(",") + "\n";
   }
   return s;
+}
+
+/* Picked points as KML, to drop straight into Google Earth. */
+function pointsKml() {
+  const esc = s => String(s).replace(/[&<>]/g, ch =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[ch]));
+  let s = '<?xml version="1.0" encoding="UTF-8"?>\n'
+        + '<kml xmlns="http://www.opengis.net/kml/2.2"><Document>\n'
+        + '  <name>cog_locate picks</name>\n'
+        + '  <Style id="pick"><IconStyle><color>ff3dd3ff</color>'
+        + '<Icon><href>http://maps.google.com/mapfiles/kml/shapes/placemark_circle.png'
+        + '</href></Icon></IconStyle></Style>\n';
+  for (const pt of points) {
+    const p = PANELS[pt.panel];
+    const desc = [
+      `panel ${p.name}: ${esc(p.spec.label)}`,
+      `map X ${pt.x.toFixed(3)}  Y ${pt.y.toFixed(3)} (${esc(p.spec.crs)})`,
+      `source pixel col ${pt.srcCol.toFixed(2)} row ${pt.srcRow.toFixed(2)}`,
+      ...p.planes.map((pl, k) => `${esc(pl.label)}: ${
+        (pt.vals && isFinite(pt.vals[k])) ? pt.vals[k].toFixed(2) + " " + esc(pl.units) : "nodata"}`),
+      pt.snapped ? "snapped to local peak" : "placed by hand",
+    ].join("\n");
+    s += `  <Placemark><name>${esc(pt.name)} (${p.name})</name>`
+       + `<styleUrl>#pick</styleUrl>`
+       + `<description><![CDATA[${desc}]]></description>`
+       + `<Point><coordinates>${pt.lon.toFixed(9)},${pt.lat.toFixed(9)},0</coordinates>`
+       + `</Point></Placemark>\n`;
+  }
+  return s + "</Document></kml>\n";
 }
 
 function accuracyCsv() {
@@ -992,7 +1068,8 @@ function accuracyCsv() {
 
 function download(name, text) {
   const a = document.createElement("a");
-  a.href = URL.createObjectURL(new Blob([text], { type: "text/csv" }));
+  a.href = URL.createObjectURL(new Blob([text], {
+    type: name.endsWith(".kml") ? "application/vnd.google-earth.kml+xml" : "text/csv" }));
   a.download = name;
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
@@ -1055,6 +1132,7 @@ $("#bCopy").onclick = async () => {
   setTimeout(() => { $("#bCopy").textContent = "Copy CSV"; }, 1600);
 };
 $("#bDown").onclick = () => download("cog_locate_points.csv", pointsCsv());
+$("#bKml").onclick = () => download("cog_locate_points.kml", pointsKml());
 $("#bDownAle").onclick = () => download("cog_locate_accuracy.csv", accuracyCsv());
 
 document.querySelectorAll("#tabs button").forEach(b => {
@@ -1117,10 +1195,19 @@ function renderMeta() {
       <tr><td class="l">decimation</td><td class="l">${s.dec}×</td></tr>
       <tr><td class="l">chip pixel size</td><td class="l">${s.px_x_m.toFixed(4)} × ${s.px_y_m.toFixed(4)} m</td></tr>
       <tr><td class="l">CRS</td><td class="l">${escapeHtml(s.crs)}</td></tr>
-      <tr><td class="l">stretch</td><td class="l">${escapeHtml(st.mode)}, ${st.vmin.toFixed(2)} .. ${st.vmax.toFixed(2)} ${escapeHtml(st.units)} (${st.pct[0]}–${st.pct[1]} pct)</td></tr>
+      <tr><td class="l">display</td><td class="l">${s.mode === "rgb"
+        ? "RGB composite — R=" + escapeHtml(s.channels[0]) + ", G=" + escapeHtml(s.channels[1]) + ", B=" + escapeHtml(s.channels[2])
+        : "single channel — " + escapeHtml(s.channels ? s.channels[0] : "")}</td></tr>
+      ${(s.stretches || [st]).map((x, k) => `<tr><td class="l">stretch ${
+        s.mode === "rgb" ? "RGB".charAt(k) + " (" + escapeHtml(s.channels[k]) + ")" : ""
+        }</td><td class="l">${escapeHtml(x.mode)}, ${x.vmin.toFixed(2)} .. ${x.vmax.toFixed(2)} ${escapeHtml(x.units)} (${x.pct[0]}–${x.pct[1]} pct)</td></tr>`).join("")}
       <tr><td class="l">valid pixels</td><td class="l">${(st.valid_fraction * 100).toFixed(1)}%</td></tr>
       <tr><td class="l">lon/lat mesh error</td><td class="l">${isFinite(s.grid.residual_m) ? s.grid.residual_m.toExponential(2) + " m" : "n/a"}</td></tr>
-      <tr><td class="l">values embedded</td><td class="l">${p.vals ? "yes (" + s.values.encoding + ")" : "no — dB readout and snap-to-peak disabled"}</td></tr>
+      <tr><td class="l">values embedded</td><td class="l">${p.planes.length
+        ? p.planes.map(x => escapeHtml(x.label)).join(", ")
+        : "none — value readout and snap-to-peak disabled"}</td></tr>
+      ${s.src.product ? `<tr><td class="l">product</td><td class="l">${escapeHtml(s.src.product)}</td></tr>` : ""}
+      ${s.src.chunks ? `<tr><td class="l">HDF5 chunks</td><td class="l">${s.src.chunks.join(" x ")}</td></tr>` : ""}
       <tr><td class="l">grid orientation</td><td class="l">+X axis bears ${gridBearing(p).toFixed(3)}° from true north</td></tr>
       </tbody></table>`;
     if (s.dec > 1) {

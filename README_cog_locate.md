@@ -12,9 +12,10 @@ corner reflectors — which is the reference method, not a fallback.
 ```
 cog_locate.py     CLI + raster/geo core
 cog_viewer.py     builds the self-contained HTML viewer
+nisar_h5.py       streams NISAR HDF5 products over HTTP range requests
 ```
 
-Requires `numpy` and `rasterio`. PNG encoding is done with `zlib` alone, so
+Requires `numpy` and `rasterio`, plus `h5py` for NISAR HDF5 products. PNG encoding is done with `zlib` alone, so
 Pillow and matplotlib are not needed — one less thing to prefetch onto an
 air-gapped box. `python cog_locate.py selftest` builds a synthetic viewer with
 no network and no rasterio at all, which is the quickest way to check the page
@@ -39,8 +40,118 @@ python cog_locate.py view https://host/path/nisar_gcov_HH.tif \
 coordinates, `--bbox minx,miny,maxx,maxy` for an explicit footprint, or
 `--full` for the whole scene (cheap: it comes out of the overviews).
 
-Accepted inputs: an `https://` URL, `s3://`, `gs://`, a local path, or a
-GDAL connection string such as `HDF5:"/vsicurl/https://…/x.h5"://science/...`.
+Accepted inputs: an `https://` URL, `s3://`, `gs://`, a local path, a NISAR
+`.h5` (local or remote — see below), or a GDAL connection string.
+
+## NISAR products from ASF
+
+**There is no COG.** ASF publishes NISAR L2 as a single HDF5 and nothing else —
+CMR lists exactly one data file per granule, plus browse PNGs. A GSLC granule
+runs to ~22 GB. GDAL cannot help here either: its HDF5 driver will not open a
+`/vsicurl/` path.
+
+So `nisar_h5.py` streams the HDF5 itself. h5py can read from any seekable
+file-like object, so it is given one backed by `Range:` requests with a block
+cache; HDF5's own chunked layout means only the chunks intersecting your window
+come over the wire. A window read off a 22 GB granule costs a few MB.
+
+```bash
+# what frequencies and polarizations does this granule have?
+python cog_locate.py info https://nisar.asf.earthdatacloud.nasa.gov/NISAR/…/GRANULE.h5
+
+URI          : …/GRANULE.h5
+product      : LSAR GSLC
+file size    : 22.17 GB  (streamed, not downloaded)
+frequencyA   : pols HH, HV   EPSG:32611
+    HH    …, complex64, chunks (128, 128), complex
+suggested    : --rgb HH,HV,HH/HV
+```
+
+Every read reports what it cost, so the saving is visible rather than claimed.
+
+**Credentials.** ASF gates the data GET behind Earthdata Login (the HEAD is
+open, the GET is not — the redirect to `urs.earthdata.nasa.gov` returns 401).
+Credentials are read from where they already live and are **never** taken on a
+command line, where they would land in your shell history and the process table:
+
+1. `$EARTHDATA_TOKEN` — a bearer token from
+   <https://urs.earthdata.nasa.gov/profile> → Generate Token. Preferred: scoped
+   and revocable, and not your password.
+2. `~/.netrc` — the standard NASA/ASF mechanism:
+   ```
+   machine urs.earthdata.nasa.gov
+     login YOUR_USERNAME
+     password YOUR_PASSWORD
+   ```
+   then `chmod 600 ~/.netrc`.
+
+Nothing here logs, echoes or persists a credential. You must also have accepted
+the NISAR EULA once by downloading any granule through the Earthdata web UI.
+
+**GSLC is complex.** Geocoded SLC stores complex amplitude; the tool converts to
+intensity (`|z|²`) before the dB stretch, which is the right quantity both for
+display and for locating a point target's peak.
+
+`--freq A|B` selects the frequency sub-band, `--pol HH` a single polarization,
+`--h5-block KB` tunes the range-request size.
+
+## Multispectral composites
+
+```bash
+python cog_locate.py view …/GRANULE.h5 --rgb auto \
+    --center 34.8021,-118.0765 --size 3km --values all --out rgb.html
+```
+
+`--rgb` takes three channels — polarizations, or ratios of two — mapped to red,
+green and blue. Each is stretched on its own percentiles, so a weak cross-pol
+channel is not crushed by a strong co-pol one.
+
+`--rgb auto` picks the best composite the product actually contains:
+
+| product | composite | reading it |
+|---|---|---|
+| quad-pol | `HH,HV,VV` | the conventional Pauli-like assignment |
+| dual-pol (DH: HH+HV) | `HH,HV,HH/HV` | red = surface scattering, green = volume scattering from vegetation |
+
+**A dual-pol granule has no VV.** A `DHDH` acquisition transmits H only and
+receives H and V, so it carries HH and HV and nothing else — asking for VV gets
+you a clear error listing what is actually there. The co/cross ratio stands in
+for the third channel, and it is not filler: it separates surface from volume
+scattering, which is most of what a three-colour SAR composite is read for.
+
+For a plain COG, `--rgb` takes band numbers instead: `--rgb 3,2,1`.
+
+`--values all` embeds every channel so the cursor reports each one's dB
+(`HH -15.31 dB / HV -15.21 dB / HH/HV -0.10 dB`) and every picked point carries
+all three into the CSV. It roughly triples the page size; the default `first`
+embeds only the red channel, which is all snap-to-peak needs.
+
+## Google Earth
+
+Two ways out, for checking a position against imagery you trust.
+
+**Picked points → KML.** The `Download KML` button in the viewer writes your
+picks as placemarks, each carrying its map coordinate, source pixel and channel
+values in its description. Open it straight in Google Earth.
+
+**The chip itself → KMZ.** Build the page with `--kml out.kmz` and you also get
+the NISAR chip as a GroundOverlay, so you can drape it over Google Earth's
+basemap and see directly whether a feature lands where it should:
+
+```bash
+python cog_locate.py view …/GRANULE.h5 --rgb auto \
+    --center 34.8021,-118.0765 --size 3km --out check.html --kml check.kmz
+```
+
+The overlay is placed with `<gx:LatLonQuad>`, which takes the four true corners.
+That is exact for any projection — a `<LatLonBox>` can only model a north-up
+rectangle plus one rotation angle, which is wrong for a UTM chip. A path ending
+`.kml` instead writes just the footprint and overlay points, with no imagery.
+
+One caveat worth knowing: Google Earth's own basemap has its own geolocation
+error, typically a few metres and occasionally much worse in relief. It is a
+good sanity check and a poor reference — for a number you intend to quote, use
+surveyed points via `--overlay`.
 
 ## What the viewer does
 
