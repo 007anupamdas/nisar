@@ -90,25 +90,54 @@ def ca_bundle() -> Optional[str]:
 def check_ca_bundle(path: str) -> Optional[str]:
     """Return a human-readable reason `path` is unusable as a CA bundle.
 
-    The usual culprit is a DER-encoded .crt: OpenSSL only loads PEM in a bundle,
-    and a DER file fails silently, leaving verification to fall back to the
-    system store and fail with 'unable to get local issuer certificate'.
+    Two traps, both of which surface as the same unhelpful message,
+    'unable to get local issuer certificate':
+
+    1. A DER-encoded .crt. OpenSSL only loads PEM into a bundle and ignores DER
+       silently, leaving verification to fall back to the system store.
+    2. A bundle holding only the proxy's own CA. These variables REPLACE the
+       trust store rather than adding to it, so every host the proxy does not
+       intercept presents a real certificate that now chains to nothing.
     """
     try:
         with open(path, "rb") as fh:
-            head = fh.read(64)
+            blob = fh.read(16 << 20)
     except OSError as exc:
         return f"cannot read it ({exc.strerror})"
-    if not head:
+    if not blob:
         return "the file is empty"
-    if b"-----BEGIN" not in head:
-        return ("it is not PEM text (probably DER-encoded). Convert it:\n"
+
+    # Search the whole file: a real bundle often opens with comment lines, so
+    # inspecting only the first few bytes misreads valid PEM as DER.
+    n_certs = blob.count(b"-----BEGIN CERTIFICATE-----")
+    if n_certs == 0:
+        hint = " (probably DER-encoded)" if blob[:1] == b"\x30" else ""
+        return (f"it contains no PEM certificate{hint}. Convert it:\n"
                 f"      openssl x509 -inform DER -in {path} -out ca.pem")
+
     try:
         import ssl
         ssl.create_default_context(cafile=path)
     except Exception as exc:
         return f"OpenSSL rejected it: {exc}"
+
+    # A public trust store carries ~100+ roots; a handful means proxy-CA-only.
+    if n_certs < 5:
+        return (
+            f"it holds only {n_certs} certificate"
+            f"{'' if n_certs == 1 else 's'}, so it has REPLACED the public "
+            "trust store\n"
+            "      rather than added to it. Hosts the proxy does NOT intercept "
+            "present their\n"
+            "      real certificates, which now chain to nothing. Concatenate "
+            "it with the\n"
+            "      public roots instead:\n"
+            "        cat \"$(python -c 'import certifi;print(certifi.where())')\" "
+            f"\"{path}\" > ~/ca-combined.pem\n"
+            "        export SSL_CERT_FILE=~/ca-combined.pem "
+            "REQUESTS_CA_BUNDLE=~/ca-combined.pem \\\n"
+            "               CURL_CA_BUNDLE=~/ca-combined.pem "
+            "GDAL_HTTP_CAINFO=~/ca-combined.pem")
     return None
 
 
