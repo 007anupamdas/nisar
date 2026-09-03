@@ -59,6 +59,58 @@ import numpy as np
 
 URS_HOST = "urs.earthdata.nasa.gov"
 
+# Corporate TLS-inspecting proxies (Cisco WSA, Zscaler, Blue Coat) re-sign every
+# connection, so the system trust store is useless and the proxy's own CA has to
+# be trusted explicitly. Different libraries read different variables, and a
+# machine that has one set usually means all of them, so resolve once here and
+# hand the answer to both requests and GDAL.
+CA_BUNDLE_VARS = ("GDAL_HTTP_CAINFO", "CURL_CA_BUNDLE",
+                  "REQUESTS_CA_BUNDLE", "SSL_CERT_FILE")
+
+
+def ca_bundle_source() -> Tuple[Optional[str], Optional[str]]:
+    """(variable, path) of the CA bundle to use, highest priority first.
+
+    Several of these are often set at once and can disagree, so the variable
+    name travels with the path -- an error that names only a file leaves you
+    guessing which line of your shell profile produced it.
+    """
+    for var in CA_BUNDLE_VARS:
+        path = os.environ.get(var)
+        if path and os.path.exists(path):
+            return var, path
+    return None, None
+
+
+def ca_bundle() -> Optional[str]:
+    """The CA bundle this environment wants used, if any is configured."""
+    return ca_bundle_source()[1]
+
+
+def check_ca_bundle(path: str) -> Optional[str]:
+    """Return a human-readable reason `path` is unusable as a CA bundle.
+
+    The usual culprit is a DER-encoded .crt: OpenSSL only loads PEM in a bundle,
+    and a DER file fails silently, leaving verification to fall back to the
+    system store and fail with 'unable to get local issuer certificate'.
+    """
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(64)
+    except OSError as exc:
+        return f"cannot read it ({exc.strerror})"
+    if not head:
+        return "the file is empty"
+    if b"-----BEGIN" not in head:
+        return ("it is not PEM text (probably DER-encoded). Convert it:\n"
+                f"      openssl x509 -inform DER -in {path} -out ca.pem")
+    try:
+        import ssl
+        ssl.create_default_context(cafile=path)
+    except Exception as exc:
+        return f"OpenSSL rejected it: {exc}"
+    return None
+
 
 # =============================================================================
 # Authenticated, seekable HTTP file object
@@ -214,14 +266,15 @@ class HttpRangeFile(_BlockCachedFile):
             token, basic = _find_credentials(url)
             self.s = _EarthdataSession(token, basic)
 
+        bundle_var, bundle = ca_bundle_source()
+        if bundle:
+            # Set it explicitly rather than leaving it to trust_env, so the
+            # bundle actually used is the one the error message names.
+            self.s.verify = bundle
         try:
             r = self.s.head(url, allow_redirects=True, timeout=timeout)
         except Exception as exc:
-            raise OSError(
-                f"cannot reach {url}\n"
-                f"  {type(exc).__name__}: {exc}\n"
-                "  Check the URL, your network, and any proxy settings "
-                "(HTTPS_PROXY / NO_PROXY).") from None
+            raise OSError(_reach_hint(url, exc, bundle, bundle_var)) from None
         if r.status_code in (401, 403):
             raise PermissionError(_auth_hint(url, r.status_code))
         r.raise_for_status()
@@ -253,6 +306,50 @@ class HttpRangeFile(_BlockCachedFile):
             raise PermissionError(_auth_hint(self.url, r.status_code))
         r.raise_for_status()
         return r.content
+
+
+def _reach_hint(url: str, exc: Exception, bundle: Optional[str],
+                bundle_var: Optional[str] = None) -> str:
+    """Explain a connection failure, with TLS spelled out separately.
+
+    Behind an inspecting proxy a certificate error is the norm rather than the
+    exception, and 'check your network' is useless advice for it.
+    """
+    msg = [f"cannot reach {url}", f"  {type(exc).__name__}: {exc}"]
+    if "SSL" in type(exc).__name__ or "CERTIFICATE_VERIFY_FAILED" in str(exc):
+        msg.append("")
+        msg.append("  TLS verification failed. Behind a corporate proxy that "
+                   "inspects HTTPS,")
+        msg.append("  its CA certificate has to be trusted explicitly:")
+        if bundle:
+            why = check_ca_bundle(bundle)
+            msg.append(f"    Using CA bundle: {bundle}"
+                       + (f"  (from ${bundle_var})" if bundle_var else ""))
+            others = [v for v in CA_BUNDLE_VARS
+                      if v != bundle_var and os.environ.get(v)
+                      and os.environ.get(v) != bundle]
+            if others:
+                msg.append("    Note: " + ", ".join(f"${v}" for v in others)
+                           + " point elsewhere -- make them agree.")
+            if why:
+                msg.append(f"    That file looks unusable -- {why}")
+            else:
+                msg.append("    The file parses as PEM and OpenSSL accepts it, "
+                           "so the chain itself")
+                msg.append("    is likely incomplete or the proxy CA has been "
+                           "rotated. Ask IT for")
+                msg.append("    the current CA (root AND any intermediates) and "
+                           "concatenate them.")
+        else:
+            msg.append("    No CA bundle is configured. Set one of "
+                       + ", ".join(CA_BUNDLE_VARS))
+            msg.append("    to the PEM file holding your proxy's CA "
+                       "certificate.")
+        msg.append("  Never disable verification to work around this.")
+    else:
+        msg.append("  Check the URL, your network, and any proxy settings "
+                   "(HTTPS_PROXY / NO_PROXY).")
+    return "\n".join(msg)
 
 
 def _auth_hint(url: str, code: int) -> str:

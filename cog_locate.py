@@ -171,6 +171,16 @@ def open_raster(uri: str, extra_env: Optional[Dict[str, str]] = None):
     """
     rasterio = _require_rasterio()
     opts = dict(GDAL_REMOTE_OPTS)
+    # GDAL reads GDAL_HTTP_CAINFO/CURL_CA_BUNDLE, not REQUESTS_CA_BUNDLE or
+    # SSL_CERT_FILE, so a machine behind an inspecting proxy that works for
+    # requests would still fail here. Pass the same bundle through.
+    try:
+        import nisar_h5 as _nh
+        bundle = _nh.ca_bundle()
+        if bundle and not os.environ.get("GDAL_HTTP_CAINFO"):
+            opts["GDAL_HTTP_CAINFO"] = bundle
+    except Exception:
+        pass
     if extra_env:
         opts.update(extra_env)
     env = rasterio.Env(**opts)
