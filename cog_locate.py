@@ -136,6 +136,8 @@ def _require_rasterio():
 # Set from --s3-endpoint before any raster is opened; open_raster has no
 # argument for it and GDAL is configured process-wide anyway.
 _S3_ENDPOINT_OVERRIDE: Optional[str] = None
+_S3_ADDRESSING: str = "path"
+_S3_ANON: bool = False
 
 
 def normalize_uri(uri: str) -> str:
@@ -191,7 +193,11 @@ def open_raster(uri: str, extra_env: Optional[Dict[str, str]] = None):
         if ep:
             opts.setdefault("AWS_S3_ENDPOINT", ep.split("://", 1)[-1])
             opts.setdefault("AWS_HTTPS", "YES" if ep.startswith("https") else "NO")
-            opts.setdefault("AWS_VIRTUAL_HOSTING", "FALSE")
+            opts.setdefault(
+                "AWS_VIRTUAL_HOSTING",
+                "TRUE" if _S3_ADDRESSING == "virtual" else "FALSE")
+            if _S3_ANON:
+                opts.setdefault("AWS_NO_SIGN_REQUEST", "YES")
     except Exception:
         pass
     if extra_env:
@@ -585,12 +591,14 @@ def is_h5(uri: str) -> bool:
 
 
 def open_nisar(uri: str, freq: Optional[str] = None, block: int = 1 << 20,
-               endpoint: Optional[str] = None):
+               endpoint: Optional[str] = None, anon: bool = False,
+               addressing: str = "path"):
     """Open a NISAR product and pick a frequency. Returns (h5, freq_info, tf, crs)."""
     import nisar_h5 as nh
 
     try:
-        h5, backing = nh.open_h5(uri, block=block, endpoint=endpoint)
+        h5, backing = nh.open_h5(uri, block=block, endpoint=endpoint,
+                                 anon=anon, addressing=addressing)
     except (OSError, PermissionError) as exc:
         # Auth and reachability failures already carry an actionable message;
         # a traceback on top of it just buries the useful part.
@@ -625,7 +633,9 @@ def read_nisar_channels(uri: str, channels: List[str], args,
 
     h5, backing, info, key, fi, tf, crs = open_nisar(
         uri, freq, block=args.h5_block * 1024,
-        endpoint=getattr(args, "s3_endpoint", None))
+        endpoint=getattr(args, "s3_endpoint", None),
+        anon=getattr(args, "s3_anon", False),
+        addressing=getattr(args, "s3_addressing", "path"))
     pols = fi["pols"]
     try:
         needed: List[str] = []
@@ -1210,7 +1220,9 @@ def cmd_info_nisar(args) -> int:
 
     h5, backing, info, key, fi, tf, crs = open_nisar(
         args.uri, args.freq, block=args.h5_block * 1024,
-        endpoint=getattr(args, "s3_endpoint", None))
+        endpoint=getattr(args, "s3_endpoint", None),
+        anon=getattr(args, "s3_anon", False),
+        addressing=getattr(args, "s3_addressing", "path"))
     try:
         print(f"URI          : {args.uri}")
         print(f"product      : {info['band']} {info['product']}")
@@ -1513,7 +1525,9 @@ def load_channels(args, uri: str, band: int, rgb: Optional[str]
     if is_h5(uri):
         h5, backing, info, key, fi, _tf, _crs = open_nisar(
             uri, args.freq, block=args.h5_block * 1024,
-            endpoint=getattr(args, "s3_endpoint", None))
+            endpoint=getattr(args, "s3_endpoint", None),
+        anon=getattr(args, "s3_anon", False),
+        addressing=getattr(args, "s3_addressing", "path"))
         avail = sorted(fi["pols"])
         h5.close()
         if rgb:
@@ -1774,6 +1788,15 @@ def _add_source_args(p):
                         "$AWS_ENDPOINT_URL / $AWS_S3_ENDPOINT. Setting it "
                         "switches off the Earthdata in-region rules, so an "
                         "s3:// URI is read directly wherever you are.")
+    g.add_argument("--s3-anon", action="store_true",
+                   help="read the store without signing (open, read-only "
+                        "buckets). Tried automatically if no credentials "
+                        "are found.")
+    g.add_argument("--s3-addressing", default="path",
+                   choices=("path", "virtual", "auto"),
+                   help="S3 URL style (default path -- a private endpoint "
+                        "rarely has the wildcard DNS virtual-hosted buckets "
+                        "need)")
     g.add_argument("--h5-block", type=int, default=1024, metavar="KB",
                    help="HDF5 range-request block size in kB (default 1024). "
                         "Smaller fetches less per read but makes more requests.")
@@ -1897,10 +1920,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
-    global _S3_ENDPOINT_OVERRIDE
+    global _S3_ENDPOINT_OVERRIDE, _S3_ADDRESSING, _S3_ANON
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     args = build_parser().parse_args(argv)
     _S3_ENDPOINT_OVERRIDE = getattr(args, "s3_endpoint", None)
+    _S3_ADDRESSING = getattr(args, "s3_addressing", "path")
+    _S3_ANON = getattr(args, "s3_anon", False)
     return args.func(args)
 
 

@@ -137,8 +137,6 @@ For data in your own object storage — MinIO, Ceph, or an institutional endpoin
 such as NRSC's — give it the endpoint and everything above works the same way:
 
 ```bash
-export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...   # or ~/.aws/credentials
-
 python cog_locate.py info 's3://nisar-s/PRODUCT/PRODUCT.h5' \
     --s3-endpoint https://qas.private.nrsc.gov.in
 
@@ -148,8 +146,17 @@ python cog_locate.py chip 's3://nisar-s/PRODUCT/PRODUCT.h5' \
 ```
 
 The endpoint can also come from `$AWS_ENDPOINT_URL` or `$AWS_S3_ENDPOINT`.
-Credentials use boto3's normal chain (environment, `~/.aws/credentials`, IAM
-role) — nothing Earthdata-specific applies.
+
+**You probably don't need to set any credentials.** boto3's normal chain applies
+— environment, `~/.aws/credentials`, IAM role — so a machine already set up for
+`aws s3 cp` or a plain `boto3.client("s3", endpoint_url=...)` needs nothing
+extra. If that chain turns up empty the read is retried **unsigned**, because
+boto3 otherwise refuses to send a request at all and a read-only store open to
+its own network is a real deployment. `--s3-anon` forces that mode.
+
+Requests use **path-style** addressing by default, since a private endpoint
+rarely has the wildcard DNS that virtual-hosted buckets need. If your store
+wants the other form, `--s3-addressing virtual`.
 
 Setting an endpoint switches the Earthdata rules off entirely: no in-region
 check, no DAAC credential fetch, no HTTPS fallback. The read goes straight to

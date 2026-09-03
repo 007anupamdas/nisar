@@ -512,6 +512,43 @@ def _daac_s3_credentials(host: str, session, timeout: int = 60) -> Dict:
     return creds
 
 
+def _private_s3_client(endpoint_url: str, region: str, anon: bool = False,
+                       addressing: str = "path"):
+    """boto3 client for a private S3-compatible store.
+
+    Credentials come from boto3's normal chain, so a machine already set up for
+    `aws s3 cp` needs nothing extra. If that chain turns up empty we retry
+    unsigned rather than failing: a read-only store open to its network is a
+    real deployment, and boto3 refuses to even send a request without either
+    credentials or an explicit unsigned config.
+    """
+    import boto3
+    from botocore.client import Config
+    from botocore import UNSIGNED
+
+    def build(unsigned: bool):
+        cfg = Config(s3={"addressing_style": addressing},
+                     **({"signature_version": UNSIGNED} if unsigned else {}))
+        return boto3.client(
+            "s3", endpoint_url=endpoint_url,
+            region_name=os.environ.get("AWS_DEFAULT_REGION") or region,
+            config=cfg)
+
+    if anon:
+        return build(True)
+
+    from botocore.exceptions import NoCredentialsError
+    client = build(False)
+    try:
+        client.list_buckets()          # cheapest call that forces signing
+    except NoCredentialsError:
+        return build(True)
+    except Exception:
+        pass                           # reachable and signing; other errors
+    return client                      # (e.g. AccessDenied on ListBuckets) are
+                                       # not our business here
+
+
 class S3RangeFile(_BlockCachedFile):
     """Block-cached ranged reads straight from S3, for in-region use.
 
@@ -521,7 +558,8 @@ class S3RangeFile(_BlockCachedFile):
 
     def __init__(self, uri: str, block: int = 1 << 20, max_blocks: int = 512,
                  region: str = S3_REGION, timeout: int = 120,
-                 endpoint_url: Optional[str] = None):
+                 endpoint_url: Optional[str] = None, anon: bool = False,
+                 addressing: str = "path"):
         try:
             import boto3  # noqa: F401
         except ImportError as exc:
@@ -543,16 +581,10 @@ class S3RangeFile(_BlockCachedFile):
         self._expiry = float("inf")
 
         if endpoint_url:
-            # Private store: boto3's own credential chain (env, ~/.aws, IAM
-            # role) and no expiry to manage.
-            import boto3
-            from botocore.client import Config
-            self._client = boto3.client(
-                "s3", endpoint_url=endpoint_url,
-                region_name=os.environ.get("AWS_DEFAULT_REGION") or region,
-                # Path-style addressing: a private endpoint rarely has the
-                # wildcard DNS that virtual-hosted buckets require.
-                config=Config(s3={"addressing_style": "path"}))
+            # Private store: boto3's own credential chain (env, ~/.aws/
+            # credentials, IAM role) and no expiry to manage.
+            self._client = _private_s3_client(endpoint_url, region,
+                                              anon=anon, addressing=addressing)
         else:
             # The DAAC that fronts this bucket also issues its credentials.
             self._cred_host = ASF_S3_TO_HTTPS.get(
@@ -572,7 +604,10 @@ class S3RangeFile(_BlockCachedFile):
                    "  Check the bucket/key, the endpoint, and that credentials "
                    "are available\n"
                    "  (AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, ~/.aws/"
-                   "credentials, or an IAM role)."
+                   "credentials, or an IAM role);\n"
+                   "  an unsigned read is tried automatically when none are "
+                   "found. If the store\n"
+                   "  uses virtual-hosted buckets, add --s3-addressing virtual."
                    if endpoint_url else
                    "  Earthdata S3 works only from inside AWS " + S3_REGION
                    + ".")) from None
@@ -633,7 +668,8 @@ def resolve_uri(uri: str, verbose: bool = True,
         "  CMR both give it directly.")
 
 
-def open_h5(uri: str, block: int = 1 << 20, endpoint: Optional[str] = None):
+def open_h5(uri: str, block: int = 1 << 20, endpoint: Optional[str] = None,
+            anon: bool = False, addressing: str = "path"):
     """Open a NISAR HDF5, local or remote. Returns (h5py.File, backing_or_None)."""
     try:
         import h5py
@@ -647,7 +683,8 @@ def open_h5(uri: str, block: int = 1 << 20, endpoint: Optional[str] = None):
     if mode == "local":
         return h5py.File(resolved, "r"), None
 
-    backing = (S3RangeFile(resolved, block=block, endpoint_url=ep)
+    backing = (S3RangeFile(resolved, block=block, endpoint_url=ep,
+                          anon=anon, addressing=addressing)
                if mode == "s3" else HttpRangeFile(resolved, block=block))
     # A generous chunk cache pays for itself when neighbouring image chunks
     # share HDF5 metadata blocks.
