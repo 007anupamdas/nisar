@@ -131,7 +131,37 @@ command line, where they would land in your shell history and the process table:
 Nothing here logs, echoes or persists a credential. You must also have accepted
 the NISAR EULA once by downloading any granule through the Earthdata web UI.
 
-### The `s3://` URL: in-region only
+### A private S3-compatible store
+
+For data in your own object storage — MinIO, Ceph, or an institutional endpoint
+such as NRSC's — give it the endpoint and everything above works the same way:
+
+```bash
+export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...   # or ~/.aws/credentials
+
+python cog_locate.py info 's3://nisar-s/PRODUCT/PRODUCT.h5' \
+    --s3-endpoint https://qas.private.nrsc.gov.in
+
+python cog_locate.py chip 's3://nisar-s/PRODUCT/PRODUCT.h5' \
+    --s3-endpoint https://qas.private.nrsc.gov.in \
+    --rgb auto --center 16.80,78.03 --size 2km --gtiff chip.tif
+```
+
+The endpoint can also come from `$AWS_ENDPOINT_URL` or `$AWS_S3_ENDPOINT`.
+Credentials use boto3's normal chain (environment, `~/.aws/credentials`, IAM
+role) — nothing Earthdata-specific applies.
+
+Setting an endpoint switches the Earthdata rules off entirely: no in-region
+check, no DAAC credential fetch, no HTTPS fallback. The read goes straight to
+your store from wherever you are, with path-style addressing (a private
+endpoint rarely has the wildcard DNS virtual-hosted buckets need). GDAL gets
+the same endpoint, so a COG in the same bucket works too.
+
+Both `LSAR` and `SSAR` products are handled — the group path is discovered, not
+assumed, so S-band `science/SSAR/GSLC/grids/frequencyA` reads exactly like the
+L-band equivalent.
+
+### The ASF `s3://` URL: in-region only
 
 CMR advertises a `GET DATA VIA DIRECT ACCESS` link like
 `s3://sds-n-cumulus-prod-nisar-products/...`. It is real — the bucket is in

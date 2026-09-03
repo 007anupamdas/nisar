@@ -414,6 +414,26 @@ def _auth_hint(url: str, code: int) -> str:
 # HTTPS URL for the same object, which works from anywhere.
 S3_REGION = "us-west-2"
 
+# A private S3-compatible store (MinIO, Ceph, NRSC's own) is reached by giving
+# boto3 an endpoint and letting its normal credential chain apply. None of the
+# Earthdata machinery -- in-region checks, DAAC credential fetches, HTTPS
+# fallback -- applies there, so an endpoint switches all of it off.
+S3_ENDPOINT_VARS = ("COG_LOCATE_S3_ENDPOINT", "AWS_ENDPOINT_URL_S3",
+                    "AWS_ENDPOINT_URL", "AWS_S3_ENDPOINT")
+
+
+def s3_endpoint(explicit: Optional[str] = None) -> Optional[str]:
+    """The S3 endpoint to use, if this is a private store rather than AWS."""
+    if explicit:
+        return explicit
+    for var in S3_ENDPOINT_VARS:
+        val = os.environ.get(var)
+        if val:
+            # AWS_S3_ENDPOINT is conventionally bare host[:port]; the others are
+            # full URLs. Normalise so callers always get something openable.
+            return val if "://" in val else "https://" + val
+    return None
+
 # Bucket -> (HTTPS host, path prefix). ASF splits products and browse imagery
 # into sibling buckets that map onto sibling prefixes on the same host.
 ASF_S3_TO_HTTPS = {
@@ -500,7 +520,8 @@ class S3RangeFile(_BlockCachedFile):
     """
 
     def __init__(self, uri: str, block: int = 1 << 20, max_blocks: int = 512,
-                 region: str = S3_REGION, timeout: int = 120):
+                 region: str = S3_REGION, timeout: int = 120,
+                 endpoint_url: Optional[str] = None):
         try:
             import boto3  # noqa: F401
         except ImportError as exc:
@@ -516,20 +537,45 @@ class S3RangeFile(_BlockCachedFile):
         self.max_blocks = int(max_blocks)
         self.region = region
         self.timeout = timeout
+        self.endpoint_url = endpoint_url
         self._init_cache()
-
-        # The DAAC that fronts this bucket is also the one that issues its
-        # temporary credentials.
-        host = ASF_S3_TO_HTTPS.get(
-            self.bucket, ("nisar.asf.earthdatacloud.nasa.gov",))[0]
-        token, basic = _find_credentials(uri)
-        self._edl = _EarthdataSession(token, basic)
-        self._cred_host = host
         self._client = None
-        self._expiry = 0.0
-        self._refresh()
+        self._expiry = float("inf")
 
-        head = self._client.head_object(Bucket=self.bucket, Key=self.key)
+        if endpoint_url:
+            # Private store: boto3's own credential chain (env, ~/.aws, IAM
+            # role) and no expiry to manage.
+            import boto3
+            from botocore.client import Config
+            self._client = boto3.client(
+                "s3", endpoint_url=endpoint_url,
+                region_name=os.environ.get("AWS_DEFAULT_REGION") or region,
+                # Path-style addressing: a private endpoint rarely has the
+                # wildcard DNS that virtual-hosted buckets require.
+                config=Config(s3={"addressing_style": "path"}))
+        else:
+            # The DAAC that fronts this bucket also issues its credentials.
+            self._cred_host = ASF_S3_TO_HTTPS.get(
+                self.bucket, ("nisar.asf.earthdatacloud.nasa.gov",))[0]
+            token, basic = _find_credentials(uri)
+            self._edl = _EarthdataSession(token, basic)
+            self._expiry = 0.0
+            self._refresh()
+
+        try:
+            head = self._client.head_object(Bucket=self.bucket, Key=self.key)
+        except Exception as exc:
+            raise OSError(
+                f"cannot read s3://{self.bucket}/{self.key}\n"
+                f"  {type(exc).__name__}: {exc}\n"
+                + (f"  endpoint: {endpoint_url}\n"
+                   "  Check the bucket/key, the endpoint, and that credentials "
+                   "are available\n"
+                   "  (AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, ~/.aws/"
+                   "credentials, or an IAM role)."
+                   if endpoint_url else
+                   "  Earthdata S3 works only from inside AWS " + S3_REGION
+                   + ".")) from None
         self.size = int(head["ContentLength"])
 
     def _refresh(self):
@@ -545,19 +591,25 @@ class S3RangeFile(_BlockCachedFile):
 
     def _fetch_range(self, lo: int, hi: int) -> bytes:
         if time.time() > self._expiry:
-            self._refresh()
+            self._refresh()  # Earthdata only; a private endpoint never expires
         r = self._client.get_object(Bucket=self.bucket, Key=self.key,
                                     Range=f"bytes={lo}-{hi}")
         return r["Body"].read()
 
 
-def resolve_uri(uri: str, verbose: bool = True) -> Tuple[str, str]:
+def resolve_uri(uri: str, verbose: bool = True,
+                endpoint: Optional[str] = None) -> Tuple[str, str]:
     """Decide how to read `uri`. Returns (mode, resolved_uri).
 
-    mode is "s3" (direct, in-region), "http", or "local".
+    mode is "s3" (direct), "http", or "local".
     """
     if not uri.startswith("s3://"):
         return ("http" if uri.startswith(("http://", "https://")) else "local"), uri
+
+    # A configured endpoint means a private store, which has none of Earthdata's
+    # in-region restrictions -- read it directly from wherever we are.
+    if s3_endpoint(endpoint):
+        return "s3", uri
 
     if in_aws_region():
         return "s3", uri
@@ -581,7 +633,7 @@ def resolve_uri(uri: str, verbose: bool = True) -> Tuple[str, str]:
         "  CMR both give it directly.")
 
 
-def open_h5(uri: str, block: int = 1 << 20):
+def open_h5(uri: str, block: int = 1 << 20, endpoint: Optional[str] = None):
     """Open a NISAR HDF5, local or remote. Returns (h5py.File, backing_or_None)."""
     try:
         import h5py
@@ -590,12 +642,13 @@ def open_h5(uri: str, block: int = 1 << 20):
             "h5py is required to read NISAR HDF5 products.\n"
             f"  pip install h5py        (import error: {exc})")
 
-    mode, resolved = resolve_uri(uri)
+    ep = s3_endpoint(endpoint)
+    mode, resolved = resolve_uri(uri, endpoint=endpoint)
     if mode == "local":
         return h5py.File(resolved, "r"), None
 
-    backing = (S3RangeFile(resolved, block=block) if mode == "s3"
-               else HttpRangeFile(resolved, block=block))
+    backing = (S3RangeFile(resolved, block=block, endpoint_url=ep)
+               if mode == "s3" else HttpRangeFile(resolved, block=block))
     # A generous chunk cache pays for itself when neighbouring image chunks
     # share HDF5 metadata blocks.
     return h5py.File(backing, "r", rdcc_nbytes=128 * 1024 * 1024), backing
