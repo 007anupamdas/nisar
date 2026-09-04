@@ -449,12 +449,21 @@ def rank_name_fields(field_names):
     return sorted(field_names, key=lambda f: (score(f), f.lower()))
 
 
+def build_name_lookup(raster_names):
+    """Case-insensitive name -> actual name, built once for a whole index pass."""
+    return {n.lower(): n for n in raster_names}
+
+
 def resolve_index_name(value, raster_names):
     """An index attribute's value -> the raster it names, or None.
 
     Values seen in the wild are a bare stem, a filename, or a full path from
     whatever machine wrote the index -- so only the basename is trusted, and a
     missing extension is filled in.
+
+    `raster_names` is a sequence of names, or a mapping from build_name_lookup;
+    pass the mapping when walking an index so the lookup is not rebuilt per
+    feature.
     """
     if value is None:
         return None
@@ -464,7 +473,8 @@ def resolve_index_name(value, raster_names):
     base = os.path.basename(text)
     if not base:
         return None
-    lower = {n.lower(): n for n in raster_names}
+    lower = (raster_names if isinstance(raster_names, dict)
+             else build_name_lookup(raster_names))
     if base.lower() in lower:
         return lower[base.lower()]
     stem = os.path.splitext(base)[0]
@@ -1065,11 +1075,12 @@ class QCDashboard(QMainWindow):
 
         # Lock onto the first attribute that actually resolves to a raster, so a
         # later feature with a blank cell cannot silently switch fields.
+        lookup = build_name_lookup(rasters)
         name_field, unmatched = None, 0
         for feat in lyr.getFeatures():
             if name_field is None:
                 for field in fields:
-                    if resolve_index_name(feat[field], list(rasters)):
+                    if resolve_index_name(feat[field], lookup):
                         name_field = field
                         print(f"[META] {shp_name}: raster names from "
                               f"attribute '{field}'")
@@ -1078,7 +1089,7 @@ class QCDashboard(QMainWindow):
                     unmatched += 1
                     continue
 
-            tif = resolve_index_name(feat[name_field], list(rasters))
+            tif = resolve_index_name(feat[name_field], lookup)
             if not tif:
                 unmatched += 1
                 continue
@@ -1097,8 +1108,10 @@ class QCDashboard(QMainWindow):
                 f"{shp_name}: no attribute matched any raster name. Fields are: "
                 + ", ".join(fields[:12]))
         elif unmatched:
-            errors.append(f"{shp_name}: {unmatched} index entr(ies) named a "
-                          f"raster not present in the folder")
+            # An index routinely spans more than the folder holds. Worth stating,
+            # not worth a dialog on every load.
+            print(f"[META] {shp_name}: {unmatched} index entr(ies) name a raster "
+                  f"not in this folder; {len(self.ref_footprints)} matched")
         return errors
 
     @staticmethod

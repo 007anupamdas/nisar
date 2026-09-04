@@ -230,6 +230,13 @@ check("a NISAR granule is not a tile", H["parse_degree_tile"](xml_name), None)
 check("out-of-range lat rejected", H["parse_degree_tile"]("N95E073.tif"), None)
 
 # ── 8. L8: a shapefile index names the rasters ───────────────────────────────
+# The real L8 index.shp stores tif names under 'FileName'.
+check("'FileName' wins over other plausible fields",
+      H["rank_name_fields"](["OBJECTID", "Shape_Area", "FileName",
+                             "path", "acq_date"])[0], "FileName")
+check("matching is case-insensitive on the field name",
+      H["rank_name_fields"](["FILENAME", "name"])[0], "FILENAME")
+
 fields = ["OBJECTID", "geom_area", "FILENAME", "path", "acq_date"]
 check("name-ish attributes rank first", H["rank_name_fields"](fields)[0], "FILENAME")
 ranked = H["rank_name_fields"](fields)
@@ -252,6 +259,16 @@ check("index value naming a missing raster",
       H["resolve_index_name"]("LC08_999999_20240102.tif", scenes), None)
 check("index value blank", H["resolve_index_name"]("   ", scenes), None)
 check("index value null", H["resolve_index_name"](None, scenes), None)
+
+# L8 tif names carry no structure, so the index attribute is the only link --
+# and with many features the lookup is built once and reused.
+lookup = H["build_name_lookup"](scenes)
+check("prebuilt lookup resolves the same",
+      H["resolve_index_name"]("LC08_144048_20240102.tif", lookup), scenes[0])
+check("prebuilt lookup, case-insensitive",
+      H["resolve_index_name"]("lc08_144049_20240102.TIF", lookup), scenes[1])
+check("prebuilt lookup, absent raster",
+      H["resolve_index_name"]("LC08_000000_20240102.tif", lookup), None)
 
 check("prefers index.shp", H["pick_index_shapefile"](["tiles.shp", "index.shp"]),
       "index.shp")
