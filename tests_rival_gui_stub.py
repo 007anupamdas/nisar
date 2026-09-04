@@ -389,30 +389,40 @@ class _Combo:
     def currentIndex(self): return self._idx
     def currentText(self): return self._items[self._idx] if self._idx >= 0 else ""
 
+win.cb_normalize_input.isChecked = MagicMock(return_value=False)
+
+# NISAR carries two bands; every slot offers both and the default is 1,1,1
+dual = fake_layer(2, ["HH", "HV"])
 win.band_combos = [_Combo(), _Combo(), _Combo()]
+win.input_tif_layer = dual
+win.band_container.show.reset_mock()
+win.populate_band_picker(dual)
+assert [c._items for c in win.band_combos] == [["1: HH", "2: HV"]] * 3, \
+    "each slot should offer every band"
+assert [c.currentIndex() for c in win.band_combos] == [0, 0, 0], "default is not 1,1,1"
+assert captured[-1] == ("rgb", 1, 1, 1), captured
+assert win.band_container.show.called, "picker hidden for a 2-band raster"
+print("2-band input -> every slot lists both, default", captured[-1])
+
+# any band in any slot, repeats allowed
+win.band_combos[1].setCurrentIndex(1)
+win.apply_input_bands()
+assert captured[-1] == ("rgb", 1, 2, 1), captured
+print("HH/HV/HH selected ->", captured[-1])
+
+# a 3-band chip works the same way
 win.input_tif_layer = pol
+win.band_combos = [_Combo(), _Combo(), _Combo()]
 win.populate_band_picker(pol)
-assert [c.currentText() for c in win.band_combos] == ["1: HH", "2: HV", "3: HH/HV"]
+assert [c._items for c in win.band_combos] == [["1: HH", "2: HV", "3: HH/HV"]] * 3
+assert captured[-1] == ("rgb", 1, 1, 1), captured
+for combo, idx in zip(win.band_combos, (0, 1, 2)):
+    combo.setCurrentIndex(idx)
+win.apply_input_bands()
 assert captured[-1] == ("rgb", 1, 2, 3), captured
 print("3-band input -> composite", captured[-1])
 
-# unset green/blue: greyscale on the red band, not a broken composite
-win.band_combos[1].setCurrentIndex(3)      # the BAND_NONE entry
-win.band_combos[2].setCurrentIndex(3)
-win.apply_input_bands()
-assert captured[-1] == ("grey", 1), captured
-print("red alone -> greyscale", captured[-1])
-
-# two bands: third slot defaults to none, so it renders grey rather than guessing
-dual = fake_layer(2, ["HH", "HV"])
-win.input_tif_layer = dual
-win.band_combos = [_Combo(), _Combo(), _Combo()]
-win.populate_band_picker(dual)
-assert win.band_combos[2].currentText() == R.BAND_NONE, \
-    win.band_combos[2].currentText()
-print("2-band input -> blue slot left unset:", captured[-1])
-
-# single band: no picker to show, still rendered
+# single band: nothing to choose between, so no picker, still rendered
 single = fake_layer(1, ["HH"])
 win.input_tif_layer = single
 win.band_container.hide.reset_mock()
@@ -420,6 +430,29 @@ win.populate_band_picker(single)
 assert win.band_container.hide.called, "picker shown for a single-band raster"
 assert captured[-1] == ("grey", 1), captured
 print("1-band input -> picker hidden, rendered", captured[-1])
+
+# ── 11. 'Normalize NISAR' drives the same gamma stretch as the reference ─────
+win.input_tif_layer = dual
+win.band_combos = [_Combo(), _Combo(), _Combo()]
+win.populate_band_picker(dual)
+win._gamma_bounds = MagicMock(return_value=(12.0, 340.0))
+
+win.cb_normalize_input.isChecked = MagicMock(return_value=False)
+win._stretch_for(dual, 1)
+assert not win._gamma_bounds.called, "gamma used while Normalize NISAR is off"
+
+win.cb_normalize_input.isChecked = MagicMock(return_value=True)
+win.apply_input_bands()
+bands = [c[0][1] for c in win._gamma_bounds.call_args_list]
+assert bands == [1, 1, 1], bands          # one stretch per channel
+print("Normalize NISAR on -> gamma bounds computed per channel:", bands)
+
+# and it falls back to the percentile clip when the gamma read fails
+win._gamma_bounds = MagicMock(return_value=(None, None))
+win.apply_input_bands()
+assert captured[-1] == ("rgb", 1, 1, 1), captured
+print("gamma unavailable -> falls back to the percentile clip")
+win.cb_normalize_input.isChecked = MagicMock(return_value=False)
 
 for d in (d1, d2, d3, d4):
     shutil.rmtree(d, ignore_errors=True)

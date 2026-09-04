@@ -31,12 +31,18 @@ place being measured. Clicking the same feature on the right then fills Ref X/Y
 and the row's error. 'Pan' (Ctrl+P) swaps both canvases to dragging the view
 instead of marking.
 
-A multi-band input is composed from an R/G/B picker over the left canvas, which
-lists the bands by the names the raster carries -- cog_locate's --gtiff writes
-the polarization into each band description, so a NISAR chip offers HH and HV
-rather than 'Band 1'. Each channel is stretched on its own percentiles, since a
-min/max stretch on SAR is set by a few bright scatterers and renders the scene
-black. Red alone gives greyscale; a single-band raster hides the picker.
+A multi-band input is composed from an R/G/B picker over the left canvas. Every
+slot offers every band and a band may be repeated, so a two-band NISAR chip can
+be shown any way round; the default puts band 1 in all three, which renders
+grey. Bands are listed by the names the raster carries -- cog_locate's --gtiff
+writes the polarization into each description, so a chip offers HH and HV rather
+than 'Band 1'.
+
+'Normalize NISAR' and 'Normalize Ref' select the same SAR sqrt-gamma stretch for
+their canvas, computed by one shared routine so the word means the same thing on
+both. Unticked, the input clips each channel at its 2%-98% percentiles. Either
+way a plain min/max is avoided: on SAR it is set by a handful of bright
+scatterers and renders the scene black.
 
 NISAR rasters are UTM and the C1/L8 references are WGS84. By default both
 canvases are pinned to the working CRS and QGIS reprojects the reference as it
@@ -140,7 +146,11 @@ REF_VIEW_WIDTH_M = 2000.0
 # by a handful of bright scatterers and leaves the scene black.
 RGB_CLIP_LOW  = 0.02
 RGB_CLIP_HIGH = 0.98
-BAND_NONE     = "—"        # em dash: this slot is unused
+
+# Which band each channel starts on. All three on band 1 renders grey, so the
+# scene is legible before any choice is made; NISAR carries HH and HV, and which
+# pairing is useful depends on the scene.
+RGB_DEFAULT_BANDS = (1, 1, 1)
 
 
 # ── BEGIN PURE HELPERS ────────────────────────────────────────────────────────
@@ -748,6 +758,12 @@ class QCDashboard(QMainWindow):
         self.cb_pan.setToolTip(
             "Drag to pan both canvases instead of marking points  (Ctrl+P).\n"
             "Turn off to go back to marking.")
+        self.cb_normalize_input = QCheckBox("Normalize NISAR")
+        self.cb_normalize_input.setChecked(False)
+        self.cb_normalize_input.setToolTip(
+            "OFF = each channel clipped at its 2%-98% percentiles\n"
+            "ON  = SAR sqrt-gamma stretch over DN 0-1500, per channel"
+        )
         self.cb_normalize = QCheckBox("Normalize Ref")
         self.cb_normalize.setChecked(False)
         self.cb_normalize.setToolTip(
@@ -788,7 +804,8 @@ class QCDashboard(QMainWindow):
         btn_layout = QHBoxLayout()
         for w in [self.btn_input_tif, self.btn_reference_folder,
                   self.btn_load, self.btn_add, self.btn_save,
-                  self.btn_del, self.cb_pan, self.cb_sync, self.cb_normalize]:
+                  self.btn_del, self.cb_pan, self.cb_sync,
+                  self.cb_normalize_input, self.cb_normalize]:
             btn_layout.addWidget(w)
 
         main_layout = QVBoxLayout()
@@ -814,6 +831,8 @@ class QCDashboard(QMainWindow):
         self.dropdown_band.currentIndexChanged.connect(lambda _: self.filter_reference_tifs())
         self.cb_normalize.stateChanged.connect(self.toggle_normalization)
         self.cb_pan.stateChanged.connect(lambda _: self.toggle_pan_mode())
+        self.cb_normalize_input.stateChanged.connect(
+            lambda _: self.apply_input_bands())
         for combo in self.band_combos:
             combo.currentIndexChanged.connect(lambda _: self.apply_input_bands())
 
@@ -860,18 +879,22 @@ class QCDashboard(QMainWindow):
         threading.Thread(target=_build, daemon=True).start()
 
     # ── NORMALIZATION: SAR SQRT-GAMMA STRETCH ─────────────────────────────────
-    def normalize_layer(self, layer):
-        """SAR sqrt-gamma stretch: gamma=NORM_GAMMA over DN range NORM_MIN..NORM_MAX.
-        Reads a downsampled tile, applies power stretch, inverse-maps 2%-98%
-        percentile output back to input DN for QgsContrastEnhancement."""
-        if not layer or not layer.isValid():
-            return
+    def _gamma_bounds(self, source, band_no=1):
+        """(min_dn, max_dn) for the SAR sqrt-gamma stretch, or (None, None).
+
+        Reads a downsampled tile, applies the power stretch, and inverse-maps
+        the 2%-98% output percentiles back to input DN so the result can drive a
+        plain QgsContrastEnhancement. Shared by the reference and input canvases
+        so 'Normalize' means the same thing on both.
+        """
         try:
             from osgeo import gdal
-            ds = gdal.Open(layer.source(), gdal.GA_ReadOnly)
+            ds = gdal.Open(source, gdal.GA_ReadOnly)
             if not ds:
-                return
-            band   = ds.GetRasterBand(1)
+                return (None, None)
+            band   = ds.GetRasterBand(band_no)
+            if band is None:
+                return (None, None)
             xsize  = min(band.XSize, 1000)
             ysize  = min(band.YSize, 1000)
             data   = band.ReadAsArray(0, 0, band.XSize, band.YSize,
@@ -892,7 +915,7 @@ class QCDashboard(QMainWindow):
 
             valid = stretched[mask]
             if valid.size == 0:
-                return
+                return (None, None)
 
             p2_out  = float(np.percentile(valid, 2))
             p98_out = float(np.percentile(valid, 98))
@@ -904,7 +927,19 @@ class QCDashboard(QMainWindow):
 
             if max_dn <= min_dn:
                 min_dn, max_dn = float(NORM_MIN), float(NORM_MAX)
+            return (min_dn, max_dn)
+        except Exception as e:
+            print(f"[NORM] Error: {e}")
+            return (None, None)
 
+    def normalize_layer(self, layer):
+        """Apply the SAR sqrt-gamma stretch to the reference layer."""
+        if not layer or not layer.isValid():
+            return
+        min_dn, max_dn = self._gamma_bounds(layer.source(), 1)
+        if min_dn is None:
+            return
+        try:
             provider = layer.dataProvider()
             ce = QgsContrastEnhancement(provider.dataType(1))
             ce.setMinimumValue(min_dn)
@@ -1928,7 +1963,12 @@ class QCDashboard(QMainWindow):
         return labels
 
     def populate_band_picker(self, layer):
-        """Fill the R/G/B combos from the input raster, then apply a default."""
+        """Fill the R/G/B combos from the input raster, then apply the default.
+
+        Every slot offers every band and any band may be repeated -- NISAR
+        carries two, and which pairing reads best is a judgement about the
+        scene. The default puts band 1 in all three, which renders grey.
+        """
         if layer is None or not layer.isValid():
             self.band_container.hide()
             return
@@ -1937,51 +1977,46 @@ class QCDashboard(QMainWindow):
         if count < 1:
             self.band_container.hide()
             return
-        # a single-band raster has nothing to compose; leave the picker away
-        if count < 2:
-            self.band_container.hide()
-            self.apply_input_bands()
-            return
-
-        defaults = [0, 1, 2] if count >= 3 else [0, 1, count]   # count -> BAND_NONE
         try:
-            for combo in self.band_combos:
+            for combo, default in zip(self.band_combos, RGB_DEFAULT_BANDS):
                 combo.blockSignals(True)
                 combo.clear()
                 for label in labels:
                     combo.addItem(label)
-                combo.addItem(BAND_NONE)
-            for combo, idx in zip(self.band_combos, defaults):
-                combo.setCurrentIndex(min(idx, combo.count() - 1))
+                combo.setCurrentIndex(min(default - 1, count - 1))
         finally:
             for combo in self.band_combos:
                 combo.blockSignals(False)
-        self.band_container.show()
-        self.band_container.raise_()
+        # nothing to choose between with one band
+        if count < 2:
+            self.band_container.hide()
+        else:
+            self.band_container.show()
+            self.band_container.raise_()
         print(f"[BANDS] input has {count}: {', '.join(labels)}")
         self.apply_input_bands()
 
     def _selected_bands(self):
-        """The chosen 1-based band per channel, None where unset."""
-        out = []
-        for combo in self.band_combos:
-            idx = combo.currentIndex()
-            out.append(None if idx < 0 or combo.currentText() == BAND_NONE
-                       else idx + 1)
-        return out
+        """The chosen 1-based band per channel."""
+        return [max(combo.currentIndex(), 0) + 1 for combo in self.band_combos]
 
-    def _stretch_for(self, provider, band):
-        """Contrast enhancement for one band, clipped at the RGB percentiles.
+    def _stretch_for(self, layer, band):
+        """Contrast enhancement for one input band.
 
-        A min/max stretch on SAR is set by a few bright scatterers and renders
-        the scene black, so the cumulative cut is used where the provider offers
-        it and full statistics only as a fallback.
+        'Normalize NISAR' selects the same SAR sqrt-gamma stretch the reference
+        uses; otherwise the band is clipped at the RGB percentiles. Either way a
+        plain min/max is avoided -- on SAR it is set by a handful of bright
+        scatterers and renders the scene black.
         """
+        provider = layer.dataProvider()
         lo = hi = None
-        try:
-            lo, hi = provider.cumulativeCut(band, RGB_CLIP_LOW, RGB_CLIP_HIGH)
-        except Exception:
-            pass
+        if self.cb_normalize_input.isChecked():
+            lo, hi = self._gamma_bounds(layer.source(), band)
+        if lo is None or hi is None or hi <= lo:
+            try:
+                lo, hi = provider.cumulativeCut(band, RGB_CLIP_LOW, RGB_CLIP_HIGH)
+            except Exception:
+                lo = hi = None
         if lo is None or hi is None or hi <= lo:
             stats = provider.bandStatistics(band)
             lo, hi = stats.minimumValue, stats.maximumValue
@@ -1999,25 +2034,24 @@ class QCDashboard(QMainWindow):
             return
         provider = layer.dataProvider()
         try:
-            red, green, blue = self._selected_bands()
-            if provider.bandCount() < 2:
-                red = red or 1
-            if red and green and blue:
-                renderer = QgsMultiBandColorRenderer(provider, red, green, blue)
-                renderer.setRedContrastEnhancement(self._stretch_for(provider, red))
-                renderer.setGreenContrastEnhancement(self._stretch_for(provider, green))
-                renderer.setBlueContrastEnhancement(self._stretch_for(provider, blue))
-                shown = f"R={red} G={green} B={blue}"
+            count = max(provider.bandCount(), 1)
+            red, green, blue = [min(b, count) for b in self._selected_bands()]
+            if count < 2:
+                renderer = QgsSingleBandGrayRenderer(provider, 1)
+                renderer.setContrastEnhancement(self._stretch_for(layer, 1))
+                shown = "grey band 1"
             else:
-                # red alone (or nothing picked) means greyscale on that band
-                band = red or green or blue or 1
-                renderer = QgsSingleBandGrayRenderer(provider, band)
-                renderer.setContrastEnhancement(self._stretch_for(provider, band))
-                shown = f"grey band {band}"
+                renderer = QgsMultiBandColorRenderer(provider, red, green, blue)
+                renderer.setRedContrastEnhancement(self._stretch_for(layer, red))
+                renderer.setGreenContrastEnhancement(self._stretch_for(layer, green))
+                renderer.setBlueContrastEnhancement(self._stretch_for(layer, blue))
+                shown = f"R={red} G={green} B={blue}"
             layer.setRenderer(renderer)
             layer.triggerRepaint()
             self.canvas_left.refresh()
-            print(f"[BANDS] input rendered as {shown}")
+            stretch = ("gamma" if self.cb_normalize_input.isChecked()
+                       else f"{RGB_CLIP_LOW:.0%}-{RGB_CLIP_HIGH:.0%}")
+            print(f"[BANDS] input rendered as {shown} ({stretch} stretch)")
         except Exception as e:
             print(f"[BANDS] {e}")
 
