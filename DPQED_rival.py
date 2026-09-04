@@ -1,8 +1,31 @@
+"""RIVAL - Reference Image Validation and Accuracy Logger (QGIS).
+
+Two linked canvases: the input raster on the left, a reference tile on the right.
+Drag on either to fill the selected row; the table reports DX/DY in the working
+CRS's metres, with RMSE and CE90 underneath.
+
+Reference tiles are discovered from their sidecar metadata, in either of the two
+forms NISAR products ship:
+
+  <stem>_meta.txt   gdalinfo-style text -- four corner lon/lats (SSAR GSLC)
+  <stem>.iso.xml    ISO 19115-2 XML     -- full gml:posList footprint (LSAR GSLC)
+
+Each footprint is tagged LSAR or SSAR: from the tag spelled out in the granule
+name if it is there, otherwise from the centre frequency the metadata carries
+(L-band ~1.24 GHz, S-band ~3.2 GHz). Untaggable footprints are listed as UNK
+rather than guessed at. The dropdown shows the tag and can filter on it.
+
+The working CRS is adopted from the input raster when that carries a projected
+one, falling back to WORKING_CRS_DEFAULT -- a fixed zone is wrong as soon as a
+scene sits in another, and an LSAR frame is wide enough to straddle two.
+"""
+
 import csv
 import os
 import sys
 import re
 import threading
+import xml.etree.ElementTree as ET
 import numpy as np
 from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QTableWidget, QTableWidgetItem, QPushButton,
@@ -28,6 +51,264 @@ NORM_MIN    = 0           # SAR normalization min DN
 NORM_MAX    = 1500        # SAR normalization max DN
 NORM_GAMMA  = 0.5         # gamma exponent for sqrt stretch (0.5 = square root)
 
+# Working (projected) CRS the table's In/Ref columns and the error metres live in.
+# Adopted from the input TIF when that carries a projected CRS; this is the fallback.
+WORKING_CRS_DEFAULT = "EPSG:32644"     # UTM 44N
+
+# Sidecar metadata: SSAR products ship a gdalinfo-style text file, LSAR products
+# ship ISO 19115-2 XML. Both are scanned; each footprint is tagged with its band.
+META_SUFFIX_TEXT = "_meta.txt"
+META_SUFFIX_XML  = ".iso.xml"
+
+# NISAR L-band is centred near 1.24 GHz, S-band near 3.2 GHz. Anything below this
+# split is LSAR, anything above is SSAR.
+BAND_SPLIT_HZ = 2.0e9
+BAND_UNKNOWN  = "UNK"
+
+
+# ── BEGIN PURE HELPERS ────────────────────────────────────────────────────────
+# Everything between these markers is plain Python -- no Qt, no QGIS -- so the
+# metadata parsing can be exercised without a QGIS session. tests_rival_meta.py
+# execs exactly this slice.
+
+_ISO_NS = {
+    "gmd": "http://www.isotc211.org/2005/gmd",
+    "gco": "http://www.isotc211.org/2005/gco",
+    "gml": "http://www.opengis.net/gml/3.2",
+    "gmx": "http://www.isotc211.org/2005/gmx",
+    "eos": "http://earthdata.nasa.gov/schema/eos",
+    "gmi": "http://www.isotc211.org/2005/gmi",
+}
+
+
+def band_from_name(name):
+    """LSAR / SSAR spelled out in a file or granule name, if it is there."""
+    upper = (name or "").upper()
+    for tag in ("LSAR", "SSAR"):
+        if tag in upper:
+            return tag
+    return None
+
+
+def band_from_frequency(hz):
+    """NISAR centre frequency -> band tag. L-band ~1.24 GHz, S-band ~3.2 GHz."""
+    try:
+        hz = float(hz)
+    except (TypeError, ValueError):
+        return None
+    if hz <= 0:
+        return None
+    return "LSAR" if hz < BAND_SPLIT_HZ else "SSAR"
+
+
+def close_ring(ring):
+    """Return the ring with its first vertex repeated at the end."""
+    if len(ring) >= 3 and ring[0] != ring[-1]:
+        return list(ring) + [ring[0]]
+    return list(ring)
+
+
+def ring_wkt(ring):
+    """POLYGON WKT for an ordered vertex list. Returns None if under 3 vertices."""
+    if not ring or len(ring) < 3:
+        return None
+    closed = close_ring(ring)
+    pts = ",".join(f"{x} {y}" for x, y in closed)
+    return f"POLYGON(({pts}))"
+
+
+def parse_pos_list(text):
+    """gml:posList -> [(lon, lat), ...].
+
+    NISAR writes comma-separated 'lon lat height' triples; the GML default is one
+    whitespace-separated run. Both are accepted, and a 2-value (lon lat) run too.
+    """
+    if not text:
+        return []
+    chunks = [c for c in text.replace("\n", " ").split(",") if c.strip()]
+    if len(chunks) > 1:
+        ring = []
+        for chunk in chunks:
+            parts = chunk.split()
+            if len(parts) >= 2:
+                ring.append((float(parts[0]), float(parts[1])))
+        return ring
+    parts = text.split()
+    for step in (3, 2):
+        if len(parts) >= 3 * step and len(parts) % step == 0:
+            return [(float(parts[i]), float(parts[i + 1]))
+                    for i in range(0, len(parts), step)]
+    return []
+
+
+def parse_meta_text(content, source="<text>"):
+    """gdalinfo-style '_meta.txt' -> footprint record, or None.
+
+    Corner lines look like:  Upper Left  ( 78.0312500,  17.1234500)
+    """
+    corners = {}
+    label_map = {
+        "Upper Left":  "UL", "Upper Right": "UR",
+        "Lower Left":  "LL", "Lower Right": "LR",
+    }
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        for label, key in label_map.items():
+            if label in line and "(" in line and "," in line:
+                try:
+                    lon = float(line.split("(")[1].split(",")[0].strip())
+                    lat = float(line.split("(")[1].split(",")[1]
+                                .strip().split(")")[0])
+                    corners[key] = (lon, lat)
+                except (IndexError, ValueError) as e:
+                    print(f"[META] {label} in {source}: {e}")
+                break
+    if len(corners) != 4:
+        missing = {"UL", "UR", "LL", "LR"} - set(corners.keys())
+        print(f"[META] {source}: missing {sorted(missing)}")
+        return None
+
+    band = band_from_name(content)
+    if band is None:
+        m = re.search(r"(?:centre|center)\s*frequency\s*[:=]?\s*"
+                      r"([0-9]+(?:\.[0-9]+)?(?:[eE][-+]?[0-9]+)?)",
+                      content, re.IGNORECASE)
+        if m:
+            band = band_from_frequency(m.group(1))
+    if band is None:
+        m = re.search(r"\bband\s*[:=]\s*([LS])\b", content, re.IGNORECASE)
+        if m:
+            band = m.group(1).upper() + "SAR"
+
+    m = re.search(r"Files\s*:?\s+(\S+\.(?:tif|tiff|vrt))", content, re.IGNORECASE)
+    return {
+        "ring": [corners["UL"], corners["UR"], corners["LR"], corners["LL"]],
+        "band": band or BAND_UNKNOWN,
+        "crs": None,
+        "granule": m.group(1) if m else None,
+        "source": "text",
+    }
+
+
+def _iso_text(root, path):
+    node = root.find(path, _ISO_NS)
+    return node.text.strip() if node is not None and node.text else None
+
+
+def parse_meta_iso_xml(content, source="<xml>"):
+    """NISAR ISO 19115-2 '.iso.xml' -> footprint record, or None.
+
+    Takes the full bounding polygon rather than a corner box: a NISAR frame is a
+    slanted swath, so its four extreme corners over-cover it badly.
+    """
+    try:
+        root = ET.fromstring(content)
+    except ET.ParseError as e:
+        print(f"[META] {source}: XML parse error: {e}")
+        return None
+
+    ring = []
+    for node in root.iter("{%s}posList" % _ISO_NS["gml"]):
+        ring = parse_pos_list(node.text)
+        if len(ring) >= 3:
+            break
+    if len(ring) < 3:
+        print(f"[META] {source}: no usable gml:posList")
+        return None
+
+    crs = None
+    for node in root.iter("{%s}referenceSystemInfo" % _ISO_NS["gmd"]):
+        code = _iso_text(node, ".//gmd:code/gco:CharacterString")
+        if code:
+            m = re.search(r"EPSG:*(\d{4,6})", code)
+            crs = f"EPSG:{m.group(1)}" if m else code
+            break
+
+    granule = None
+    for tag in ("{%s}FileName" % _ISO_NS["gmx"],
+                "{%s}CharacterString" % _ISO_NS["gco"]):
+        for node in root.iter(tag):
+            if node.text and node.text.strip().endswith(".h5"):
+                granule = node.text.strip()
+                break
+        if granule:
+            break
+
+    band = band_from_name(granule or "") or band_from_name(source)
+    if band is None:
+        for node in root.iter("{%s}EOS_AdditionalAttribute" % _ISO_NS["eos"]):
+            name = _iso_text(node, ".//eos:name/eos:CharacterString") or ""
+            if name.strip().lower() != "center frequency":
+                continue
+            band = band_from_frequency(
+                _iso_text(node, "./eos:value/eos:CharacterString"))
+            if band:
+                break
+
+    return {
+        "ring": ring,
+        "band": band or BAND_UNKNOWN,
+        "crs": crs,
+        "granule": granule,
+        "source": "iso-xml",
+    }
+
+
+def meta_base_stem(meta_name):
+    """Strip the sidecar suffix, leaving the stem its raster shares."""
+    for suffix in (META_SUFFIX_XML, META_SUFFIX_TEXT):
+        if meta_name.lower().endswith(suffix.lower()):
+            stem = meta_name[: -len(suffix)]
+            break
+    else:
+        stem = os.path.splitext(meta_name)[0]
+    if stem.lower().endswith(".h5"):
+        stem = stem[:-3]
+    return stem
+
+
+def match_raster(files, stem, granule=None):
+    """Pick the raster a sidecar describes, out of a folder listing.
+
+    Exact stem match first, then the granule name the metadata itself gives, then
+    any raster whose name starts with the stem -- DPQED_h52tif writes
+    '<product>1.tif', so a plain stem+'.tif' does not always exist.
+    """
+    exts = (".tif", ".tiff", ".vrt")
+    lower = {f.lower(): f for f in files}
+
+    stems = [stem]
+    if granule:
+        g = os.path.basename(granule)
+        if g.lower().endswith(".h5"):
+            g = g[:-3]
+        stems.append(os.path.splitext(g)[0] if "." in g else g)
+
+    for cand in stems:
+        for ext in exts:
+            hit = lower.get((cand + ext).lower())
+            if hit:
+                return hit
+
+    prefixed = sorted(
+        f for f in files
+        if f.lower().startswith(stem.lower()) and f.lower().endswith(exts)
+    )
+    return prefixed[0] if prefixed else None
+
+
+def is_meta_file(name):
+    """Which sidecar parser a filename belongs to, or None."""
+    low = name.lower()
+    if low.endswith(META_SUFFIX_XML.lower()):
+        return "iso-xml"
+    if low.endswith(META_SUFFIX_TEXT.lower()):
+        return "text"
+    return None
+
+
+# ── END PURE HELPERS ──────────────────────────────────────────────────────────
+
 
 # ── MAP TOOL ──────────────────────────────────────────────────────────────────
 class DragMapTool(QgsMapTool):
@@ -38,10 +319,6 @@ class DragMapTool(QgsMapTool):
         self.is_left_map = is_left_map
         self.dragging    = False
         self.setCursor(Qt.CrossCursor)
-        if not self.is_left_map:
-            self.transform_to_utm = QgsCoordinateTransform(
-                parent.wgs84_crs, parent.utm44n_crs, QgsProject.instance()
-            )
 
     def canvasPressEvent(self, e):
         self.dragging = True
@@ -62,7 +339,8 @@ class DragMapTool(QgsMapTool):
         point = self.toMapCoordinates(pos)
         col   = 0 if self.is_left_map else 2
         if not self.is_left_map:
-            p = self.transform_to_utm.transform(point)
+            # rebuilt per pick: the working CRS is adopted from the input TIF
+            p = self.parent.transform_wgs_to_proj.transform(point)
             sx, sy = p.x(), p.y()
         else:
             sx, sy = point.x(), point.y()
@@ -101,21 +379,15 @@ class QCDashboard(QMainWindow):
 
         self.markers           = {"left": None, "right": None}
         self.ref_folder_path   = None
-        self.ref_meta_data     = {}
-        self.ref_meta_data_utm = {}
+        self.ref_footprints    = {}
         self.ref_tif_list      = []
         self.input_tif_layer   = None
         self.current_ref_layer = None
         self._syncing          = False
 
-        self.wgs84_crs  = QgsCoordinateReferenceSystem("EPSG:4326")
-        self.utm44n_crs = QgsCoordinateReferenceSystem("EPSG:32644")
-        self.transform_utm_to_wgs = QgsCoordinateTransform(
-            self.utm44n_crs, self.wgs84_crs, QgsProject.instance()
-        )
-        self.transform_wgs_to_utm = QgsCoordinateTransform(
-            self.wgs84_crs, self.utm44n_crs, QgsProject.instance()
-        )
+        self.wgs84_crs = QgsCoordinateReferenceSystem("EPSG:4326")
+        self.proj_crs  = QgsCoordinateReferenceSystem(WORKING_CRS_DEFAULT)
+        self._rebuild_transforms()
 
         self._configure_gdal_cache()
 
@@ -131,10 +403,18 @@ class QCDashboard(QMainWindow):
         self.dropdown_container = QWidget(self.canvas_right)
         self.dropdown_container.setGeometry(10, 10, 600, 35)
         self.dropdown_container.setStyleSheet("background-color: rgba(255,255,255,153);")
-        _dl = QVBoxLayout(self.dropdown_container)
+        _dl = QHBoxLayout(self.dropdown_container)
         _dl.setContentsMargins(5, 5, 5, 5)
+        self.dropdown_band = QComboBox()
+        self.dropdown_band.addItems(["All bands", "LSAR", "SSAR"])
+        self.dropdown_band.setToolTip(
+            "Restrict the reference list to one NISAR band.\n"
+            "The tag comes from the sidecar metadata: LSAR/SSAR in the granule\n"
+            "name, else the centre frequency (L ~1.24 GHz, S ~3.2 GHz)."
+        )
         self.dropdown_ref = QComboBox()
-        _dl.addWidget(self.dropdown_ref)
+        _dl.addWidget(self.dropdown_band)
+        _dl.addWidget(self.dropdown_ref, 1)
         self.dropdown_container.hide()
         self.resize_filter = DropdownResizeFilter(self.canvas_right, self.dropdown_container)
         self.canvas_right.installEventFilter(self.resize_filter)
@@ -221,6 +501,7 @@ class QCDashboard(QMainWindow):
         self.table.itemSelectionChanged.connect(self.sync_view_to_row)
         self.canvas_left.extentsChanged.connect(self.sync_canvas_extents)
         self.dropdown_ref.currentIndexChanged.connect(self.load_reference_tif_from_dropdown)
+        self.dropdown_band.currentIndexChanged.connect(lambda _: self.filter_reference_tifs())
         self.cb_normalize.stateChanged.connect(self.toggle_normalization)
 
         QShortcut(QKeySequence("Ctrl+N"),      self).activated.connect(self.add_manual_row)
@@ -387,52 +668,92 @@ class QCDashboard(QMainWindow):
             self.canvas_right.setRenderFlag(True)
             self.canvas_right.refresh()
 
+    # ── WORKING CRS ──────────────────────────────────────────────────────────
+    def _rebuild_transforms(self):
+        """Rebuild the WGS84 <-> working-CRS transforms after a CRS change."""
+        self.transform_proj_to_wgs = QgsCoordinateTransform(
+            self.proj_crs, self.wgs84_crs, QgsProject.instance()
+        )
+        self.transform_wgs_to_proj = QgsCoordinateTransform(
+            self.wgs84_crs, self.proj_crs, QgsProject.instance()
+        )
+
+    def adopt_working_crs(self, crs):
+        """Take the working CRS from the input raster.
+
+        The table's In/Ref columns and the error metres are expressed in it, so a
+        hard-coded zone is wrong the moment a scene sits in another one -- and an
+        LSAR frame is wide enough to straddle two. Geographic CRSs are refused:
+        the errors have to come out in metres.
+        """
+        if crs is None or not crs.isValid() or crs.isGeographic():
+            return False
+        if crs.authid() and crs.authid() == self.proj_crs.authid():
+            return False
+        old = self.proj_crs.authid() or self.proj_crs.description()
+        self.proj_crs = crs
+        self._rebuild_transforms()
+        self._reproject_footprints()
+        print(f"[CRS] Working CRS {old} -> "
+              f"{crs.authid() or crs.description()} (from input raster)")
+        return True
+
+    def _reproject_footprints(self):
+        """Re-derive every footprint's projected ring in the current working CRS."""
+        for rec in self.ref_footprints.values():
+            rec["ring_proj"] = [
+                (lambda q: (q.x(), q.y()))(
+                    self.transform_wgs_to_proj.transform(QgsPointXY(lon, lat)))
+                for lon, lat in rec["ring"]
+            ]
+
     # ── REFERENCE FOLDER ─────────────────────────────────────────────────────
     def select_reference_folder(self):
         folder_path = QFileDialog.getExistingDirectory(self, "Select Reference Folder")
         if not folder_path:
             return
-        self.ref_folder_path   = folder_path
-        self.ref_meta_data     = {}
-        self.ref_meta_data_utm = {}
+        self.ref_folder_path = folder_path
+        self.ref_footprints  = {}
         errors = []
         try:
             files = os.listdir(folder_path)
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Cannot read folder: {e}")
             return
-        transform_wgs_to_utm = QgsCoordinateTransform(
-            self.wgs84_crs, self.utm44n_crs, QgsProject.instance()
-        )
-        for meta_file in [f for f in files if f.endswith("_meta.txt")]:
+
+        counts = {}
+        for meta_file in sorted(files):
+            kind = is_meta_file(meta_file)
+            if kind is None:
+                continue
             try:
                 meta_path = os.path.join(folder_path, meta_file)
-                corners   = self.parse_meta_file(meta_path)
-                if not corners:
-                    errors.append(f"{meta_file}: Could not parse corners")
+                with open(meta_path, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read()
+                if kind == "iso-xml":
+                    rec = parse_meta_iso_xml(content, meta_file)
+                else:
+                    rec = parse_meta_text(content, meta_file)
+                if not rec:
+                    errors.append(f"{meta_file}: could not parse footprint")
                     continue
-                base       = meta_file.replace("_meta.txt", "")
-                candidates = [base + ".tif", base + ".TIF"]
-                with open(meta_path, "r", encoding="utf-8") as f:
-                    m = re.search(r"Files\s+(\S+\.tif)", f.read(), re.IGNORECASE)
-                    if m:
-                        candidates.append(m.group(1))
-                tif_path = next(
-                    (os.path.join(folder_path, c) for c in candidates
-                     if os.path.exists(os.path.join(folder_path, c))), None
-                )
-                if not tif_path:
-                    errors.append(f"{meta_file}: TIF not found")
+
+                stem = meta_base_stem(meta_file)
+                tif  = match_raster(files, stem, rec.get("granule"))
+                if not tif:
+                    errors.append(f"{meta_file}: no raster found for '{stem}'")
                     continue
-                self.ref_meta_data[tif_path] = corners
-                utm_corners = {}
-                for k, v in corners.items():
-                    p = transform_wgs_to_utm.transform(QgsPointXY(*v))
-                    utm_corners[k] = (p.x(), p.y())
-                self.ref_meta_data_utm[tif_path] = utm_corners
+
+                rec["meta"] = meta_path
+                self.ref_footprints[os.path.join(folder_path, tif)] = rec
+                counts[rec["band"]] = counts.get(rec["band"], 0) + 1
             except Exception as e:
                 errors.append(f"{meta_file}: {e}")
 
+        self._reproject_footprints()
+        if counts:
+            summary = ", ".join(f"{n} {b}" for b, n in sorted(counts.items()))
+            print(f"[META] Reference folder: {summary}")
         if errors:
             txt = "\n".join(errors[:10])
             if len(errors) > 10:
@@ -440,48 +761,30 @@ class QCDashboard(QMainWindow):
             QMessageBox.warning(self, "Parsing Warnings", txt)
         self.filter_reference_tifs()
 
-    # ── PARSE META FILE ───────────────────────────────────────────────────────
-    def parse_meta_file(self, meta_path):
-        try:
-            with open(meta_path, "r", encoding="utf-8") as f:
-                content = f.read()
-            corners   = {}
-            label_map = {
-                "Upper Left":  "UL", "Upper Right": "UR",
-                "Lower Left":  "LL", "Lower Right": "LR"
-            }
-            for raw_line in content.splitlines():
-                line = raw_line.strip()
-                for label, key in label_map.items():
-                    if label in line and "(" in line and "," in line:
-                        try:
-                            lon = float(line.split("(")[1].split(",")[0].strip())
-                            lat = float(line.split("(")[1].split(",")[1]
-                                        .strip().split(")")[0])
-                            corners[key] = (lon, lat)
-                        except (IndexError, ValueError) as e:
-                            print(f"[META] {label} in {meta_path}: {e}")
-                        break
-            if len(corners) == 4:
-                return corners
-            missing = {"UL", "UR", "LL", "LR"} - set(corners.keys())
-            print(f"[META] {os.path.basename(meta_path)}: missing {missing}")
-            return None
-        except Exception as e:
-            print(f"[META] Error {meta_path}: {e}")
-            return None
-
     # ── STAGE 1 FILTER ────────────────────────────────────────────────────────
+    def _band_choice(self):
+        txt = self.dropdown_band.currentText()
+        return None if txt.startswith("All") else txt
+
+    def _label_for(self, tif_path):
+        rec = self.ref_footprints.get(tif_path, {})
+        return f"[{rec.get('band', BAND_UNKNOWN)}] {os.path.basename(tif_path)}"
+
     def filter_reference_tifs(self):
         self.ref_tif_list = []
         self.dropdown_ref.blockSignals(True)
         self.dropdown_ref.clear()
         self.dropdown_ref.blockSignals(False)
-        if not self.ref_meta_data:
+        if not self.ref_footprints:
             self.dropdown_container.hide()
             return
+
+        band = self._band_choice()
+        candidates = [t for t, rec in self.ref_footprints.items()
+                      if band is None or rec.get("band") == band]
+
         if not self.input_tif_layer or not self.input_tif_layer.isValid():
-            self.ref_tif_list = list(self.ref_meta_data.keys())
+            self.ref_tif_list = candidates
         else:
             try:
                 tf = QgsCoordinateTransform(
@@ -490,25 +793,21 @@ class QCDashboard(QMainWindow):
                 input_geom = QgsGeometry.fromRect(
                     tf.transformBoundingBox(self.input_tif_layer.extent())
                 )
-                for tif_path, corners in self.ref_meta_data.items():
+                for tif_path in candidates:
                     try:
-                        ul, ur, lr, ll = (corners["UL"], corners["UR"],
-                                          corners["LR"], corners["LL"])
-                        wkt = (f"POLYGON(({ul[0]} {ul[1]},{ur[0]} {ur[1]},"
-                               f"{lr[0]} {lr[1]},{ll[0]} {ll[1]},"
-                               f"{ul[0]} {ul[1]}))")
-                        if QgsGeometry.fromWkt(wkt).intersects(input_geom):
+                        wkt = ring_wkt(self.ref_footprints[tif_path]["ring"])
+                        if wkt and QgsGeometry.fromWkt(wkt).intersects(input_geom):
                             self.ref_tif_list.append(tif_path)
                     except Exception as e:
                         print(f"[FILTER] {tif_path}: {e}")
             except Exception as e:
                 print(f"[FILTER] Error: {e}")
-                self.ref_tif_list = list(self.ref_meta_data.keys())
+                self.ref_tif_list = candidates
 
         if self.ref_tif_list:
             self.dropdown_ref.blockSignals(True)
             for p in self.ref_tif_list:
-                self.dropdown_ref.addItem(os.path.basename(p))
+                self.dropdown_ref.addItem(self._label_for(p))
             self.dropdown_ref.blockSignals(False)
             self.dropdown_container.show()
             self.dropdown_container.raise_()
@@ -559,12 +858,12 @@ class QCDashboard(QMainWindow):
             pt           = QgsGeometry.fromPointXY(QgsPointXY(rx, ry))
             best, best_a = None, float("inf")
             for tif_path in self.ref_tif_list:
-                if tif_path not in self.ref_meta_data_utm:
+                rec = self.ref_footprints.get(tif_path)
+                if not rec or not rec.get("ring_proj"):
                     continue
-                c  = self.ref_meta_data_utm[tif_path]
-                ul, ur, lr, ll = c["UL"], c["UR"], c["LR"], c["LL"]
-                wkt = (f"POLYGON(({ul[0]} {ul[1]},{ur[0]} {ur[1]},"
-                       f"{lr[0]} {lr[1]},{ll[0]} {ll[1]},{ul[0]} {ul[1]}))")
+                wkt = ring_wkt(rec["ring_proj"])
+                if not wkt:
+                    continue
                 geom = QgsGeometry.fromWkt(wkt)
                 if geom.contains(pt):
                     a = geom.area()
@@ -669,7 +968,7 @@ class QCDashboard(QMainWindow):
                 
 
             if rx != 0.0:
-                p_wgs = self.transform_utm_to_wgs.transform(QgsPointXY(rx, ry))
+                p_wgs = self.transform_proj_to_wgs.transform(QgsPointXY(rx, ry))
                 self.canvas_right.setCenter(p_wgs)
                 self.canvas_right.zoomScale(ZOOM_REF_PLACEHOLDER)
                 self.draw_marker(p_wgs, self.canvas_right, Qt.green)
@@ -687,7 +986,7 @@ class QCDashboard(QMainWindow):
         self._syncing = True
         try:
             left_center_utm  = self.canvas_left.center()
-            right_center_wgs = self.transform_utm_to_wgs.transform(left_center_utm)
+            right_center_wgs = self.transform_proj_to_wgs.transform(left_center_utm)
             self.canvas_right.setCenter(right_center_wgs)
             self.canvas_right.zoomScale(ZOOM_REF_PLACEHOLDER)
             self.canvas_right.refresh()
@@ -824,6 +1123,7 @@ class QCDashboard(QMainWindow):
             self.input_tif_layer = None
             QgsProject.instance().addMapLayer(lyr, False)
             self.input_tif_layer = lyr
+            self.adopt_working_crs(lyr.crs())
             self.canvas_left.setLayers([lyr])
             self.canvas_left.setExtent(lyr.extent())
             self.canvas_left.refresh()
@@ -839,6 +1139,7 @@ class QCDashboard(QMainWindow):
         ref_l = [l for l in layers if "ref"   in l.name().lower()]
         if in_l:
             self.input_tif_layer = in_l[0]
+            self.adopt_working_crs(in_l[0].crs())
             self.canvas_left.setLayers([in_l[0]])
             self.canvas_left.setExtent(in_l[0].extent())
             self.canvas_left.refresh()
