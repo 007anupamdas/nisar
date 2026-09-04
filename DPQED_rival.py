@@ -25,9 +25,16 @@ the tag in the granule name, else the centre frequency (L ~1.24 GHz, S ~3.2 GHz)
 Nothing is guessed: an untaggable footprint is UNK and shows unprefixed, and the
 band filter offers only tags the folder actually holds.
 
-The working CRS is adopted from the input raster when that carries a projected
-one, falling back to WORKING_CRS_DEFAULT -- a fixed zone is wrong as soon as a
-scene sits in another, and an LSAR frame is wide enough to straddle two.
+NISAR rasters are UTM and the C1/L8 references are WGS84, so both canvases are
+pinned to the working CRS and QGIS reprojects the reference as it draws. In and
+Ref are then directly comparable and a pick needs no conversion. The working CRS
+is adopted from the input raster when that carries a projected one, falling back
+to WORKING_CRS_DEFAULT -- a fixed zone is wrong as soon as a scene sits in
+another, and an LSAR frame is wide enough to straddle two.
+
+Which references are offered is decided against the input scene's own lon/lat
+footprint, read from its sidecar when one sits beside it, rather than its
+north-up extent.
 """
 
 import csv
@@ -578,13 +585,11 @@ class DragMapTool(QgsMapTool):
         if row < 0:
             return
         point = self.toMapCoordinates(pos)
-        col   = 0 if self.is_left_map else 2
-        if not self.is_left_map:
-            # rebuilt per pick: the working CRS is adopted from the input TIF
-            p = self.parent.transform_wgs_to_proj.transform(point)
-            sx, sy = p.x(), p.y()
-        else:
-            sx, sy = point.x(), point.y()
+        col = 0 if self.is_left_map else 2
+        # Both canvases render in the working CRS -- QGIS reprojects the WGS84
+        # reference on the fly -- so a pick is already in the units the table
+        # and the error columns use. No transform, and none to get wrong.
+        sx, sy = point.x(), point.y()
         try:
             self.parent.table.blockSignals(True)
             self.parent.table.setItem(row, col,     QTableWidgetItem(f"{sx:.3f}"))
@@ -622,6 +627,7 @@ class QCDashboard(QMainWindow):
         self.ref_folder_path   = None
         self.ref_footprints    = {}
         self.ref_mode          = None
+        self.input_ring        = None
         self.ref_tif_list      = []
         self.input_tif_layer   = None
         self.current_ref_layer = None
@@ -919,6 +925,32 @@ class QCDashboard(QMainWindow):
         self.transform_wgs_to_proj = QgsCoordinateTransform(
             self.wgs84_crs, self.proj_crs, QgsProject.instance()
         )
+        self._apply_canvas_crs()
+
+    def _apply_canvas_crs(self):
+        """Render both canvases in the working CRS.
+
+        NISAR rasters are UTM and the C1/L8 references are WGS84, so left and
+        right would otherwise be in different units and every reference pick
+        would need converting. Pinning both to the working CRS has QGIS
+        reproject the reference as it draws, which makes In and Ref directly
+        comparable and removes the conversion from the measurement path.
+
+        A bare QgsMapCanvas inherits the project's CRS instead, so without this
+        a pick could be read in whatever CRS the reference happened to carry --
+        silently wrong numbers rather than an error.
+        """
+        left = getattr(self, "canvas_left", None)
+        right = getattr(self, "canvas_right", None)
+        if left is None or right is None:
+            return          # called from __init__ before the canvases exist
+        try:
+            left.setDestinationCrs(self.proj_crs)
+            right.setDestinationCrs(self.proj_crs)
+            print(f"[CRS] both canvases render in "
+                  f"{self.proj_crs.authid() or self.proj_crs.description()}")
+        except Exception as e:
+            print(f"[CRS] could not pin canvas CRS: {e}")
 
     def adopt_working_crs(self, crs):
         """Take the working CRS from the input raster.
@@ -1060,6 +1092,54 @@ class QCDashboard(QMainWindow):
                 self, "Reference Folder",
                 f"Read footprints from {mode}, but none matched a raster.")
         self.filter_reference_tifs()
+
+    def _input_footprint_ring(self, raster_path):
+        """The input NISAR scene's true lon/lat footprint from its own sidecar.
+
+        The raster's extent is the north-up product grid, which includes the
+        nodata wedges either side of a slanted swath. The '.met' Image* corners
+        and the ISO gml:posList give the swath itself, so selecting reference
+        tiles against it offers only tiles the scene actually has data over.
+        Falls back to the extent when no sidecar sits beside the raster.
+        """
+        folder = os.path.dirname(raster_path)
+        base   = os.path.basename(raster_path)
+        dirs   = [folder]
+        try:
+            for entry in sorted(os.listdir(folder)):
+                if (os.path.isdir(os.path.join(folder, entry))
+                        and entry.lower() in META_DIR_NAMES):
+                    dirs.append(os.path.join(folder, entry))
+        except OSError as e:
+            print(f"[INPUT] {folder}: {e}")
+            return None
+
+        for d in dirs:
+            try:
+                names = sorted(os.listdir(d))
+            except OSError:
+                continue
+            for name in names:
+                kind = is_meta_file(name)
+                if not kind:
+                    continue
+                if match_raster([base], meta_base_stem(name)) != base:
+                    continue
+                try:
+                    with open(os.path.join(d, name), "r",
+                              encoding="utf-8", errors="replace") as f:
+                        content = f.read()
+                except OSError as e:
+                    print(f"[INPUT] {name}: {e}")
+                    continue
+                rec = (parse_meta_iso_xml(content, name) if kind == "iso-xml"
+                       else parse_meta_text(content, name))
+                if rec and rec.get("ring"):
+                    print(f"[INPUT] footprint from {name}: "
+                          f"{len(rec['ring'])} vertices, "
+                          f"{format_bounds(rings_bounds([rec['ring']]))}")
+                    return rec["ring"]
+        return None
 
     def _scan_sidecars(self, rasters, metas):
         """One metadata file per raster: NISAR '.met' / '.h5.iso.xml', or gdalinfo."""
@@ -1225,12 +1305,16 @@ class QCDashboard(QMainWindow):
             self.ref_tif_list = candidates
         else:
             try:
-                tf = QgsCoordinateTransform(
-                    self.input_tif_layer.crs(), self.wgs84_crs, QgsProject.instance()
-                )
-                input_geom = QgsGeometry.fromRect(
-                    tf.transformBoundingBox(self.input_tif_layer.extent())
-                )
+                if self.input_ring:
+                    input_geom = QgsGeometry.fromWkt(ring_wkt(self.input_ring))
+                else:
+                    tf = QgsCoordinateTransform(
+                        self.input_tif_layer.crs(), self.wgs84_crs,
+                        QgsProject.instance()
+                    )
+                    input_geom = QgsGeometry.fromRect(
+                        tf.transformBoundingBox(self.input_tif_layer.extent())
+                    )
                 for tif_path in candidates:
                     try:
                         wkt = ring_wkt(self.ref_footprints[tif_path]["ring"])
@@ -1419,10 +1503,10 @@ class QCDashboard(QMainWindow):
                 
 
             if rx != 0.0:
-                p_wgs = self.transform_proj_to_wgs.transform(QgsPointXY(rx, ry))
-                self.canvas_right.setCenter(p_wgs)
+                p_ref = QgsPointXY(rx, ry)      # same CRS as the left canvas
+                self.canvas_right.setCenter(p_ref)
                 self.canvas_right.zoomScale(ZOOM_REF_PLACEHOLDER)
-                self.draw_marker(p_wgs, self.canvas_right, Qt.green)
+                self.draw_marker(p_ref, self.canvas_right, Qt.green)
 
         except Exception as e:
             print(f"[SYNC ROW] {e}")
@@ -1431,14 +1515,12 @@ class QCDashboard(QMainWindow):
                 self.cb_sync.setChecked(True)
 
     def sync_canvas_extents(self):
-        """Pan left (UTM) -> transform centre to WGS84 -> pan right at fixed ref zoom."""
+        """Pan left -> pan right to the same point, both in the working CRS."""
         if not self.cb_sync.isChecked() or self._syncing:
             return
         self._syncing = True
         try:
-            left_center_utm  = self.canvas_left.center()
-            right_center_wgs = self.transform_proj_to_wgs.transform(left_center_utm)
-            self.canvas_right.setCenter(right_center_wgs)
+            self.canvas_right.setCenter(self.canvas_left.center())
             self.canvas_right.zoomScale(ZOOM_REF_PLACEHOLDER)
             self.canvas_right.refresh()
         except Exception as e:
@@ -1574,6 +1656,10 @@ class QCDashboard(QMainWindow):
             self.input_tif_layer = None
             QgsProject.instance().addMapLayer(lyr, False)
             self.input_tif_layer = lyr
+            self.input_ring = self._input_footprint_ring(path)
+            if self.input_ring is None:
+                print("[INPUT] no sidecar beside the raster; "
+                      "selecting references against its full extent")
             self.adopt_working_crs(lyr.crs())
             self.canvas_left.setLayers([lyr])
             self.canvas_left.setExtent(lyr.extent())
@@ -1603,6 +1689,7 @@ class QCDashboard(QMainWindow):
             self.canvas_right.refresh()
 
     def init_map_tools(self):
+        self._apply_canvas_crs()
         self.tool_left  = DragMapTool(self.canvas_left,  self, True)
         self.tool_right = DragMapTool(self.canvas_right, self, False)
         self.canvas_left.setMapTool(self.tool_left)
