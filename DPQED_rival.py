@@ -25,12 +25,19 @@ the tag in the granule name, else the centre frequency (L ~1.24 GHz, S ~3.2 GHz)
 Nothing is guessed: an untaggable footprint is UNK and shows unprefixed, and the
 band filter offers only tags the folder actually holds.
 
-NISAR rasters are UTM and the C1/L8 references are WGS84, so both canvases are
-pinned to the working CRS and QGIS reprojects the reference as it draws. In and
-Ref are then directly comparable and a pick needs no conversion. The working CRS
-is adopted from the input raster when that carries a projected one, falling back
-to WORKING_CRS_DEFAULT -- a fixed zone is wrong as soon as a scene sits in
-another, and an LSAR frame is wide enough to straddle two.
+Marking on the input canvas drives the reference canvas: the tile covering that
+ground is brought up, centred and marked, so the reference is always showing the
+place being measured. Clicking the same feature on the right then fills Ref X/Y
+and the row's error.
+
+NISAR rasters are UTM and the C1/L8 references are WGS84. By default both
+canvases are pinned to the working CRS and QGIS reprojects the reference as it
+draws, so In and Ref are directly comparable and a pick needs no conversion; set
+REF_CANVAS_CRS = "wgs84" to draw the reference in its own CRS instead, converting
+picks rather than pixels. The working CRS is adopted from the input raster when
+that carries a projected one, falling back to WORKING_CRS_DEFAULT -- a fixed zone
+is wrong as soon as a scene sits in another, and an LSAR frame is wide enough to
+straddle two.
 
 Which references are offered is decided against the input scene's own lon/lat
 footprint, read from its sidecar when one sits beside it, rather than its
@@ -108,6 +115,13 @@ META_DIR_NAMES = ("meta", "metadata")
 # stopping at the file cap so pointing the picker at a huge drive cannot hang.
 REF_SCAN_DEPTH    = 4
 REF_SCAN_MAX_FILES = 50000
+
+# Which CRS the reference canvas draws in. "working" matches the input canvas,
+# so In and Ref are directly comparable and a pick needs no conversion, at the
+# cost of QGIS reprojecting the WGS84 reference as it draws. Switch to "wgs84"
+# if that reprojection is slow on a given machine -- picks are then converted
+# instead, and every other behaviour is identical.
+REF_CANVAS_CRS = "working"      # "working" | "wgs84"
 
 
 # ── BEGIN PURE HELPERS ────────────────────────────────────────────────────────
@@ -589,7 +603,11 @@ class DragMapTool(QgsMapTool):
         # Both canvases render in the working CRS -- QGIS reprojects the WGS84
         # reference on the fly -- so a pick is already in the units the table
         # and the error columns use. No transform, and none to get wrong.
-        sx, sy = point.x(), point.y()
+        if self.is_left_map:
+            sx, sy = point.x(), point.y()
+        else:
+            p = self.parent._from_ref_canvas(point)
+            sx, sy = p.x(), p.y()
         try:
             self.parent.table.blockSignals(True)
             self.parent.table.setItem(row, col,     QTableWidgetItem(f"{sx:.3f}"))
@@ -599,6 +617,8 @@ class DragMapTool(QgsMapTool):
         self.parent.draw_marker(point, self.canvas,
                                 Qt.red if self.is_left_map else Qt.green)
         self.parent.calculate_error(row)
+        if self.is_left_map:
+            self.parent.follow_input_point(QgsPointXY(sx, sy))
 
 
 # ── DROPDOWN RESIZE FILTER ────────────────────────────────────────────────────
@@ -899,9 +919,10 @@ class QCDashboard(QMainWindow):
             self.current_ref_layer = lyr
             self.canvas_right.setLayers([lyr])
 
-            # only touch extent if caller really wants it
+            # only touch extent if caller really wants it -- and in the CRS the
+            # canvas is drawing in, not the layer's
             if set_extent:
-                self.canvas_right.setExtent(lyr.extent())
+                self.canvas_right.setExtent(self._extent_in_ref_canvas(lyr))
 
             if self.cb_normalize.isChecked():
                 self.normalize_layer(lyr)
@@ -927,18 +948,51 @@ class QCDashboard(QMainWindow):
         )
         self._apply_canvas_crs()
 
+    def _ref_canvas_crs(self):
+        return self.wgs84_crs if REF_CANVAS_CRS == "wgs84" else self.proj_crs
+
+    def _to_ref_canvas(self, pt):
+        """A point in the working CRS -> the reference canvas's CRS."""
+        if REF_CANVAS_CRS == "wgs84":
+            return self.transform_proj_to_wgs.transform(pt)
+        return pt
+
+    def _from_ref_canvas(self, pt):
+        """A point picked on the reference canvas -> the working CRS."""
+        if REF_CANVAS_CRS == "wgs84":
+            return self.transform_wgs_to_proj.transform(pt)
+        return pt
+
+    def _extent_in_ref_canvas(self, lyr):
+        """A layer's extent expressed in the reference canvas's CRS.
+
+        The extent comes back in the LAYER's CRS. Handing a WGS84 rectangle to a
+        canvas drawing in UTM puts the view at (73, 16) metres -- off the coast
+        of Africa, with the raster nowhere in sight and no error raised.
+        """
+        dest = self._ref_canvas_crs()
+        src  = lyr.crs()
+        try:
+            if src.authid() and dest.authid() and src.authid() == dest.authid():
+                return lyr.extent()
+            return QgsCoordinateTransform(
+                src, dest, QgsProject.instance()
+            ).transformBoundingBox(lyr.extent())
+        except Exception as e:
+            print(f"[LOAD] extent transform failed: {e}")
+            return lyr.extent()
+
     def _apply_canvas_crs(self):
-        """Render both canvases in the working CRS.
+        """Pin each canvas to the CRS it draws in.
 
-        NISAR rasters are UTM and the C1/L8 references are WGS84, so left and
-        right would otherwise be in different units and every reference pick
-        would need converting. Pinning both to the working CRS has QGIS
-        reproject the reference as it draws, which makes In and Ref directly
-        comparable and removes the conversion from the measurement path.
+        The input canvas is always the working CRS. The reference canvas follows
+        REF_CANVAS_CRS: the working CRS by default, so QGIS reprojects the WGS84
+        reference as it draws and a pick needs no conversion; or WGS84, which
+        skips that reprojection and converts picks instead.
 
-        A bare QgsMapCanvas inherits the project's CRS instead, so without this
-        a pick could be read in whatever CRS the reference happened to carry --
-        silently wrong numbers rather than an error.
+        Either way it must be set explicitly. A bare QgsMapCanvas inherits the
+        project's CRS, so a pick could otherwise be read in whatever CRS the
+        reference happened to carry -- silently wrong numbers, not an error.
         """
         left = getattr(self, "canvas_left", None)
         right = getattr(self, "canvas_right", None)
@@ -946,9 +1000,11 @@ class QCDashboard(QMainWindow):
             return          # called from __init__ before the canvases exist
         try:
             left.setDestinationCrs(self.proj_crs)
-            right.setDestinationCrs(self.proj_crs)
-            print(f"[CRS] both canvases render in "
-                  f"{self.proj_crs.authid() or self.proj_crs.description()}")
+            ref = self._ref_canvas_crs()
+            right.setDestinationCrs(ref)
+            print(f"[CRS] input canvas "
+                  f"{self.proj_crs.authid() or self.proj_crs.description()}, "
+                  f"reference canvas {ref.authid() or ref.description()}")
         except Exception as e:
             print(f"[CRS] could not pin canvas CRS: {e}")
 
@@ -1376,6 +1432,69 @@ class QCDashboard(QMainWindow):
         self.current_ref_layer = None
 
     # ── STAGE 2 AUTO-SWITCH ───────────────────────────────────────────────────
+    def reference_for_point(self, pt):
+        """The smallest loaded reference footprint containing a working-CRS point."""
+        target      = QgsGeometry.fromPointXY(pt)
+        best, best_a = None, float("inf")
+        for tif_path in self.ref_tif_list:
+            rec = self.ref_footprints.get(tif_path)
+            if not rec or not rec.get("ring_proj"):
+                continue
+            wkt = ring_wkt(rec["ring_proj"])
+            if not wkt:
+                continue
+            geom = QgsGeometry.fromWkt(wkt)
+            if geom.contains(target):
+                area = geom.area()
+                if area < best_a:
+                    best_a, best = area, tif_path
+        return best
+
+    def show_reference_for(self, pt):
+        """Bring up the reference tile covering a point. True if one is showing."""
+        best = self.reference_for_point(pt)
+        if not best:
+            self.cleanup_reference_layer()
+            self.canvas_right.setLayers([])
+            self.canvas_right.refresh()
+            return False
+        if (self.current_ref_layer and self.current_ref_layer.isValid()
+                and os.path.normpath(self.current_ref_layer.source())
+                == os.path.normpath(best)):
+            return True          # already showing; do not reload on every drag
+        try:
+            self.dropdown_ref.blockSignals(True)
+            self.dropdown_ref.setCurrentIndex(self.ref_tif_list.index(best))
+        finally:
+            self.dropdown_ref.blockSignals(False)
+        self.cleanup_reference_layer()
+        self._load_ref_layer(best, set_extent=False)
+        return True
+
+    def follow_input_point(self, pt):
+        """Point the reference canvas at a position marked on the input canvas.
+
+        The reference is only useful at the place being measured, so marking on
+        the left brings up the tile covering that ground, centres the right
+        canvas on the same position and marks it. The marker is red -- it mirrors
+        the input, and is not a reference pick until clicked on the right, which
+        redraws it green.
+        """
+        if self._syncing:
+            return
+        self._syncing = True
+        try:
+            if not self.show_reference_for(pt):
+                return
+            p_ref = self._to_ref_canvas(pt)
+            self.canvas_right.setCenter(p_ref)
+            self.canvas_right.zoomScale(ZOOM_REF_PLACEHOLDER)
+            self.draw_marker(p_ref, self.canvas_right, Qt.red)
+        except Exception as e:
+            print(f"[FOLLOW] {e}")
+        finally:
+            self._syncing = False
+
     def auto_switch_reference_tif(self, row):
         if not self.ref_tif_list:
             return
@@ -1386,42 +1505,21 @@ class QCDashboard(QMainWindow):
                 return
             rx, ry = float(ri.text()), float(rj.text())
             if rx == 0.0 and ry == 0.0:
-                self.cleanup_reference_layer()
-                self.canvas_right.setLayers([])
-                self.canvas_right.refresh()
-                return
-            pt           = QgsGeometry.fromPointXY(QgsPointXY(rx, ry))
-            best, best_a = None, float("inf")
-            for tif_path in self.ref_tif_list:
-                rec = self.ref_footprints.get(tif_path)
-                if not rec or not rec.get("ring_proj"):
-                    continue
-                wkt = ring_wkt(rec["ring_proj"])
-                if not wkt:
-                    continue
-                geom = QgsGeometry.fromWkt(wkt)
-                if geom.contains(pt):
-                    a = geom.area()
-                    if a < best_a:
-                        best_a, best = a, tif_path
-            if best:
-                if (self.current_ref_layer and
-                        self.current_ref_layer.isValid() and
-                        os.path.normpath(self.current_ref_layer.source())
-                        == os.path.normpath(best)):
-                    return
-                idx = self.ref_tif_list.index(best)
+                # no reference pick yet -- follow the input point instead of
+                # blanking the canvas, so the row is still usable
+                ii, ij = self.table.item(row, 0), self.table.item(row, 1)
                 try:
-                    self.dropdown_ref.blockSignals(True)
-                    self.dropdown_ref.setCurrentIndex(idx)
-                finally:
-                    self.dropdown_ref.blockSignals(False)
-                self.cleanup_reference_layer()
-                self._load_ref_layer(best, set_extent=False)
-            else:
-                self.cleanup_reference_layer()
-                self.canvas_right.setLayers([])
-                self.canvas_right.refresh()
+                    ix, iy = float(ii.text()), float(ij.text())
+                except (AttributeError, ValueError):
+                    ix = iy = 0.0
+                if ix or iy:
+                    self.show_reference_for(QgsPointXY(ix, iy))
+                else:
+                    self.cleanup_reference_layer()
+                    self.canvas_right.setLayers([])
+                    self.canvas_right.refresh()
+                return
+            self.show_reference_for(QgsPointXY(rx, ry))
         except Exception as e:
             print(f"[AUTO-SWITCH] {e}")
 
@@ -1502,11 +1600,17 @@ class QCDashboard(QMainWindow):
                 
                 
 
-            if rx != 0.0:
-                p_ref = QgsPointXY(rx, ry)      # same CRS as the left canvas
+            if rx != 0.0 or ry != 0.0:
+                p_ref = self._to_ref_canvas(QgsPointXY(rx, ry))
                 self.canvas_right.setCenter(p_ref)
                 self.canvas_right.zoomScale(ZOOM_REF_PLACEHOLDER)
                 self.draw_marker(p_ref, self.canvas_right, Qt.green)
+            elif ix != 0.0 or iy != 0.0:
+                # no reference pick on this row yet: sit on the input position
+                p_ref = self._to_ref_canvas(QgsPointXY(ix, iy))
+                self.canvas_right.setCenter(p_ref)
+                self.canvas_right.zoomScale(ZOOM_REF_PLACEHOLDER)
+                self.draw_marker(p_ref, self.canvas_right, Qt.red)
 
         except Exception as e:
             print(f"[SYNC ROW] {e}")
@@ -1520,7 +1624,8 @@ class QCDashboard(QMainWindow):
             return
         self._syncing = True
         try:
-            self.canvas_right.setCenter(self.canvas_left.center())
+            self.canvas_right.setCenter(
+                self._to_ref_canvas(self.canvas_left.center()))
             self.canvas_right.zoomScale(ZOOM_REF_PLACEHOLDER)
             self.canvas_right.refresh()
         except Exception as e:
