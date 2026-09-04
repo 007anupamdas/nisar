@@ -7,8 +7,10 @@ CRS's metres, with RMSE and CE90 underneath.
 Reference tiles are discovered from their sidecar metadata, in either of the two
 forms NISAR products ship:
 
-  <stem>_meta.txt   gdalinfo-style text -- four corner lon/lats (SSAR GSLC)
-  <stem>.iso.xml    ISO 19115-2 XML     -- full gml:posList footprint (LSAR GSLC)
+  <product>.met         plain text  -- four corner lon/lats      (SSAR GSLC)
+  <product>.h5.iso.xml  ISO 19115-2 -- full gml:posList footprint (LSAR GSLC)
+
+('<stem>_meta.txt' is still read, for folders written before '.met'.)
 
 Each footprint is tagged LSAR or SSAR: from the tag spelled out in the granule
 name if it is there, otherwise from the centre frequency the metadata carries
@@ -55,10 +57,12 @@ NORM_GAMMA  = 0.5         # gamma exponent for sqrt stretch (0.5 = square root)
 # Adopted from the input TIF when that carries a projected CRS; this is the fallback.
 WORKING_CRS_DEFAULT = "EPSG:32644"     # UTM 44N
 
-# Sidecar metadata: SSAR products ship a gdalinfo-style text file, LSAR products
-# ship ISO 19115-2 XML. Both are scanned; each footprint is tagged with its band.
-META_SUFFIX_TEXT = "_meta.txt"
-META_SUFFIX_XML  = ".iso.xml"
+# Sidecar metadata sitting beside '<product>.h5': SSAR ships '<product>.met',
+# a plain text file; LSAR ships '<product>.h5.iso.xml', ISO 19115-2. Both are
+# scanned, and each footprint is tagged with its band.
+# '_meta.txt' is kept for folders written before the '.met' convention.
+META_SUFFIXES_TEXT = (".met", "_meta.txt")
+META_SUFFIX_XML    = ".iso.xml"
 
 # NISAR L-band is centred near 1.24 GHz, S-band near 3.2 GHz. Anything below this
 # split is LSAR, anything above is SSAR.
@@ -255,8 +259,11 @@ def parse_meta_iso_xml(content, source="<xml>"):
 
 
 def meta_base_stem(meta_name):
-    """Strip the sidecar suffix, leaving the stem its raster shares."""
-    for suffix in (META_SUFFIX_XML, META_SUFFIX_TEXT):
+    """Strip the sidecar suffix, leaving the stem its raster shares.
+
+    '<product>.h5.iso.xml' and '<product>.met' both reduce to '<product>'.
+    """
+    for suffix in (META_SUFFIX_XML,) + META_SUFFIXES_TEXT:
         if meta_name.lower().endswith(suffix.lower()):
             stem = meta_name[: -len(suffix)]
             break
@@ -302,7 +309,7 @@ def is_meta_file(name):
     low = name.lower()
     if low.endswith(META_SUFFIX_XML.lower()):
         return "iso-xml"
-    if low.endswith(META_SUFFIX_TEXT.lower()):
+    if any(low.endswith(suffix.lower()) for suffix in META_SUFFIXES_TEXT):
         return "text"
     return None
 

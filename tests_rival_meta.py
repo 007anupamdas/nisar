@@ -19,7 +19,7 @@ def load_helpers():
     text = open(SRC, encoding="utf-8").read()
     consts = {}
     for name in ("BAND_SPLIT_HZ", "BAND_UNKNOWN",
-                 "META_SUFFIX_TEXT", "META_SUFFIX_XML"):
+                 "META_SUFFIXES_TEXT", "META_SUFFIX_XML"):
         m = re.search(rf"^{name}\s*=\s*(.+?)\s*(?:#.*)?$", text, re.M)
         assert m, f"constant {name} not found"
         consts[name] = eval(m.group(1))
@@ -81,7 +81,7 @@ Lower Left  (  77.0000000,  17.0000000)
 Upper Right (  77.5000000,  17.5000000)
 Lower Right (  77.5000000,  17.0000000)
 """
-t = H["parse_meta_text"](TEXT, "demo_meta.txt")
+t = H["parse_meta_text"](TEXT, "NISAR_SSAR_GSLC_demo.met")
 check("text corners in UL,UR,LR,LL order", t["ring"],
       [(77.0, 17.5), (77.5, 17.5), (77.5, 17.0), (77.0, 17.0)])
 check("text band from SSAR in name", t["band"], "SSAR")
@@ -89,20 +89,20 @@ check("text granule", t["granule"], "NISAR_SSAR_GSLC_demo1.tif")
 check("text source", t["source"], "text")
 
 # no band tag anywhere -> UNK, never a guess
-plain = H["parse_meta_text"](TEXT.replace("SSAR", "XXXX"), "plain_meta.txt")
+plain = H["parse_meta_text"](TEXT.replace("SSAR", "XXXX"), "plain.met")
 check("untagged text -> UNK", plain["band"], "UNK")
 
 # centre frequency in a text sidecar is honoured too
 freq = H["parse_meta_text"](
-    TEXT.replace("SSAR", "XXXX") + "Center frequency: 3200000000.0\n", "f_meta.txt")
+    TEXT.replace("SSAR", "XXXX") + "Center frequency: 3200000000.0\n", "f.met")
 check("text band from 3.2 GHz", freq["band"], "SSAR")
 freq_l = H["parse_meta_text"](
-    TEXT.replace("SSAR", "XXXX") + "Center frequency: 1.239e9\n", "fl_meta.txt")
+    TEXT.replace("SSAR", "XXXX") + "Center frequency: 1.239e9\n", "fl.met")
 check("text band from 1.239 GHz", freq_l["band"], "LSAR")
 
 # a sidecar missing a corner is rejected, not half-parsed
 broken = H["parse_meta_text"](
-    "\n".join(l for l in TEXT.splitlines() if "Lower Right" not in l), "bad_meta.txt")
+    "\n".join(l for l in TEXT.splitlines() if "Lower Right" not in l), "bad.met")
 check("incomplete corners rejected", broken, None)
 check("malformed xml rejected", H["parse_meta_iso_xml"]("<not-xml", "x.iso.xml"), None)
 check("xml without posList rejected",
@@ -129,14 +129,22 @@ check("posList empty", H["parse_pos_list"](""), [])
 
 # ── 5. sidecar routing and raster matching ────────────────────────────────────
 check("routes .iso.xml", H["is_meta_file"](xml_name), "iso-xml")
-check("routes _meta.txt", H["is_meta_file"]("scene_meta.txt"), "text")
+check("routes .met", H["is_meta_file"]("SCENE_A.met"), "text")
+check("routes legacy _meta.txt", H["is_meta_file"]("scene_meta.txt"), "text")
+check("ignores the .h5 itself", H["is_meta_file"]("SCENE_A.h5"), None)
 check("ignores others", H["is_meta_file"]("scene.tif"), None)
 
+# '<product>.h5' and '<product>.met' share a stem; the XML sidecar hangs off the
+# .h5 name, so both must reduce to the same thing.
 check("stem drops .h5.iso.xml", H["meta_base_stem"](xml_name),
       xml_name[:-len(".h5.iso.xml")])
-check("stem drops _meta.txt", H["meta_base_stem"]("SCENE_A_meta.txt"), "SCENE_A")
+check("stem drops .met", H["meta_base_stem"]("SCENE_A.met"), "SCENE_A")
+check(".met and .h5.iso.xml agree on the stem",
+      H["meta_base_stem"]("SCENE_A.met") == H["meta_base_stem"]("SCENE_A.h5.iso.xml"),
+      True)
+check("stem drops legacy _meta.txt", H["meta_base_stem"]("SCENE_A_meta.txt"), "SCENE_A")
 
-files = ["SCENE_A.tif", "SCENE_B1.tif", "SCENE_B_meta.txt", "notes.txt"]
+files = ["SCENE_A.tif", "SCENE_B1.tif", "SCENE_B.met", "SCENE_B.h5", "notes.txt"]
 check("exact stem match", H["match_raster"](files, "SCENE_A"), "SCENE_A.tif")
 check("h52tif '<product>1.tif' prefix match",
       H["match_raster"](files, "SCENE_B"), "SCENE_B1.tif")
