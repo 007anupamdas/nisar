@@ -3,6 +3,7 @@
 The pure helpers in DPQED_rival.py sit between explicit markers; this execs that
 exact slice, so what is tested is the code that ships, not a copy of it.
 """
+import json
 import os
 import re
 import sys
@@ -24,7 +25,7 @@ def load_helpers():
         assert m, f"constant {name} not found"
         consts[name] = eval(m.group(1))
     body = text[text.index(BEGIN):text.index(END)]
-    ns = dict(consts, os=os, re=re, ET=ET, print=print)
+    ns = dict(consts, os=os, re=re, json=json, ET=ET, print=print)
     exec(compile(body, SRC, "exec"), ns)
     return ns
 
@@ -71,7 +72,43 @@ check("ring is tighter than its bbox", area < 0.8 * bbox, True)
 check("iso wkt starts as polygon",
       H["ring_wkt"](rec["ring"]).startswith("POLYGON(("), True)
 
-# ── 2. SSAR: gdalinfo-style text sidecar (unchanged path) ─────────────────────
+# ── 2. SSAR: the real '.met' JSON sidecar in this repo ────────────────────────
+met_name = ("NISAR_S2_PR_GSLC_028_084_A_010_3700_DHNA_A_"
+            "20260819T001733_20260819T001810_P00500_M_F_I_001.met")
+met = H["parse_meta_text"](
+    open(os.path.join(HERE, met_name), encoding="utf-8").read(), met_name)
+
+check("met band (Sensor field)", met["band"], "SSAR")
+check("met crs (EPSG field)", met["crs"], "EPSG:32644")
+check("met source prefers the swath", met["source"], "met-json (image)")
+check("met granule", met["granule"], met_name[:-len(".met")] + ".h5")
+check("met ring is the 4 Image corners", met["ring"],
+      [(76.534748, 17.614687), (78.827076, 18.171194),
+       (79.385351, 15.993327), (77.112174, 15.446038)])
+
+# Image* is the slanted swath; Prod* is the north-up grid the raster spans.
+# Preferring Image* is what stops the tool offering a tile whose data does not
+# reach the picked point.
+def shoelace(r):
+    r = H["close_ring"](r)
+    return abs(sum(r[i][0] * r[i + 1][1] - r[i + 1][0] * r[i][1]
+                   for i in range(len(r) - 1))) / 2.0
+
+met_obj = json.load(open(os.path.join(HERE, met_name), encoding="utf-8"))
+prod = H["parse_meta_json"](
+    {k: v for k, v in met_obj.items() if not k.startswith("Image")}, met_name)
+check("Prod* used when Image* absent", prod["source"], "met-json (product-grid)")
+print(f"      Image swath {shoelace(met['ring']):.4f} deg^2 vs "
+      f"Prod grid {shoelace(prod['ring']):.4f} deg^2")
+check("swath is tighter than the product grid",
+      shoelace(met["ring"]) < 0.8 * shoelace(prod["ring"]), True)
+
+check("met missing all corners rejected",
+      H["parse_meta_json"]({"Sensor": "SSAR"}, "empty.met"), None)
+check("malformed JSON rejected",
+      H["parse_meta_text"]('{"Sensor": ', "bad.met"), None)
+
+# ── 3. legacy gdalinfo-style text sidecar (unchanged path) ────────────────────
 TEXT = """Driver: GTiff/GeoTIFF
 Files: NISAR_SSAR_GSLC_demo1.tif
 Size is 10980, 10980
@@ -108,7 +145,7 @@ check("malformed xml rejected", H["parse_meta_iso_xml"]("<not-xml", "x.iso.xml")
 check("xml without posList rejected",
       H["parse_meta_iso_xml"]("<a xmlns='urn:x'><b/></a>", "y.iso.xml"), None)
 
-# ── 3. band helpers ───────────────────────────────────────────────────────────
+# ── 4. band helpers ──────────────────────────────────────────────────────────
 check("band_from_frequency 1.239e9", H["band_from_frequency"](1.239e9), "LSAR")
 check("band_from_frequency 1.2935e9", H["band_from_frequency"](1.2935e9), "LSAR")
 check("band_from_frequency 3.2e9", H["band_from_frequency"](3.2e9), "SSAR")
@@ -117,7 +154,7 @@ check("band_from_frequency zero", H["band_from_frequency"](0), None)
 check("band_from_name lsar lowercase", H["band_from_name"]("nisar_lsar_gslc.h5"), "LSAR")
 check("band_from_name absent", H["band_from_name"]("cartosat_ortho.tif"), None)
 
-# ── 4. posList shapes ─────────────────────────────────────────────────────────
+# ── 5. posList shapes ─────────────────────────────────────────────────────────
 check("posList comma triples",
       H["parse_pos_list"]("1 2 3,4 5 6,7 8 9"), [(1.0, 2.0), (4.0, 5.0), (7.0, 8.0)])
 check("posList whitespace triples",
@@ -127,7 +164,7 @@ check("posList whitespace pairs",
       [(1.0, 2.0), (3.0, 4.0), (5.0, 6.0), (7.0, 8.0)])
 check("posList empty", H["parse_pos_list"](""), [])
 
-# ── 5. sidecar routing and raster matching ────────────────────────────────────
+# ── 6. sidecar routing and raster matching ────────────────────────────────────
 check("routes .iso.xml", H["is_meta_file"](xml_name), "iso-xml")
 check("routes .met", H["is_meta_file"]("SCENE_A.met"), "text")
 check("routes legacy _meta.txt", H["is_meta_file"]("scene_meta.txt"), "text")

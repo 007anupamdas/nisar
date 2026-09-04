@@ -7,10 +7,10 @@ CRS's metres, with RMSE and CE90 underneath.
 Reference tiles are discovered from their sidecar metadata, in either of the two
 forms NISAR products ship:
 
-  <product>.met         plain text  -- four corner lon/lats      (SSAR GSLC)
+  <product>.met         JSON        -- Image* swath corners       (SSAR GSLC)
   <product>.h5.iso.xml  ISO 19115-2 -- full gml:posList footprint (LSAR GSLC)
 
-('<stem>_meta.txt' is still read, for folders written before '.met'.)
+('<stem>_meta.txt' holding gdalinfo output is still read, as a legacy form.)
 
 Each footprint is tagged LSAR or SSAR: from the tag spelled out in the granule
 name if it is there, otherwise from the centre frequency the metadata carries
@@ -23,6 +23,7 @@ scene sits in another, and an LSAR frame is wide enough to straddle two.
 """
 
 import csv
+import json
 import os
 import sys
 import re
@@ -145,11 +146,72 @@ def parse_pos_list(text):
     return []
 
 
-def parse_meta_text(content, source="<text>"):
-    """gdalinfo-style '_meta.txt' -> footprint record, or None.
+def parse_meta_json(obj, source="<met>"):
+    """SSAR '.met' JSON -> footprint record, or None.
 
-    Corner lines look like:  Upper Left  ( 78.0312500,  17.1234500)
+    Two corner sets are given. Image* is the real slanted swath; Prod* is the
+    north-up product grid the raster spans, which includes the nodata wedges
+    either side. Image* is preferred for the same reason the ISO ring is
+    preferred over a bounding box -- it does not claim ground the scene has no
+    data over. Prod* is the fallback.
     """
+    def ring_for(prefix):
+        out = []
+        for corner in ("UL", "UR", "LR", "LL"):
+            lat = obj.get(f"{prefix}{corner}Lat")
+            lon = obj.get(f"{prefix}{corner}Lon")
+            if lat is None or lon is None:
+                return None
+            try:
+                out.append((float(lon), float(lat)))
+            except (TypeError, ValueError):
+                return None
+        return out
+
+    ring = ring_for("Image")
+    extent = "image"
+    if ring is None:
+        ring, extent = ring_for("Prod"), "product-grid"
+    if ring is None:
+        print(f"[META] {source}: no Image*/Prod* corner set")
+        return None
+
+    band = band_from_name(str(obj.get("Sensor", ""))) or band_from_name(source)
+    if band is None:
+        band = band_from_name(str(obj.get("OTSProductID", "")))
+
+    crs = None
+    epsg = obj.get("EPSG")
+    if epsg not in (None, ""):
+        try:
+            crs = f"EPSG:{int(epsg)}"
+        except (TypeError, ValueError):
+            crs = None
+
+    granule = obj.get("OTSProductID") or None
+    return {
+        "ring": ring,
+        "band": band or BAND_UNKNOWN,
+        "crs": crs,
+        "granule": f"{granule}.h5" if granule else None,
+        "source": f"met-json ({extent})",
+    }
+
+
+def parse_meta_text(content, source="<text>"):
+    """Text sidecar -> footprint record, or None.
+
+    SSAR '.met' is JSON; the older '_meta.txt' is gdalinfo output, whose corner
+    lines look like  Upper Left  ( 78.0312500,  17.1234500).
+    """
+    stripped = content.lstrip()
+    if stripped.startswith("{"):
+        try:
+            return parse_meta_json(json.loads(stripped), source)
+        except (ValueError, AttributeError) as e:
+            print(f"[META] {source}: JSON parse error: {e}")
+            return None
+
     corners = {}
     label_map = {
         "Upper Left":  "UL", "Upper Right": "UR",
