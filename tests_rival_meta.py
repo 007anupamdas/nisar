@@ -18,12 +18,18 @@ END   = "# ── END PURE HELPERS"
 
 def load_helpers():
     text = open(SRC, encoding="utf-8").read()
+    # Every module-level UPPER_CASE literal the helpers may reference. Picked up
+    # generically so a new constant does not need adding here by hand.
     consts = {}
-    for name in ("BAND_SPLIT_HZ", "BAND_UNKNOWN",
-                 "META_SUFFIXES_TEXT", "META_SUFFIX_XML"):
-        m = re.search(rf"^{name}\s*=\s*(.+?)\s*(?:#.*)?$", text, re.M)
-        assert m, f"constant {name} not found"
-        consts[name] = eval(m.group(1))
+    for name, expr in re.findall(r"^([A-Z][A-Z0-9_]*)\s*=\s*(.+?)\s*(?:#.*)?$",
+                                 text, re.M):
+        try:
+            consts[name] = eval(expr, {"__builtins__": {}}, dict(consts))
+        except Exception:
+            pass
+    for required in ("BAND_SPLIT_HZ", "BAND_UNKNOWN", "META_SUFFIXES_TEXT",
+                     "META_SUFFIX_XML", "DEGREE_TILE_SIZE", "RASTER_EXTS"):
+        assert required in consts, f"constant {required} not found"
     body = text[text.index(BEGIN):text.index(END)]
     ns = dict(consts, os=os, re=re, json=json, ET=ET, print=print)
     exec(compile(body, SRC, "exec"), ns)
@@ -204,6 +210,73 @@ for label, meta_name, rec_for in (
               H["match_raster"]([folder_tif, "unrelated.tif"], stem,
                                 rec_for["granule"]),
               folder_tif)
+
+# ── 7. C1: the footprint is the tile name ────────────────────────────────────
+# 'N16E73.tif' is the cell whose SOUTH-WEST corner is 16 N, 73 E.
+tile = H["parse_degree_tile"]("N16E73.tif")
+check("N16E73 ring (UL,UR,LR,LL)", tile["ring"],
+      [(73.0, 17.0), (74.0, 17.0), (74.0, 16.0), (73.0, 16.0)])
+check("tile source", tile["source"], "tile-name (1 deg)")
+check("tile has no band", tile["band"], "UNK")
+check("three-digit lon", H["parse_degree_tile"]("N16E073.tif")["ring"][0], (73.0, 17.0))
+check("southern hemisphere", H["parse_degree_tile"]("S34E018.tif")["ring"][3],
+      (18.0, -34.0))
+check("western hemisphere", H["parse_degree_tile"]("N40W105.tif")["ring"][3],
+      (-105.0, 40.0))
+check("suffix after the token is ignored",
+      H["parse_degree_tile"]("N16E73_ORTHO_v2.tif")["ring"][3], (73.0, 16.0))
+check("not a tile", H["parse_degree_tile"]("cartosat_ortho.tif"), None)
+check("a NISAR granule is not a tile", H["parse_degree_tile"](xml_name), None)
+check("out-of-range lat rejected", H["parse_degree_tile"]("N95E073.tif"), None)
+
+# ── 8. L8: a shapefile index names the rasters ───────────────────────────────
+fields = ["OBJECTID", "geom_area", "FILENAME", "path", "acq_date"]
+check("name-ish attributes rank first", H["rank_name_fields"](fields)[0], "FILENAME")
+ranked = H["rank_name_fields"](fields)
+check("hinted attributes all rank above unhinted ones",
+      ranked.index("path") < ranked.index("acq_date")
+      and ranked.index("OBJECTID") < ranked.index("acq_date")
+      and ranked.index("OBJECTID") < ranked.index("geom_area"), True)
+
+scenes = ["LC08_144048_20240102.tif", "LC08_144049_20240102.TIF"]
+check("index value: bare stem",
+      H["resolve_index_name"]("LC08_144048_20240102", scenes), scenes[0])
+check("index value: filename",
+      H["resolve_index_name"]("LC08_144048_20240102.tif", scenes), scenes[0])
+check("index value: a path from another machine",
+      H["resolve_index_name"](r"D:\\refs\\L8\\LC08_144048_20240102.tif", scenes),
+      scenes[0])
+check("index value: case-insensitive extension",
+      H["resolve_index_name"]("LC08_144049_20240102.tif", scenes), scenes[1])
+check("index value naming a missing raster",
+      H["resolve_index_name"]("LC08_999999_20240102.tif", scenes), None)
+check("index value blank", H["resolve_index_name"]("   ", scenes), None)
+check("index value null", H["resolve_index_name"](None, scenes), None)
+
+check("prefers index.shp", H["pick_index_shapefile"](["tiles.shp", "index.shp"]),
+      "index.shp")
+check("falls back to the only shapefile",
+      H["pick_index_shapefile"](["tiles.shp"]), "tiles.shp")
+check("no shapefile", H["pick_index_shapefile"](["a.tif", "b.met"]), None)
+
+# ── 9. picking the mode from a folder listing ────────────────────────────────
+check("L8 folder -> index",
+      H["detect_reference_mode"](["LC08_a.tif", "LC08_b.tif", "index.shp",
+                                  "index.dbf", "index.shx"]), "index-shp")
+check("NISAR folder -> sidecar",
+      H["detect_reference_mode"]([met_name, xml_name, "a.tif"]), "sidecar")
+check("C1 folder -> degree-tile",
+      H["detect_reference_mode"](["N16E73.tif", "N16E74.tif", "N17E73.tif"]),
+      "degree-tile")
+# An index or sidecar states the real footprint; a tile name only implies a
+# nominal cell, so the name must never win over either.
+check("index beats a sidecar",
+      H["detect_reference_mode"](["a.tif", "a.met", "index.shp"]), "index-shp")
+check("sidecar beats a tile name",
+      H["detect_reference_mode"](["N16E73.tif", "N16E73.met"]), "sidecar")
+check("rasters with nothing to place them",
+      H["detect_reference_mode"](["scene_a.tif", "readme.txt"]), None)
+check("empty folder", H["detect_reference_mode"]([]), None)
 
 print()
 if failures:

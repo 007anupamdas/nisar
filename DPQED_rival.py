@@ -4,18 +4,26 @@ Two linked canvases: the input raster on the left, a reference tile on the right
 Drag on either to fill the selected row; the table reports DX/DY in the working
 CRS's metres, with RMSE and CE90 underneath.
 
-Reference tiles are discovered from their sidecar metadata, in either of the two
-forms NISAR products ship:
+Reference tiles are discovered by whichever means the collection uses to declare
+its footprints; the folder is inspected and the mode chosen automatically.
 
-  <product>.met         JSON        -- Image* swath corners       (SSAR GSLC)
-  <product>.h5.iso.xml  ISO 19115-2 -- full gml:posList footprint (LSAR GSLC)
+  index-shp    a shapefile indexing the set, one attribute naming each raster
+               (L8: Meta/index.shp)
+  sidecar      one metadata file per raster (NISAR and S1):
+                 <product>.met         JSON        -- Image* swath corners
+                 <product>.h5.iso.xml  ISO 19115-2 -- gml:posList footprint
+                 <stem>_meta.txt       gdalinfo    -- legacy corner lines
+  degree-tile  the name is the footprint (C1: N16E73.tif is 16-17 N, 73-74 E)
 
-('<stem>_meta.txt' holding gdalinfo output is still read, as a legacy form.)
+An index or sidecar states the real footprint while a tile name only implies a
+nominal cell, so the name is the last resort rather than the first guess. Set
+REF_MODE_OVERRIDE to force one. Imagery at the top of the folder and metadata in
+a 'Meta' subfolder are matched across that split.
 
-Each footprint is tagged LSAR or SSAR: from the tag spelled out in the granule
-name if it is there, otherwise from the centre frequency the metadata carries
-(L-band ~1.24 GHz, S-band ~3.2 GHz). Untaggable footprints are listed as UNK
-rather than guessed at. The dropdown shows the tag and can filter on it.
+NISAR footprints are tagged LSAR or SSAR -- from the '.met' Sensor field, else
+the tag in the granule name, else the centre frequency (L ~1.24 GHz, S ~3.2 GHz).
+Nothing is guessed: an untaggable footprint is UNK and shows unprefixed, and the
+band filter offers only tags the folder actually holds.
 
 The working CRS is adopted from the input raster when that carries a projected
 one, falling back to WORKING_CRS_DEFAULT -- a fixed zone is wrong as soon as a
@@ -38,9 +46,10 @@ from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
 from PyQt5.QtCore import Qt, QObject, QEvent
 from PyQt5.QtGui import QKeySequence, QFont
 from qgis.gui import QgsMapCanvas, QgsMapTool, QgsVertexMarker
-from qgis.core import (QgsProject, QgsPointXY, QgsRasterLayer, QgsGeometry,
-                       QgsCoordinateReferenceSystem, QgsCoordinateTransform,
-                       QgsSingleBandGrayRenderer, QgsContrastEnhancement, QgsRectangle)
+from qgis.core import (QgsProject, QgsPointXY, QgsRasterLayer, QgsVectorLayer,
+                       QgsGeometry, QgsCoordinateReferenceSystem,
+                       QgsCoordinateTransform, QgsSingleBandGrayRenderer,
+                       QgsContrastEnhancement, QgsRectangle)
 
 
 # ── CONSTANTS ─────────────────────────────────────────────────────────────────
@@ -69,6 +78,23 @@ META_SUFFIX_XML    = ".iso.xml"
 # split is LSAR, anything above is SSAR.
 BAND_SPLIT_HZ = 2.0e9
 BAND_UNKNOWN  = "UNK"
+
+# A reference collection declares its tile footprints in one of three ways. The
+# folder is inspected and the mode chosen automatically; set REF_MODE_OVERRIDE to
+# one of the REF_MODE_* values below to force it when the guess is wrong.
+REF_MODE_SIDECAR = "sidecar"       # one metadata file per raster (NISAR, S1)
+REF_MODE_INDEX   = "index-shp"     # one shapefile indexing the whole set (L8)
+REF_MODE_TILE    = "degree-tile"   # the footprint is in the name (C1: N16E73)
+REF_MODE_OVERRIDE = None
+
+# 'N16E73.tif' is the cell whose SOUTH-WEST corner is 16 N, 73 E, i.e. 16-17 N
+# by 73-74 E. Change this if a collection is tiled at another step.
+DEGREE_TILE_SIZE = 1.0
+
+RASTER_EXTS = (".tif", ".tiff", ".vrt")
+
+# Subfolder names that hold the metadata rather than the imagery.
+META_DIR_NAMES = ("meta", "metadata")
 
 
 # ── BEGIN PURE HELPERS ────────────────────────────────────────────────────────
@@ -372,6 +398,111 @@ def match_raster(files, stem, granule=None):
     return prefixed[0] if prefixed else None
 
 
+_TILE_RE = re.compile(r"^([NS])(\d{2})([EW])(\d{2,3})(?![0-9])", re.IGNORECASE)
+
+
+def parse_degree_tile(name, size=DEGREE_TILE_SIZE):
+    """'N16E73.tif' -> the degree cell it names, or None.
+
+    The token gives the cell's south-west corner, so N16E73 spans 16-17 N by
+    73-74 E. Lon takes two or three digits ('E73' and 'E073' both work). NISAR
+    granule names cannot collide: they start 'NISAR', and a digit must follow
+    the hemisphere letter.
+    """
+    m = _TILE_RE.match(os.path.basename(name))
+    if not m:
+        return None
+    ns, lat_s, ew, lon_s = m.groups()
+    lat = float(lat_s) * (-1 if ns.upper() == "S" else 1)
+    lon = float(lon_s) * (-1 if ew.upper() == "W" else 1)
+    if not (-90.0 <= lat <= 90.0 - size) or not (-180.0 <= lon <= 180.0 - size):
+        print(f"[META] {name}: tile {lat},{lon} out of range")
+        return None
+    return {
+        "ring": [(lon, lat + size), (lon + size, lat + size),
+                 (lon + size, lat), (lon, lat)],
+        "band": BAND_UNKNOWN,
+        "crs": None,
+        "granule": None,
+        "source": f"tile-name ({size:g} deg)",
+    }
+
+
+# Attribute names a shapefile index plausibly stores its raster names under,
+# best first. Matched exactly before being matched as a substring.
+NAME_FIELD_HINTS = ("filename", "file_name", "fname", "file", "name", "tile",
+                    "tilename", "tile_name", "image", "scene", "location",
+                    "path", "label", "id")
+
+
+def rank_name_fields(field_names):
+    """Order a shapefile's attributes by how likely they name the raster."""
+    def score(field):
+        low = field.lower()
+        for i, hint in enumerate(NAME_FIELD_HINTS):
+            if low == hint:
+                return (0, i)
+        for i, hint in enumerate(NAME_FIELD_HINTS):
+            if hint in low:
+                return (1, i)
+        return (2, 0)
+    return sorted(field_names, key=lambda f: (score(f), f.lower()))
+
+
+def resolve_index_name(value, raster_names):
+    """An index attribute's value -> the raster it names, or None.
+
+    Values seen in the wild are a bare stem, a filename, or a full path from
+    whatever machine wrote the index -- so only the basename is trusted, and a
+    missing extension is filled in.
+    """
+    if value is None:
+        return None
+    text = str(value).strip().replace("\\", "/")
+    if not text:
+        return None
+    base = os.path.basename(text)
+    if not base:
+        return None
+    lower = {n.lower(): n for n in raster_names}
+    if base.lower() in lower:
+        return lower[base.lower()]
+    stem = os.path.splitext(base)[0]
+    for ext in RASTER_EXTS:
+        hit = lower.get((stem + ext).lower())
+        if hit:
+            return hit
+    return None
+
+
+def pick_index_shapefile(names):
+    """Choose the indexing shapefile from a listing, preferring 'index.shp'."""
+    shps = sorted(n for n in names if n.lower().endswith(".shp"))
+    if not shps:
+        return None
+    for shp in shps:
+        if os.path.splitext(os.path.basename(shp))[0].lower() == "index":
+            return shp
+    return shps[0]
+
+
+def detect_reference_mode(names):
+    """Work out how a reference folder declares its footprints, or None.
+
+    Order matters: an explicit index or per-raster sidecar states the real
+    footprint, while a tile name only implies a nominal cell, so the name is the
+    last resort rather than the first guess.
+    """
+    if pick_index_shapefile(names):
+        return REF_MODE_INDEX
+    if any(is_meta_file(n) for n in names):
+        return REF_MODE_SIDECAR
+    if any(parse_degree_tile(n) for n in names
+           if n.lower().endswith(RASTER_EXTS)):
+        return REF_MODE_TILE
+    return None
+
+
 def is_meta_file(name):
     """Which sidecar parser a filename belongs to, or None."""
     low = name.lower()
@@ -455,6 +586,7 @@ class QCDashboard(QMainWindow):
         self.markers           = {"left": None, "right": None}
         self.ref_folder_path   = None
         self.ref_footprints    = {}
+        self.ref_mode          = None
         self.ref_tif_list      = []
         self.input_tif_layer   = None
         self.current_ref_layer = None
@@ -481,7 +613,7 @@ class QCDashboard(QMainWindow):
         _dl = QHBoxLayout(self.dropdown_container)
         _dl.setContentsMargins(5, 5, 5, 5)
         self.dropdown_band = QComboBox()
-        self.dropdown_band.addItems(["All bands", "LSAR", "SSAR"])
+        self.dropdown_band.addItem("All bands")
         self.dropdown_band.setToolTip(
             "Restrict the reference list to one NISAR band.\n"
             "The tag comes from the sidecar metadata: LSAR/SSAR in the granule\n"
@@ -783,67 +915,246 @@ class QCDashboard(QMainWindow):
             ]
 
     # ── REFERENCE FOLDER ─────────────────────────────────────────────────────
+    def _folder_entries(self, folder_path):
+        """Files in the folder and one level under it.
+
+        A collection commonly keeps its imagery at the top and its metadata in a
+        'Meta' subfolder, so both are gathered and the two are matched by name
+        across that split.
+        """
+        rasters, metas, others = {}, {}, {}
+        dirs = [folder_path]
+        try:
+            for entry in sorted(os.listdir(folder_path)):
+                full = os.path.join(folder_path, entry)
+                if os.path.isdir(full):
+                    dirs.append(full)
+        except OSError as e:
+            print(f"[META] {folder_path}: {e}")
+
+        for d in dirs:
+            try:
+                names = sorted(os.listdir(d))
+            except OSError as e:
+                print(f"[META] {d}: {e}")
+                continue
+            for name in names:
+                full = os.path.join(d, name)
+                if not os.path.isfile(full):
+                    continue
+                if name.lower().endswith(RASTER_EXTS):
+                    rasters.setdefault(name, full)
+                elif is_meta_file(name):
+                    metas.setdefault(name, full)
+                else:
+                    others.setdefault(name, full)
+        return rasters, metas, others
+
     def select_reference_folder(self):
         folder_path = QFileDialog.getExistingDirectory(self, "Select Reference Folder")
         if not folder_path:
             return
         self.ref_folder_path = folder_path
         self.ref_footprints  = {}
+        self.ref_mode        = None
+        self._refresh_band_choices()
         errors = []
-        try:
-            files = os.listdir(folder_path)
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Cannot read folder: {e}")
+
+        rasters, metas, others = self._folder_entries(folder_path)
+        if not rasters:
+            QMessageBox.critical(
+                self, "Error",
+                f"No rasters ({', '.join(RASTER_EXTS)}) in {folder_path} "
+                f"or its subfolders.")
+            self.filter_reference_tifs()
             return
 
-        counts = {}
-        for meta_file in sorted(files):
-            kind = is_meta_file(meta_file)
-            if kind is None:
-                continue
-            try:
-                meta_path = os.path.join(folder_path, meta_file)
-                with open(meta_path, "r", encoding="utf-8", errors="replace") as f:
-                    content = f.read()
-                if kind == "iso-xml":
-                    rec = parse_meta_iso_xml(content, meta_file)
-                else:
-                    rec = parse_meta_text(content, meta_file)
-                if not rec:
-                    errors.append(f"{meta_file}: could not parse footprint")
-                    continue
+        listing = list(rasters) + list(metas) + list(others)
+        mode = REF_MODE_OVERRIDE or detect_reference_mode(listing)
+        if mode is None:
+            QMessageBox.warning(
+                self, "Reference Folder",
+                f"{len(rasters)} raster(s) found, but no footprints could be "
+                f"read from them.\n\nExpected one of:\n"
+                f"  - a shapefile index (e.g. Meta/index.shp)\n"
+                f"  - a sidecar per raster ('.met', '.h5.iso.xml', '_meta.txt')\n"
+                f"  - degree-tile names (e.g. N16E73.tif)\n\n"
+                f"Set REF_MODE_OVERRIDE in the script to force one.")
+            self.filter_reference_tifs()
+            return
 
-                stem = meta_base_stem(meta_file)
-                tif  = match_raster(files, stem, rec.get("granule"))
-                if not tif:
-                    errors.append(f"{meta_file}: no raster found for '{stem}'")
-                    continue
+        print(f"[META] {os.path.basename(folder_path)}: {len(rasters)} raster(s), "
+              f"footprints from {mode}")
+        if mode == REF_MODE_INDEX:
+            errors = self._scan_index(rasters, {**metas, **others})
+        elif mode == REF_MODE_SIDECAR:
+            errors = self._scan_sidecars(rasters, metas)
+        else:
+            errors = self._scan_tile_names(rasters)
 
-                rec["meta"] = meta_path
-                self.ref_footprints[os.path.join(folder_path, tif)] = rec
-                counts[rec["band"]] = counts.get(rec["band"], 0) + 1
-            except Exception as e:
-                errors.append(f"{meta_file}: {e}")
-
+        self.ref_mode = mode
         self._reproject_footprints()
+        self._refresh_band_choices()
+
+        counts = {}
+        for rec in self.ref_footprints.values():
+            counts[rec["band"]] = counts.get(rec["band"], 0) + 1
         if counts:
-            summary = ", ".join(f"{n} {b}" for b, n in sorted(counts.items()))
-            print(f"[META] Reference folder: {summary}")
+            print("[META] Tagged: "
+                  + ", ".join(f"{n} {b}" for b, n in sorted(counts.items())))
         if errors:
             txt = "\n".join(errors[:10])
             if len(errors) > 10:
                 txt += f"\n\n...and {len(errors) - 10} more"
             QMessageBox.warning(self, "Parsing Warnings", txt)
+        elif not self.ref_footprints:
+            QMessageBox.warning(
+                self, "Reference Folder",
+                f"Read footprints from {mode}, but none matched a raster.")
         self.filter_reference_tifs()
+
+    def _scan_sidecars(self, rasters, metas):
+        """One metadata file per raster: NISAR '.met' / '.h5.iso.xml', or gdalinfo."""
+        errors = []
+        for meta_file, meta_path in sorted(metas.items()):
+            kind = is_meta_file(meta_file)
+            try:
+                with open(meta_path, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read()
+                rec = (parse_meta_iso_xml(content, meta_file) if kind == "iso-xml"
+                       else parse_meta_text(content, meta_file))
+                if not rec:
+                    errors.append(f"{meta_file}: could not parse footprint")
+                    continue
+                stem = meta_base_stem(meta_file)
+                tif  = match_raster(list(rasters), stem, rec.get("granule"))
+                if not tif:
+                    errors.append(f"{meta_file}: no raster found for '{stem}'")
+                    continue
+                rec["meta"] = meta_path
+                self.ref_footprints[rasters[tif]] = rec
+            except Exception as e:
+                errors.append(f"{meta_file}: {e}")
+        return errors
+
+    def _scan_tile_names(self, rasters):
+        """The footprint is the name: 'N16E73.tif' is a degree cell."""
+        errors = []
+        for name, path in sorted(rasters.items()):
+            rec = parse_degree_tile(name)
+            if rec is None:
+                errors.append(f"{name}: name is not a degree tile")
+                continue
+            rec["meta"] = None
+            self.ref_footprints[path] = rec
+        return errors
+
+    def _scan_index(self, rasters, candidates):
+        """One shapefile indexes the set, its attributes naming each raster."""
+        errors = []
+        shp_name = pick_index_shapefile(list(candidates))
+        shp_path = candidates[shp_name]
+        lyr = QgsVectorLayer(shp_path, "ref_index", "ogr")
+        if not lyr.isValid():
+            return [f"{shp_name}: not a readable vector layer"]
+
+        tf = QgsCoordinateTransform(lyr.crs(), self.wgs84_crs, QgsProject.instance())
+        fields = rank_name_fields([f.name() for f in lyr.fields()])
+        if not fields:
+            return [f"{shp_name}: no attributes to match raster names against"]
+
+        # Lock onto the first attribute that actually resolves to a raster, so a
+        # later feature with a blank cell cannot silently switch fields.
+        name_field, unmatched = None, 0
+        for feat in lyr.getFeatures():
+            if name_field is None:
+                for field in fields:
+                    if resolve_index_name(feat[field], list(rasters)):
+                        name_field = field
+                        print(f"[META] {shp_name}: raster names from "
+                              f"attribute '{field}'")
+                        break
+                if name_field is None:
+                    unmatched += 1
+                    continue
+
+            tif = resolve_index_name(feat[name_field], list(rasters))
+            if not tif:
+                unmatched += 1
+                continue
+            ring = self._geometry_ring(feat.geometry(), tf)
+            if not ring:
+                errors.append(f"{shp_name}: '{tif}' has no usable polygon")
+                continue
+            self.ref_footprints[rasters[tif]] = {
+                "ring": ring, "band": BAND_UNKNOWN, "crs": lyr.crs().authid() or None,
+                "granule": None, "source": f"index ({shp_name}:{name_field})",
+                "meta": shp_path,
+            }
+
+        if name_field is None:
+            errors.append(
+                f"{shp_name}: no attribute matched any raster name. Fields are: "
+                + ", ".join(fields[:12]))
+        elif unmatched:
+            errors.append(f"{shp_name}: {unmatched} index entr(ies) named a "
+                          f"raster not present in the folder")
+        return errors
+
+    @staticmethod
+    def _geometry_ring(geom, transform):
+        """A feature's exterior ring in WGS84, largest part if multipart."""
+        if geom is None or geom.isEmpty():
+            return None
+        try:
+            if geom.isMultipart():
+                parts = [p[0] for p in geom.asMultiPolygon() if p]
+                if not parts:
+                    return None
+                pts = max(parts, key=len)
+            else:
+                poly = geom.asPolygon()
+                if not poly:
+                    return None
+                pts = poly[0]
+            ring = []
+            for pt in pts:
+                q = transform.transform(QgsPointXY(pt))
+                ring.append((q.x(), q.y()))
+            return ring if len(ring) >= 3 else None
+        except Exception as e:
+            print(f"[META] geometry: {e}")
+            return None
 
     # ── STAGE 1 FILTER ────────────────────────────────────────────────────────
     def _band_choice(self):
         txt = self.dropdown_band.currentText()
         return None if txt.startswith("All") else txt
 
+    def _refresh_band_choices(self):
+        """Offer only the band tags this folder actually holds.
+
+        A NISAR reference splits LSAR/SSAR; a C1 or L8 reference has no band at
+        all, so the filter collapses to a single disabled entry rather than
+        listing choices that would empty the list.
+        """
+        tags = sorted({rec.get("band", BAND_UNKNOWN)
+                       for rec in self.ref_footprints.values()} - {BAND_UNKNOWN})
+        try:
+            self.dropdown_band.blockSignals(True)
+            self.dropdown_band.clear()
+            self.dropdown_band.addItem("All bands")
+            for tag in tags:
+                self.dropdown_band.addItem(tag)
+        finally:
+            self.dropdown_band.blockSignals(False)
+        self.dropdown_band.setEnabled(bool(tags))
+
     def _label_for(self, tif_path):
-        rec = self.ref_footprints.get(tif_path, {})
-        return f"[{rec.get('band', BAND_UNKNOWN)}] {os.path.basename(tif_path)}"
+        rec  = self.ref_footprints.get(tif_path, {})
+        band = rec.get("band", BAND_UNKNOWN)
+        name = os.path.basename(tif_path)
+        return f"[{band}] {name}" if band != BAND_UNKNOWN else name
 
     def filter_reference_tifs(self):
         self.ref_tif_list = []
