@@ -26,8 +26,18 @@ qw = sys.modules["PyQt5.QtWidgets"]
 qg = sys.modules["qgis.gui"]
 qc = sys.modules["PyQt5.QtCore"]
 class _Base:
+    """Stand-in for the Qt classes the module subclasses.
+
+    Attributes are memoised: returning a fresh MagicMock per access is the
+    mirror of the cached-return_value trap -- every call would land on a
+    different mock, so `widget.hide.called` was always False.
+    """
     def __init__(self, *a, **k): pass
-    def __getattr__(self, n): return MagicMock()
+
+    def __getattr__(self, n):
+        m = MagicMock()
+        object.__setattr__(self, n, m)
+        return m
 for mod, names in ((qw, ["QMainWindow", "QWidget"]),
                    (qg, ["QgsMapTool"]),
                    (qc, ["QObject"])):
@@ -323,6 +333,93 @@ assert metric.xMaximum() - metric.xMinimum() == R.REF_VIEW_WIDTH_M, metric
 print("REF_CANVAS_CRS='wgs84': canvas is WGS84, picks convert both ways, "
       "view rect converted", metric, "->", wgs_rect)
 R.REF_CANVAS_CRS = "working"
+
+# ── 9. pan mode swaps the tool on BOTH canvases ──────────────────────────────
+win.init_map_tools()
+def tools():
+    return (win.canvas_left.setMapTool.call_args[0][0],
+            win.canvas_right.setMapTool.call_args[0][0])
+
+win.cb_pan.isChecked = MagicMock(return_value=True)
+win.toggle_pan_mode()
+assert tools() == (win.tool_pan_left, win.tool_pan_right), "pan not applied"
+win.cb_pan.isChecked = MagicMock(return_value=False)
+win.toggle_pan_mode()
+assert tools() == (win.tool_left, win.tool_right), "marking not restored"
+print("\npan mode swaps both canvases, and restores marking")
+
+# ── 10. the input R/G/B picker ───────────────────────────────────────────────
+class _Provider:
+    def __init__(self, n): self._n = n
+    def bandCount(self): return self._n
+    def dataType(self, band): return 6
+    def cumulativeCut(self, band, lo, hi): return (0.1 * band, 10.0 * band)
+    def bandStatistics(self, band):
+        return MagicMock(minimumValue=0.0, maximumValue=1.0)
+
+
+def fake_layer(n, names=None):
+    lyr = MagicMock()
+    lyr.isValid.return_value = True
+    lyr.dataProvider.return_value = _Provider(n)
+    lyr.bandName.side_effect = (lambda b: names[b - 1]) if names else \
+        (lambda b: f"Band {b:03d}")
+    return lyr
+
+# names the raster carries are used; QGIS's synthetic 'Band 001' is not
+pol = fake_layer(3, ["HH", "HV", "HH/HV"])
+assert win._band_labels(pol) == ["1: HH", "2: HV", "3: HH/HV"], win._band_labels(pol)
+assert win._band_labels(fake_layer(2)) == ["Band 1", "Band 2"]
+print("band labels from the raster:", win._band_labels(pol))
+
+captured = []
+R.QgsMultiBandColorRenderer = lambda p, r, g, b: (
+    captured.append(("rgb", r, g, b)) or MagicMock())
+R.QgsSingleBandGrayRenderer = lambda p, b: (
+    captured.append(("grey", b)) or MagicMock())
+
+# a real combo stand-in: the mock would report one shared current index
+class _Combo:
+    def __init__(self): self._items, self._idx = [], -1
+    def blockSignals(self, _): pass
+    def clear(self): self._items, self._idx = [], -1
+    def addItem(self, t): self._items.append(t)
+    def count(self): return len(self._items)
+    def setCurrentIndex(self, i): self._idx = i
+    def currentIndex(self): return self._idx
+    def currentText(self): return self._items[self._idx] if self._idx >= 0 else ""
+
+win.band_combos = [_Combo(), _Combo(), _Combo()]
+win.input_tif_layer = pol
+win.populate_band_picker(pol)
+assert [c.currentText() for c in win.band_combos] == ["1: HH", "2: HV", "3: HH/HV"]
+assert captured[-1] == ("rgb", 1, 2, 3), captured
+print("3-band input -> composite", captured[-1])
+
+# unset green/blue: greyscale on the red band, not a broken composite
+win.band_combos[1].setCurrentIndex(3)      # the BAND_NONE entry
+win.band_combos[2].setCurrentIndex(3)
+win.apply_input_bands()
+assert captured[-1] == ("grey", 1), captured
+print("red alone -> greyscale", captured[-1])
+
+# two bands: third slot defaults to none, so it renders grey rather than guessing
+dual = fake_layer(2, ["HH", "HV"])
+win.input_tif_layer = dual
+win.band_combos = [_Combo(), _Combo(), _Combo()]
+win.populate_band_picker(dual)
+assert win.band_combos[2].currentText() == R.BAND_NONE, \
+    win.band_combos[2].currentText()
+print("2-band input -> blue slot left unset:", captured[-1])
+
+# single band: no picker to show, still rendered
+single = fake_layer(1, ["HH"])
+win.input_tif_layer = single
+win.band_container.hide.reset_mock()
+win.populate_band_picker(single)
+assert win.band_container.hide.called, "picker shown for a single-band raster"
+assert captured[-1] == ("grey", 1), captured
+print("1-band input -> picker hidden, rendered", captured[-1])
 
 for d in (d1, d2, d3, d4):
     shutil.rmtree(d, ignore_errors=True)

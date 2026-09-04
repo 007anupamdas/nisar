@@ -28,7 +28,15 @@ band filter offers only tags the folder actually holds.
 Marking on the input canvas drives the reference canvas: the tile covering that
 ground is brought up, centred and marked, so the reference is always showing the
 place being measured. Clicking the same feature on the right then fills Ref X/Y
-and the row's error.
+and the row's error. 'Pan' (Ctrl+P) swaps both canvases to dragging the view
+instead of marking.
+
+A multi-band input is composed from an R/G/B picker over the left canvas, which
+lists the bands by the names the raster carries -- cog_locate's --gtiff writes
+the polarization into each band description, so a NISAR chip offers HH and HV
+rather than 'Band 1'. Each channel is stretched on its own percentiles, since a
+min/max stretch on SAR is set by a few bright scatterers and renders the scene
+black. Red alone gives greyscale; a single-band raster hides the picker.
 
 NISAR rasters are UTM and the C1/L8 references are WGS84. By default both
 canvases are pinned to the working CRS and QGIS reprojects the reference as it
@@ -59,11 +67,12 @@ from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QFrame)
 from PyQt5.QtCore import Qt, QObject, QEvent
 from PyQt5.QtGui import QKeySequence, QFont
-from qgis.gui import QgsMapCanvas, QgsMapTool, QgsVertexMarker
+from qgis.gui import QgsMapCanvas, QgsMapTool, QgsMapToolPan, QgsVertexMarker
 from qgis.core import (QgsProject, QgsPointXY, QgsRasterLayer, QgsVectorLayer,
                        QgsGeometry, QgsCoordinateReferenceSystem,
                        QgsCoordinateTransform, QgsSingleBandGrayRenderer,
-                       QgsContrastEnhancement, QgsRectangle)
+                       QgsMultiBandColorRenderer, QgsContrastEnhancement,
+                       QgsRectangle)
 
 
 # ── CONSTANTS ─────────────────────────────────────────────────────────────────
@@ -126,6 +135,12 @@ REF_CANVAS_CRS = "working"      # "working" | "wgs84"
 # widget's size and DPI and quietly does nothing on a canvas that has not been
 # laid out yet, which leaves the view at the origin with the raster off-screen.
 REF_VIEW_WIDTH_M = 2000.0
+
+# Percentile clip for the input composite. A min/max stretch on SAR is dominated
+# by a handful of bright scatterers and leaves the scene black.
+RGB_CLIP_LOW  = 0.02
+RGB_CLIP_HIGH = 0.98
+BAND_NONE     = "—"        # em dash: this slot is unused
 
 
 # ── BEGIN PURE HELPERS ────────────────────────────────────────────────────────
@@ -672,6 +687,25 @@ class QCDashboard(QMainWindow):
         self.canvas_left.setParallelRenderingEnabled(True)
         self.canvas_right.setParallelRenderingEnabled(True)
 
+        self.band_container = QWidget(self.canvas_left)
+        self.band_container.setGeometry(10, 10, 420, 35)
+        self.band_container.setStyleSheet("background-color: rgba(255,255,255,153);")
+        _bl = QHBoxLayout(self.band_container)
+        _bl.setContentsMargins(5, 5, 5, 5)
+        _bl.addWidget(QLabel("R G B"))
+        self.band_combos = []
+        for channel in ("red", "green", "blue"):
+            combo = QComboBox()
+            combo.setToolTip(
+                f"Band shown as {channel} on the input canvas.\n"
+                f"Set all three for a composite; set red alone for greyscale.")
+            _bl.addWidget(combo, 1)
+            self.band_combos.append(combo)
+        self.band_container.hide()
+        self.band_resize_filter = DropdownResizeFilter(self.canvas_left,
+                                                       self.band_container)
+        self.canvas_left.installEventFilter(self.band_resize_filter)
+
         self.dropdown_container = QWidget(self.canvas_right)
         self.dropdown_container.setGeometry(10, 10, 600, 35)
         self.dropdown_container.setStyleSheet("background-color: rgba(255,255,255,153);")
@@ -710,6 +744,10 @@ class QCDashboard(QMainWindow):
         self.btn_del.setToolTip("Delete Row  (Ctrl+Delete)")
         self.cb_sync      = QCheckBox("Sync Maps")
         self.cb_sync.setChecked(True)
+        self.cb_pan = QCheckBox("Pan")
+        self.cb_pan.setToolTip(
+            "Drag to pan both canvases instead of marking points  (Ctrl+P).\n"
+            "Turn off to go back to marking.")
         self.cb_normalize = QCheckBox("Normalize Ref")
         self.cb_normalize.setChecked(False)
         self.cb_normalize.setToolTip(
@@ -750,7 +788,7 @@ class QCDashboard(QMainWindow):
         btn_layout = QHBoxLayout()
         for w in [self.btn_input_tif, self.btn_reference_folder,
                   self.btn_load, self.btn_add, self.btn_save,
-                  self.btn_del, self.cb_sync, self.cb_normalize]:
+                  self.btn_del, self.cb_pan, self.cb_sync, self.cb_normalize]:
             btn_layout.addWidget(w)
 
         main_layout = QVBoxLayout()
@@ -775,6 +813,9 @@ class QCDashboard(QMainWindow):
         self.dropdown_ref.currentIndexChanged.connect(self.load_reference_tif_from_dropdown)
         self.dropdown_band.currentIndexChanged.connect(lambda _: self.filter_reference_tifs())
         self.cb_normalize.stateChanged.connect(self.toggle_normalization)
+        self.cb_pan.stateChanged.connect(lambda _: self.toggle_pan_mode())
+        for combo in self.band_combos:
+            combo.currentIndexChanged.connect(lambda _: self.apply_input_bands())
 
         QShortcut(QKeySequence("Ctrl+N"),      self).activated.connect(self.add_manual_row)
         QShortcut(QKeySequence("Ctrl+S"),      self).activated.connect(self.save_csv)
@@ -782,6 +823,8 @@ class QCDashboard(QMainWindow):
         QShortcut(QKeySequence("Ctrl+Delete"), self).activated.connect(self.delete_row)
         QShortcut(QKeySequence("F5"),          self).activated.connect(self.sync_view_to_row)
         QShortcut(QKeySequence("Escape"),      self).activated.connect(self.clear_markers)
+        QShortcut(QKeySequence("Ctrl+P"),       self).activated.connect(
+            lambda: self.cb_pan.setChecked(not self.cb_pan.isChecked()))
 
         self.auto_connect_layers()
         self.init_map_tools()
@@ -1803,6 +1846,7 @@ class QCDashboard(QMainWindow):
             self.adopt_working_crs(lyr.crs())
             self.canvas_left.setLayers([lyr])
             self.canvas_left.setExtent(lyr.extent())
+            self.populate_band_picker(lyr)
             self.canvas_left.refresh()
             if self.ref_folder_path:
                 self.filter_reference_tifs()
@@ -1819,6 +1863,7 @@ class QCDashboard(QMainWindow):
             self.adopt_working_crs(in_l[0].crs())
             self.canvas_left.setLayers([in_l[0]])
             self.canvas_left.setExtent(in_l[0].extent())
+            self.populate_band_picker(in_l[0])
             self.canvas_left.refresh()
         if ref_l:
             self.ensure_overviews(ref_l[0].source())
@@ -1830,10 +1875,151 @@ class QCDashboard(QMainWindow):
 
     def init_map_tools(self):
         self._apply_canvas_crs()
-        self.tool_left  = DragMapTool(self.canvas_left,  self, True)
-        self.tool_right = DragMapTool(self.canvas_right, self, False)
-        self.canvas_left.setMapTool(self.tool_left)
-        self.canvas_right.setMapTool(self.tool_right)
+        self.tool_left      = DragMapTool(self.canvas_left,  self, True)
+        self.tool_right     = DragMapTool(self.canvas_right, self, False)
+        self.tool_pan_left  = QgsMapToolPan(self.canvas_left)
+        self.tool_pan_right = QgsMapToolPan(self.canvas_right)
+        self.toggle_pan_mode()
+
+    def toggle_pan_mode(self, _state=None):
+        """Swap both canvases between marking points and panning.
+
+        One toggle for both: the canvases are linked, so leaving one in marking
+        mode while panning the other only produces stray picks. The mode is read
+        from the checkbox rather than the signal argument, which arrives as an
+        int from stateChanged but as a bool from a direct call.
+        """
+        panning = bool(self.cb_pan.isChecked())
+        try:
+            self.canvas_left.setMapTool(
+                self.tool_pan_left if panning else self.tool_left)
+            self.canvas_right.setMapTool(
+                self.tool_pan_right if panning else self.tool_right)
+        except AttributeError:
+            return          # called before init_map_tools
+        for canvas in (self.canvas_left, self.canvas_right):
+            try:
+                canvas.setCursor(Qt.OpenHandCursor if panning else Qt.CrossCursor)
+            except Exception:
+                pass
+        print(f"[TOOL] {'pan' if panning else 'mark'} mode")
+
+    # ── INPUT BAND COMPOSITE ──────────────────────────────────────────────────
+    def _band_labels(self, layer):
+        """Human labels for a raster's bands, using the names it carries.
+
+        cog_locate's --gtiff writes the polarization into each band description,
+        so a NISAR chip lists 'HH' and 'HV' rather than 'Band 1'.
+        """
+        provider = layer.dataProvider()
+        labels = []
+        for band in range(1, provider.bandCount() + 1):
+            name = ""
+            try:
+                name = (layer.bandName(band) or "").strip()
+            except Exception:
+                pass
+            # QGIS synthesises 'Band 001' when a raster names nothing
+            if not name or re.fullmatch(r"Band\s*0*\d+", name):
+                name = f"Band {band}"
+            elif not name.lower().startswith("band"):
+                name = f"{band}: {name}"
+            labels.append(name)
+        return labels
+
+    def populate_band_picker(self, layer):
+        """Fill the R/G/B combos from the input raster, then apply a default."""
+        if layer is None or not layer.isValid():
+            self.band_container.hide()
+            return
+        labels = self._band_labels(layer)
+        count  = len(labels)
+        if count < 1:
+            self.band_container.hide()
+            return
+        # a single-band raster has nothing to compose; leave the picker away
+        if count < 2:
+            self.band_container.hide()
+            self.apply_input_bands()
+            return
+
+        defaults = [0, 1, 2] if count >= 3 else [0, 1, count]   # count -> BAND_NONE
+        try:
+            for combo in self.band_combos:
+                combo.blockSignals(True)
+                combo.clear()
+                for label in labels:
+                    combo.addItem(label)
+                combo.addItem(BAND_NONE)
+            for combo, idx in zip(self.band_combos, defaults):
+                combo.setCurrentIndex(min(idx, combo.count() - 1))
+        finally:
+            for combo in self.band_combos:
+                combo.blockSignals(False)
+        self.band_container.show()
+        self.band_container.raise_()
+        print(f"[BANDS] input has {count}: {', '.join(labels)}")
+        self.apply_input_bands()
+
+    def _selected_bands(self):
+        """The chosen 1-based band per channel, None where unset."""
+        out = []
+        for combo in self.band_combos:
+            idx = combo.currentIndex()
+            out.append(None if idx < 0 or combo.currentText() == BAND_NONE
+                       else idx + 1)
+        return out
+
+    def _stretch_for(self, provider, band):
+        """Contrast enhancement for one band, clipped at the RGB percentiles.
+
+        A min/max stretch on SAR is set by a few bright scatterers and renders
+        the scene black, so the cumulative cut is used where the provider offers
+        it and full statistics only as a fallback.
+        """
+        lo = hi = None
+        try:
+            lo, hi = provider.cumulativeCut(band, RGB_CLIP_LOW, RGB_CLIP_HIGH)
+        except Exception:
+            pass
+        if lo is None or hi is None or hi <= lo:
+            stats = provider.bandStatistics(band)
+            lo, hi = stats.minimumValue, stats.maximumValue
+        ce = QgsContrastEnhancement(provider.dataType(band))
+        ce.setContrastEnhancementAlgorithm(
+            QgsContrastEnhancement.StretchToMinimumMaximum)
+        ce.setMinimumValue(lo)
+        ce.setMaximumValue(hi)
+        return ce
+
+    def apply_input_bands(self):
+        """Render the input canvas from the picked bands."""
+        layer = self.input_tif_layer
+        if layer is None or not layer.isValid():
+            return
+        provider = layer.dataProvider()
+        try:
+            red, green, blue = self._selected_bands()
+            if provider.bandCount() < 2:
+                red = red or 1
+            if red and green and blue:
+                renderer = QgsMultiBandColorRenderer(provider, red, green, blue)
+                renderer.setRedContrastEnhancement(self._stretch_for(provider, red))
+                renderer.setGreenContrastEnhancement(self._stretch_for(provider, green))
+                renderer.setBlueContrastEnhancement(self._stretch_for(provider, blue))
+                shown = f"R={red} G={green} B={blue}"
+            else:
+                # red alone (or nothing picked) means greyscale on that band
+                band = red or green or blue or 1
+                renderer = QgsSingleBandGrayRenderer(provider, band)
+                renderer.setContrastEnhancement(self._stretch_for(provider, band))
+                shown = f"grey band {band}"
+            layer.setRenderer(renderer)
+            layer.triggerRepaint()
+            self.canvas_left.refresh()
+            print(f"[BANDS] input rendered as {shown}")
+        except Exception as e:
+            print(f"[BANDS] {e}")
 
 
 # ── ENTRY POINT ───────────────────────────────────────────────────────────────
