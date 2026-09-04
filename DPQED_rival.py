@@ -67,12 +67,10 @@ from qgis.core import (QgsProject, QgsPointXY, QgsRasterLayer, QgsVectorLayer,
 
 
 # ── CONSTANTS ─────────────────────────────────────────────────────────────────
-ZOOM_INPUT_PLACEHOLDER = 700000000   # fixed zoom for left/input canvas
-ZOOM_REF_PLACEHOLDER   = 70000   # fixed zoom for right/ref canvas
-left_view_width = 5000
-
-SCALE_LEFT  = 700000000      # left canvas fixed zoom scale (UTM metres) — no longer used
-SCALE_RIGHT = 70000          # right canvas fixed zoom scale (WGS84 degrees) — no longer used
+# Both views are now set from an explicit ground rectangle -- see
+# REF_VIEW_WIDTH_M below for why. The old fixed zoom scales are gone with the
+# last zoomScale() call that used them.
+left_view_width = 5000       # ground width of the input view, metres
 NORM_MIN    = 0           # SAR normalization min DN
 NORM_MAX    = 1500        # SAR normalization max DN
 NORM_GAMMA  = 0.5         # gamma exponent for sqrt stretch (0.5 = square root)
@@ -122,6 +120,12 @@ REF_SCAN_MAX_FILES = 50000
 # if that reprojection is slow on a given machine -- picks are then converted
 # instead, and every other behaviour is identical.
 REF_CANVAS_CRS = "working"      # "working" | "wgs84"
+
+# Ground width of the reference view, in metres. The extent is set from an
+# explicit rectangle rather than setCenter + zoomScale: a scale depends on the
+# widget's size and DPI and quietly does nothing on a canvas that has not been
+# laid out yet, which leaves the view at the origin with the raster off-screen.
+REF_VIEW_WIDTH_M = 2000.0
 
 
 # ── BEGIN PURE HELPERS ────────────────────────────────────────────────────────
@@ -921,8 +925,17 @@ class QCDashboard(QMainWindow):
 
             # only touch extent if caller really wants it -- and in the CRS the
             # canvas is drawing in, not the layer's
+            ext = self._extent_in_ref_canvas(lyr)
+            try:
+                print(f"[LOAD] {os.path.basename(tif_path)} "
+                      f"[{lyr.crs().authid()}] spans "
+                      f"{ext.xMinimum():.1f},{ext.yMinimum():.1f} .. "
+                      f"{ext.xMaximum():.1f},{ext.yMaximum():.1f} "
+                      f"in the reference canvas CRS")
+            except Exception:
+                pass
             if set_extent:
-                self.canvas_right.setExtent(self._extent_in_ref_canvas(lyr))
+                self.canvas_right.setExtent(ext)
 
             if self.cb_normalize.isChecked():
                 self.normalize_layer(lyr)
@@ -981,6 +994,38 @@ class QCDashboard(QMainWindow):
         except Exception as e:
             print(f"[LOAD] extent transform failed: {e}")
             return lyr.extent()
+
+    def _ref_view_rect(self, pt, width_m=REF_VIEW_WIDTH_M):
+        """A view box of fixed ground width around a working-CRS point.
+
+        Built in metres and then converted, so it is the same patch of ground
+        whichever CRS the reference canvas is drawing in.
+        """
+        aspect = 1.0
+        try:
+            size = self.canvas_right.size()
+            aspect = float(size.width()) / max(float(size.height()), 1.0)
+        except Exception:
+            pass
+        if not aspect or aspect <= 0:
+            aspect = 1.0
+        half_w = width_m / 2.0
+        half_h = (width_m / aspect) / 2.0
+        rect = QgsRectangle(pt.x() - half_w, pt.y() - half_h,
+                            pt.x() + half_w, pt.y() + half_h)
+        if REF_CANVAS_CRS == "wgs84":
+            try:
+                rect = self.transform_proj_to_wgs.transformBoundingBox(rect)
+            except Exception as e:
+                print(f"[VIEW] rect transform failed: {e}")
+        return rect
+
+    def show_ref_at(self, pt, colour):
+        """Put the reference canvas over a working-CRS point and mark it."""
+        rect = self._ref_view_rect(pt)
+        self.canvas_right.setExtent(rect)
+        self.canvas_right.refresh()
+        self.draw_marker(self._to_ref_canvas(pt), self.canvas_right, colour)
 
     def _apply_canvas_crs(self):
         """Pin each canvas to the CRS it draws in.
@@ -1486,10 +1531,7 @@ class QCDashboard(QMainWindow):
         try:
             if not self.show_reference_for(pt):
                 return
-            p_ref = self._to_ref_canvas(pt)
-            self.canvas_right.setCenter(p_ref)
-            self.canvas_right.zoomScale(ZOOM_REF_PLACEHOLDER)
-            self.draw_marker(p_ref, self.canvas_right, Qt.red)
+            self.show_ref_at(pt, Qt.red)
         except Exception as e:
             print(f"[FOLLOW] {e}")
         finally:
@@ -1601,16 +1643,10 @@ class QCDashboard(QMainWindow):
                 
 
             if rx != 0.0 or ry != 0.0:
-                p_ref = self._to_ref_canvas(QgsPointXY(rx, ry))
-                self.canvas_right.setCenter(p_ref)
-                self.canvas_right.zoomScale(ZOOM_REF_PLACEHOLDER)
-                self.draw_marker(p_ref, self.canvas_right, Qt.green)
+                self.show_ref_at(QgsPointXY(rx, ry), Qt.green)
             elif ix != 0.0 or iy != 0.0:
                 # no reference pick on this row yet: sit on the input position
-                p_ref = self._to_ref_canvas(QgsPointXY(ix, iy))
-                self.canvas_right.setCenter(p_ref)
-                self.canvas_right.zoomScale(ZOOM_REF_PLACEHOLDER)
-                self.draw_marker(p_ref, self.canvas_right, Qt.red)
+                self.show_ref_at(QgsPointXY(ix, iy), Qt.red)
 
         except Exception as e:
             print(f"[SYNC ROW] {e}")
@@ -1624,9 +1660,8 @@ class QCDashboard(QMainWindow):
             return
         self._syncing = True
         try:
-            self.canvas_right.setCenter(
-                self._to_ref_canvas(self.canvas_left.center()))
-            self.canvas_right.zoomScale(ZOOM_REF_PLACEHOLDER)
+            self.canvas_right.setExtent(
+                self._ref_view_rect(self.canvas_left.center()))
             self.canvas_right.refresh()
         except Exception as e:
             print(f"[SYNC EXTENTS] {e}")

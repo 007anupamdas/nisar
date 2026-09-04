@@ -59,6 +59,20 @@ class _PointXY:
 R.QgsPointXY = _PointXY
 
 
+class _Rect:
+    """QgsRectangle stand-in, for the same reason as _PointXY."""
+    def __init__(self, *b): self._b = tuple(float(v) for v in b)
+    def xMinimum(self): return self._b[0]
+    def yMinimum(self): return self._b[1]
+    def xMaximum(self): return self._b[2]
+    def yMaximum(self): return self._b[3]
+    def __repr__(self):
+        return (f"[{self._b[0]:.1f},{self._b[1]:.1f} .. "
+                f"{self._b[2]:.1f},{self._b[3]:.1f}]")
+
+R.QgsRectangle = _Rect
+
+
 qw.QFileDialog.getExistingDirectory = MagicMock()
 warned = []
 qw.QMessageBox.warning  = lambda *a, **k: warned.append(a[-1])
@@ -210,13 +224,6 @@ assert win.adopt_working_crs(_Geo("EPSG:4326")) is False, "geographic CRS accept
 print("geographic CRS refused as a working CRS")
 
 # ── 6. a mark on the input canvas drives the reference canvas ────────────────
-class _Rect:
-    def __init__(self, *b): self._b = b
-    def xMinimum(self): return self._b[0]
-    def yMinimum(self): return self._b[1]
-    def xMaximum(self): return self._b[2]
-    def yMaximum(self): return self._b[3]
-
 R.REF_CANVAS_CRS = "working"
 win.proj_crs = _CRS("EPSG:32644")
 win._rebuild_transforms()
@@ -251,14 +258,29 @@ win.canvas_right.setCenter.reset_mock()
 win.canvas_right.zoomScale.reset_mock()
 win.draw_marker = MagicMock()
 
+win.canvas_right.setExtent.reset_mock()
+win.canvas_right.size.return_value = MagicMock(width=lambda: 800,
+                                               height=lambda: 400)
 win.follow_input_point(inside)
 assert win._load_ref_layer.called, "tile covering the point was not loaded"
-centred = win.canvas_right.setCenter.call_args[0][0]
-assert (centred.x(), centred.y()) == (325000.0, 1900000.0), centred
-assert win.canvas_right.zoomScale.called, "reference canvas did not zoom"
+# The view must be set from an explicit ground rectangle. setCenter + zoomScale
+# is what left the canvas at the origin: a scale silently does nothing on a
+# canvas that has not been laid out, and a click then read as (-456, -244).
+assert win.canvas_right.setExtent.called, "reference view never got an extent"
+rect = win.canvas_right.setExtent.call_args[0][0]
+cx = (rect.xMinimum() + rect.xMaximum()) / 2.0
+cy = (rect.yMinimum() + rect.yMaximum()) / 2.0
+assert (cx, cy) == (325000.0, 1900000.0), (cx, cy)
+assert rect.xMaximum() - rect.xMinimum() == R.REF_VIEW_WIDTH_M, rect
+# 2:1 canvas -> half the ground height, so the aspect is honoured
+assert rect.yMaximum() - rect.yMinimum() == R.REF_VIEW_WIDTH_M / 2.0, rect
 assert win.draw_marker.called, "reference canvas was not marked"
-print("follow_input_point: loaded tile, centred", (centred.x(), centred.y()),
-      ", zoomed, marked")
+print("follow_input_point: loaded tile, extent", rect, "centred on", (cx, cy),
+      ", marked")
+
+# and the marker sits at the pick, in the canvas's CRS
+marked = win.draw_marker.call_args[0][0]
+assert (marked.x(), marked.y()) == (325000.0, 1900000.0), marked
 
 # ── 7. the extent handed to the canvas is in the canvas's CRS ────────────────
 wgs_layer = MagicMock()
@@ -289,7 +311,17 @@ out = win._to_ref_canvas(inside)
 assert win.transform_proj_to_wgs.transform.called, "no conversion under wgs84 mode"
 back = win._from_ref_canvas(out)
 assert win.transform_wgs_to_proj.transform.called
-print("REF_CANVAS_CRS='wgs84': canvas is WGS84 and picks convert both ways")
+# the view rectangle is built in metres and then converted, so it is the same
+# patch of ground either way
+win.transform_proj_to_wgs.transformBoundingBox = MagicMock(
+    return_value=_Rect(78.49, 17.19, 78.51, 17.21))
+wgs_rect = win._ref_view_rect(inside)
+assert win.transform_proj_to_wgs.transformBoundingBox.called, \
+    "metric view rect handed to a WGS84 canvas unconverted"
+metric = win.transform_proj_to_wgs.transformBoundingBox.call_args[0][0]
+assert metric.xMaximum() - metric.xMinimum() == R.REF_VIEW_WIDTH_M, metric
+print("REF_CANVAS_CRS='wgs84': canvas is WGS84, picks convert both ways, "
+      "view rect converted", metric, "->", wgs_rect)
 R.REF_CANVAS_CRS = "working"
 
 for d in (d1, d2, d3, d4):
