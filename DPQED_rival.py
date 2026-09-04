@@ -148,6 +148,22 @@ def ring_wkt(ring):
     return f"POLYGON(({pts}))"
 
 
+def rings_bounds(rings):
+    """(min_lon, min_lat, max_lon, max_lat) over several rings, or None."""
+    xs = [x for ring in rings for x, _ in ring]
+    ys = [y for ring in rings for _, y in ring]
+    if not xs:
+        return None
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def format_bounds(b):
+    """A lon/lat box as something readable in a dialog."""
+    if not b:
+        return "empty"
+    return (f"{b[1]:.3f}..{b[3]:.3f} lat, {b[0]:.3f}..{b[2]:.3f} lon")
+
+
 def parse_pos_list(text):
     """gml:posList -> [(lon, lat), ...].
 
@@ -398,16 +414,19 @@ def match_raster(files, stem, granule=None):
     return prefixed[0] if prefixed else None
 
 
-_TILE_RE = re.compile(r"^([NS])(\d{2})([EW])(\d{2,3})(?![0-9])", re.IGNORECASE)
+# Degree counts are not reliably zero-padded: 'N8E76_ortho.tif' is as real as
+# 'N16E073.tif'. Latitude takes 1-2 digits, longitude 1-3, and the trailing
+# lookahead stops a longer run being read as a tile.
+_TILE_RE = re.compile(r"^([NS])(\d{1,2})([EW])(\d{1,3})(?![0-9])", re.IGNORECASE)
 
 
 def parse_degree_tile(name, size=DEGREE_TILE_SIZE):
     """'N16E73.tif' -> the degree cell it names, or None.
 
     The token gives the cell's south-west corner, so N16E73 spans 16-17 N by
-    73-74 E. Lon takes two or three digits ('E73' and 'E073' both work). NISAR
-    granule names cannot collide: they start 'NISAR', and a digit must follow
-    the hemisphere letter.
+    73-74 E. Padding is not assumed: 'N8E76', 'N16E73' and 'N16E073' all parse.
+    NISAR granule names cannot collide: they start 'NISAR', and a digit must
+    follow the hemisphere letter.
     """
     m = _TILE_RE.match(os.path.basename(name))
     if not m:
@@ -1053,7 +1072,8 @@ class QCDashboard(QMainWindow):
         for name, path in sorted(rasters.items()):
             rec = parse_degree_tile(name)
             if rec is None:
-                errors.append(f"{name}: name is not a degree tile")
+                errors.append(f"{name}: name is not a degree tile "
+                              f"(expected e.g. N16E73, N8E76, S34E018)")
                 continue
             rec["meta"] = None
             self.ref_footprints[path] = rec
@@ -1199,6 +1219,17 @@ class QCDashboard(QMainWindow):
                             self.ref_tif_list.append(tif_path)
                     except Exception as e:
                         print(f"[FILTER] {tif_path}: {e}")
+                if candidates and not self.ref_tif_list:
+                    # Footprints read fine, they just do not cover this scene.
+                    # Say so with both extents rather than an empty dropdown.
+                    box = input_geom.boundingBox()
+                    ref_b = rings_bounds(
+                        [self.ref_footprints[t]["ring"] for t in candidates])
+                    print(f"[FILTER] none of {len(candidates)} reference "
+                          f"footprint(s) overlap the input.")
+                    print(f"[FILTER]   input     : "
+                          f"{format_bounds((box.xMinimum(), box.yMinimum(), box.xMaximum(), box.yMaximum()))}")
+                    print(f"[FILTER]   reference : {format_bounds(ref_b)}")
             except Exception as e:
                 print(f"[FILTER] Error: {e}")
                 self.ref_tif_list = candidates
@@ -1212,8 +1243,10 @@ class QCDashboard(QMainWindow):
             self.dropdown_container.raise_()
             self.dropdown_ref.setCurrentIndex(0)
         else:
+            label = ("No matches found" if not candidates else
+                     f"None of {len(candidates)} tile(s) overlap the input")
             self.dropdown_ref.blockSignals(True)
-            self.dropdown_ref.addItem("No matches found")
+            self.dropdown_ref.addItem(label)
             self.dropdown_ref.blockSignals(False)
             self.dropdown_container.show()
             self.dropdown_container.raise_()

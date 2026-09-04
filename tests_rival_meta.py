@@ -225,6 +225,35 @@ check("western hemisphere", H["parse_degree_tile"]("N40W105.tif")["ring"][3],
       (-105.0, 40.0))
 check("suffix after the token is ignored",
       H["parse_degree_tile"]("N16E73_ORTHO_v2.tif")["ring"][3], (73.0, 16.0))
+
+# Reported from a real C1 folder: degree counts are not zero-padded.
+check("unpadded latitude 'N8E76_ortho.tif'",
+      H["parse_degree_tile"]("N8E76_ortho.tif")["ring"],
+      [(76.0, 9.0), (77.0, 9.0), (77.0, 8.0), (76.0, 8.0)])
+check("unpadded latitude, padded longitude",
+      H["parse_degree_tile"]("N8E076.tif")["ring"][3], (76.0, 8.0))
+check("unpadded longitude", H["parse_degree_tile"]("N16E7.tif")["ring"][3],
+      (7.0, 16.0))
+check("lowercase token", H["parse_degree_tile"]("n8e76_ortho.tif")["ring"][3],
+      (76.0, 8.0))
+check("a three-digit latitude is not a tile",
+      H["parse_degree_tile"]("N123E45.tif"), None)
+check("a four-digit longitude is not a tile",
+      H["parse_degree_tile"]("N16E7300.tif"), None)
+# An N8 tile cannot meet a 16-18 N scene; the bounds are what makes that legible
+# rather than an empty dropdown.
+n8   = H["parse_degree_tile"]("N8E76_ortho.tif")["ring"]
+n9   = H["parse_degree_tile"]("N9E76_ortho.tif")["ring"]
+check("bounds over several tiles", H["rings_bounds"]([n8, n9]),
+      (76.0, 8.0, 77.0, 10.0))
+check("bounds of nothing", H["rings_bounds"]([]), None)
+check("bounds read as lat then lon", H["format_bounds"]((76.0, 8.0, 77.0, 10.0)),
+      "8.000..10.000 lat, 76.000..77.000 lon")
+check("bounds of nothing reads as empty", H["format_bounds"](None), "empty")
+
+check("unpadded names still detect as degree-tile",
+      H["detect_reference_mode"](["N8E76_ortho.tif", "N9E76_ortho.tif"]),
+      "degree-tile")
 check("not a tile", H["parse_degree_tile"]("cartosat_ortho.tif"), None)
 check("a NISAR granule is not a tile", H["parse_degree_tile"](xml_name), None)
 check("out-of-range lat rejected", H["parse_degree_tile"]("N95E073.tif"), None)
