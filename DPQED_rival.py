@@ -96,6 +96,12 @@ RASTER_EXTS = (".tif", ".tiff", ".vrt")
 # Subfolder names that hold the metadata rather than the imagery.
 META_DIR_NAMES = ("meta", "metadata")
 
+# A reference collection is often filed into subfolders -- by region, by year, or
+# imagery above with a Meta/ beside it. The whole tree is walked to this depth,
+# stopping at the file cap so pointing the picker at a huge drive cannot hang.
+REF_SCAN_DEPTH    = 4
+REF_SCAN_MAX_FILES = 50000
+
 
 # ── BEGIN PURE HELPERS ────────────────────────────────────────────────────────
 # Everything between these markers is plain Python -- no Qt, no QGIS -- so the
@@ -945,38 +951,47 @@ class QCDashboard(QMainWindow):
 
     # ── REFERENCE FOLDER ─────────────────────────────────────────────────────
     def _folder_entries(self, folder_path):
-        """Files in the folder and one level under it.
+        """Rasters, sidecars and everything else under the chosen folder.
 
-        A collection commonly keeps its imagery at the top and its metadata in a
-        'Meta' subfolder, so both are gathered and the two are matched by name
-        across that split.
+        Collections get filed into subfolders -- by region, by year, or imagery
+        above with a Meta/ beside it -- so the tree is walked rather than just
+        listed, and the two halves are matched by name across that split. Files
+        are keyed by basename, so a name appearing twice keeps the first and is
+        reported rather than silently shadowing.
         """
         rasters, metas, others = {}, {}, {}
-        dirs = [folder_path]
-        try:
-            for entry in sorted(os.listdir(folder_path)):
-                full = os.path.join(folder_path, entry)
-                if os.path.isdir(full):
-                    dirs.append(full)
-        except OSError as e:
-            print(f"[META] {folder_path}: {e}")
+        dupes, count, truncated = [], 0, False
+        root_depth = folder_path.rstrip(os.sep).count(os.sep)
 
-        for d in dirs:
-            try:
-                names = sorted(os.listdir(d))
-            except OSError as e:
-                print(f"[META] {d}: {e}")
-                continue
-            for name in names:
-                full = os.path.join(d, name)
-                if not os.path.isfile(full):
-                    continue
+        for dirpath, dirnames, filenames in os.walk(folder_path):
+            if dirpath.rstrip(os.sep).count(os.sep) - root_depth >= REF_SCAN_DEPTH:
+                dirnames[:] = []
+            dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
+            for name in sorted(filenames):
+                count += 1
+                if count > REF_SCAN_MAX_FILES:
+                    truncated = True
+                    break
+                full = os.path.join(dirpath, name)
                 if name.lower().endswith(RASTER_EXTS):
-                    rasters.setdefault(name, full)
+                    bucket = rasters
                 elif is_meta_file(name):
-                    metas.setdefault(name, full)
+                    bucket = metas
                 else:
-                    others.setdefault(name, full)
+                    bucket = others
+                if name in bucket:
+                    dupes.append(name)
+                else:
+                    bucket[name] = full
+            if truncated:
+                break
+
+        if truncated:
+            print(f"[META] stopped after {REF_SCAN_MAX_FILES} files -- point the "
+                  f"picker at a narrower folder if tiles are missing")
+        if dupes:
+            print(f"[META] {len(dupes)} duplicate filename(s) across subfolders, "
+                  f"first kept (e.g. {', '.join(sorted(set(dupes))[:3])})")
         return rasters, metas, others
 
     def select_reference_folder(self):
@@ -1031,6 +1046,10 @@ class QCDashboard(QMainWindow):
         if counts:
             print("[META] Tagged: "
                   + ", ".join(f"{n} {b}" for b, n in sorted(counts.items())))
+        if self.ref_footprints:
+            bounds = rings_bounds([r["ring"] for r in self.ref_footprints.values()])
+            print(f"[META] {len(self.ref_footprints)} footprint(s) covering "
+                  f"{format_bounds(bounds)}")
         if errors:
             txt = "\n".join(errors[:10])
             if len(errors) > 10:
