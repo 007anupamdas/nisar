@@ -188,12 +188,14 @@ def parse_meta_json(obj, source="<met>"):
         except (TypeError, ValueError):
             crs = None
 
-    granule = obj.get("OTSProductID") or None
+    # OTSProductID is the bare product id, no extension. Leave it that way: what
+    # sits in the reference folder is '<product>.tif', not the '.h5', and
+    # match_raster only ever looks for rasters.
     return {
         "ring": ring,
         "band": band or BAND_UNKNOWN,
         "crs": crs,
-        "granule": f"{granule}.h5" if granule else None,
+        "granule": obj.get("OTSProductID") or None,
         "source": f"met-json ({extent})",
     }
 
@@ -342,6 +344,10 @@ def match_raster(files, stem, granule=None):
     Exact stem match first, then the granule name the metadata itself gives, then
     any raster whose name starts with the stem -- DPQED_h52tif writes
     '<product>1.tif', so a plain stem+'.tif' does not always exist.
+
+    Only rasters are ever considered. The metadata names the '.h5' it was written
+    from, but what sits in the reference folder is the '.tif', so any '.h5' the
+    caller passes in is reduced to its stem rather than looked for.
     """
     exts = (".tif", ".tiff", ".vrt")
     lower = {f.lower(): f for f in files}

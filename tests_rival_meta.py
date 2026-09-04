@@ -81,7 +81,8 @@ met = H["parse_meta_text"](
 check("met band (Sensor field)", met["band"], "SSAR")
 check("met crs (EPSG field)", met["crs"], "EPSG:32644")
 check("met source prefers the swath", met["source"], "met-json (image)")
-check("met granule", met["granule"], met_name[:-len(".met")] + ".h5")
+check("met granule is the bare product id", met["granule"],
+      met_name[:-len(".met")])
 check("met ring is the 4 Image corners", met["ring"],
       [(76.534748, 17.614687), (78.827076, 18.171194),
        (79.385351, 15.993327), (77.112174, 15.446038)])
@@ -188,6 +189,21 @@ check("h52tif '<product>1.tif' prefix match",
 check("granule name fallback",
       H["match_raster"](["OTHER.tif"], "NOPE", "OTHER.h5"), "OTHER.tif")
 check("no raster -> None", H["match_raster"](files, "SCENE_Z"), None)
+check("an .h5 alone is not a raster",
+      H["match_raster"](["SCENE_B.h5"], "SCENE_B", "SCENE_B.h5"), None)
+
+# What sits in the reference folder is the '.tif'; the '.h5' the metadata names
+# need not exist. Pin every naming shape either band's raster turns up as.
+for label, meta_name, rec_for in (
+        ("LSAR", xml_name, rec),
+        ("SSAR", met_name, met)):
+    stem = H["meta_base_stem"](meta_name)
+    for shape in (".tif", ".h5.tif", "1.tif", ".TIF"):
+        folder_tif = stem + shape
+        check(f"{label} raster named '<product>{shape}'",
+              H["match_raster"]([folder_tif, "unrelated.tif"], stem,
+                                rec_for["granule"]),
+              folder_tif)
 
 print()
 if failures:
