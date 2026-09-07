@@ -62,7 +62,7 @@ grey. Bands are listed by the names the raster carries -- cog_locate's --gtiff
 writes the polarization into each description, so a chip offers HH and HV rather
 than 'Band 1'.
 
-'Each canvas carries a translucent 'Normalize' tool with a clip percentage. It
+Each canvas carries a translucent 'Normalize' tool with a clip percentage. It
 is an action, not a mode: it measures WHAT IS IN VIEW -- the statistics and the
 pixel read are both restricted to the visible extent -- applies the SAR
 sqrt-gamma stretch, and pins the result. Panning and zooming afterwards do not
