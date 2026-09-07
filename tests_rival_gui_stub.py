@@ -49,6 +49,19 @@ for mod, names in ((qw, ["QMainWindow", "QWidget"]),
 # fresh mock.
 qg.QgsMapCanvas = MagicMock(side_effect=lambda *a, **k: MagicMock())
 
+# Same trap for the map tools: QgsMapToolZoom(canvas, False) and (canvas, True)
+# differ only by that flag, so one cached return_value would make zoom-in and
+# zoom-out indistinguishable. Record the arguments on each instance instead.
+def _tool_factory(name):
+    def make(*a, **k):
+        m = MagicMock()
+        m._tool, m._args = name, a
+        return m
+    return MagicMock(side_effect=make)
+
+qg.QgsMapToolPan  = _tool_factory("pan")
+qg.QgsMapToolZoom = _tool_factory("zoom")
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import DPQED_rival as R
 print("imported OK; QCDashboard built:", type(R.win).__name__)
@@ -334,19 +347,72 @@ print("REF_CANVAS_CRS='wgs84': canvas is WGS84, picks convert both ways, "
       "view rect converted", metric, "->", wgs_rect)
 R.REF_CANVAS_CRS = "working"
 
-# ── 9. pan mode swaps the tool on BOTH canvases ──────────────────────────────
+# ── 9. every map tool applies to BOTH canvases ───────────────────────────────
+# Real checkable buttons: the mock would report every button as checked at once,
+# so an exclusive row could not be told apart from a broken one.
+class _Button:
+    def __init__(self): self._on = False
+    def setCheckable(self, _): pass
+    def setToolTip(self, _): pass
+    def setChecked(self, v):
+        if v:
+            for b in win.tool_buttons.values():
+                b._on = False
+        self._on = bool(v)
+    def isChecked(self): return self._on
+
+win.tool_buttons = {m: _Button() for m in R.MAP_TOOLS}
+win.tool_buttons[R.TOOL_MARK].setChecked(True)
 win.init_map_tools()
+
 def tools():
     return (win.canvas_left.setMapTool.call_args[0][0],
             win.canvas_right.setMapTool.call_args[0][0])
 
-win.cb_pan.isChecked = MagicMock(return_value=True)
-win.toggle_pan_mode()
-assert tools() == (win.tool_pan_left, win.tool_pan_right), "pan not applied"
-win.cb_pan.isChecked = MagicMock(return_value=False)
-win.toggle_pan_mode()
+for mode in R.MAP_TOOLS:
+    win.set_map_tool(mode)
+    assert tools() == win.map_tools[mode], f"{mode} not applied to both canvases"
+    checked = [m for m, b in win.tool_buttons.items() if b.isChecked()]
+    assert checked == [mode], f"tool row not exclusive: {checked}"
+print("\nall four tools apply to both canvases, one selected at a time:",
+      ", ".join(R.MAP_TOOLS))
+
+# four distinct tool objects per canvas, and zoom-out really is the out variant
+per_canvas = [win.map_tools[m][0] for m in R.MAP_TOOLS]
+assert len(set(map(id, per_canvas))) == 4, "map tools are not distinct"
+assert win.map_tools[R.TOOL_PAN][0]._tool == "pan"
+zoom_in  = win.map_tools[R.TOOL_ZOOM_IN][0]
+zoom_out = win.map_tools[R.TOOL_ZOOM_OUT][0]
+assert zoom_in._tool == zoom_out._tool == "zoom"
+assert zoom_in._args[1] is False, zoom_in._args
+assert zoom_out._args[1] is True, zoom_out._args
+print("zoom in/out built as the in and out variants, one per canvas")
+
+# marking still routes to the DragMapTool the measuring paths reach by name
+win.set_map_tool(R.TOOL_MARK)
 assert tools() == (win.tool_left, win.tool_right), "marking not restored"
-print("\npan mode swaps both canvases, and restores marking")
+
+# ── 9b. with Sync Maps on, the reference follows the input's scale ────────────
+win.cb_sync.isChecked = MagicMock(return_value=True)
+win.canvas_left.extent = MagicMock(return_value=_Rect(320000, 1898000,
+                                                      330000, 1902000))
+rect = win._ref_view_rect(_PointXY(325000.0, 1900000.0))
+assert rect.xMaximum() - rect.xMinimum() == 10000.0, rect
+print("zoomed input (10 km wide) -> reference view matches:", rect)
+
+# unsynced, it falls back to the fixed reference width
+win.cb_sync.isChecked = MagicMock(return_value=False)
+rect = win._ref_view_rect(_PointXY(325000.0, 1900000.0))
+assert rect.xMaximum() - rect.xMinimum() == R.REF_VIEW_WIDTH_M, rect
+print("sync off -> reference view back to REF_VIEW_WIDTH_M:", rect)
+
+# a degenerate extent must not produce a zero-width view
+win.cb_sync.isChecked = MagicMock(return_value=True)
+win.canvas_left.extent = MagicMock(return_value=_Rect(0, 0, 0, 0))
+rect = win._ref_view_rect(_PointXY(325000.0, 1900000.0))
+assert rect.xMaximum() - rect.xMinimum() == R.REF_VIEW_WIDTH_M, rect
+print("degenerate input extent -> falls back, not a zero-width view")
+win.cb_sync.isChecked = MagicMock(return_value=False)
 
 # ── 10. the input R/G/B picker ───────────────────────────────────────────────
 class _Provider:

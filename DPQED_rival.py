@@ -28,8 +28,13 @@ band filter offers only tags the folder actually holds.
 Marking on the input canvas drives the reference canvas: the tile covering that
 ground is brought up, centred and marked, so the reference is always showing the
 place being measured. Clicking the same feature on the right then fills Ref X/Y
-and the row's error. 'Pan' (Ctrl+P) swaps both canvases to dragging the view
-instead of marking.
+and the row's error.
+
+Mark / Pan / Zoom In / Zoom Out (Ctrl+1..4) is one exclusive row applied to both
+canvases at once -- leaving one marking while the other is being zoomed only
+produces stray picks. Mark is the only tool that fills the table; the rest move
+the view. With 'Sync Maps' on the reference follows the input's centre and
+scale, so zooming either side keeps both at the same ground width.
 
 A multi-band input is composed from an R/G/B picker over the left canvas. Every
 slot offers every band and a band may be repeated, so a two-band NISAR chip can
@@ -70,10 +75,11 @@ from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QTableWidget, QTableWidgetItem, QPushButton,
                              QFileDialog, QHeaderView, QCheckBox, QComboBox,
                              QMessageBox, QApplication, QShortcut, QLabel,
-                             QFrame)
+                             QFrame, QButtonGroup)
 from PyQt5.QtCore import Qt, QObject, QEvent
 from PyQt5.QtGui import QKeySequence, QFont
-from qgis.gui import QgsMapCanvas, QgsMapTool, QgsMapToolPan, QgsVertexMarker
+from qgis.gui import (QgsMapCanvas, QgsMapTool, QgsMapToolPan, QgsMapToolZoom,
+                      QgsVertexMarker)
 from qgis.core import (QgsProject, QgsPointXY, QgsRasterLayer, QgsVectorLayer,
                        QgsGeometry, QgsCoordinateReferenceSystem,
                        QgsCoordinateTransform, QgsSingleBandGrayRenderer,
@@ -141,6 +147,14 @@ REF_CANVAS_CRS = "working"      # "working" | "wgs84"
 # widget's size and DPI and quietly does nothing on a canvas that has not been
 # laid out yet, which leaves the view at the origin with the raster off-screen.
 REF_VIEW_WIDTH_M = 2000.0
+
+# Map tools offered on both canvases, in button order. "mark" is the measuring
+# tool -- it is what fills the table; the rest only move the view.
+TOOL_MARK     = "mark"
+TOOL_PAN      = "pan"
+TOOL_ZOOM_IN  = "zoom in"
+TOOL_ZOOM_OUT = "zoom out"
+MAP_TOOLS = (TOOL_MARK, TOOL_PAN, TOOL_ZOOM_IN, TOOL_ZOOM_OUT)
 
 # Percentile clip for the input composite. A min/max stretch on SAR is dominated
 # by a handful of bright scatterers and leaves the scene black.
@@ -754,10 +768,24 @@ class QCDashboard(QMainWindow):
         self.btn_del.setToolTip("Delete Row  (Ctrl+Delete)")
         self.cb_sync      = QCheckBox("Sync Maps")
         self.cb_sync.setChecked(True)
-        self.cb_pan = QCheckBox("Pan")
-        self.cb_pan.setToolTip(
-            "Drag to pan both canvases instead of marking points  (Ctrl+P).\n"
-            "Turn off to go back to marking.")
+        # One exclusive row of map tools, applied to both canvases at once.
+        self.tool_buttons = {}
+        self.tool_group   = QButtonGroup(self)
+        self.tool_group.setExclusive(True)
+        tips = {
+            TOOL_MARK: "Click or drag to mark the point being measured (Ctrl+1)",
+            TOOL_PAN: "Drag to move the view (Ctrl+2)",
+            TOOL_ZOOM_IN: "Drag a box, or click, to zoom in (Ctrl+3)",
+            TOOL_ZOOM_OUT: "Drag a box, or click, to zoom out (Ctrl+4)",
+        }
+        for i, mode in enumerate(MAP_TOOLS):
+            button = QPushButton(mode.title())
+            button.setCheckable(True)
+            button.setToolTip(tips[mode] + "\n\nApplies to both canvases; the "
+                              "mouse wheel zooms whichever tool is active.")
+            self.tool_group.addButton(button, i)
+            self.tool_buttons[mode] = button
+        self.tool_buttons[TOOL_MARK].setChecked(True)
         self.cb_normalize_input = QCheckBox("Normalize NISAR")
         self.cb_normalize_input.setChecked(False)
         self.cb_normalize_input.setToolTip(
@@ -802,10 +830,10 @@ class QCDashboard(QMainWindow):
         map_layout.addWidget(self.canvas_right)
 
         btn_layout = QHBoxLayout()
-        for w in [self.btn_input_tif, self.btn_reference_folder,
-                  self.btn_load, self.btn_add, self.btn_save,
-                  self.btn_del, self.cb_pan, self.cb_sync,
-                  self.cb_normalize_input, self.cb_normalize]:
+        for w in ([self.btn_input_tif, self.btn_reference_folder,
+                   self.btn_load, self.btn_add, self.btn_save, self.btn_del]
+                  + [self.tool_buttons[m] for m in MAP_TOOLS]
+                  + [self.cb_sync, self.cb_normalize_input, self.cb_normalize]):
             btn_layout.addWidget(w)
 
         main_layout = QVBoxLayout()
@@ -830,7 +858,7 @@ class QCDashboard(QMainWindow):
         self.dropdown_ref.currentIndexChanged.connect(self.load_reference_tif_from_dropdown)
         self.dropdown_band.currentIndexChanged.connect(lambda _: self.filter_reference_tifs())
         self.cb_normalize.stateChanged.connect(self.toggle_normalization)
-        self.cb_pan.stateChanged.connect(lambda _: self.toggle_pan_mode())
+        self.tool_group.buttonClicked.connect(lambda _: self.apply_map_tool())
         self.cb_normalize_input.stateChanged.connect(
             lambda _: self.apply_input_bands())
         for combo in self.band_combos:
@@ -842,8 +870,9 @@ class QCDashboard(QMainWindow):
         QShortcut(QKeySequence("Ctrl+Delete"), self).activated.connect(self.delete_row)
         QShortcut(QKeySequence("F5"),          self).activated.connect(self.sync_view_to_row)
         QShortcut(QKeySequence("Escape"),      self).activated.connect(self.clear_markers)
-        QShortcut(QKeySequence("Ctrl+P"),       self).activated.connect(
-            lambda: self.cb_pan.setChecked(not self.cb_pan.isChecked()))
+        for i, mode in enumerate(MAP_TOOLS, start=1):
+            QShortcut(QKeySequence(f"Ctrl+{i}"), self).activated.connect(
+                lambda m=mode: self.set_map_tool(m))
 
         self.auto_connect_layers()
         self.init_map_tools()
@@ -1073,12 +1102,34 @@ class QCDashboard(QMainWindow):
             print(f"[LOAD] extent transform failed: {e}")
             return lyr.extent()
 
-    def _ref_view_rect(self, pt, width_m=REF_VIEW_WIDTH_M):
-        """A view box of fixed ground width around a working-CRS point.
+    def _left_view_width(self):
+        """The input canvas's current ground width in metres, or None."""
+        try:
+            extent = self.canvas_left.extent()
+            width = float(extent.xMaximum()) - float(extent.xMinimum())
+        except Exception:
+            return None
+        return width if width > 0 else None
+
+    def _ref_view_rect(self, pt, width_m=None):
+        """A view box of ground width around a working-CRS point.
 
         Built in metres and then converted, so it is the same patch of ground
         whichever CRS the reference canvas is drawing in.
+
+        With 'Sync Maps' on, the width follows the input canvas, so zooming
+        either side keeps the two showing the same scale -- which is the point
+        of having a zoom tool at all. Otherwise it is REF_VIEW_WIDTH_M.
         """
+        if width_m is None:
+            width_m = None
+            try:
+                if self.cb_sync.isChecked():
+                    width_m = self._left_view_width()
+            except Exception:
+                width_m = None
+            if width_m is None:
+                width_m = REF_VIEW_WIDTH_M
         aspect = 1.0
         try:
             size = self.canvas_right.size()
@@ -1733,7 +1784,11 @@ class QCDashboard(QMainWindow):
                 self.cb_sync.setChecked(True)
 
     def sync_canvas_extents(self):
-        """Pan left -> pan right to the same point, both in the working CRS."""
+        """Follow the input canvas: same centre and, now, the same scale.
+
+        Fired by extentsChanged, so it covers panning and zooming alike -- the
+        reference tracks whatever the input view does.
+        """
         if not self.cb_sync.isChecked() or self._syncing:
             return
         self._syncing = True
@@ -1909,35 +1964,59 @@ class QCDashboard(QMainWindow):
             self.canvas_right.refresh()
 
     def init_map_tools(self):
+        """Build one set of map tools per canvas, then activate the current one."""
         self._apply_canvas_crs()
-        self.tool_left      = DragMapTool(self.canvas_left,  self, True)
-        self.tool_right     = DragMapTool(self.canvas_right, self, False)
-        self.tool_pan_left  = QgsMapToolPan(self.canvas_left)
-        self.tool_pan_right = QgsMapToolPan(self.canvas_right)
-        self.toggle_pan_mode()
+        self.map_tools = {
+            TOOL_MARK: (DragMapTool(self.canvas_left, self, True),
+                        DragMapTool(self.canvas_right, self, False)),
+            TOOL_PAN: (QgsMapToolPan(self.canvas_left),
+                       QgsMapToolPan(self.canvas_right)),
+            TOOL_ZOOM_IN: (QgsMapToolZoom(self.canvas_left, False),
+                           QgsMapToolZoom(self.canvas_right, False)),
+            TOOL_ZOOM_OUT: (QgsMapToolZoom(self.canvas_left, True),
+                            QgsMapToolZoom(self.canvas_right, True)),
+        }
+        # kept for the marking paths, which reach for these by name
+        self.tool_left, self.tool_right = self.map_tools[TOOL_MARK]
+        self.apply_map_tool()
 
-    def toggle_pan_mode(self, _state=None):
-        """Swap both canvases between marking points and panning.
+    def current_map_tool(self):
+        for mode, button in self.tool_buttons.items():
+            if button.isChecked():
+                return mode
+        return TOOL_MARK
 
-        One toggle for both: the canvases are linked, so leaving one in marking
-        mode while panning the other only produces stray picks. The mode is read
-        from the checkbox rather than the signal argument, which arrives as an
-        int from stateChanged but as a bool from a direct call.
+    def set_map_tool(self, mode):
+        """Select a tool by name, keeping the button row in step."""
+        button = self.tool_buttons.get(mode)
+        if button is None:
+            return
+        button.setChecked(True)
+        self.apply_map_tool()
+
+    def apply_map_tool(self, _checked=None):
+        """Put the selected tool on BOTH canvases.
+
+        One selection for both: the canvases are linked, so leaving one in
+        marking mode while zooming the other only produces stray picks. The mode
+        is read from the button row rather than a signal argument, which arrives
+        differently depending on how the change was made.
         """
-        panning = bool(self.cb_pan.isChecked())
-        try:
-            self.canvas_left.setMapTool(
-                self.tool_pan_left if panning else self.tool_left)
-            self.canvas_right.setMapTool(
-                self.tool_pan_right if panning else self.tool_right)
-        except AttributeError:
+        mode = self.current_map_tool()
+        tools = getattr(self, "map_tools", None)
+        if not tools:
             return          # called before init_map_tools
+        left, right = tools[mode]
+        self.canvas_left.setMapTool(left)
+        self.canvas_right.setMapTool(right)
+        cursor = {TOOL_MARK: Qt.CrossCursor,
+                  TOOL_PAN: Qt.OpenHandCursor}.get(mode, Qt.CrossCursor)
         for canvas in (self.canvas_left, self.canvas_right):
             try:
-                canvas.setCursor(Qt.OpenHandCursor if panning else Qt.CrossCursor)
+                canvas.setCursor(cursor)
             except Exception:
                 pass
-        print(f"[TOOL] {'pan' if panning else 'mark'} mode")
+        print(f"[TOOL] {mode}")
 
     # ── INPUT BAND COMPOSITE ──────────────────────────────────────────────────
     def _band_labels(self, layer):
