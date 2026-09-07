@@ -45,10 +45,9 @@ the arrows come from either a rotated marker (rotation = bearing, size = mag) or
 a geometry generator, since a metres-long error is invisible at scene scale and
 has to be drawn scaled.
 
-The mark is a coloured cross -- red for the input, green for the reference --
-over a wider translucent yellow one. The halo is what makes it findable over
-bright SAR speckle or a pale ortho, where a thin cross disappears; the
-translucency keeps the pixel being measured visible through it.
+The mark is a solid cross, magenta for the input and yellow for its reference.
+The input is commonly shown as a red/cyan composite and the reference as
+greyscale, so red, green and any grey each vanish into one of the two.
 
 The arrow keys over a canvas move that side's mark by one source pixel (Shift
 for ten), rather than panning the view: while measuring, the thing being
@@ -63,11 +62,14 @@ grey. Bands are listed by the names the raster carries -- cog_locate's --gtiff
 writes the polarization into each description, so a chip offers HH and HV rather
 than 'Band 1'.
 
-'Normalize NISAR' and 'Normalize Ref' select the same SAR sqrt-gamma stretch for
-their canvas, computed by one shared routine so the word means the same thing on
-both. Unticked, the input clips each channel at its 2%-98% percentiles. Either
-way a plain min/max is avoided: on SAR it is set by a handful of bright
-scatterers and renders the scene black.
+''Normalize NISAR' and 'Normalize Ref' select the same SAR sqrt-gamma stretch,
+computed by one shared routine -- but each over its own data range. The
+reference keeps NORM_MIN..NORM_MAX, tuned for its DN; the input takes the band's
+own sampled range, because a NISAR chip in float32 dB runs about -28..+2 and
+forcing it through 0-1500 leaves every pixel at the bottom of the curve, which
+renders the scene black. Unticked, the input clips each channel at its 2%-98%
+percentiles. Either way a plain min/max is avoided: on SAR it is set by a
+handful of bright scatterers and renders the scene black.
 
 NISAR rasters are UTM and the C1/L8 references are WGS84. By default both
 canvases are pinned to the working CRS and QGIS reprojects the reference as it
@@ -2482,10 +2484,11 @@ class QCDashboard(QMainWindow):
     def _stretch_for(self, layer, band):
         """Contrast enhancement for one input band.
 
-        'Normalize NISAR' selects the same SAR sqrt-gamma stretch the reference
-        uses; otherwise the band is clipped at the RGB percentiles. Either way a
-        plain min/max is avoided -- on SAR it is set by a handful of bright
-        scatterers and renders the scene black.
+        'Normalize NISAR' applies the same SAR sqrt-gamma stretch the reference
+        uses, but over the band's OWN sampled range rather than the reference's
+        DN range -- a dB chip forced through 0-1500 renders black. Otherwise the
+        band is clipped at the RGB percentiles. Either way a plain min/max is
+        avoided: on SAR it is set by a handful of bright scatterers.
 
         Bounds are cached per raster, band and stretch: re-picking the channel
         order is a common action and must not recompute statistics each time.
