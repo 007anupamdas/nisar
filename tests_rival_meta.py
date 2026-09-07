@@ -3,7 +3,9 @@
 The pure helpers in DPQED_rival.py sit between explicit markers; this execs that
 exact slice, so what is tested is the code that ships, not a copy of it.
 """
+import ast
 import json
+import math
 import os
 import re
 import sys
@@ -18,20 +20,26 @@ END   = "# ── END PURE HELPERS"
 
 def load_helpers():
     text = open(SRC, encoding="utf-8").read()
-    # Every module-level UPPER_CASE literal the helpers may reference. Picked up
-    # generically so a new constant does not need adding here by hand.
+    # Every module-level UPPER_CASE literal the helpers may reference. Parsed
+    # from the AST rather than matched line by line, so a multi-line list like
+    # SHP_FIELDS is picked up as readily as a scalar, and nothing is executed.
     consts = {}
-    for name, expr in re.findall(r"^([A-Z][A-Z0-9_]*)\s*=\s*(.+?)\s*(?:#.*)?$",
-                                 text, re.M):
-        try:
-            consts[name] = eval(expr, {"__builtins__": {}}, dict(consts))
-        except Exception:
-            pass
+    for node in ast.parse(text).body:
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if not isinstance(target, ast.Name) or not target.id.isupper():
+                continue
+            try:
+                consts[target.id] = ast.literal_eval(node.value)
+            except (ValueError, TypeError, SyntaxError):
+                pass
     for required in ("BAND_SPLIT_HZ", "BAND_UNKNOWN", "META_SUFFIXES_TEXT",
-                     "META_SUFFIX_XML", "DEGREE_TILE_SIZE", "RASTER_EXTS"):
+                     "META_SUFFIX_XML", "DEGREE_TILE_SIZE", "RASTER_EXTS",
+                     "SHP_FIELDS"):
         assert required in consts, f"constant {required} not found"
     body = text[text.index(BEGIN):text.index(END)]
-    ns = dict(consts, os=os, re=re, json=json, ET=ET, print=print)
+    ns = dict(consts, os=os, re=re, json=json, math=math, ET=ET, print=print)
     exec(compile(body, SRC, "exec"), ns)
     return ns
 
@@ -323,6 +331,38 @@ check("sidecar beats a tile name",
 check("rasters with nothing to place them",
       H["detect_reference_mode"](["scene_a.tif", "readme.txt"]), None)
 check("empty folder", H["detect_reference_mode"]([]), None)
+
+# ── 10. shapefile export records ─────────────────────────────────────────────
+# dx/dy are In - Ref, matching the table's Error columns, the CSV and dqe_imw.
+# quiver.py forms Ref - In, so the two point opposite ways -- stated in the
+# docstring and pinned here so it cannot drift silently.
+row = H["quiver_row"](3, 325010.0, 1900007.0, 325000.0, 1900000.0,
+                      (78.5, 17.2), (78.4999, 17.1999))
+check("row index is 1-based as passed", row["row"], 3)
+check("dx is In - Ref", row["dx"], 10.0)
+check("dy is In - Ref", row["dy"], 7.0)
+check("magnitude", round(row["mag"], 4), round((10.0 ** 2 + 7.0 ** 2) ** 0.5, 4))
+check("lon/lat carried for both sides",
+      (row["in_lon"], row["in_lat"], row["ref_lon"], row["ref_lat"]),
+      (78.5, 17.2, 78.4999, 17.1999))
+
+# bearing is a compass angle: 0 north, 90 east, so it can rotate a marker
+for (dx, dy), want in (((0, 1), 0.0), ((1, 0), 90.0),
+                       ((0, -1), 180.0), ((-1, 0), 270.0)):
+    b = H["quiver_row"](1, dx, dy, 0.0, 0.0)["bearing"]
+    check(f"bearing of ({dx},{dy})", round(b, 6), want)
+
+check("no lon/lat available -> None, not 0",
+      (H["quiver_row"](1, 1.0, 1.0, 0.0, 0.0)["in_lon"],
+       H["quiver_row"](1, 1.0, 1.0, 0.0, 0.0)["ref_lat"]), (None, None))
+
+# every field the writer declares must be produced, and DBF caps names at 10
+fields = [name for name, _ in H["SHP_FIELDS"]]
+check("every declared field is produced",
+      sorted(fields) == sorted(row.keys()), True)
+check("no field name exceeds the DBF 10-character limit",
+      max(len(f) for f in fields) <= 10, True)
+check("field names are unique", len(set(fields)), len(fields))
 
 print()
 if failures:

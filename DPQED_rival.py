@@ -36,6 +36,15 @@ produces stray picks. Mark is the only tool that fills the table; the rest move
 the view. With 'Sync Maps' on the reference follows the input's centre and
 scale, so zooming either side keeps both at the same ground width.
 
+'Export SHP' writes the marked rows as a point shapefile in the working CRS:
+a point per pick at its input position, carrying in/ref coordinates in both map
+units and lon/lat, the error as dx/dy (In - Ref, as in the table and the CSV),
+and its magnitude and compass bearing. Two scenes over one area export to two
+files that overlay directly, and quiver.py can read the lat/lon columns. In QGIS
+the arrows come from either a rotated marker (rotation = bearing, size = mag) or
+a geometry generator, since a metres-long error is invisible at scene scale and
+has to be drawn scaled.
+
 The mark is a coloured cross -- red for the input, green for the reference --
 over a wider translucent yellow one. The halo is what makes it findable over
 bright SAR speckle or a pale ortho, where a thin cross disappears; the
@@ -76,6 +85,7 @@ north-up extent.
 
 import csv
 import json
+import math
 import os
 import sys
 import re
@@ -95,7 +105,9 @@ from qgis.core import (QgsProject, QgsPointXY, QgsRasterLayer, QgsVectorLayer,
                        QgsGeometry, QgsCoordinateReferenceSystem,
                        QgsCoordinateTransform, QgsSingleBandGrayRenderer,
                        QgsMultiBandColorRenderer, QgsContrastEnhancement,
-                       QgsRasterBandStats, QgsRectangle)
+                       QgsRasterBandStats, QgsRectangle, QgsFields, QgsField,
+                       QgsFeature, QgsVectorFileWriter, QgsWkbTypes)
+from PyQt5.QtCore import QVariant
 
 
 # ── CONSTANTS ─────────────────────────────────────────────────────────────────
@@ -181,6 +193,19 @@ MARKER_PEN_WIDTH      = 1
 MARKER_OUTLINE_RGBA   = (255, 255, 0, 110)     # yellow, ~43% opaque
 MARKER_OUTLINE_WIDTH  = 4
 MARKER_OUTLINE_EXTRA  = 2                      # px wider than the cross itself
+
+# Shapefile export, for quiver.py and for comparing two scenes over one area in
+# QGIS. DBF caps a field name at 10 characters, so these are already at the
+# limit -- do not lengthen them.
+SHP_FIELDS = [
+    ("row",     "int"),      # 1-based table row, so a point maps back to a pick
+    ("in_x",    "double"), ("in_y",    "double"),
+    ("in_lon",  "double"), ("in_lat",  "double"),
+    ("ref_x",   "double"), ("ref_y",   "double"),
+    ("ref_lon", "double"), ("ref_lat", "double"),
+    ("dx",      "double"), ("dy",      "double"),
+    ("mag",     "double"), ("bearing", "double"),
+]
 
 # Percentile clip for the input composite. A min/max stretch on SAR is dominated
 # by a handful of bright scatterers and leaves the scene black.
@@ -644,6 +669,33 @@ def is_meta_file(name):
     return None
 
 
+def quiver_row(index, ix, iy, rx, ry, in_lonlat=None, ref_lonlat=None):
+    """One export record: the pick, its reference, and the error between them.
+
+    dx/dy are In - Ref, matching the table's own Error columns, the CSV export
+    and the dqe_imw convention. quiver.py forms Ref - In, so an arrow drawn from
+    these fields points the opposite way to one drawn from its x_err/y_err --
+    negate, or read the arrow as the offset of the image from the truth.
+
+    bearing is the compass direction of (dx, dy): 0 north, 90 east, so it can
+    drive a rotated marker directly.
+    """
+    dx, dy = ix - rx, iy - ry
+    row = {
+        "row": int(index),
+        "in_x": float(ix), "in_y": float(iy),
+        "ref_x": float(rx), "ref_y": float(ry),
+        "dx": dx, "dy": dy,
+        "mag": math.hypot(dx, dy),
+        "bearing": math.degrees(math.atan2(dx, dy)) % 360.0,
+    }
+    for prefix, lonlat in (("in", in_lonlat), ("ref", ref_lonlat)):
+        lon, lat = lonlat if lonlat else (None, None)
+        row[f"{prefix}_lon"] = None if lon is None else float(lon)
+        row[f"{prefix}_lat"] = None if lat is None else float(lat)
+    return row
+
+
 # ── END PURE HELPERS ──────────────────────────────────────────────────────────
 
 
@@ -842,6 +894,11 @@ class QCDashboard(QMainWindow):
         self.btn_add.setToolTip("Add Row  (Ctrl+N)")
         self.btn_save  = QPushButton("Export CSV")
         self.btn_save.setToolTip("Export CSV  (Ctrl+S)")
+        self.btn_shp   = QPushButton("Export SHP")
+        self.btn_shp.setToolTip(
+            "Export the marked rows as a point shapefile  (Ctrl+Shift+S).\n"
+            "Points sit at the input pick, carrying dx/dy, magnitude and\n"
+            "bearing, so two scenes over one area overlay as quiver plots.")
         self.btn_del   = QPushButton("Delete Row")
         self.btn_del.setToolTip("Delete Row  (Ctrl+Delete)")
         self.cb_sync      = QCheckBox("Sync Maps")
@@ -909,7 +966,8 @@ class QCDashboard(QMainWindow):
 
         btn_layout = QHBoxLayout()
         for w in ([self.btn_input_tif, self.btn_reference_folder,
-                   self.btn_load, self.btn_add, self.btn_save, self.btn_del]
+                   self.btn_load, self.btn_add, self.btn_save, self.btn_shp,
+                   self.btn_del]
                   + [self.tool_buttons[m] for m in MAP_TOOLS]
                   + [self.cb_sync, self.cb_normalize_input, self.cb_normalize]):
             btn_layout.addWidget(w)
@@ -929,6 +987,7 @@ class QCDashboard(QMainWindow):
         self.btn_load.clicked.connect(self.load_csv_smart)
         self.btn_add.clicked.connect(self.add_manual_row)
         self.btn_save.clicked.connect(self.save_csv)
+        self.btn_shp.clicked.connect(self.save_shapefile)
         self.btn_del.clicked.connect(self.delete_row)
         self.table.itemChanged.connect(self.handle_manual_typing)
         self.table.itemSelectionChanged.connect(self.sync_view_to_row)
@@ -944,6 +1003,8 @@ class QCDashboard(QMainWindow):
 
         QShortcut(QKeySequence("Ctrl+N"),      self).activated.connect(self.add_manual_row)
         QShortcut(QKeySequence("Ctrl+S"),      self).activated.connect(self.save_csv)
+        QShortcut(QKeySequence("Ctrl+Shift+S"), self).activated.connect(
+            self.save_shapefile)
         QShortcut(QKeySequence("Ctrl+O"),      self).activated.connect(self.load_csv_smart)
         QShortcut(QKeySequence("Ctrl+Delete"), self).activated.connect(self.delete_row)
         QShortcut(QKeySequence("F5"),          self).activated.connect(self.sync_view_to_row)
@@ -1976,6 +2037,114 @@ class QCDashboard(QMainWindow):
                     self.table.blockSignals(False)
                 self.calculate_error(r)
         self.update_stats()
+
+    # ── SHAPEFILE EXPORT ──────────────────────────────────────────────────────
+    def export_rows(self):
+        """Every fully marked row as an export record, in table order.
+
+        A row needs both a pick and its reference to describe an error, so rows
+        with either side unset are skipped rather than exported as an offset
+        from the origin.
+        """
+        rows = []
+        for r in range(self.table.rowCount()):
+            try:
+                ix = float(self.table.item(r, 0).text())
+                iy = float(self.table.item(r, 1).text())
+                rx = float(self.table.item(r, 2).text())
+                ry = float(self.table.item(r, 3).text())
+            except (AttributeError, ValueError):
+                continue
+            if (ix == 0.0 and iy == 0.0) or (rx == 0.0 and ry == 0.0):
+                continue
+            rows.append(quiver_row(r + 1, ix, iy, rx, ry,
+                                   self._to_lonlat(ix, iy),
+                                   self._to_lonlat(rx, ry)))
+        return rows
+
+    def _to_lonlat(self, x, y):
+        try:
+            p = self.transform_proj_to_wgs.transform(QgsPointXY(x, y))
+            return (p.x(), p.y())
+        except Exception:
+            return None
+
+    def save_shapefile(self):
+        """Write the marked rows as a point layer, one point per pick.
+
+        Points sit at the input position -- where the feature was measured --
+        carrying the error as dx/dy plus its magnitude and bearing, so the same
+        file serves a scaled quiver in QGIS and quiver.py's lat/lon columns. Two
+        scenes over one area export to two files and overlay directly.
+        """
+        rows = self.export_rows()
+        if not rows:
+            QMessageBox.warning(
+                self, "Export SHP",
+                "No fully marked rows. A row needs both an input and a "
+                "reference pick before it describes an error.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Shapefile", "", "Shapefile (*.shp)")
+        if not path:
+            return
+        if not path.lower().endswith(".shp"):
+            path += ".shp"
+
+        fields = QgsFields()
+        types = {"int": QVariant.Int, "double": QVariant.Double}
+        for name, kind in SHP_FIELDS:
+            fields.append(QgsField(name, types[kind]))
+
+        try:
+            writer = self._make_writer(path, fields)
+            if writer is None:
+                return
+            for row in rows:
+                feat = QgsFeature(fields)
+                feat.setGeometry(QgsGeometry.fromPointXY(
+                    QgsPointXY(row["in_x"], row["in_y"])))
+                feat.setAttributes([row[name] for name, _ in SHP_FIELDS])
+                writer.addFeature(feat)
+            del writer          # flushes and closes the .shp/.dbf/.shx/.prj
+        except Exception as e:
+            QMessageBox.critical(self, "Export SHP", f"Could not write:\n{e}")
+            return
+
+        crs = self.proj_crs.authid() or self.proj_crs.description()
+        print(f"[EXPORT] {len(rows)} point(s) -> {path} [{crs}]")
+        QMessageBox.information(
+            self, "Export SHP",
+            f"{len(rows)} point(s) written to\n{path}\n\nCRS: {crs}\n"
+            f"Fields: {', '.join(n for n, _ in SHP_FIELDS)}")
+
+    def _make_writer(self, path, fields):
+        """QgsVectorFileWriter across the versions that changed its API."""
+        options = None
+        try:
+            options = QgsVectorFileWriter.SaveVectorOptions()
+            options.driverName = "ESRI Shapefile"
+            options.fileEncoding = "UTF-8"
+        except Exception:
+            options = None
+        if options is not None:
+            for factory in ("create", "createWriter"):
+                make = getattr(QgsVectorFileWriter, factory, None)
+                if make is None:
+                    continue
+                try:
+                    return make(path, fields, QgsWkbTypes.Point, self.proj_crs,
+                                QgsProject.instance().transformContext(),
+                                options)
+                except Exception:
+                    continue
+        try:
+            return QgsVectorFileWriter(path, "UTF-8", fields, QgsWkbTypes.Point,
+                                       self.proj_crs, "ESRI Shapefile")
+        except Exception as e:
+            QMessageBox.critical(self, "Export SHP",
+                                 f"No usable shapefile writer:\n{e}")
+            return None
 
     def save_csv(self):
         path, _ = QFileDialog.getSaveFileName(self, "Export Results", "", "CSV Files (*.csv)")

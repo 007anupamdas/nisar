@@ -715,6 +715,50 @@ assert step is not None and step[0] > 0 and step[1] > 0, step
 print("WGS84 reference pixel measured through the transform:",
       tuple(round(v, 3) for v in step))
 
+# ── 13. shapefile export collects only fully marked rows ─────────────────────
+class _Rows:
+    def __init__(self, rows): self._rows = rows
+    def rowCount(self): return len(self._rows)
+    def item(self, row, col):
+        v = self._rows[row][col]
+        return None if v is None else MagicMock(text=lambda v=v: v)
+
+win.transform_proj_to_wgs = MagicMock(
+    transform=MagicMock(return_value=_PointXY(78.5, 17.2)))
+win.table = _Rows([
+    ["325010.000", "1900007.000", "325000.000", "1900000.000"],   # complete
+    ["0.000", "0.000", "325000.000", "1900000.000"],              # no input
+    ["325010.000", "1900007.000", "0.000", "0.000"],              # no reference
+    ["325020.000", "1900000.000", "325000.000", "1900000.000"],   # complete
+    [None, None, None, None],                                     # empty row
+])
+rows = win.export_rows()
+assert [r["row"] for r in rows] == [1, 4], [r["row"] for r in rows]
+print("\nexport skips half-marked and empty rows, keeping table numbering:",
+      [r["row"] for r in rows])
+assert rows[0]["dx"] == 10.0 and rows[0]["dy"] == 7.0, rows[0]
+assert rows[1]["dx"] == 20.0 and rows[1]["dy"] == 0.0, rows[1]
+assert rows[1]["bearing"] == 90.0, rows[1]        # due east
+print("errors and bearings carried through:",
+      [(r["dx"], r["dy"], r["bearing"]) for r in rows])
+
+# a row is skipped rather than exported as an offset from the origin
+assert all(r["ref_x"] != 0.0 for r in rows), rows
+
+# lon/lat come from the working-CRS transform, not from the map units
+assert rows[0]["in_lon"] == 78.5 and rows[0]["in_lat"] == 17.2, rows[0]
+print("lon/lat filled from the transform, for quiver.py's columns")
+
+# nothing marked at all -> the writer is never reached
+win.table = _Rows([["0.000", "0.000", "0.000", "0.000"]])
+assert win.export_rows() == []
+qw.QFileDialog.getSaveFileName = MagicMock(return_value=("/tmp/should_not.shp", ""))
+del warned[:]
+win.save_shapefile()
+assert not qw.QFileDialog.getSaveFileName.called, "asked for a path with no rows"
+assert warned and "marked" in warned[0], warned
+print("no marked rows -> warned, no file dialog, nothing written")
+
 for d in (d1, d2, d3, d4):
     shutil.rmtree(d, ignore_errors=True)
 print("\nstubbed integration OK")
