@@ -12,7 +12,7 @@ fixed: a MagicMock caches its return_value, so QgsMapCanvas() handed back ONE
 object for both canvases, and QgsPointXY(...) handed back one point for every
 coordinate. Both now get real stand-ins.
 """
-import os, sys, shutil, tempfile
+import os, sys, shutil, tempfile, types
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 from unittest.mock import MagicMock
@@ -595,46 +595,47 @@ win.clear_stretch_cache("/big/scene.tif")
 assert not any(k[0] == "/big/scene.tif" for k in win._stretch_cache)
 print("loading a raster clears its own cached bounds")
 
-# ── 11c. the mark is a coloured cross over a translucent yellow halo ─────────
+# ── 11c. the mark is a solid cross in a contrasting colour ───────────────────
 made = []
 R.QgsVertexMarker = MagicMock(side_effect=lambda canvas: (
     made.append(MagicMock()) or made[-1]))
-R.QColor = lambda *rgba: ("color", rgba)
+R.QColor = lambda *rgb: ("color", rgb)
 
 # section 6 replaced draw_marker with a mock to check follow_input_point; put
 # the real method back so this exercises the shipped drawing code
 win.draw_marker = R.QCDashboard.draw_marker.__get__(win, R.QCDashboard)
 win.markers = {"left": [], "right": []}
 win.canvas_left.scene.return_value = MagicMock()
-win.draw_marker(_PointXY(325000.0, 1900000.0), win.canvas_left, "RED")
+win.draw_marker(_PointXY(325000.0, 1900000.0), win.canvas_left,
+                R.MARKER_COLOR_INPUT)
 
 items = win.markers["left"]
-assert len(items) == 2, items
-halo, cross = items
-assert halo.setColor.call_args[0][0] == ("color", R.MARKER_OUTLINE_RGBA)
-assert cross.setColor.call_args[0][0] == "RED"
-# translucent: the alpha must be well short of opaque
-assert 0 < R.MARKER_OUTLINE_RGBA[3] < 255, R.MARKER_OUTLINE_RGBA
-# the halo is the wider one, and drawn first so the cross sits on top
-assert (halo.setPenWidth.call_args[0][0]
-        > cross.setPenWidth.call_args[0][0]), "halo is not the wider pen"
-assert (halo.setIconSize.call_args[0][0]
-        > cross.setIconSize.call_args[0][0]), "halo is not the larger icon"
-assert items.index(halo) < items.index(cross), "halo drawn over the cross"
-print("\nmark = %s cross over a translucent yellow halo, alpha %d/255"
-      % (cross.setColor.call_args[0][0], R.MARKER_OUTLINE_RGBA[3]))
+assert len(items) == 1, items          # one solid cross, no halo behind it
+assert items[0].setColor.call_args[0][0] == ("color", R.MARKER_COLOR_INPUT)
 
-# re-marking takes BOTH items off the scene, not just one
+# The input is shown as a red/cyan composite and the reference as greyscale, so
+# a red, green or grey mark disappears into one of them.
+for name, rgb in (("input", R.MARKER_COLOR_INPUT), ("ref", R.MARKER_COLOR_REF)):
+    r, g, b = rgb
+    assert not (r == g == b), f"{name} mark is a grey"
+    assert rgb not in ((255, 0, 0), (0, 255, 0)), f"{name} mark is red or green"
+assert R.MARKER_COLOR_INPUT != R.MARKER_COLOR_REF, "both marks the same colour"
+print("\nsolid single cross, input %s / ref %s, neither red, green nor grey"
+      % (R.MARKER_COLOR_INPUT, R.MARKER_COLOR_REF))
+
+# re-marking takes the old item off the scene
 scene = win.canvas_left.scene.return_value
 scene.removeItem.reset_mock()
-win.draw_marker(_PointXY(325010.0, 1900000.0), win.canvas_left, "RED")
+win.draw_marker(_PointXY(325010.0, 1900000.0), win.canvas_left,
+                R.MARKER_COLOR_INPUT)
 removed = [c[0][0] for c in scene.removeItem.call_args_list]
-assert set(map(id, removed)) == {id(halo), id(cross)}, removed
-print("re-marking removes both items, leaving no orphan halo")
+assert removed == [items[0]], removed
+print("re-marking removes the previous cross, leaving no orphan")
 
 # clear_markers empties both canvases
 win.canvas_right.scene.return_value = MagicMock()
-win.draw_marker(_PointXY(325000.0, 1900000.0), win.canvas_right, "GREEN")
+win.draw_marker(_PointXY(325000.0, 1900000.0), win.canvas_right,
+                R.MARKER_COLOR_REF)
 win.clear_markers()
 assert win.markers["left"] == [] and win.markers["right"] == [], win.markers
 print("clear_markers empties both canvases")
@@ -714,6 +715,86 @@ step = win._pixel_step(False, _PointXY(325000.0, 1900000.0))
 assert step is not None and step[0] > 0 and step[1] > 0, step
 print("WGS84 reference pixel measured through the transform:",
       tuple(round(v, 3) for v in step))
+
+# ── 12b. the gamma stretch on dB data, and on data carrying NaN ──────────────
+# Reported: 'Normalize NISAR' renders the input black while the reference
+# normalises fine. Two independent causes, both exercised here against real
+# numpy arrays through a stubbed GDAL.
+import numpy as np
+
+def fake_gdal(array, nodata=None):
+    band = MagicMock()
+    band.XSize, band.YSize = array.shape[1], array.shape[0]
+    band.ReadAsArray = MagicMock(return_value=array)
+    band.GetNoDataValue = MagicMock(return_value=nodata)
+    ds = MagicMock()
+    ds.GetRasterBand = MagicMock(return_value=band)
+    osgeo = types.ModuleType("osgeo")
+    gdal = types.ModuleType("osgeo.gdal")
+    gdal.GA_ReadOnly = 0
+    gdal.Open = MagicMock(return_value=ds)
+    osgeo.gdal = gdal
+    sys.modules["osgeo"], sys.modules["osgeo.gdal"] = osgeo, gdal
+
+# section 11 replaced _gamma_bounds with a mock to check the Normalize routing;
+# put the real method back so this exercises the shipped arithmetic
+win._gamma_bounds = R.QCDashboard._gamma_bounds.__get__(win, R.QCDashboard)
+
+rng = np.random.default_rng(0)
+
+# (1) an S-band-like DN scene over the reference's own 0-1500 range: unchanged
+dn = rng.uniform(20.0, 900.0, size=(64, 64))
+fake_gdal(dn)
+lo, hi = win._gamma_bounds("/ref.tif", 1)
+assert lo is not None and hi > lo, (lo, hi)
+assert R.NORM_MIN <= lo < hi <= R.NORM_MAX, (lo, hi)
+print("\nreference DN scene over NORM_MIN..NORM_MAX: bounds",
+      (round(lo, 1), round(hi, 1)), "-- behaviour unchanged")
+
+# (2) a NISAR chip in float32 dB. Forcing the reference's 0-1500 range clips
+# every pixel to the very bottom of the curve, which is what rendered black.
+db = rng.uniform(-28.0, 2.0, size=(64, 64))
+span = float(db.max() - db.min())
+fake_gdal(db)
+
+# It does not fail loudly -- it returns a technically valid range that covers
+# almost none of the data, so nearly every pixel clamps to black. That is the
+# reported symptom, pinned here so the fix cannot silently regress.
+forced = win._gamma_bounds("/in.tif", 1)
+forced_span = forced[1] - forced[0]
+assert forced_span / span < 0.10, (forced, span)
+print("dB scene forced through 0-1500 -> stretch covers only "
+      f"{100 * forced_span / span:.1f}% of the data: that is the black render")
+
+# over its own range it produces a usable stretch inside the data
+own = win._gamma_bounds("/in.tif", 1, float(db.min()), float(db.max()))
+assert own[0] is not None and own[1] > own[0], own
+assert db.min() <= own[0] < own[1] <= db.max(), own
+own_span = own[1] - own[0]
+assert own_span / span > 0.5, (own, span)
+print("dB scene over its own range -> covers "
+      f"{100 * own_span / span:.1f}% of the data:",
+      tuple(round(v, 2) for v in own))
+
+# (3) NaN nodata, which --gtiff writes. NaN != NaN, so a nodata test alone lets
+# every NaN through and one NaN makes every percentile NaN.
+holed = db.copy()
+holed[:8, :8] = np.nan
+fake_gdal(holed, nodata=float("nan"))
+with_nan = win._gamma_bounds("/in.tif", 1, float(db.min()), float(db.max()))
+assert with_nan[0] is not None and np.isfinite(with_nan[0]), with_nan
+assert abs(with_nan[0] - own[0]) < 1.0 and abs(with_nan[1] - own[1]) < 1.0, \
+    (with_nan, own)
+print("NaN nodata excluded -> bounds still finite and close to the clean scene:",
+      tuple(round(v, 2) for v in with_nan))
+
+# all-NaN is refused rather than returning nonsense
+fake_gdal(np.full((32, 32), np.nan))
+assert win._gamma_bounds("/in.tif", 1, -30.0, 5.0) == (None, None)
+# a degenerate range is refused too
+fake_gdal(db)
+assert win._gamma_bounds("/in.tif", 1, 5.0, 5.0) == (None, None)
+print("all-NaN and degenerate ranges refused, so the caller falls back")
 
 # ── 13. shapefile export collects only fully marked rows ─────────────────────
 class _Rows:

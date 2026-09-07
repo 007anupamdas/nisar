@@ -184,15 +184,13 @@ MAP_TOOLS = (TOOL_MARK, TOOL_PAN, TOOL_ZOOM_IN, TOOL_ZOOM_OUT)
 NUDGE_PIXELS       = 1
 NUDGE_SHIFT_FACTOR = 10
 
-# The mark is a coloured cross over a wider translucent yellow one. The halo is
-# what makes it findable over bright SAR speckle or a pale ortho, where a thin
-# red or green cross disappears; the translucency keeps the pixel being measured
-# visible through it.
-MARKER_SIZE           = 20
-MARKER_PEN_WIDTH      = 1
-MARKER_OUTLINE_RGBA   = (255, 255, 0, 110)     # yellow, ~43% opaque
-MARKER_OUTLINE_WIDTH  = 4
-MARKER_OUTLINE_EXTRA  = 2                      # px wider than the cross itself
+# A solid cross, in a colour that is not in the imagery. The input is commonly
+# shown as a red/cyan composite and the reference as greyscale, so red, green
+# and any grey are all poor marks; magenta and yellow sit outside both.
+MARKER_SIZE        = 20
+MARKER_PEN_WIDTH   = 2
+MARKER_COLOR_INPUT = (255, 0, 255)     # magenta: the pick being measured
+MARKER_COLOR_REF   = (255, 255, 0)     # yellow: its reference
 
 # Shapefile export, for quiver.py and for comparing two scenes over one area in
 # QGIS. DBF caps a field name at 10 characters, so these are already at the
@@ -741,8 +739,9 @@ class DragMapTool(QgsMapTool):
             self.parent.table.setItem(row, col + 1, QTableWidgetItem(f"{sy:.3f}"))
         finally:
             self.parent.table.blockSignals(False)
-        self.parent.draw_marker(point, self.canvas,
-                                Qt.red if self.is_left_map else Qt.green)
+        self.parent.draw_marker(
+            point, self.canvas,
+            MARKER_COLOR_INPUT if self.is_left_map else MARKER_COLOR_REF)
         self.parent.calculate_error(row)
         if self.is_left_map:
             self.parent.follow_input_point(QgsPointXY(sx, sy))
@@ -1047,14 +1046,24 @@ class QCDashboard(QMainWindow):
         threading.Thread(target=_build, daemon=True).start()
 
     # ── NORMALIZATION: SAR SQRT-GAMMA STRETCH ─────────────────────────────────
-    def _gamma_bounds(self, source, band_no=1):
+    def _gamma_bounds(self, source, band_no=1, dn_min=None, dn_max=None):
         """(min_dn, max_dn) for the SAR sqrt-gamma stretch, or (None, None).
 
         Reads a downsampled tile, applies the power stretch, and inverse-maps
-        the 2%-98% output percentiles back to input DN so the result can drive a
-        plain QgsContrastEnhancement. Shared by the reference and input canvases
-        so 'Normalize' means the same thing on both.
+        the 2%-98% output percentiles back to input values so the result can
+        drive a plain QgsContrastEnhancement.
+
+        The range the gamma is applied over defaults to NORM_MIN..NORM_MAX,
+        which is tuned for the S-band reference's DN. That range is meaningless
+        for a NISAR chip in float32 dB (roughly -30..+5): clipping to 0..1500
+        puts every pixel at the very bottom of the curve and the scene renders
+        black. Callers with data on another scale pass their own range, and the
+        input canvas passes the band's own sampled percentiles.
         """
+        if dn_min is None:
+            dn_min = NORM_MIN
+        if dn_max is None:
+            dn_max = NORM_MAX
         try:
             from osgeo import gdal
             ds = gdal.Open(source, gdal.GA_ReadOnly)
@@ -1070,15 +1079,20 @@ class QCDashboard(QMainWindow):
             nodata = band.GetNoDataValue()
             ds     = None
 
-            # Build valid-pixel mask
-            mask = np.ones(data.shape, dtype=bool)
-            if nodata is not None:
+            # Valid-pixel mask. NaN must be excluded explicitly: cog_locate's
+            # --gtiff writes NaN as the nodata value, and NaN != NaN is True, so
+            # a nodata test alone lets every NaN through -- one NaN then makes
+            # every percentile NaN and the whole scene renders black.
+            mask = np.isfinite(data)
+            if nodata is not None and np.isfinite(nodata):
                 mask &= (data != nodata)
 
-            # Gamma stretch: clip to [NORM_MIN, NORM_MAX], normalise, apply power
-            dn_range     = max(float(NORM_MAX - NORM_MIN), 1.0)
-            data_clipped = np.clip(data, NORM_MIN, NORM_MAX)
-            norm         = (data_clipped - NORM_MIN) / dn_range
+            # Gamma stretch: clip to the range, normalise, apply the power
+            dn_range     = float(dn_max - dn_min)
+            if not np.isfinite(dn_range) or dn_range <= 0:
+                return (None, None)
+            data_clipped = np.clip(data, dn_min, dn_max)
+            norm         = (data_clipped - dn_min) / dn_range
             stretched    = np.power(norm, NORM_GAMMA) * 255.0
 
             valid = stretched[mask]
@@ -1087,14 +1101,16 @@ class QCDashboard(QMainWindow):
 
             p2_out  = float(np.percentile(valid, 2))
             p98_out = float(np.percentile(valid, 98))
+            if not (np.isfinite(p2_out) and np.isfinite(p98_out)):
+                return (None, None)
 
-            # Inverse-map stretched percentiles back to input DN values
+            # Inverse-map stretched percentiles back to input values
             inv_gamma = 1.0 / NORM_GAMMA
-            min_dn = NORM_MIN + dn_range * ((p2_out  / 255.0) ** inv_gamma)
-            max_dn = NORM_MIN + dn_range * ((p98_out / 255.0) ** inv_gamma)
+            min_dn = dn_min + dn_range * ((p2_out  / 255.0) ** inv_gamma)
+            max_dn = dn_min + dn_range * ((p98_out / 255.0) ** inv_gamma)
 
-            if max_dn <= min_dn:
-                min_dn, max_dn = float(NORM_MIN), float(NORM_MAX)
+            if not (np.isfinite(min_dn) and np.isfinite(max_dn)) or max_dn <= min_dn:
+                return (None, None)
             return (min_dn, max_dn)
         except Exception as e:
             print(f"[NORM] Error: {e}")
@@ -1797,7 +1813,7 @@ class QCDashboard(QMainWindow):
         try:
             if not self.show_reference_for(pt):
                 return
-            self.show_ref_at(pt, Qt.red)
+            self.show_ref_at(pt, MARKER_COLOR_INPUT)
         except Exception as e:
             print(f"[FOLLOW] {e}")
         finally:
@@ -1860,26 +1876,18 @@ class QCDashboard(QMainWindow):
         self.markers[key] = []
 
     def draw_marker(self, point, canvas, color):
-        """A cross in `color`, haloed by a wider translucent yellow one."""
+        """A solid cross in `color`, which may be a QColor or an RGB tuple."""
         key = "left" if canvas == self.canvas_left else "right"
         self._remove_markers(canvas, key)
-
-        halo = QgsVertexMarker(canvas)
-        halo.setCenter(point)
-        halo.setIconType(QgsVertexMarker.ICON_CROSS)
-        halo.setColor(QColor(*MARKER_OUTLINE_RGBA))
-        halo.setPenWidth(MARKER_OUTLINE_WIDTH)
-        halo.setIconSize(MARKER_SIZE + MARKER_OUTLINE_EXTRA)
 
         cross = QgsVertexMarker(canvas)
         cross.setCenter(point)
         cross.setIconType(QgsVertexMarker.ICON_CROSS)
-        cross.setColor(color)
+        cross.setColor(QColor(*color) if isinstance(color, tuple) else color)
         cross.setPenWidth(MARKER_PEN_WIDTH)
         cross.setIconSize(MARKER_SIZE)
 
-        # halo first so the coloured cross sits on top of it
-        self.markers[key] = [halo, cross]
+        self.markers[key] = [cross]
         canvas.refresh()
 
     def sync_view_to_row(self):
@@ -1910,7 +1918,7 @@ class QCDashboard(QMainWindow):
 
             if (ix != 0.0) or (iy != 0.0):
                 p = QgsPointXY(ix, iy)
-                self.draw_marker(p, self.canvas_left, Qt.red)
+                self.draw_marker(p, self.canvas_left, MARKER_COLOR_INPUT)
                 canvas_size = self.canvas_left.size()
                 aspect = canvas_size.width() / max(canvas_size.height(), 1)
                 
@@ -1933,10 +1941,10 @@ class QCDashboard(QMainWindow):
                 
 
             if rx != 0.0 or ry != 0.0:
-                self.show_ref_at(QgsPointXY(rx, ry), Qt.green)
+                self.show_ref_at(QgsPointXY(rx, ry), MARKER_COLOR_REF)
             elif ix != 0.0 or iy != 0.0:
                 # no reference pick on this row yet: sit on the input position
-                self.show_ref_at(QgsPointXY(ix, iy), Qt.red)
+                self.show_ref_at(QgsPointXY(ix, iy), MARKER_COLOR_INPUT)
 
         except Exception as e:
             print(f"[SYNC ROW] {e}")
@@ -2320,10 +2328,10 @@ class QCDashboard(QMainWindow):
 
         moved = QgsPointXY(nx, ny)
         if is_left_map:
-            self.draw_marker(moved, self.canvas_left, Qt.red)
+            self.draw_marker(moved, self.canvas_left, MARKER_COLOR_INPUT)
         else:
             self.draw_marker(self._to_ref_canvas(moved), self.canvas_right,
-                             Qt.green)
+                             MARKER_COLOR_REF)
         self.calculate_error(row)
         return True
 
@@ -2491,7 +2499,16 @@ class QCDashboard(QMainWindow):
         else:
             lo = hi = None
             if normalize:
-                lo, hi = self._gamma_bounds(layer.source(), band)
+                # Apply the gamma over the band's OWN range. A NISAR chip in dB
+                # sits nowhere near the reference's 0-1500 DN, and forcing that
+                # range renders it black.
+                base_lo, base_hi = self.sampled_cut(provider, band, 0.0, 1.0)
+                if (base_lo is None or base_hi is None or base_hi <= base_lo):
+                    stats = self.sampled_stats(provider, band)
+                    if stats is not None:
+                        base_lo, base_hi = stats.minimumValue, stats.maximumValue
+                lo, hi = self._gamma_bounds(layer.source(), band,
+                                            base_lo, base_hi)
             if lo is None or hi is None or hi <= lo:
                 lo, hi = self.sampled_cut(provider, band,
                                           RGB_CLIP_LOW, RGB_CLIP_HIGH)
