@@ -520,6 +520,82 @@ assert captured[-1] == ("rgb", 1, 1, 1), captured
 print("gamma unavailable -> falls back to the percentile clip")
 win.cb_normalize_input.isChecked = MagicMock(return_value=False)
 
+# ── 12. arrow keys nudge the mark, not the view ──────────────────────────────
+class _Table:
+    """Enough QTableWidget for the nudge path, with real cell values."""
+    def __init__(self, row, cells):
+        self._row, self._cells = row, dict(cells)
+    def currentRow(self): return self._row
+    def item(self, row, col):
+        v = self._cells.get((row, col))
+        return None if v is None else MagicMock(text=lambda v=v: v)
+    def setItem(self, row, col, item): self._cells[(row, col)] = str(item)
+    def blockSignals(self, _): pass
+    def rowCount(self): return 1
+
+def utm_layer(px, py):
+    lyr = MagicMock()
+    lyr.isValid.return_value = True
+    lyr.crs.return_value = win.proj_crs
+    lyr.rasterUnitsPerPixelX.return_value = px
+    lyr.rasterUnitsPerPixelY.return_value = py
+    return lyr
+
+win.proj_crs = _CRS("EPSG:32644")
+win._rebuild_transforms()
+win.input_tif_layer = utm_layer(5.0, 5.0)      # NISAR posts at 5 m
+win.current_ref_layer = None
+win.draw_marker = MagicMock()
+win.calculate_error = MagicMock()
+win.canvas_left.setExtent.reset_mock()
+win.canvas_left.setCenter.reset_mock()
+
+# In X/Y marked at (325000, 1900000); one press of Right
+win.table = _Table(0, {(0, 0): "325000.000", (0, 1): "1900000.000",
+                       (0, 2): "0.000", (0, 3): "0.000"})
+assert win.nudge_point(True, 1, 0) is True
+assert win.table._cells[(0, 0)] == "325005.000", win.table._cells
+assert win.table._cells[(0, 1)] == "1900000.000", win.table._cells
+print("\nRight arrow -> In X moves one 5 m pixel east:",
+      win.table._cells[(0, 0)])
+
+# Up is north (+Y), and Shift multiplies the step
+assert win.nudge_point(True, 0, 1) is True
+assert win.table._cells[(0, 1)] == "1900005.000", win.table._cells
+assert win.nudge_point(True, 0, -R.NUDGE_SHIFT_FACTOR) is True
+assert win.table._cells[(0, 1)] == "1899955.000", win.table._cells
+print("Up = north, Shift steps", R.NUDGE_SHIFT_FACTOR, "pixels:",
+      win.table._cells[(0, 1)])
+
+# the error is recomputed and the marker redrawn -- but the view is untouched
+assert win.calculate_error.called and win.draw_marker.called
+assert not win.canvas_left.setExtent.called, "nudging moved the view"
+assert not win.canvas_left.setCenter.called, "nudging moved the view"
+print("marker and error updated, view untouched")
+
+# nothing marked on that side yet -> not handled, so the canvas still pans
+assert win.nudge_point(False, 1, 0) is False, "nudged an unmarked Ref"
+win.table = _Table(0, {(0, 0): "0.000", (0, 1): "0.000"})
+assert win.nudge_point(True, 1, 0) is False, "nudged an unmarked In"
+win.table = _Table(-1, {})
+assert win.nudge_point(True, 1, 0) is False, "nudged with no row selected"
+print("unmarked side / no row -> not handled, canvas keeps the key")
+
+# a WGS84 reference tile: its pixel is degrees, so the step is measured through
+# the transform rather than added to a UTM coordinate as if it were metres
+wgs = MagicMock()
+wgs.isValid.return_value = True
+wgs.crs.return_value = _CRS("EPSG:4326")
+wgs.rasterUnitsPerPixelX.return_value = 2.5e-5     # ~2.8 m at this latitude
+wgs.rasterUnitsPerPixelY.return_value = 2.5e-5
+win.current_ref_layer = wgs
+R.QgsCoordinateTransform = MagicMock(side_effect=lambda src, dst, prj: MagicMock(
+    transform=lambda p: _PointXY(p.x() + 1.0, p.y() + 2.0)))
+step = win._pixel_step(False, _PointXY(325000.0, 1900000.0))
+assert step is not None and step[0] > 0 and step[1] > 0, step
+print("WGS84 reference pixel measured through the transform:",
+      tuple(round(v, 3) for v in step))
+
 for d in (d1, d2, d3, d4):
     shutil.rmtree(d, ignore_errors=True)
 print("\nstubbed integration OK")

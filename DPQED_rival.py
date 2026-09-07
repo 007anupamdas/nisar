@@ -36,6 +36,12 @@ produces stray picks. Mark is the only tool that fills the table; the rest move
 the view. With 'Sync Maps' on the reference follows the input's centre and
 scale, so zooming either side keeps both at the same ground width.
 
+The arrow keys over a canvas move that side's mark by one source pixel (Shift
+for ten), rather than panning the view: while measuring, the thing being
+refined is the point. The input's own pixel size is used on the left and the
+reference tile's on the right, converted from its CRS, so a step is one pixel of
+whatever is under the cursor. Arrow keys in the table still move between cells.
+
 A multi-band input is composed from an R/G/B picker over the left canvas. Every
 slot offers every band and a band may be repeated, so a two-band NISAR chip can
 be shown any way round; the default puts band 1 in all three, which renders
@@ -155,6 +161,11 @@ TOOL_PAN      = "pan"
 TOOL_ZOOM_IN  = "zoom in"
 TOOL_ZOOM_OUT = "zoom out"
 MAP_TOOLS = (TOOL_MARK, TOOL_PAN, TOOL_ZOOM_IN, TOOL_ZOOM_OUT)
+
+# Arrow keys nudge the marked point by this many source pixels; Shift multiplies
+# it, for closing a gap of tens of pixels without holding the key down.
+NUDGE_PIXELS       = 1
+NUDGE_SHIFT_FACTOR = 10
 
 # Percentile clip for the input composite. A min/max stretch on SAR is dominated
 # by a handful of bright scatterers and leaves the scene black.
@@ -662,6 +673,51 @@ class DragMapTool(QgsMapTool):
         self.parent.calculate_error(row)
         if self.is_left_map:
             self.parent.follow_input_point(QgsPointXY(sx, sy))
+
+
+# ── ARROW-KEY NUDGE ───────────────────────────────────────────────────────────
+class ArrowNudgeFilter(QObject):
+    """Turn the arrow keys over a canvas into a one-pixel move of the mark.
+
+    QgsMapCanvas takes the arrow keys to pan, which is the wrong thing while
+    measuring: the position being refined is the point, not the view. The event
+    is swallowed only when a nudge actually happened, so panning still works
+    when there is no point to move -- and the table keeps its own arrow-key cell
+    navigation, since this filter only sees keys while a canvas has focus.
+    """
+
+    _DELTAS = None      # built lazily; Qt.Key_* are not available at import in
+                        # a stubbed environment
+
+    def __init__(self, parent, is_left_map):
+        super().__init__(parent)
+        self.dashboard   = parent
+        self.is_left_map = is_left_map
+
+    def _deltas(self):
+        if ArrowNudgeFilter._DELTAS is None:
+            ArrowNudgeFilter._DELTAS = {
+                Qt.Key_Left:  (-1, 0),
+                Qt.Key_Right: (1, 0),
+                Qt.Key_Up:    (0, 1),      # north is +Y in a projected CRS
+                Qt.Key_Down:  (0, -1),
+            }
+        return ArrowNudgeFilter._DELTAS
+
+    def eventFilter(self, obj, event):
+        try:
+            if event.type() == QEvent.KeyPress:
+                delta = self._deltas().get(event.key())
+                if delta is not None:
+                    step = NUDGE_PIXELS
+                    if event.modifiers() & Qt.ShiftModifier:
+                        step *= NUDGE_SHIFT_FACTOR
+                    if self.dashboard.nudge_point(
+                            self.is_left_map, delta[0] * step, delta[1] * step):
+                        return True         # handled: do not let the canvas pan
+        except Exception as e:
+            print(f"[NUDGE] {e}")
+        return super().eventFilter(obj, event)
 
 
 # ── DROPDOWN RESIZE FILTER ────────────────────────────────────────────────────
@@ -1978,7 +2034,87 @@ class QCDashboard(QMainWindow):
         }
         # kept for the marking paths, which reach for these by name
         self.tool_left, self.tool_right = self.map_tools[TOOL_MARK]
+        self.nudge_filters = (ArrowNudgeFilter(self, True),
+                              ArrowNudgeFilter(self, False))
+        self.canvas_left.installEventFilter(self.nudge_filters[0])
+        self.canvas_right.installEventFilter(self.nudge_filters[1])
         self.apply_map_tool()
+
+    # ── ARROW-KEY NUDGE ───────────────────────────────────────────────────────
+    def _pixel_step(self, is_left_map, pt):
+        """One source pixel, in working-CRS units, at a given point.
+
+        The input raster is already in the working CRS, so its pixel size is
+        used directly. A reference tile is usually WGS84, where a pixel is a
+        fraction of a degree, so it is measured by stepping one pixel in the
+        layer's own CRS and transforming both ends back.
+        """
+        layer = self.input_tif_layer if is_left_map else self.current_ref_layer
+        if layer is None or not layer.isValid():
+            return None
+        try:
+            px = abs(float(layer.rasterUnitsPerPixelX()))
+            py = abs(float(layer.rasterUnitsPerPixelY()))
+        except Exception:
+            return None
+        if px <= 0 or py <= 0:
+            return None
+        try:
+            src = layer.crs()
+            if src.authid() and src.authid() == self.proj_crs.authid():
+                return (px, py)
+            project = QgsProject.instance()
+            to_layer = QgsCoordinateTransform(self.proj_crs, src, project)
+            to_proj  = QgsCoordinateTransform(src, self.proj_crs, project)
+            here = to_layer.transform(pt)
+            over = to_proj.transform(QgsPointXY(here.x() + px, here.y() + py))
+            step_x, step_y = abs(over.x() - pt.x()), abs(over.y() - pt.y())
+            if step_x <= 0 or step_y <= 0:
+                return None
+            return (step_x, step_y)
+        except Exception as e:
+            print(f"[NUDGE] pixel size: {e}")
+            return None
+
+    def nudge_point(self, is_left_map, dx_px, dy_px):
+        """Move the selected row's mark by whole pixels. True if it moved.
+
+        Only the mark moves -- the view is left where it is, which is the whole
+        point of taking the arrow keys off the canvas.
+        """
+        row = self.table.currentRow()
+        if row < 0:
+            return False
+        col = 0 if is_left_map else 2
+        try:
+            x = float(self.table.item(row, col).text())
+            y = float(self.table.item(row, col + 1).text())
+        except (AttributeError, ValueError):
+            return False
+        if x == 0.0 and y == 0.0:
+            return False        # nothing marked on this side yet
+
+        point = QgsPointXY(x, y)
+        step = self._pixel_step(is_left_map, point)
+        if step is None:
+            return False
+        nx, ny = x + dx_px * step[0], y + dy_px * step[1]
+
+        try:
+            self.table.blockSignals(True)
+            self.table.setItem(row, col,     QTableWidgetItem(f"{nx:.3f}"))
+            self.table.setItem(row, col + 1, QTableWidgetItem(f"{ny:.3f}"))
+        finally:
+            self.table.blockSignals(False)
+
+        moved = QgsPointXY(nx, ny)
+        if is_left_map:
+            self.draw_marker(moved, self.canvas_left, Qt.red)
+        else:
+            self.draw_marker(self._to_ref_canvas(moved), self.canvas_right,
+                             Qt.green)
+        self.calculate_error(row)
+        return True
 
     def current_map_tool(self):
         for mode, button in self.tool_buttons.items():
