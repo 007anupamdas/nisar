@@ -90,7 +90,7 @@ from qgis.core import (QgsProject, QgsPointXY, QgsRasterLayer, QgsVectorLayer,
                        QgsGeometry, QgsCoordinateReferenceSystem,
                        QgsCoordinateTransform, QgsSingleBandGrayRenderer,
                        QgsMultiBandColorRenderer, QgsContrastEnhancement,
-                       QgsRectangle)
+                       QgsRasterBandStats, QgsRectangle)
 
 
 # ── CONSTANTS ─────────────────────────────────────────────────────────────────
@@ -171,6 +171,12 @@ NUDGE_SHIFT_FACTOR = 10
 # by a handful of bright scatterers and leaves the scene black.
 RGB_CLIP_LOW  = 0.02
 RGB_CLIP_HIGH = 0.98
+
+# Pixels sampled when working out a stretch. Unbounded, QGIS reads the WHOLE
+# raster at full resolution to build the histogram -- per band, on the GUI
+# thread -- which on a large COG is minutes of a frozen window. This is the
+# same figure QGIS itself uses for its estimated min/max.
+RASTER_SAMPLE_SIZE = 250000
 
 # Which band each channel starts on. All three on band 1 renders grey, so the
 # scene is legible before any choice is made; NISAR carries HH and HV, and which
@@ -747,6 +753,7 @@ class QCDashboard(QMainWindow):
         self.ref_footprints    = {}
         self.ref_mode          = None
         self.input_ring        = None
+        self._stretch_cache    = {}
         self.ref_tif_list      = []
         self.input_tif_layer   = None
         self.current_ref_layer = None
@@ -1047,7 +1054,9 @@ class QCDashboard(QMainWindow):
             return
         try:
             provider  = layer.dataProvider()
-            stats     = provider.bandStatistics(1)
+            stats     = self.sampled_stats(provider, 1)
+            if stats is None:
+                return
             ce        = QgsContrastEnhancement(provider.dataType(1))
             ce.setContrastEnhancementAlgorithm(
                 QgsContrastEnhancement.StretchToMinimumMaximum
@@ -1985,6 +1994,7 @@ class QCDashboard(QMainWindow):
             self.input_tif_layer = None
             QgsProject.instance().addMapLayer(lyr, False)
             self.input_tif_layer = lyr
+            self.ensure_overviews(path)
             self.input_ring = self._input_footprint_ring(path)
             if self.input_ring is None:
                 print("[INPUT] no sidecar beside the raster; "
@@ -2006,6 +2016,7 @@ class QCDashboard(QMainWindow):
         ref_l = [l for l in layers if "ref"   in l.name().lower()]
         if in_l:
             self.input_tif_layer = in_l[0]
+            self.ensure_overviews(in_l[0].source())
             self.adopt_working_crs(in_l[0].crs())
             self.canvas_left.setLayers([in_l[0]])
             self.canvas_left.setExtent(in_l[0].extent())
@@ -2177,6 +2188,14 @@ class QCDashboard(QMainWindow):
             labels.append(name)
         return labels
 
+    def clear_stretch_cache(self, source=None):
+        """Drop cached stretch bounds, for one raster or all of them."""
+        if source is None:
+            self._stretch_cache = {}
+        else:
+            for key in [k for k in self._stretch_cache if k[0] == source]:
+                del self._stretch_cache[key]
+
     def populate_band_picker(self, layer):
         """Fill the R/G/B combos from the input raster, then apply the default.
 
@@ -2187,6 +2206,7 @@ class QCDashboard(QMainWindow):
         if layer is None or not layer.isValid():
             self.band_container.hide()
             return
+        self.clear_stretch_cache(layer.source())
         labels = self._band_labels(layer)
         count  = len(labels)
         if count < 1:
@@ -2215,6 +2235,42 @@ class QCDashboard(QMainWindow):
         """The chosen 1-based band per channel."""
         return [max(combo.currentIndex(), 0) + 1 for combo in self.band_combos]
 
+    @staticmethod
+    def sampled_cut(provider, band, low, high):
+        """cumulativeCut over a bounded sample, or (None, None).
+
+        The sampled overload is tried first and the unsampled signature only as
+        a fallback for older QGIS, because unsampled means a full-resolution
+        pass over the whole raster.
+        """
+        try:
+            return provider.cumulativeCut(band, low, high, QgsRectangle(),
+                                          RASTER_SAMPLE_SIZE)
+        except TypeError:
+            pass
+        except Exception:
+            return (None, None)
+        try:
+            return provider.cumulativeCut(band, low, high)
+        except Exception:
+            return (None, None)
+
+    @staticmethod
+    def sampled_stats(provider, band):
+        """bandStatistics over a bounded sample, or None. Same reasoning."""
+        try:
+            return provider.bandStatistics(
+                band, QgsRasterBandStats.Min | QgsRasterBandStats.Max,
+                QgsRectangle(), RASTER_SAMPLE_SIZE)
+        except TypeError:
+            pass
+        except Exception:
+            return None
+        try:
+            return provider.bandStatistics(band)
+        except Exception:
+            return None
+
     def _stretch_for(self, layer, band):
         """Contrast enhancement for one input band.
 
@@ -2222,19 +2278,30 @@ class QCDashboard(QMainWindow):
         uses; otherwise the band is clipped at the RGB percentiles. Either way a
         plain min/max is avoided -- on SAR it is set by a handful of bright
         scatterers and renders the scene black.
+
+        Bounds are cached per raster, band and stretch: re-picking the channel
+        order is a common action and must not recompute statistics each time.
         """
         provider = layer.dataProvider()
-        lo = hi = None
-        if self.cb_normalize_input.isChecked():
-            lo, hi = self._gamma_bounds(layer.source(), band)
-        if lo is None or hi is None or hi <= lo:
-            try:
-                lo, hi = provider.cumulativeCut(band, RGB_CLIP_LOW, RGB_CLIP_HIGH)
-            except Exception:
-                lo = hi = None
-        if lo is None or hi is None or hi <= lo:
-            stats = provider.bandStatistics(band)
-            lo, hi = stats.minimumValue, stats.maximumValue
+        normalize = bool(self.cb_normalize_input.isChecked())
+        key = (layer.source(), band, normalize)
+        cached = self._stretch_cache.get(key)
+        if cached is not None:
+            lo, hi = cached
+        else:
+            lo = hi = None
+            if normalize:
+                lo, hi = self._gamma_bounds(layer.source(), band)
+            if lo is None or hi is None or hi <= lo:
+                lo, hi = self.sampled_cut(provider, band,
+                                          RGB_CLIP_LOW, RGB_CLIP_HIGH)
+            if lo is None or hi is None or hi <= lo:
+                stats = self.sampled_stats(provider, band)
+                if stats is not None:
+                    lo, hi = stats.minimumValue, stats.maximumValue
+            if lo is None or hi is None or hi <= lo:
+                lo, hi = 0.0, 1.0
+            self._stretch_cache[key] = (lo, hi)
         ce = QgsContrastEnhancement(provider.dataType(band))
         ce.setContrastEnhancementAlgorithm(
             QgsContrastEnhancement.StretchToMinimumMaximum)

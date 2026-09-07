@@ -508,17 +508,92 @@ win._stretch_for(dual, 1)
 assert not win._gamma_bounds.called, "gamma used while Normalize NISAR is off"
 
 win.cb_normalize_input.isChecked = MagicMock(return_value=True)
+win._stretch_cache = {}
 win.apply_input_bands()
+# R=G=B=1, so one pass covers all three channels -- the bounds are cached per
+# (raster, band, stretch), not recomputed per slot
 bands = [c[0][1] for c in win._gamma_bounds.call_args_list]
-assert bands == [1, 1, 1], bands          # one stretch per channel
-print("Normalize NISAR on -> gamma bounds computed per channel:", bands)
+assert bands == [1], bands
+print("Normalize NISAR on -> gamma bounds computed once for band 1:", bands)
+
+# a second distinct band does cost a pass
+win.band_combos[1].setCurrentIndex(1)
+win.apply_input_bands()
+assert [c[0][1] for c in win._gamma_bounds.call_args_list] == [1, 2], \
+    win._gamma_bounds.call_args_list
+win.band_combos[1].setCurrentIndex(0)
+print("a distinct band costs one more pass, then is cached too")
 
 # and it falls back to the percentile clip when the gamma read fails
 win._gamma_bounds = MagicMock(return_value=(None, None))
+win._stretch_cache = {}
 win.apply_input_bands()
 assert captured[-1] == ("rgb", 1, 1, 1), captured
 print("gamma unavailable -> falls back to the percentile clip")
 win.cb_normalize_input.isChecked = MagicMock(return_value=False)
+
+# ── 11b. stretch statistics are sampled and cached ───────────────────────────
+# An unsampled cumulativeCut reads the WHOLE raster at full resolution, per
+# band, on the GUI thread -- the regression that froze QGIS for minutes on load.
+calls = {"cut": [], "stats": []}
+
+class _BigProvider:
+    def bandCount(self): return 2
+    def dataType(self, band): return 6
+    def cumulativeCut(self, band, lo, hi, extent=None, sample=None):
+        calls["cut"].append((band, sample))
+        if sample is None:                     # the unsampled overload
+            raise AssertionError("unsampled cumulativeCut would scan everything")
+        return (0.1, 10.0)
+    def bandStatistics(self, band, stats=None, extent=None, sample=None):
+        calls["stats"].append((band, sample))
+        return MagicMock(minimumValue=0.0, maximumValue=1.0)
+
+big = MagicMock()
+big.isValid.return_value = True
+big.source.return_value = "/big/scene.tif"
+big.dataProvider.return_value = _BigProvider()
+big.bandName.side_effect = lambda b: ["HH", "HV"][b - 1]
+
+win.cb_normalize_input.isChecked = MagicMock(return_value=False)
+win.band_combos = [_Combo(), _Combo(), _Combo()]
+win.input_tif_layer = big
+win._stretch_cache = {}
+win.populate_band_picker(big)
+
+assert calls["cut"], "no stretch computed"
+assert all(sample == R.RASTER_SAMPLE_SIZE for _, sample in calls["cut"]), calls
+print("\nstretch sampled at", R.RASTER_SAMPLE_SIZE, "px, not the whole raster")
+
+# default is 1,1,1 -- three channels on one band must not cost three passes
+assert len(calls["cut"]) == 1, calls["cut"]
+print("R=G=B=1 -> one statistics pass, not three:", calls["cut"])
+
+# re-picking the channel order reuses the cache
+before = len(calls["cut"])
+win.band_combos[1].setCurrentIndex(1)
+win.apply_input_bands()
+assert [b for b, _ in calls["cut"]] == [1, 2], calls["cut"]
+win.band_combos[1].setCurrentIndex(0)
+win.apply_input_bands()
+assert len(calls["cut"]) == before + 1, "re-picking recomputed a cached band"
+print("re-picking a band reuses the cache:", calls["cut"])
+
+# toggling Normalize is a different stretch, so it is cached separately
+win.cb_normalize_input.isChecked = MagicMock(return_value=True)
+win._gamma_bounds = MagicMock(return_value=(12.0, 340.0))
+win.apply_input_bands()
+assert win._gamma_bounds.called, "Normalize did not reach the gamma bounds"
+win._gamma_bounds.reset_mock()
+win.apply_input_bands()
+assert not win._gamma_bounds.called, "normalized bounds were not cached"
+print("Normalize NISAR cached separately from the percentile stretch")
+win.cb_normalize_input.isChecked = MagicMock(return_value=False)
+
+# loading a raster drops only that raster's cached bounds
+win.clear_stretch_cache("/big/scene.tif")
+assert not any(k[0] == "/big/scene.tif" for k in win._stretch_cache)
+print("loading a raster clears its own cached bounds")
 
 # ── 12. arrow keys nudge the mark, not the view ──────────────────────────────
 class _Table:
