@@ -62,17 +62,25 @@ grey. Bands are listed by the names the raster carries -- cog_locate's --gtiff
 writes the polarization into each description, so a chip offers HH and HV rather
 than 'Band 1'.
 
-''Normalize NISAR' and 'Normalize Ref' apply the same SAR sqrt-gamma stretch,
-each over the range its own raster reports, read per band. NISAR products turn
-up as linear amplitude (0.158-0.580 on one L-band chip), as float32 dB (about
--28..+2) and as DN in the thousands; the fixed NORM_MIN..NORM_MAX survives only
-as the fallback when a raster cannot be measured, since a range far above the
-data leaves every pixel at the bottom of the curve. Unticked, the input clips
-each channel at its 2%-98% percentiles. Either way a plain min/max is avoided:
-on SAR it is set by a handful of bright scatterers.
+'Each canvas carries a translucent 'Normalize' tool with a clip percentage. It
+is an action, not a mode: it measures WHAT IS IN VIEW -- the statistics and the
+pixel read are both restricted to the visible extent -- applies the SAR
+sqrt-gamma stretch, and pins the result. Panning and zooming afterwards do not
+re-stretch, so the picture cannot change under a measurement in progress and two
+views of one scene stay comparable. Press it again to re-measure where you are;
+loading another raster clears its pinning.
 
-The range used is printed per band, so a stretch can be checked against what
-QGIS reports for the same raster.
+The clip is the same idiom as QGIS's cumulative count cut -- 2% ignores the
+brightest and darkest 2% of the stretched values, 0% is a true min/max. The
+range the gamma is applied over is read from the raster per band, since NISAR
+products turn up as linear amplitude (0.158-0.580 on one L-band chip), as
+float32 dB (about -28..+2) and as DN in the thousands; NORM_MIN..NORM_MAX
+survives only as the fallback for a raster that cannot be measured. Until
+Normalize is pressed, the input clips each channel at its 2%-98% percentiles
+over the whole raster.
+
+Every measurement prints the view range, the clip and the resulting stretch, so
+it can be checked against what QGIS reports for the same raster.
 
 NISAR rasters are UTM and the C1/L8 references are WGS84. By default both
 canvases are pinned to the working CRS and QGIS reprojects the reference as it
@@ -128,6 +136,13 @@ NORM_GAMMA  = 0.5         # gamma exponent for sqrt stretch (0.5 = square root)
 # the thousands. No single hard-coded range fits those, and the failure is
 # silent -- a range far above the data leaves every pixel at the bottom of the
 # curve and the scene renders black.
+# Clip taken off each end when Normalize measures a view, as a percentage. The
+# same idiom as QGIS's cumulative count cut: 2% ignores the brightest and
+# darkest 2% of the stretched values, so a few bright scatterers cannot set the
+# whole scene. 0% is a true min/max.
+NORM_CLIP_CHOICES = (0.0, 0.5, 1.0, 2.0, 5.0)
+NORM_CLIP_DEFAULT = 2.0
+
 NORM_USE_DATA_RANGE = True
 NORM_MIN    = 0           # fallback range, used only when the raster cannot be
 NORM_MAX    = 1500        # measured, or with NORM_USE_DATA_RANGE off
@@ -833,6 +848,11 @@ class QCDashboard(QMainWindow):
         self.ref_mode          = None
         self.input_ring        = None
         self._stretch_cache    = {}
+        # Stretch bounds pinned by the Normalize buttons: {"input": {band: (lo,hi)},
+        # "ref": {1: (lo, hi)}}. Set only when the button is pressed, and kept
+        # until it is pressed again or the raster changes -- panning must not
+        # silently re-stretch under a measurement.
+        self.norm_bounds       = {"input": {}, "ref": {}}
         self.ref_tif_list      = []
         self.input_tif_layer   = None
         self.current_ref_layer = None
@@ -853,11 +873,22 @@ class QCDashboard(QMainWindow):
         self.canvas_left.setParallelRenderingEnabled(True)
         self.canvas_right.setParallelRenderingEnabled(True)
 
+        # The band picker overlay also has to exist before the band combos are
+        # built, so the Normalize tool is created here and parented into it.
         self.band_container = QWidget(self.canvas_left)
         self.band_container.setGeometry(10, 10, 420, 35)
         self.band_container.setStyleSheet("background-color: rgba(255,255,255,153);")
         _bl = QHBoxLayout(self.band_container)
         _bl.setContentsMargins(5, 5, 5, 5)
+        self.btn_norm_input = self._normalize_button(
+            "Stretch the input to what is currently in view.\n"
+            "The result is kept until you press it again -- panning and\n"
+            "zooming do not re-stretch, so a scene stays comparable while\n"
+            "you measure across it.")
+        self.clip_combos = {}
+        self.clip_combos["input"] = self._clip_combo()
+        _bl.addWidget(self.btn_norm_input)
+        _bl.addWidget(self.clip_combos["input"])
         _bl.addWidget(QLabel("R G B"))
         self.band_combos = []
         for channel in ("red", "green", "blue"):
@@ -885,6 +916,12 @@ class QCDashboard(QMainWindow):
             "name, else the centre frequency (L ~1.24 GHz, S ~3.2 GHz)."
         )
         self.dropdown_ref = QComboBox()
+        self.btn_norm_ref = self._normalize_button(
+            "Stretch the reference tile to what is currently in view.\n"
+            "Kept until pressed again, or until another tile loads.")
+        self.clip_combos["ref"] = self._clip_combo()
+        _dl.addWidget(self.btn_norm_ref)
+        _dl.addWidget(self.clip_combos["ref"])
         _dl.addWidget(self.dropdown_band)
         _dl.addWidget(self.dropdown_ref, 1)
         self.dropdown_container.hide()
@@ -933,18 +970,7 @@ class QCDashboard(QMainWindow):
             self.tool_group.addButton(button, i)
             self.tool_buttons[mode] = button
         self.tool_buttons[TOOL_MARK].setChecked(True)
-        self.cb_normalize_input = QCheckBox("Normalize NISAR")
-        self.cb_normalize_input.setChecked(False)
-        self.cb_normalize_input.setToolTip(
-            "OFF = each channel clipped at its 2%-98% percentiles\n"
-            "ON  = SAR sqrt-gamma stretch over DN 0-1500, per channel"
-        )
-        self.cb_normalize = QCheckBox("Normalize Ref")
-        self.cb_normalize.setChecked(False)
-        self.cb_normalize.setToolTip(
-            "OFF = QGIS default auto-stretch (natural look)\n"
-            "ON  = SAR sqrt-gamma stretch over DN 0-1500"
-        )
+
 
         _stat_font = QFont()
         _stat_font.setBold(True)
@@ -981,7 +1007,7 @@ class QCDashboard(QMainWindow):
                    self.btn_load, self.btn_add, self.btn_save, self.btn_shp,
                    self.btn_del]
                   + [self.tool_buttons[m] for m in MAP_TOOLS]
-                  + [self.cb_sync, self.cb_normalize_input, self.cb_normalize]):
+                  + [self.cb_sync]):
             btn_layout.addWidget(w)
 
         main_layout = QVBoxLayout()
@@ -1006,10 +1032,10 @@ class QCDashboard(QMainWindow):
         self.canvas_left.extentsChanged.connect(self.sync_canvas_extents)
         self.dropdown_ref.currentIndexChanged.connect(self.load_reference_tif_from_dropdown)
         self.dropdown_band.currentIndexChanged.connect(lambda _: self.filter_reference_tifs())
-        self.cb_normalize.stateChanged.connect(self.toggle_normalization)
+        self.btn_norm_ref.clicked.connect(lambda: self.normalize_to_view("ref"))
         self.tool_group.buttonClicked.connect(lambda _: self.apply_map_tool())
-        self.cb_normalize_input.stateChanged.connect(
-            lambda _: self.apply_input_bands())
+        self.btn_norm_input.clicked.connect(
+            lambda: self.normalize_to_view("input"))
         for combo in self.band_combos:
             combo.currentIndexChanged.connect(lambda _: self.apply_input_bands())
 
@@ -1059,18 +1085,39 @@ class QCDashboard(QMainWindow):
         threading.Thread(target=_build, daemon=True).start()
 
     # ── NORMALIZATION: SAR SQRT-GAMMA STRETCH ─────────────────────────────────
-    def normalize_range(self, provider, band):
+    def view_extent_for(self, layer, canvas):
+        """The canvas's current view as a rectangle in the layer's own CRS.
+
+        Statistics are asked for over this, so a stretch describes the ground
+        being looked at rather than the whole scene -- a 20 km frame averaged
+        whole is set by terrain nowhere near the feature being measured.
+        """
+        try:
+            extent = canvas.extent()
+        except Exception:
+            return None
+        try:
+            src, dst = self.proj_crs, layer.crs()
+            if src.authid() and dst.authid() and src.authid() == dst.authid():
+                return extent
+            return QgsCoordinateTransform(
+                src, dst, QgsProject.instance()).transformBoundingBox(extent)
+        except Exception as e:
+            print(f"[NORM] view extent: {e}")
+            return None
+
+    def normalize_range(self, provider, band, extent=None):
         """The range to apply the gamma over, read from the raster itself.
 
         Full min/max of a bounded sample rather than a percentile clip: the
         percentiles are taken later, on the stretched values, and clipping twice
-        would compound. Falls back to NORM_MIN..NORM_MAX only when the raster
-        cannot be measured at all.
+        would compound. Restricted to `extent` when one is given. Falls back to
+        NORM_MIN..NORM_MAX only when the raster cannot be measured at all.
         """
         if NORM_USE_DATA_RANGE:
-            lo, hi = self.sampled_cut(provider, band, 0.0, 1.0)
+            lo, hi = self.sampled_cut(provider, band, 0.0, 1.0, extent)
             if lo is None or hi is None or hi <= lo:
-                stats = self.sampled_stats(provider, band)
+                stats = self.sampled_stats(provider, band, extent)
                 if stats is not None:
                     lo, hi = stats.minimumValue, stats.maximumValue
             if lo is not None and hi is not None and hi > lo:
@@ -1079,7 +1126,27 @@ class QCDashboard(QMainWindow):
                   f"falling back to {NORM_MIN}..{NORM_MAX}")
         return (float(NORM_MIN), float(NORM_MAX))
 
-    def _gamma_bounds(self, source, band_no=1, dn_min=None, dn_max=None):
+    def pixel_window(self, layer, extent):
+        """`extent` (in the layer's CRS) as a raster pixel window, or None."""
+        if extent is None or layer is None:
+            return None
+        try:
+            full = layer.extent()
+            px = abs(float(layer.rasterUnitsPerPixelX()))
+            py = abs(float(layer.rasterUnitsPerPixelY()))
+            if px <= 0 or py <= 0:
+                return None
+            x0 = int((extent.xMinimum() - full.xMinimum()) / px)
+            y0 = int((full.yMaximum() - extent.yMaximum()) / py)
+            w  = int(max(extent.xMaximum() - extent.xMinimum(), px) / px)
+            h  = int(max(extent.yMaximum() - extent.yMinimum(), py) / py)
+            return (x0, y0, max(w, 1), max(h, 1))
+        except Exception as e:
+            print(f"[NORM] pixel window: {e}")
+            return None
+
+    def _gamma_bounds(self, source, band_no=1, dn_min=None, dn_max=None,
+                      window=None, clip_pct=NORM_CLIP_DEFAULT):
         """(min_dn, max_dn) for the SAR sqrt-gamma stretch, or (None, None).
 
         Reads a downsampled tile, applies the power stretch, and inverse-maps
@@ -1105,9 +1172,14 @@ class QCDashboard(QMainWindow):
             band   = ds.GetRasterBand(band_no)
             if band is None:
                 return (None, None)
-            xsize  = min(band.XSize, 1000)
-            ysize  = min(band.YSize, 1000)
-            data   = band.ReadAsArray(0, 0, band.XSize, band.YSize,
+            x0, y0, w, h = window or (0, 0, band.XSize, band.YSize)
+            x0 = max(0, min(int(x0), band.XSize - 1))
+            y0 = max(0, min(int(y0), band.YSize - 1))
+            w  = max(1, min(int(w), band.XSize - x0))
+            h  = max(1, min(int(h), band.YSize - y0))
+            xsize  = min(w, 1000)
+            ysize  = min(h, 1000)
+            data   = band.ReadAsArray(x0, y0, w, h,
                                       xsize, ysize).astype(float)
             nodata = band.GetNoDataValue()
             ds     = None
@@ -1132,8 +1204,9 @@ class QCDashboard(QMainWindow):
             if valid.size == 0:
                 return (None, None)
 
-            p2_out  = float(np.percentile(valid, 2))
-            p98_out = float(np.percentile(valid, 98))
+            clip    = min(max(float(clip_pct), 0.0), 49.0)
+            p2_out  = float(np.percentile(valid, clip))
+            p98_out = float(np.percentile(valid, 100.0 - clip))
             if not (np.isfinite(p2_out) and np.isfinite(p98_out)):
                 return (None, None)
 
@@ -1149,13 +1222,83 @@ class QCDashboard(QMainWindow):
             print(f"[NORM] Error: {e}")
             return (None, None)
 
+    def normalize_to_view(self, side):
+        """Stretch one canvas to what is currently in view, and keep it.
+
+        This is an action, not a mode. Re-measuring on every pan would change
+        the picture under a measurement in progress and make two views of the
+        same scene incomparable, so the bounds are pinned until the button is
+        pressed again or the raster changes.
+        """
+        if side == "input":
+            layer, canvas = self.input_tif_layer, self.canvas_left
+            bands = sorted(set(self._selected_bands())) or [1]
+        else:
+            layer, canvas = self.current_ref_layer, self.canvas_right
+            bands = [1]
+        if layer is None or not layer.isValid():
+            QMessageBox.warning(self, "Normalize",
+                                f"No {side} raster loaded.")
+            return
+
+        provider = layer.dataProvider()
+        extent   = self.view_extent_for(layer, canvas)
+        window   = self.pixel_window(layer, extent)
+        clip     = self.clip_percent(side)
+        pinned   = {}
+        for band in bands:
+            base_lo, base_hi = self.normalize_range(provider, band, extent)
+            lo, hi = self._gamma_bounds(layer.source(), band,
+                                        base_lo, base_hi, window, clip)
+            if lo is None or hi is None or hi <= lo:
+                print(f"[NORM] {side} band {band}: view has no usable range, "
+                      f"leaving it as it was")
+                continue
+            pinned[band] = (lo, hi)
+            print(f"[NORM] {side} band {band}: view {base_lo:.6g}..{base_hi:.6g}"
+                  f" clip {clip:g}% -> stretch {lo:.6g}..{hi:.6g}")
+        if not pinned:
+            QMessageBox.warning(
+                self, "Normalize",
+                "Nothing measurable in the current view -- it may be all "
+                "nodata. Move to where there is data and press again.")
+            return
+
+        self.norm_bounds[side].update(pinned)
+        if side == "input":
+            self.apply_input_bands()
+        else:
+            self._apply_ref_stretch(layer)
+            self.canvas_right.refresh()
+
+    def _apply_ref_stretch(self, layer):
+        """Render the reference with its pinned bounds, or QGIS's own stretch."""
+        bounds = self.norm_bounds["ref"].get(1)
+        if bounds is None:
+            self.reset_normalization(layer)
+            return
+        try:
+            provider = layer.dataProvider()
+            ce = QgsContrastEnhancement(provider.dataType(1))
+            ce.setContrastEnhancementAlgorithm(
+                QgsContrastEnhancement.StretchToMinimumMaximum)
+            ce.setMinimumValue(bounds[0])
+            ce.setMaximumValue(bounds[1])
+            renderer = QgsSingleBandGrayRenderer(provider, 1)
+            renderer.setContrastEnhancement(ce)
+            layer.setRenderer(renderer)
+            layer.triggerRepaint()
+        except Exception as e:
+            print(f"[NORM] reference: {e}")
+
     def normalize_layer(self, layer):
         """Apply the SAR sqrt-gamma stretch to the reference layer."""
         if not layer or not layer.isValid():
             return
         provider = layer.dataProvider()
         base_lo, base_hi = self.normalize_range(provider, 1)
-        min_dn, max_dn = self._gamma_bounds(layer.source(), 1, base_lo, base_hi)
+        min_dn, max_dn = self._gamma_bounds(layer.source(), 1, base_lo, base_hi,
+                                            None, self.clip_percent("ref"))
         if min_dn is None:
             print("[NORM] reference: gamma bounds unavailable, "
                   "leaving the current stretch")
@@ -1200,16 +1343,6 @@ class QCDashboard(QMainWindow):
         except Exception as e:
             print(f"[RESET NORM] Error: {e}")
 
-    def toggle_normalization(self, state):
-        """Toggle SAR gamma stretch ON / restore QGIS default stretch OFF."""
-        if not self.current_ref_layer or not self.current_ref_layer.isValid():
-            return
-        if state == Qt.Checked:
-            self.normalize_layer(self.current_ref_layer)
-        else:
-            self.reset_normalization(self.current_ref_layer)
-        self.canvas_right.refresh()
-
     # ── REFERENCE TIF LOADER ─────────────────────────────────────────────────
     def _load_ref_layer(self, tif_path, set_extent=True):
         """Single entry point for all reference TIF loads."""
@@ -1239,10 +1372,7 @@ class QCDashboard(QMainWindow):
             if set_extent:
                 self.canvas_right.setExtent(ext)
 
-            if self.cb_normalize.isChecked():
-                self.normalize_layer(lyr)
-            else:
-                self.reset_normalization(lyr)
+            self._apply_ref_stretch(lyr)
             return lyr
         except Exception as e:
             print(f"[LOAD] Error: {e}")
@@ -1253,6 +1383,49 @@ class QCDashboard(QMainWindow):
             self.canvas_right.refresh()
 
     # ── WORKING CRS ──────────────────────────────────────────────────────────
+    @staticmethod
+    def _clip_combo():
+        """The percentage Normalize clips off each end."""
+        combo = QComboBox()
+        combo.setFixedWidth(64)
+        for pct in NORM_CLIP_CHOICES:
+            combo.addItem(f"{pct:g}%", pct)
+        combo.setCurrentIndex(NORM_CLIP_CHOICES.index(NORM_CLIP_DEFAULT))
+        combo.setToolTip(
+            "Percentage clipped off each end when Normalize measures.\n"
+            "2% ignores the brightest and darkest 2%, so a handful of bright\n"
+            "scatterers cannot set the whole scene. 0% is a true min/max.")
+        combo.setStyleSheet("QComboBox { background-color: rgba(255,255,255,170); }")
+        return combo
+
+    def clip_percent(self, side):
+        combo = self.clip_combos.get(side)
+        try:
+            value = combo.currentData()
+            if value is None:
+                value = float(combo.currentText().rstrip("%"))
+            return float(value)
+        except Exception:
+            return NORM_CLIP_DEFAULT
+
+    @staticmethod
+    def _normalize_button(tooltip):
+        """A compact 'Normalize' that sits translucently over a canvas.
+
+        On the canvas rather than in the button row because it acts on what is
+        in view: it belongs with the thing it measures, and the row is for
+        actions on the table.
+        """
+        button = QPushButton("Normalize")
+        button.setToolTip(tooltip)
+        button.setFixedWidth(90)
+        button.setStyleSheet(
+            "QPushButton { background-color: rgba(255,255,255,170);"
+            " border: 1px solid rgba(0,0,0,90); border-radius: 3px;"
+            " padding: 2px 6px; }"
+            "QPushButton:hover { background-color: rgba(255,255,255,215); }")
+        return button
+
     def _rebuild_transforms(self):
         """Rebuild the WGS84 <-> working-CRS transforms after a CRS change."""
         self.transform_proj_to_wgs = QgsCoordinateTransform(
@@ -1787,6 +1960,7 @@ class QCDashboard(QMainWindow):
         if index < 0 or index >= len(self.ref_tif_list):
             return
         tif_path = self.ref_tif_list[index]
+        self.norm_bounds["ref"] = {}
         self._remove_markers(self.canvas_right, "right")
         self.cleanup_reference_layer()
         self._load_ref_layer(tif_path)
@@ -2453,6 +2627,7 @@ class QCDashboard(QMainWindow):
             self.band_container.hide()
             return
         self.clear_stretch_cache(layer.source())
+        self.norm_bounds["input"] = {}
         labels = self._band_labels(layer)
         count  = len(labels)
         if count < 1:
@@ -2468,12 +2643,12 @@ class QCDashboard(QMainWindow):
         finally:
             for combo in self.band_combos:
                 combo.blockSignals(False)
-        # nothing to choose between with one band
-        if count < 2:
-            self.band_container.hide()
-        else:
-            self.band_container.show()
-            self.band_container.raise_()
+        # the picker is pointless with one band, but Normalize is not, so the
+        # overlay stays up either way and only the combos come and go
+        for combo in self.band_combos:
+            combo.setVisible(count >= 2)
+        self.band_container.show()
+        self.band_container.raise_()
         print(f"[BANDS] input has {count}: {', '.join(labels)}")
         self.apply_input_bands()
 
@@ -2482,15 +2657,17 @@ class QCDashboard(QMainWindow):
         return [max(combo.currentIndex(), 0) + 1 for combo in self.band_combos]
 
     @staticmethod
-    def sampled_cut(provider, band, low, high):
+    def sampled_cut(provider, band, low, high, extent=None):
         """cumulativeCut over a bounded sample, or (None, None).
 
         The sampled overload is tried first and the unsampled signature only as
         a fallback for older QGIS, because unsampled means a full-resolution
-        pass over the whole raster.
+        pass over the whole raster. An extent narrows it to the visible ground.
         """
         try:
-            return provider.cumulativeCut(band, low, high, QgsRectangle(),
+            return provider.cumulativeCut(band, low, high,
+                                          extent if extent is not None
+                                          else QgsRectangle(),
                                           RASTER_SAMPLE_SIZE)
         except TypeError:
             pass
@@ -2502,12 +2679,13 @@ class QCDashboard(QMainWindow):
             return (None, None)
 
     @staticmethod
-    def sampled_stats(provider, band):
+    def sampled_stats(provider, band, extent=None):
         """bandStatistics over a bounded sample, or None. Same reasoning."""
         try:
             return provider.bandStatistics(
                 band, QgsRasterBandStats.Min | QgsRasterBandStats.Max,
-                QgsRectangle(), RASTER_SAMPLE_SIZE)
+                extent if extent is not None else QgsRectangle(),
+                RASTER_SAMPLE_SIZE)
         except TypeError:
             pass
         except Exception:
@@ -2520,33 +2698,32 @@ class QCDashboard(QMainWindow):
     def _stretch_for(self, layer, band):
         """Contrast enhancement for one input band.
 
-        'Normalize NISAR' applies the same SAR sqrt-gamma stretch the reference
-        uses, but over the band's OWN sampled range rather than the reference's
-        DN range -- a dB chip forced through 0-1500 renders black. Otherwise the
-        band is clipped at the RGB percentiles. Either way a plain min/max is
-        avoided: on SAR it is set by a handful of bright scatterers.
+        Bounds pinned by the Normalize tool win outright and are returned as
+        they are, so panning and zooming cannot re-stretch under a measurement.
+        Otherwise the band is clipped at its 2%-98% percentiles over the whole
+        raster. Either way a plain min/max is avoided: on SAR it is set by a
+        handful of bright scatterers.
 
         Bounds are cached per raster, band and stretch: re-picking the channel
         order is a common action and must not recompute statistics each time.
         """
         provider = layer.dataProvider()
-        normalize = bool(self.cb_normalize_input.isChecked())
-        key = (layer.source(), band, normalize)
+        pinned = self.norm_bounds["input"].get(band)
+        if pinned is not None:
+            lo, hi = pinned          # set by Normalize; survives pan and zoom
+            ce = QgsContrastEnhancement(provider.dataType(band))
+            ce.setContrastEnhancementAlgorithm(
+                QgsContrastEnhancement.StretchToMinimumMaximum)
+            ce.setMinimumValue(lo)
+            ce.setMaximumValue(hi)
+            return ce
+
+        key = (layer.source(), band, False)
         cached = self._stretch_cache.get(key)
         if cached is not None:
             lo, hi = cached
         else:
             lo = hi = None
-            if normalize:
-                # Apply the gamma over the band's OWN range, read from the
-                # raster: amplitude, dB and DN products all turn up here.
-                base_lo, base_hi = self.normalize_range(provider, band)
-                lo, hi = self._gamma_bounds(layer.source(), band,
-                                            base_lo, base_hi)
-                if lo is not None and hi is not None and hi > lo:
-                    print(f"[NORM] input band {band}: data "
-                          f"{base_lo:.6g}..{base_hi:.6g} -> stretch "
-                          f"{lo:.6g}..{hi:.6g}")
             if lo is None or hi is None or hi <= lo:
                 lo, hi = self.sampled_cut(provider, band,
                                           RGB_CLIP_LOW, RGB_CLIP_HIGH)
@@ -2586,7 +2763,7 @@ class QCDashboard(QMainWindow):
             layer.setRenderer(renderer)
             layer.triggerRepaint()
             self.canvas_left.refresh()
-            stretch = ("gamma" if self.cb_normalize_input.isChecked()
+            stretch = ("pinned" if self.norm_bounds["input"]
                        else f"{RGB_CLIP_LOW:.0%}-{RGB_CLIP_HIGH:.0%}")
             print(f"[BANDS] input rendered as {shown} ({stretch} stretch)")
         except Exception as e:

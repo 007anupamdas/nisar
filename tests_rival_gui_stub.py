@@ -446,16 +446,17 @@ R.QgsSingleBandGrayRenderer = lambda p, b: (
 
 # a real combo stand-in: the mock would report one shared current index
 class _Combo:
-    def __init__(self): self._items, self._idx = [], -1
+    def __init__(self): self._items, self._idx, self._visible = [], -1, True
     def blockSignals(self, _): pass
     def clear(self): self._items, self._idx = [], -1
     def addItem(self, t): self._items.append(t)
     def count(self): return len(self._items)
     def setCurrentIndex(self, i): self._idx = i
+    def setVisible(self, v): self._visible = bool(v)
     def currentIndex(self): return self._idx
     def currentText(self): return self._items[self._idx] if self._idx >= 0 else ""
 
-win.cb_normalize_input.isChecked = MagicMock(return_value=False)
+win.norm_bounds = {"input": {}, "ref": {}}
 
 # NISAR carries two bands; every slot offers both and the default is 1,1,1
 dual = fake_layer(2, ["HH", "HV"])
@@ -491,46 +492,46 @@ print("3-band input -> composite", captured[-1])
 # single band: nothing to choose between, so no picker, still rendered
 single = fake_layer(1, ["HH"])
 win.input_tif_layer = single
-win.band_container.hide.reset_mock()
+win.band_container.show.reset_mock()
 win.populate_band_picker(single)
-assert win.band_container.hide.called, "picker shown for a single-band raster"
+# the combos go, but the overlay stays: Normalize acts on any raster and has to
+# stay reachable even when there is nothing to compose
+assert not any(c._visible for c in win.band_combos), "combos shown for one band"
+assert win.band_container.show.called, "overlay hidden, taking Normalize with it"
 assert captured[-1] == ("grey", 1), captured
-print("1-band input -> picker hidden, rendered", captured[-1])
+print("1-band input -> combos hidden, overlay kept, rendered", captured[-1])
 
-# ── 11. 'Normalize NISAR' drives the same gamma stretch as the reference ─────
+# ── 11. Normalize pins a stretch, and panning does not disturb it ────────────
 win.input_tif_layer = dual
 win.band_combos = [_Combo(), _Combo(), _Combo()]
+win.norm_bounds = {"input": {}, "ref": {}}
 win.populate_band_picker(dual)
-win._gamma_bounds = MagicMock(return_value=(12.0, 340.0))
 
-win.cb_normalize_input.isChecked = MagicMock(return_value=False)
-win._stretch_for(dual, 1)
-assert not win._gamma_bounds.called, "gamma used while Normalize NISAR is off"
+# with nothing pinned, the band goes through the percentile clip
+before = len(captured)
+win.apply_input_bands()
+assert captured[-1][0] == "rgb", captured[-1]
 
-win.cb_normalize_input.isChecked = MagicMock(return_value=True)
+# pinning band 1 makes _stretch_for return those bounds verbatim
+win.norm_bounds["input"][1] = (0.167, 0.5715)
+ce = win._stretch_for(dual, 1)
+assert ce.setMinimumValue.call_args[0][0] == 0.167, ce.setMinimumValue.call_args
+assert ce.setMaximumValue.call_args[0][0] == 0.5715, ce.setMaximumValue.call_args
+print("\nNormalize pins band 1 at", win.norm_bounds["input"][1],
+      "and _stretch_for returns it verbatim")
+
+# an unpinned band still falls through to the percentile clip
+measured = []
+_orig_cut = win.sampled_cut
+win.sampled_cut = lambda p, b, lo, hi, ext=None: (
+    measured.append(b) or (0.1, 0.9))
 win._stretch_cache = {}
-win.apply_input_bands()
-# R=G=B=1, so one pass covers all three channels -- the bounds are cached per
-# (raster, band, stretch), not recomputed per slot
-bands = [c[0][1] for c in win._gamma_bounds.call_args_list]
-assert bands == [1], bands
-print("Normalize NISAR on -> gamma bounds computed once for band 1:", bands)
-
-# a second distinct band does cost a pass
-win.band_combos[1].setCurrentIndex(1)
-win.apply_input_bands()
-assert [c[0][1] for c in win._gamma_bounds.call_args_list] == [1, 2], \
-    win._gamma_bounds.call_args_list
-win.band_combos[1].setCurrentIndex(0)
-print("a distinct band costs one more pass, then is cached too")
-
-# and it falls back to the percentile clip when the gamma read fails
-win._gamma_bounds = MagicMock(return_value=(None, None))
-win._stretch_cache = {}
-win.apply_input_bands()
-assert captured[-1] == ("rgb", 1, 1, 1), captured
-print("gamma unavailable -> falls back to the percentile clip")
-win.cb_normalize_input.isChecked = MagicMock(return_value=False)
+win._stretch_for(dual, 2)
+assert measured == [2], measured
+win._stretch_for(dual, 1)          # pinned: must not measure again
+assert measured == [2], measured
+win.sampled_cut = _orig_cut
+print("unpinned bands measure; a pinned band never re-measures")
 
 # ── 11b. stretch statistics are sampled and cached ───────────────────────────
 # An unsampled cumulativeCut reads the WHOLE raster at full resolution, per
@@ -579,16 +580,46 @@ win.apply_input_bands()
 assert len(calls["cut"]) == before + 1, "re-picking recomputed a cached band"
 print("re-picking a band reuses the cache:", calls["cut"])
 
-# toggling Normalize is a different stretch, so it is cached separately
-win.cb_normalize_input.isChecked = MagicMock(return_value=True)
-win._gamma_bounds = MagicMock(return_value=(12.0, 340.0))
-win.apply_input_bands()
+# Normalize now measures the CURRENT VIEW and pins the result, so it is an
+# action rather than a mode: nothing about it is cached by _stretch_for.
+win.canvas_left.extent = MagicMock(return_value=_Rect(324000, 1899000,
+                                                      326000, 1901000))
+win.clip_combos = {"input": MagicMock(currentData=lambda: 2.0),
+                   "ref": MagicMock(currentData=lambda: 2.0)}
+win.view_extent_for = MagicMock(return_value=_Rect(324000, 1899000,
+                                                   326000, 1901000))
+win.pixel_window = MagicMock(return_value=(10, 20, 400, 400))
+win._gamma_bounds = MagicMock(return_value=(0.2, 0.5))
+win.norm_bounds = {"input": {}, "ref": {}}
+win.input_tif_layer = big
+win.band_combos = [_Combo(), _Combo(), _Combo()]
+win.populate_band_picker(big)
+win.normalize_to_view("input")
+
 assert win._gamma_bounds.called, "Normalize did not reach the gamma bounds"
+args = win._gamma_bounds.call_args[0]
+assert args[4] == (10, 20, 400, 400), args      # the view's pixel window
+assert args[5] == 2.0, args                     # the chosen clip percentage
+assert win.norm_bounds["input"][1] == (0.2, 0.5), win.norm_bounds
+print("Normalize measures the view window", args[4], "at clip", args[5],
+      "and pins", win.norm_bounds["input"][1])
+
+# panning must not disturb it: the pinned bounds survive a re-render
+win.canvas_left.extent = MagicMock(return_value=_Rect(400000, 1899000,
+                                                      402000, 1901000))
 win._gamma_bounds.reset_mock()
 win.apply_input_bands()
-assert not win._gamma_bounds.called, "normalized bounds were not cached"
-print("Normalize NISAR cached separately from the percentile stretch")
-win.cb_normalize_input.isChecked = MagicMock(return_value=False)
+assert not win._gamma_bounds.called, "re-render re-measured after a pan"
+assert win.norm_bounds["input"][1] == (0.2, 0.5), win.norm_bounds
+print("panning does not re-stretch; the pinned bounds survive")
+
+# the clip percentage reaches the measurement
+win.clip_combos["input"] = MagicMock(currentData=lambda: 5.0)
+assert win.clip_percent("input") == 5.0
+win.clip_combos["input"] = MagicMock(currentData=lambda: None,
+                                     currentText=lambda: "1%")
+assert win.clip_percent("input") == 1.0      # falls back to the label
+print("clip percentage read from the tool, label as fallback")
 
 # loading a raster drops only that raster's cached bounds
 win.clear_stretch_cache("/big/scene.tif")
