@@ -595,6 +595,50 @@ win.clear_stretch_cache("/big/scene.tif")
 assert not any(k[0] == "/big/scene.tif" for k in win._stretch_cache)
 print("loading a raster clears its own cached bounds")
 
+# ── 11c. the mark is a coloured cross over a translucent yellow halo ─────────
+made = []
+R.QgsVertexMarker = MagicMock(side_effect=lambda canvas: (
+    made.append(MagicMock()) or made[-1]))
+R.QColor = lambda *rgba: ("color", rgba)
+
+# section 6 replaced draw_marker with a mock to check follow_input_point; put
+# the real method back so this exercises the shipped drawing code
+win.draw_marker = R.QCDashboard.draw_marker.__get__(win, R.QCDashboard)
+win.markers = {"left": [], "right": []}
+win.canvas_left.scene.return_value = MagicMock()
+win.draw_marker(_PointXY(325000.0, 1900000.0), win.canvas_left, "RED")
+
+items = win.markers["left"]
+assert len(items) == 2, items
+halo, cross = items
+assert halo.setColor.call_args[0][0] == ("color", R.MARKER_OUTLINE_RGBA)
+assert cross.setColor.call_args[0][0] == "RED"
+# translucent: the alpha must be well short of opaque
+assert 0 < R.MARKER_OUTLINE_RGBA[3] < 255, R.MARKER_OUTLINE_RGBA
+# the halo is the wider one, and drawn first so the cross sits on top
+assert (halo.setPenWidth.call_args[0][0]
+        > cross.setPenWidth.call_args[0][0]), "halo is not the wider pen"
+assert (halo.setIconSize.call_args[0][0]
+        > cross.setIconSize.call_args[0][0]), "halo is not the larger icon"
+assert items.index(halo) < items.index(cross), "halo drawn over the cross"
+print("\nmark = %s cross over a translucent yellow halo, alpha %d/255"
+      % (cross.setColor.call_args[0][0], R.MARKER_OUTLINE_RGBA[3]))
+
+# re-marking takes BOTH items off the scene, not just one
+scene = win.canvas_left.scene.return_value
+scene.removeItem.reset_mock()
+win.draw_marker(_PointXY(325010.0, 1900000.0), win.canvas_left, "RED")
+removed = [c[0][0] for c in scene.removeItem.call_args_list]
+assert set(map(id, removed)) == {id(halo), id(cross)}, removed
+print("re-marking removes both items, leaving no orphan halo")
+
+# clear_markers empties both canvases
+win.canvas_right.scene.return_value = MagicMock()
+win.draw_marker(_PointXY(325000.0, 1900000.0), win.canvas_right, "GREEN")
+win.clear_markers()
+assert win.markers["left"] == [] and win.markers["right"] == [], win.markers
+print("clear_markers empties both canvases")
+
 # ── 12. arrow keys nudge the mark, not the view ──────────────────────────────
 class _Table:
     """Enough QTableWidget for the nudge path, with real cell values."""

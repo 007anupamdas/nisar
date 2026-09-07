@@ -36,6 +36,11 @@ produces stray picks. Mark is the only tool that fills the table; the rest move
 the view. With 'Sync Maps' on the reference follows the input's centre and
 scale, so zooming either side keeps both at the same ground width.
 
+The mark is a coloured cross -- red for the input, green for the reference --
+over a wider translucent yellow one. The halo is what makes it findable over
+bright SAR speckle or a pale ortho, where a thin cross disappears; the
+translucency keeps the pixel being measured visible through it.
+
 The arrow keys over a canvas move that side's mark by one source pixel (Shift
 for ten), rather than panning the view: while measuring, the thing being
 refined is the point. The input's own pixel size is used on the left and the
@@ -83,7 +88,7 @@ from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QMessageBox, QApplication, QShortcut, QLabel,
                              QFrame, QButtonGroup)
 from PyQt5.QtCore import Qt, QObject, QEvent
-from PyQt5.QtGui import QKeySequence, QFont
+from PyQt5.QtGui import QKeySequence, QFont, QColor
 from qgis.gui import (QgsMapCanvas, QgsMapTool, QgsMapToolPan, QgsMapToolZoom,
                       QgsVertexMarker)
 from qgis.core import (QgsProject, QgsPointXY, QgsRasterLayer, QgsVectorLayer,
@@ -166,6 +171,16 @@ MAP_TOOLS = (TOOL_MARK, TOOL_PAN, TOOL_ZOOM_IN, TOOL_ZOOM_OUT)
 # it, for closing a gap of tens of pixels without holding the key down.
 NUDGE_PIXELS       = 1
 NUDGE_SHIFT_FACTOR = 10
+
+# The mark is a coloured cross over a wider translucent yellow one. The halo is
+# what makes it findable over bright SAR speckle or a pale ortho, where a thin
+# red or green cross disappears; the translucency keeps the pixel being measured
+# visible through it.
+MARKER_SIZE           = 20
+MARKER_PEN_WIDTH      = 1
+MARKER_OUTLINE_RGBA   = (255, 255, 0, 110)     # yellow, ~43% opaque
+MARKER_OUTLINE_WIDTH  = 4
+MARKER_OUTLINE_EXTRA  = 2                      # px wider than the cross itself
 
 # Percentile clip for the input composite. A min/max stretch on SAR is dominated
 # by a handful of bright scatterers and leaves the scene black.
@@ -748,7 +763,7 @@ class QCDashboard(QMainWindow):
         self.setWindowTitle("RIVAL - Reference Image Validation and Accuracy Logger")
         self.resize(1500, 900)
 
-        self.markers           = {"left": None, "right": None}
+        self.markers           = {"left": [], "right": []}
         self.ref_folder_path   = None
         self.ref_footprints    = {}
         self.ref_mode          = None
@@ -1657,11 +1672,7 @@ class QCDashboard(QMainWindow):
         if index < 0 or index >= len(self.ref_tif_list):
             return
         tif_path = self.ref_tif_list[index]
-        if self.markers["right"]:
-            sc = self.canvas_right.scene()
-            if sc:
-                sc.removeItem(self.markers["right"])
-            self.markers["right"] = None
+        self._remove_markers(self.canvas_right, "right")
         self.cleanup_reference_layer()
         self._load_ref_layer(tif_path)
 
@@ -1771,19 +1782,43 @@ class QCDashboard(QMainWindow):
             except ValueError:
                 pass
 
+    def _remove_markers(self, canvas, key):
+        """Take this canvas's marker items off its scene."""
+        existing = self.markers.get(key) or []
+        if not isinstance(existing, (list, tuple)):
+            existing = [existing]
+        scene = canvas.scene()
+        for item in existing:
+            if item is None:
+                continue
+            try:
+                if scene:
+                    scene.removeItem(item)
+            except Exception as e:
+                print(f"[MARKER] {e}")
+        self.markers[key] = []
+
     def draw_marker(self, point, canvas, color):
+        """A cross in `color`, haloed by a wider translucent yellow one."""
         key = "left" if canvas == self.canvas_left else "right"
-        if self.markers[key]:
-            sc = canvas.scene()
-            if sc:
-                sc.removeItem(self.markers[key])
-        m = QgsVertexMarker(canvas)
-        m.setCenter(point)
-        m.setIconType(QgsVertexMarker.ICON_CROSS)
-        m.setColor(color)
-        m.setPenWidth(1)
-        m.setIconSize(20)
-        self.markers[key] = m
+        self._remove_markers(canvas, key)
+
+        halo = QgsVertexMarker(canvas)
+        halo.setCenter(point)
+        halo.setIconType(QgsVertexMarker.ICON_CROSS)
+        halo.setColor(QColor(*MARKER_OUTLINE_RGBA))
+        halo.setPenWidth(MARKER_OUTLINE_WIDTH)
+        halo.setIconSize(MARKER_SIZE + MARKER_OUTLINE_EXTRA)
+
+        cross = QgsVertexMarker(canvas)
+        cross.setCenter(point)
+        cross.setIconType(QgsVertexMarker.ICON_CROSS)
+        cross.setColor(color)
+        cross.setPenWidth(MARKER_PEN_WIDTH)
+        cross.setIconSize(MARKER_SIZE)
+
+        # halo first so the coloured cross sits on top of it
+        self.markers[key] = [halo, cross]
         canvas.refresh()
 
     def sync_view_to_row(self):
@@ -1868,11 +1903,7 @@ class QCDashboard(QMainWindow):
 
     def clear_markers(self):
         for key, canvas in [("left", self.canvas_left), ("right", self.canvas_right)]:
-            if self.markers[key]:
-                sc = canvas.scene()
-                if sc:
-                    sc.removeItem(self.markers[key])
-                self.markers[key] = None
+            self._remove_markers(canvas, key)
         self.canvas_left.refresh()
         self.canvas_right.refresh()
 
