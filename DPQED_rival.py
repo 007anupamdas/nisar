@@ -62,14 +62,17 @@ grey. Bands are listed by the names the raster carries -- cog_locate's --gtiff
 writes the polarization into each description, so a chip offers HH and HV rather
 than 'Band 1'.
 
-''Normalize NISAR' and 'Normalize Ref' select the same SAR sqrt-gamma stretch,
-computed by one shared routine -- but each over its own data range. The
-reference keeps NORM_MIN..NORM_MAX, tuned for its DN; the input takes the band's
-own sampled range, because a NISAR chip in float32 dB runs about -28..+2 and
-forcing it through 0-1500 leaves every pixel at the bottom of the curve, which
-renders the scene black. Unticked, the input clips each channel at its 2%-98%
-percentiles. Either way a plain min/max is avoided: on SAR it is set by a
-handful of bright scatterers and renders the scene black.
+''Normalize NISAR' and 'Normalize Ref' apply the same SAR sqrt-gamma stretch,
+each over the range its own raster reports, read per band. NISAR products turn
+up as linear amplitude (0.158-0.580 on one L-band chip), as float32 dB (about
+-28..+2) and as DN in the thousands; the fixed NORM_MIN..NORM_MAX survives only
+as the fallback when a raster cannot be measured, since a range far above the
+data leaves every pixel at the bottom of the curve. Unticked, the input clips
+each channel at its 2%-98% percentiles. Either way a plain min/max is avoided:
+on SAR it is set by a handful of bright scatterers.
+
+The range used is printed per band, so a stretch can be checked against what
+QGIS reports for the same raster.
 
 NISAR rasters are UTM and the C1/L8 references are WGS84. By default both
 canvases are pinned to the working CRS and QGIS reprojects the reference as it
@@ -117,9 +120,17 @@ from PyQt5.QtCore import QVariant
 # REF_VIEW_WIDTH_M below for why. The old fixed zoom scales are gone with the
 # last zoomScale() call that used them.
 left_view_width = 5000       # ground width of the input view, metres
-NORM_MIN    = 0           # SAR normalization min DN
-NORM_MAX    = 1500        # SAR normalization max DN
 NORM_GAMMA  = 0.5         # gamma exponent for sqrt stretch (0.5 = square root)
+
+# The range the gamma is applied over is read from the raster, per band: NISAR
+# products turn up as linear amplitude (an L-band chip here reads 0.158-0.580 on
+# band 1 and 0.07-0.27 on band 2), as float32 dB (about -28..+2), and as DN in
+# the thousands. No single hard-coded range fits those, and the failure is
+# silent -- a range far above the data leaves every pixel at the bottom of the
+# curve and the scene renders black.
+NORM_USE_DATA_RANGE = True
+NORM_MIN    = 0           # fallback range, used only when the raster cannot be
+NORM_MAX    = 1500        # measured, or with NORM_USE_DATA_RANGE off
 
 # Working (projected) CRS the table's In/Ref columns and the error metres live in.
 # Adopted from the input TIF when that carries a projected CRS; this is the fallback.
@@ -1048,6 +1059,26 @@ class QCDashboard(QMainWindow):
         threading.Thread(target=_build, daemon=True).start()
 
     # ── NORMALIZATION: SAR SQRT-GAMMA STRETCH ─────────────────────────────────
+    def normalize_range(self, provider, band):
+        """The range to apply the gamma over, read from the raster itself.
+
+        Full min/max of a bounded sample rather than a percentile clip: the
+        percentiles are taken later, on the stretched values, and clipping twice
+        would compound. Falls back to NORM_MIN..NORM_MAX only when the raster
+        cannot be measured at all.
+        """
+        if NORM_USE_DATA_RANGE:
+            lo, hi = self.sampled_cut(provider, band, 0.0, 1.0)
+            if lo is None or hi is None or hi <= lo:
+                stats = self.sampled_stats(provider, band)
+                if stats is not None:
+                    lo, hi = stats.minimumValue, stats.maximumValue
+            if lo is not None and hi is not None and hi > lo:
+                return (float(lo), float(hi))
+            print(f"[NORM] band {band}: could not measure a range, "
+                  f"falling back to {NORM_MIN}..{NORM_MAX}")
+        return (float(NORM_MIN), float(NORM_MAX))
+
     def _gamma_bounds(self, source, band_no=1, dn_min=None, dn_max=None):
         """(min_dn, max_dn) for the SAR sqrt-gamma stretch, or (None, None).
 
@@ -1122,11 +1153,16 @@ class QCDashboard(QMainWindow):
         """Apply the SAR sqrt-gamma stretch to the reference layer."""
         if not layer or not layer.isValid():
             return
-        min_dn, max_dn = self._gamma_bounds(layer.source(), 1)
+        provider = layer.dataProvider()
+        base_lo, base_hi = self.normalize_range(provider, 1)
+        min_dn, max_dn = self._gamma_bounds(layer.source(), 1, base_lo, base_hi)
         if min_dn is None:
+            print("[NORM] reference: gamma bounds unavailable, "
+                  "leaving the current stretch")
             return
+        print(f"[NORM] reference band 1: data {base_lo:.6g}..{base_hi:.6g} "
+              f"-> stretch {min_dn:.6g}..{max_dn:.6g}")
         try:
-            provider = layer.dataProvider()
             ce = QgsContrastEnhancement(provider.dataType(1))
             ce.setMinimumValue(min_dn)
             ce.setMaximumValue(max_dn)
@@ -2502,16 +2538,15 @@ class QCDashboard(QMainWindow):
         else:
             lo = hi = None
             if normalize:
-                # Apply the gamma over the band's OWN range. A NISAR chip in dB
-                # sits nowhere near the reference's 0-1500 DN, and forcing that
-                # range renders it black.
-                base_lo, base_hi = self.sampled_cut(provider, band, 0.0, 1.0)
-                if (base_lo is None or base_hi is None or base_hi <= base_lo):
-                    stats = self.sampled_stats(provider, band)
-                    if stats is not None:
-                        base_lo, base_hi = stats.minimumValue, stats.maximumValue
+                # Apply the gamma over the band's OWN range, read from the
+                # raster: amplitude, dB and DN products all turn up here.
+                base_lo, base_hi = self.normalize_range(provider, band)
                 lo, hi = self._gamma_bounds(layer.source(), band,
                                             base_lo, base_hi)
+                if lo is not None and hi is not None and hi > lo:
+                    print(f"[NORM] input band {band}: data "
+                          f"{base_lo:.6g}..{base_hi:.6g} -> stretch "
+                          f"{lo:.6g}..{hi:.6g}")
             if lo is None or hi is None or hi <= lo:
                 lo, hi = self.sampled_cut(provider, band,
                                           RGB_CLIP_LOW, RGB_CLIP_HIGH)

@@ -716,6 +716,51 @@ assert step is not None and step[0] > 0 and step[1] > 0, step
 print("WGS84 reference pixel measured through the transform:",
       tuple(round(v, 3) for v in step))
 
+# ── 12a. the normalize range is read from the raster, per band ───────────────
+# Reported from a real L-band chip: band 1 reads 0.158..0.580 and band 2
+# 0.07..0.27 -- linear amplitude, a third scale after dB and DN. No hard-coded
+# range fits all three, so it has to come from the raster.
+class _AmpProvider:
+    """A two-band amplitude raster with the reported ranges."""
+    RANGES = {1: (0.158, 0.580), 2: (0.07, 0.27)}
+    def __init__(self): self.cut_calls = []
+    def bandCount(self): return 2
+    def dataType(self, band): return 6
+    def cumulativeCut(self, band, lo, hi, extent=None, sample=None):
+        self.cut_calls.append((band, lo, hi, sample))
+        if sample is None:
+            raise AssertionError("unsampled cumulativeCut")
+        return self.RANGES[band] if (lo, hi) == (0.0, 1.0) else (0.2, 0.5)
+    def bandStatistics(self, band, stats=None, extent=None, sample=None):
+        lo, hi = self.RANGES[band]
+        return MagicMock(minimumValue=lo, maximumValue=hi)
+
+amp = _AmpProvider()
+assert win.normalize_range(amp, 1) == (0.158, 0.580), win.normalize_range(amp, 1)
+assert win.normalize_range(amp, 2) == (0.07, 0.27), win.normalize_range(amp, 2)
+print("\nnormalize range read from the raster per band:",
+      win.normalize_range(amp, 1), win.normalize_range(amp, 2))
+
+# full min/max, not a percentile clip -- the percentiles are taken later on the
+# stretched values and clipping twice would compound
+assert all(args[1:3] == (0.0, 1.0) for args in amp.cut_calls), amp.cut_calls
+assert all(args[3] == R.RASTER_SAMPLE_SIZE for args in amp.cut_calls), amp.cut_calls
+
+# a provider that cannot be measured falls back rather than failing
+class _Unmeasurable:
+    def cumulativeCut(self, *a, **k): raise RuntimeError("no histogram")
+    def bandStatistics(self, *a, **k): raise RuntimeError("no stats")
+assert win.normalize_range(_Unmeasurable(), 1) == (float(R.NORM_MIN),
+                                                   float(R.NORM_MAX))
+print("unmeasurable raster falls back to NORM_MIN..NORM_MAX:",
+      win.normalize_range(_Unmeasurable(), 1))
+
+# and the flag turns the whole thing off without touching anything else
+R.NORM_USE_DATA_RANGE = False
+assert win.normalize_range(amp, 1) == (float(R.NORM_MIN), float(R.NORM_MAX))
+R.NORM_USE_DATA_RANGE = True
+print("NORM_USE_DATA_RANGE=False restores the fixed range")
+
 # ── 12b. the gamma stretch on dB data, and on data carrying NaN ──────────────
 # Reported: 'Normalize NISAR' renders the input black while the reference
 # normalises fine. Two independent causes, both exercised here against real
