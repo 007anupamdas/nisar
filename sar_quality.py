@@ -48,8 +48,26 @@ NOISE -- how much of the variation is speckle rather than scene
     cv_floor    the coefficient of variation of that block. 0.52 is fully
                 developed single-look speckle.
 
-TEXTURE -- whether features survive at a given scale, which is what "I can see
-    it in one image and not the other" actually means
+CONTRAST -- how far the scene stands out of the speckle, which is what "I can
+    see it in one image and not the other" actually means
+    cv_scene    the scene's own coefficient of variation, with speckle removed.
+                Speckle is multiplicative, so cv_total^2 = cv_scene^2 +
+                cv_speckle^2 + cv_scene^2 cv_speckle^2 and the scene term comes
+                out by rearrangement. This is the contrast the sensor actually
+                recorded, independent of how the image is stretched.
+    cnr@10m     cv_scene divided by the speckle left after averaging to that
+    cnr@20m     scale: how many speckle sigmas a typical feature stands out by
+    cnr@40m     once you have squinted to 10, 20 or 40 m. The averaging uses the
+                SPECKLE correlation length, measured on the quietest region so
+                a structured scene does not deflate its own score.
+
+                Read against the Rose criterion, the standard threshold for
+                visual detection: 5 or more is reliably visible, 3 is marginal,
+                below 2 is invisible however you stretch it. This is the column
+                that answers "why can I see field boundaries in one product and
+                nothing at all in the other".
+
+TEXTURE -- the same question asked without a speckle model, as a cross-check
     tex@10m     ratio of the variation left after averaging to the variation
     tex@20m     speckle alone would leave, at 10/20/40 m blocks. 1.0 means the
     tex@40m     scene is indistinguishable from speckle at that scale: there is
@@ -61,18 +79,28 @@ CALIBRATION
     Measured against synthetic single-look speckle with known properties, at
     5 m posting, so the columns can be read rather than guessed at:
 
-      fixture                       oversmp   ENL   tex@10m  @20m  @40m
-      critically sampled, no scene    1.00    1.08    1.04    1.04  1.04
-      same, 3x oversampled            2.50    1.15    0.89    0.93  1.06
-      structured scene                1.07    1.08    1.11    1.40  2.22
-      same scene, 3x oversampled      2.63    1.15    0.94    0.99  1.33
+      fixture                      oversmp  ENL  cv_scene cnr@40m tex@40m
+      critically sampled, no scene   1.00   1.08   0.024    0.37    1.04
+      same, 3x oversampled           2.50   1.15   0.000    0.00    1.06
+      weak structure                 1.07   1.08   0.146    2.23    2.22
+      same, 3x oversampled           2.63   1.15   0.138    0.86    1.33
+      16:1 fields                    1.08   1.07   0.316    3.52    3.89
 
     So: oversmp reads 1.00 when resolution matches posting and 2.50 at a true
     3x; ENL runs ~8% high on a genuine single-look image, so treat 1.0-1.2 as
-    one look; texture sits near 1.0 when there is nothing to see and climbs
-    with scale when there is. The last two rows are the same ground truth --
-    blurring it 3x cuts the 40 m texture from 2.22 to 1.33, which is precisely
-    the "visible in one product, not the other" complaint, quantified.
+    one look; cv_scene reads ~0 on an image with no scene in it, which is the
+    property that makes it trustworthy; texture and cnr both sit near their
+    floor when there is nothing to see and climb when there is.
+
+    Rows 3 and 4 are one ground truth: blurring it 3x cuts cnr@40m from 2.23 to
+    0.86 and texture from 2.22 to 1.33, because the same contrast spread over
+    coarser samples is harder to see. That is the "visible in one product, not
+    the other" complaint, quantified.
+
+    The "clearly visible" verdict (cnr >= 5) is not reached by any fixture here
+    -- synthetic multiplicative fields saturate near cv_scene 0.33, while real
+    L-band farmland measures 0.55. Real data exercises that tier, not this
+    table.
 
 Usage:
     python sar_quality.py lsar.tif ssar.tif --center 78.03,16.80 --size 1024
@@ -112,6 +140,14 @@ RES_EFF_FLOOR = 1.0 - 1.0 / math.e
 
 # Ground scales, in metres, at which texture is reported.
 TEXTURE_SCALES_M = (10.0, 20.0, 40.0)
+
+# Rose criterion: the contrast-to-noise ratio at which a feature becomes
+# reliably visible to a human observer. 3 is marginal, below 2 is hopeless.
+ROSE_CNR = 5.0
+
+# A scene this variable, once speckle is removed, sets the image's correlation
+# length by itself -- res_eff then measures field size rather than resolution.
+SCENE_DOMINATES_CV = 0.30
 
 # max/p99 above this means a few very bright scatterers dominate the window,
 # which widens the autocorrelation and makes res_eff read coarse. Measured: a
@@ -243,6 +279,56 @@ def correlation_length(res_eff_m, px_m):
     return max(px_m, res_eff_m / RES_EFF_FLOOR)
 
 
+def speckle_region(a, block=ENL_BLOCK, pad=2):
+    """The quietest block and its neighbours -- the closest thing to bare speckle.
+
+    Correlation length has to be measured somewhere the scene is not, otherwise
+    a structured image reports the size of its fields as its resolution and then
+    gets penalised for it when speckle averaging is worked out.
+    """
+    h = (a.shape[0] // block) * block
+    w = (a.shape[1] // block) * block
+    if h < block * (2 * pad + 1) or w < block * (2 * pad + 1):
+        return a
+    blocks = a[:h, :w].reshape(h // block, block, w // block, block)
+    means = blocks.mean(axis=(1, 3))
+    stds = blocks.std(axis=(1, 3))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        cvs = np.where(means > 0, stds / means, np.nan)
+    if not np.isfinite(cvs).any():
+        return a
+    by, bx = np.unravel_index(np.nanargmin(np.where(np.isfinite(cvs), cvs, np.inf)),
+                              cvs.shape)
+    by = min(max(by, pad), cvs.shape[0] - pad - 1)
+    bx = min(max(bx, pad), cvs.shape[1] - pad - 1)
+    y0, x0 = (by - pad) * block, (bx - pad) * block
+    side = block * (2 * pad + 1)
+    return a[y0:y0 + side, x0:x0 + side]
+
+
+def scene_contrast(cv_total, cv_speckle):
+    """cv of the scene alone, speckle divided out of the total.
+
+    Speckle is multiplicative: observed = scene * speckle, so the variances
+    combine as cv_t^2 = cv_s^2 + cv_n^2 + cv_s^2 cv_n^2. Everything below the
+    speckle floor is speckle, and returns zero rather than a negative root.
+    """
+    v = (cv_total ** 2 - cv_speckle ** 2) / (1.0 + cv_speckle ** 2)
+    return math.sqrt(v) if v > 0 else 0.0
+
+
+def contrast_to_noise(cv_scene, cv_speckle, px_m, speckle_corr_m,
+                      scales=TEXTURE_SCALES_M):
+    """Speckle sigmas a typical feature stands out by, per averaging scale."""
+    out = {}
+    for scale in scales:
+        k = max(1, int(round(scale / px_m)))
+        indep = max(1.0, (k * px_m / speckle_corr_m) ** 2) if speckle_corr_m > 0 else k * k
+        residual = cv_speckle / math.sqrt(indep)
+        out[f"cnr@{scale:g}m"] = cv_scene / residual if residual else float("nan")
+    return out
+
+
 def texture(a, cv_floor, px_m, res_eff_m, scales=TEXTURE_SCALES_M):
     """How much variation survives averaging, against what speckle predicts.
 
@@ -292,6 +378,21 @@ def analyse_band(ds, band, win, max_lag, hist_bins=HIST_BINS):
     res_x = one_over_e_width(cols) * px
     cv_floor, looks = speckle_floor(filled)
 
+    quiet = speckle_region(filled)
+    # The speckle reference comes from the quiet REGION's own cv, not from
+    # cv_floor: the floor is the 5th percentile of a thousand block estimates,
+    # an order statistic biased a few percent low, and a low speckle reference
+    # manufactures scene contrast out of an image that has none. Speckle also
+    # cannot vary more than one look does, so the theoretical value caps it.
+    q_mean = float(quiet.mean())
+    cv_quiet = float(quiet.std()) / q_mean if q_mean else SPECKLE_CV_1LOOK
+    cv_speckle = min(cv_quiet, SPECKLE_CV_1LOOK)
+    q_lag = min(max_lag, max(2, min(quiet.shape) // 4))
+    speckle_corr = correlation_length(
+        (one_over_e_width(autocorr_profile(quiet, 0, q_lag)) * py
+         + one_over_e_width(autocorr_profile(quiet, 1, q_lag)) * px) / 2.0,
+        (px + py) / 2.0)
+
     out = {
         "band": band,
         "name": ds.descriptions[band - 1] or f"band {band}",
@@ -308,14 +409,25 @@ def analyse_band(ds, band, win, max_lag, hist_bins=HIST_BINS):
         "aniso": res_x / res_y if res_y else float("nan"),
         "cv_floor": cv_floor, "enl": looks,
     })
+    cv_scene = scene_contrast(out["cv"], cv_speckle)
+    out.update({"cv_speckle": cv_speckle, "cv_scene": cv_scene,
+                "speckle_corr_m": speckle_corr})
+    out.update(contrast_to_noise(cv_scene, cv_speckle, (px + py) / 2.0,
+                                 speckle_corr))
     out.update(texture(filled, cv_floor, (px + py) / 2.0,
                        (res_x + res_y) / 2.0))
     ratio = out["max"] / out["p99"] if out["p99"] > 0 else float("inf")
     out["bright_ratio"] = ratio
+    warnings = []
+    if cv_scene > SCENE_DOMINATES_CV:
+        warnings.append(f"scene structure dominates (cv_scene {cv_scene:.2f}): "
+                        f"res_eff is a correlation length, not a resolution")
     if ratio > BRIGHT_TARGET_RATIO:
-        out["warning"] = (f"bright targets dominate (max/p99 {ratio:.0f}): "
-                          f"res_eff reads coarse here, measure resolution over "
-                          f"homogeneous terrain")
+        warnings.append(f"bright targets dominate (max/p99 {ratio:.0f}): "
+                        f"res_eff reads coarse, measure resolution over "
+                        f"homogeneous terrain")
+    if warnings:
+        out["warning"] = "; ".join(warnings)
     return out
 
 
@@ -347,7 +459,16 @@ def report(path, size, center, max_lag, bands, hist_bins=HIST_BINS,
                   f"res_eff y {r['res_eff_y_m']:.1f} m x {r['res_eff_x_m']:.1f} m   "
                   f"oversmp y {r['oversmp_y']:.2f} x {r['oversmp_x']:.2f}   "
                   f"aniso {r['aniso']:.2f}")
-            print(f"    noise  cv_floor {r['cv_floor']:.3f}  ENL {r['enl']:.2f}")
+            print(f"    noise  cv_floor {r['cv_floor']:.3f}  ENL {r['enl']:.2f}  "
+                  f"speckle corr {r['speckle_corr_m']:.1f} m")
+            cnr = {k: r[k] for k in r if k.startswith("cnr@")}
+            best = max(cnr.values()) if cnr else 0.0
+            verdict = ("features clearly visible" if best >= ROSE_CNR else
+                       "marginal -- only the strongest features" if best >= 3.0 else
+                       "nothing discernible above speckle")
+            print(f"    contr  cv_scene {r['cv_scene']:.3f}   " +
+                  "  ".join(f"{k} {v:.2f}" for k, v in cnr.items()) +
+                  f"   -> {verdict}")
             if "warning" in r:
                 print(f"    !!     {r['warning']}")
             if show_hist:
