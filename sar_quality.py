@@ -113,6 +113,11 @@ RES_EFF_FLOOR = 1.0 - 1.0 / math.e
 # Ground scales, in metres, at which texture is reported.
 TEXTURE_SCALES_M = (10.0, 20.0, 40.0)
 
+# max/p99 above this means a few very bright scatterers dominate the window,
+# which widens the autocorrelation and makes res_eff read coarse. Measured: a
+# pure-speckle fixture sits near 1.8, a window over Hyderabad city at 33.
+BRIGHT_TARGET_RATIO = 15.0
+
 # Histogram: bins, and the width in characters of the printed bar.
 HIST_BINS = 24
 HIST_WIDTH = 46
@@ -305,6 +310,12 @@ def analyse_band(ds, band, win, max_lag, hist_bins=HIST_BINS):
     })
     out.update(texture(filled, cv_floor, (px + py) / 2.0,
                        (res_x + res_y) / 2.0))
+    ratio = out["max"] / out["p99"] if out["p99"] > 0 else float("inf")
+    out["bright_ratio"] = ratio
+    if ratio > BRIGHT_TARGET_RATIO:
+        out["warning"] = (f"bright targets dominate (max/p99 {ratio:.0f}): "
+                          f"res_eff reads coarse here, measure resolution over "
+                          f"homogeneous terrain")
     return out
 
 
@@ -337,6 +348,8 @@ def report(path, size, center, max_lag, bands, hist_bins=HIST_BINS,
                   f"oversmp y {r['oversmp_y']:.2f} x {r['oversmp_x']:.2f}   "
                   f"aniso {r['aniso']:.2f}")
             print(f"    noise  cv_floor {r['cv_floor']:.3f}  ENL {r['enl']:.2f}")
+            if "warning" in r:
+                print(f"    !!     {r['warning']}")
             if show_hist:
                 print_histogram(r["hist"], r["mean"], r["median"])
             print("    tex    " + "  ".join(
