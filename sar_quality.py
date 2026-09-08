@@ -1,0 +1,710 @@
+"""Measure what a SAR raster actually delivers: distribution, blur, noise, texture.
+
+Written because two NISAR GSLC products posted at the same 5 m looked nothing
+alike -- one crisp, one soft and grainy -- and "it looks blurry" is not a
+finding. Every number here is something you can put in a report next to the
+product it came from.
+
+Four groups, per band, over a window you choose:
+
+DISTRIBUTION
+    valid, min, p1, p2, median, mean, p98, p99, max, std, cv, and the dynamic
+    range in dB. The percentiles matter more than min/max: one bright scatterer
+    or one un-flagged fill pixel sets min/max and tells you nothing.
+
+    A histogram is printed with them, binned over p1..p99 rather than min..max
+    for the same reason -- a single outlier otherwise puts every real pixel in
+    the first bin -- with the counts that fall outside reported at the ends.
+    The shape says things the summary cannot: single-look SAR amplitude over
+    homogeneous ground is Rayleigh, leaning left with a long tail, so a
+    symmetric bell means something has averaged the image, a spike at zero
+    means fill is being counted as data, and a second mode means the window
+    straddles two surfaces and the looks estimate below will read low. Exact
+    bin edges and counts go to --json for plotting elsewhere.
+
+BLUR -- how much ground one pixel really represents
+    rho1        lag-1 autocorrelation of amplitude, along each map axis. A
+                critically sampled image has near-independent neighbours
+                (~0.0-0.15). Correlated neighbours mean the scene was resolved
+                more coarsely than it was posted.
+    res_eff     effective resolution: the lag where autocorrelation falls to
+                1/e, times the pixel size.
+    oversmp     res_eff / posting. 1.0 is critically sampled; 3.0 means the
+                product carries a third of the detail its grid implies.
+    aniso       res_eff across / along. SAR resolves range and azimuth
+                independently, so a product coarser in range than azimuth
+                blurs in one direction -- which is what a slant-range figure
+                quoted as if it were ground range looks like. Geocoding rotates
+                range/azimuth onto the map axes by the track heading, so read
+                this as "is there a preferred direction", not an exact ratio.
+
+NOISE -- how much of the variation is speckle rather than scene
+    enl         equivalent number of looks, estimated from the most homogeneous
+                sub-block in the window rather than the whole window, so a
+                field boundary crossing the sample does not corrupt it. Single
+                look amplitude sits at 1.0. Above ~1.5 something has smoothed
+                the image; well below 1.0 means even the quietest block still
+                holds real scene variation.
+    cv_floor    the coefficient of variation of that block. 0.52 is fully
+                developed single-look speckle.
+
+CONTRAST -- how far the scene stands out of the speckle, which is what "I can
+    see it in one image and not the other" actually means
+    cv_scene    the scene's own coefficient of variation, with speckle removed.
+                Speckle is multiplicative, so cv_total^2 = cv_scene^2 +
+                cv_speckle^2 + cv_scene^2 cv_speckle^2 and the scene term comes
+                out by rearrangement. This is the contrast the sensor actually
+                recorded, independent of how the image is stretched.
+    cnr@10m     cv_scene divided by the speckle left after averaging to that
+    cnr@20m     scale: how many speckle sigmas a typical feature stands out by
+    cnr@40m     once you have squinted to 10, 20 or 40 m. The averaging uses the
+                SPECKLE correlation length, measured on the quietest region so
+                a structured scene does not deflate its own score.
+
+                Read against the Rose criterion, the standard threshold for
+                visual detection: 5 or more is reliably visible, 3 is marginal,
+                below 2 is invisible however you stretch it. This is the column
+                that answers "why can I see field boundaries in one product and
+                nothing at all in the other".
+
+TEXTURE -- the same question asked without a speckle model, as a cross-check
+    tex@10m     ratio of the variation left after averaging to the variation
+    tex@20m     speckle alone would leave, at 10/20/40 m blocks. 1.0 means the
+    tex@40m     scene is indistinguishable from speckle at that scale: there is
+                nothing there to see. 2.0 means real structure dominates.
+                Correlation from oversampling is divided out using res_eff, so
+                a soft image is not credited with texture it does not have.
+
+CALIBRATION
+    Measured against synthetic single-look speckle with known properties, at
+    5 m posting, so the columns can be read rather than guessed at:
+
+      fixture                      oversmp  ENL  cv_scene cnr@40m tex@40m
+      critically sampled, no scene   1.00   1.08   0.024    0.37    1.04
+      same, 3x oversampled           2.50   1.15   0.000    0.00    1.06
+      weak structure                 1.07   1.08   0.146    2.23    2.22
+      same, 3x oversampled           2.63   1.15   0.138    0.86    1.33
+      16:1 fields                    1.08   1.07   0.316    3.52    3.89
+
+    So: oversmp reads 1.00 when resolution matches posting and 2.50 at a true
+    3x; ENL runs ~8% high on a genuine single-look image, so treat 1.0-1.2 as
+    one look; cv_scene reads ~0 on an image with no scene in it, which is the
+    property that makes it trustworthy; texture and cnr both sit near their
+    floor when there is nothing to see and climb when there is.
+
+    Rows 3 and 4 are one ground truth: blurring it 3x cuts cnr@40m from 2.23 to
+    0.86 and texture from 2.22 to 1.33, because the same contrast spread over
+    coarser samples is harder to see. That is the "visible in one product, not
+    the other" complaint, quantified.
+
+    The "clearly visible" verdict (cnr >= 5) is not reached by any fixture here
+    -- synthetic multiplicative fields saturate near cv_scene 0.33, while real
+    L-band farmland measures 0.46-0.50. Real data has since exercised it and
+    agreed with an observer: over one farmland window an analyst reported the
+    L-band product crisp and the S-band one featureless, and the tool returned
+    cnr@40m 6.56 / 5.13 against 2.61 / 1.67 -- "features clearly visible" on one
+    side of the Rose threshold and "nothing discernible" on the other.
+
+COMPARING TWO PRODUCTS
+    Give more than one raster and a comparison table follows, taking the first
+    as reference and splitting the cnr ratio into the two things that cause it.
+    cnr is cv_scene / (cv_speckle / sqrt(independent samples)), and the sample
+    count goes as the inverse square of the speckle correlation length, so
+
+        cnr_a / cnr_b = (cv_scene_a / cv_scene_b) * (corr_b / corr_a)
+
+    exactly -- a contrast factor times a resolution factor. Worth having because
+    the two are usually confused: on that farmland pair the L-band product beat
+    the S-band one by 2.5x overall, of which 1.9x was contrast and only 1.3x
+    resolution. Sharpening S to L's resolution would still not have made its
+    fields visible; the contrast was never there to sharpen.
+
+Usage:
+    python sar_quality.py lsar.tif ssar.tif --center 78.03,16.80 --size 1024
+    python sar_quality.py scene.tif --band 1 --size 2048 --json out.json
+
+Needs numpy and rasterio. Reads windows, so scene size does not matter.
+"""
+import argparse
+import json
+import math
+import os
+import sys
+
+import numpy as np
+import rasterio
+from rasterio.warp import transform as warp_transform
+from rasterio.windows import Window
+
+# Coefficient of variation of fully developed single-look SAR amplitude. The
+# Rayleigh distribution's sigma/mean = sqrt(4/pi - 1); every looks estimate
+# below is calibrated against it.
+SPECKLE_CV_1LOOK = math.sqrt(4.0 / math.pi - 1.0)
+
+# Block side used to hunt for the most homogeneous patch when estimating looks,
+# and the percentile of block cv taken as the speckle floor. Small enough to
+# land inside one field, large enough for a stable variance. The strict minimum
+# over a thousand blocks is an order statistic and reads ~7% low, which inflates
+# the looks estimate by 15%; the 5th percentile is just as robust to a field
+# edge crossing the sample and is very nearly unbiased.
+ENL_BLOCK = 32
+ENL_PERCENTILE = 5.0
+
+# The 1/e width of a perfectly uncorrelated field is not zero: with rho(1) = 0
+# the crossing interpolates to 1 - 1/e of a pixel. Effective resolution is
+# divided by this to give a correlation length that reads 1 pixel when the
+# image is critically sampled, so `oversmp` is 1.00 there rather than 0.63.
+RES_EFF_FLOOR = 1.0 - 1.0 / math.e
+
+# Ground scales, in metres, at which texture is reported.
+TEXTURE_SCALES_M = (10.0, 20.0, 40.0)
+
+# Rose criterion: the contrast-to-noise ratio at which a feature becomes
+# reliably visible to a human observer. 3 is marginal, below 2 is hopeless.
+ROSE_CNR = 5.0
+
+# A scene this variable, once speckle is removed, sets the image's correlation
+# length by itself -- res_eff then measures field size rather than resolution.
+SCENE_DOMINATES_CV = 0.30
+
+# max/p99 above this means a few very bright scatterers dominate the window,
+# which widens the autocorrelation and makes res_eff read coarse. Measured: a
+# pure-speckle fixture sits near 1.8, a window over Hyderabad city at 33.
+BRIGHT_TARGET_RATIO = 15.0
+
+# Histogram: bins, and the width in characters of the printed bar.
+HIST_BINS = 24
+HIST_WIDTH = 46
+
+# --plot uses finer bins than the terminal can show.
+PLOT_BINS = 96
+
+# Categorical series colours, assigned in this fixed order and never cycled --
+# a ninth raster would need faceting, not a ninth hue. Validated as a set: worst
+# adjacent CVD dE 24.7, normal-vision 33.6, all above 3:1 on the surface below.
+PLOT_SERIES = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100",
+               "#e87ba4", "#008300", "#4a3aa7", "#e34948")
+PLOT_SURFACE = "#fcfcfb"
+PLOT_INK = "#0b0b0b"
+PLOT_INK_MUTED = "#52514e"
+PLOT_GRID = "#dedcd5"
+
+
+def pick_window(ds, size, center):
+    """A `size`-square window at `center` lon/lat when given, else mid-scene."""
+    if center is None:
+        col = max(0, ds.width // 2 - size // 2)
+        row = max(0, ds.height // 2 - size // 2)
+    else:
+        lon, lat = center
+        xs, ys = warp_transform("EPSG:4326", ds.crs, [lon], [lat])
+        row_f, col_f = ds.index(xs[0], ys[0])
+        col = max(0, int(col_f) - size // 2)
+        row = max(0, int(row_f) - size // 2)
+    return Window(col, row,
+                  min(size, ds.width - col), min(size, ds.height - row))
+
+
+def distribution(values):
+    """Percentile-led summary; min/max are reported but never relied on."""
+    p1, p2, p50, p98, p99 = np.percentile(values, [1, 2, 50, 98, 99])
+    mean = float(values.mean())
+    std = float(values.std())
+    lo = float(p1) if p1 > 0 else float(values[values > 0].min()) if (values > 0).any() else 0.0
+    return {
+        "min": float(values.min()), "p1": float(p1), "p2": float(p2),
+        "median": float(p50), "mean": mean, "p98": float(p98),
+        "p99": float(p99), "max": float(values.max()), "std": std,
+        "cv": std / mean if mean else float("nan"),
+        "dyn_range_db": 20.0 * math.log10(float(p99) / lo) if lo > 0 else float("nan"),
+    }
+
+
+def histogram(values, bins=HIST_BINS):
+    """Counts over p1..p99, plus what fell outside at each end."""
+    lo, hi = np.percentile(values, [1, 99])
+    if not (hi > lo):
+        lo, hi = float(values.min()), float(values.max())
+    if not (hi > lo):
+        hi = lo + 1e-9
+    inside = values[(values >= lo) & (values <= hi)]
+    counts, edges = np.histogram(inside, bins=bins, range=(float(lo), float(hi)))
+    return {
+        "lo": float(lo), "hi": float(hi), "bins": int(bins),
+        "counts": [int(c) for c in counts],
+        "edges": [float(e) for e in edges],
+        "below": int((values < lo).sum()), "above": int((values > hi).sum()),
+    }
+
+
+def print_histogram(h, mean, median, width=HIST_WIDTH):
+    peak = max(h["counts"]) or 1
+    edges = h["edges"]
+    print(f"    hist   {h['bins']} bins over p1..p99 "
+          f"{h['lo']:.4g}..{h['hi']:.4g}   "
+          f"{h['below']} below, {h['above']} above")
+    for i, count in enumerate(h["counts"]):
+        # One marker column, so mean and median are placed rather than described.
+        mark = " "
+        if edges[i] <= median < edges[i + 1]:
+            mark = "M"
+        if edges[i] <= mean < edges[i + 1]:
+            mark = "X" if mark == "M" else "m"
+        bar = "#" * int(round(width * count / peak))
+        print(f"      {edges[i]:>10.4g} {mark}|{bar:<{width}} {count}")
+    print("             (M median, m mean, X both)")
+
+
+def autocorr_profile(a, axis, max_lag):
+    """Correlation of the mean-removed field with itself shifted along `axis`."""
+    a = a - a.mean()
+    denom = float((a * a).sum())
+    out = []
+    for lag in range(1, max_lag + 1):
+        if axis == 0:
+            num = float((a[lag:, :] * a[:-lag, :]).sum())
+        else:
+            num = float((a[:, lag:] * a[:, :-lag]).sum())
+        out.append(num / denom if denom else float("nan"))
+    return out
+
+
+def one_over_e_width(profile):
+    """Lag where correlation first drops below 1/e, linearly interpolated."""
+    target = 1.0 / math.e
+    prev = 1.0
+    for i, c in enumerate(profile, start=1):
+        if c < target:
+            span = prev - c
+            return (i - 1) + (prev - target) / span if span else float(i)
+        prev = c
+    return float(len(profile))
+
+
+def speckle_floor(a, block=ENL_BLOCK, pct=ENL_PERCENTILE):
+    """cv of the quietest blocks, and the looks that implies.
+
+    Estimating looks over a whole window measures the scene, not the speckle:
+    any field edge inflates the variance and the answer comes out below one
+    look, which is meaningless. The quietest blocks are the closest thing to a
+    homogeneous target the image offers without being told where one is.
+    """
+    h = (a.shape[0] // block) * block
+    w = (a.shape[1] // block) * block
+    if h < block or w < block:
+        return float("nan"), float("nan")
+    blocks = a[:h, :w].reshape(h // block, block, w // block, block)
+    means = blocks.mean(axis=(1, 3))
+    stds = blocks.std(axis=(1, 3))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        cvs = np.where(means > 0, stds / means, np.nan)
+    if not np.isfinite(cvs).any():
+        return float("nan"), float("nan")
+    cv_floor = float(np.nanpercentile(cvs[np.isfinite(cvs)], pct))
+    looks = (SPECKLE_CV_1LOOK / cv_floor) ** 2 if cv_floor > 0 else float("inf")
+    return cv_floor, looks
+
+
+def correlation_length(res_eff_m, px_m):
+    """Spacing between independent samples, in metres, floored at one pixel."""
+    return max(px_m, res_eff_m / RES_EFF_FLOOR)
+
+
+def speckle_region(a, block=ENL_BLOCK, pad=2):
+    """The quietest block and its neighbours -- the closest thing to bare speckle.
+
+    Correlation length has to be measured somewhere the scene is not, otherwise
+    a structured image reports the size of its fields as its resolution and then
+    gets penalised for it when speckle averaging is worked out.
+    """
+    h = (a.shape[0] // block) * block
+    w = (a.shape[1] // block) * block
+    if h < block * (2 * pad + 1) or w < block * (2 * pad + 1):
+        return a
+    blocks = a[:h, :w].reshape(h // block, block, w // block, block)
+    means = blocks.mean(axis=(1, 3))
+    stds = blocks.std(axis=(1, 3))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        cvs = np.where(means > 0, stds / means, np.nan)
+    if not np.isfinite(cvs).any():
+        return a
+    by, bx = np.unravel_index(np.nanargmin(np.where(np.isfinite(cvs), cvs, np.inf)),
+                              cvs.shape)
+    by = min(max(by, pad), cvs.shape[0] - pad - 1)
+    bx = min(max(bx, pad), cvs.shape[1] - pad - 1)
+    y0, x0 = (by - pad) * block, (bx - pad) * block
+    side = block * (2 * pad + 1)
+    return a[y0:y0 + side, x0:x0 + side]
+
+
+def scene_contrast(cv_total, cv_speckle):
+    """cv of the scene alone, speckle divided out of the total.
+
+    Speckle is multiplicative: observed = scene * speckle, so the variances
+    combine as cv_t^2 = cv_s^2 + cv_n^2 + cv_s^2 cv_n^2. Everything below the
+    speckle floor is speckle, and returns zero rather than a negative root.
+    """
+    v = (cv_total ** 2 - cv_speckle ** 2) / (1.0 + cv_speckle ** 2)
+    return math.sqrt(v) if v > 0 else 0.0
+
+
+def contrast_to_noise(cv_scene, cv_speckle, px_m, speckle_corr_m,
+                      scales=TEXTURE_SCALES_M):
+    """Speckle sigmas a typical feature stands out by, per averaging scale."""
+    out = {}
+    for scale in scales:
+        k = max(1, int(round(scale / px_m)))
+        indep = max(1.0, (k * px_m / speckle_corr_m) ** 2) if speckle_corr_m > 0 else k * k
+        residual = cv_speckle / math.sqrt(indep)
+        out[f"cnr@{scale:g}m"] = cv_scene / residual if residual else float("nan")
+    return out
+
+
+def texture(a, cv_floor, px_m, res_eff_m, scales=TEXTURE_SCALES_M):
+    """How much variation survives averaging, against what speckle predicts.
+
+    Averaging k x k pixels divides speckle by the square root of the number of
+    INDEPENDENT samples in the block -- which is not k^2 when the image is
+    oversampled, since neighbouring pixels repeat each other. The correlation
+    length gives the real sample spacing, so a soft image is not credited with
+    texture it does not have. What is left above 1.0 is scene.
+    """
+    corr_m = correlation_length(res_eff_m, px_m)
+    out = {}
+    for scale in scales:
+        k = max(1, int(round(scale / px_m)))
+        h = (a.shape[0] // k) * k
+        w = (a.shape[1] // k) * k
+        if h < k * 4 or w < k * 4 or not (cv_floor > 0):
+            out[f"tex@{scale:g}m"] = float("nan")
+            continue
+        means = a[:h, :w].reshape(h // k, k, w // k, k).mean(axis=(1, 3))
+        m = float(means.mean())
+        cv_obs = float(means.std()) / m if m else float("nan")
+        indep = max(1.0, (k * px_m / corr_m) ** 2)
+        cv_expected = cv_floor / math.sqrt(indep)
+        out[f"tex@{scale:g}m"] = cv_obs / cv_expected if cv_expected else float("nan")
+    return out
+
+
+def analyse_band(ds, band, win, max_lag, hist_bins=HIST_BINS, plot_bins=None):
+    data = ds.read(band, window=win).astype("float64")
+    finite = np.isfinite(data)
+    if ds.nodata is not None and not math.isnan(ds.nodata):
+        finite &= data != ds.nodata
+    valid = float(finite.mean())
+    if valid < 0.5:
+        return {"band": band, "valid": valid, "note": "under half the window is data"}
+
+    values = data[finite]
+    # A single hole poisons a correlation sum; the mean contributes nothing to
+    # a mean-removed product, so it is the neutral fill.
+    filled = np.where(finite, data, values.mean())
+
+    px = abs(ds.transform.a)
+    py = abs(ds.transform.e)
+    rows = autocorr_profile(filled, 0, max_lag)
+    cols = autocorr_profile(filled, 1, max_lag)
+    res_y = one_over_e_width(rows) * py
+    res_x = one_over_e_width(cols) * px
+    cv_floor, looks = speckle_floor(filled)
+
+    quiet = speckle_region(filled)
+    # The speckle reference comes from the quiet REGION's own cv, not from
+    # cv_floor: the floor is the 5th percentile of a thousand block estimates,
+    # an order statistic biased a few percent low, and a low speckle reference
+    # manufactures scene contrast out of an image that has none. Speckle also
+    # cannot vary more than one look does, so the theoretical value caps it.
+    q_mean = float(quiet.mean())
+    cv_quiet = float(quiet.std()) / q_mean if q_mean else SPECKLE_CV_1LOOK
+    cv_speckle = min(cv_quiet, SPECKLE_CV_1LOOK)
+    q_lag = min(max_lag, max(2, min(quiet.shape) // 4))
+    speckle_corr = correlation_length(
+        (one_over_e_width(autocorr_profile(quiet, 0, q_lag)) * py
+         + one_over_e_width(autocorr_profile(quiet, 1, q_lag)) * px) / 2.0,
+        (px + py) / 2.0)
+
+    out = {
+        "band": band,
+        "name": ds.descriptions[band - 1] or f"band {band}",
+        "valid": valid,
+        "px_m": px, "py_m": py,
+    }
+    out.update(distribution(values))
+    out["hist"] = histogram(values, bins=hist_bins)
+    if plot_bins:
+        out["hist_fine"] = histogram(values, bins=plot_bins)
+    out.update({
+        "rho1_y": rows[0], "rho1_x": cols[0],
+        "res_eff_y_m": res_y, "res_eff_x_m": res_x,
+        "oversmp_y": correlation_length(res_y, py) / py if py else float("nan"),
+        "oversmp_x": correlation_length(res_x, px) / px if px else float("nan"),
+        "aniso": res_x / res_y if res_y else float("nan"),
+        "cv_floor": cv_floor, "enl": looks,
+    })
+    cv_scene = scene_contrast(out["cv"], cv_speckle)
+    out.update({"cv_speckle": cv_speckle, "cv_scene": cv_scene,
+                "speckle_corr_m": speckle_corr})
+    out.update(contrast_to_noise(cv_scene, cv_speckle, (px + py) / 2.0,
+                                 speckle_corr))
+    out.update(texture(filled, cv_floor, (px + py) / 2.0,
+                       (res_x + res_y) / 2.0))
+    ratio = out["max"] / out["p99"] if out["p99"] > 0 else float("inf")
+    out["bright_ratio"] = ratio
+    warnings = []
+    if cv_scene > SCENE_DOMINATES_CV:
+        warnings.append(f"scene structure dominates (cv_scene {cv_scene:.2f}): "
+                        f"res_eff is a correlation length, not a resolution")
+    if ratio > BRIGHT_TARGET_RATIO:
+        warnings.append(f"bright targets dominate (max/p99 {ratio:.0f}): "
+                        f"res_eff reads coarse, measure resolution over "
+                        f"homogeneous terrain")
+    if warnings:
+        out["warning"] = "; ".join(warnings)
+    return out
+
+
+def report(path, size, center, max_lag, bands, hist_bins=HIST_BINS,
+           show_hist=True, plot_bins=None):
+    with rasterio.open(path) as ds:
+        win = pick_window(ds, size, center)
+        print(f"\n{path}")
+        print(f"  {ds.width} x {ds.height} px, {abs(ds.transform.a):g} x "
+              f"{abs(ds.transform.e):g} m, {ds.crs}, {ds.count} band(s), "
+              f"overviews {ds.overviews(1)}, nodata {ds.nodata}")
+        print(f"  window col {int(win.col_off)} row {int(win.row_off)} "
+              f"{int(win.width)} x {int(win.height)}")
+        results = []
+        for band in (bands or range(1, ds.count + 1)):
+            r = analyse_band(ds, band, win, max_lag, hist_bins, plot_bins)
+            results.append(r)
+            if "note" in r:
+                print(f"  {r['band']}: {r['note']} ({r['valid']:.0%} valid)")
+                continue
+            print(f"  {r['name']}")
+            print(f"    dist   min {r['min']:.4g}  p2 {r['p2']:.4g}  "
+                  f"med {r['median']:.4g}  mean {r['mean']:.4g}  "
+                  f"p98 {r['p98']:.4g}  max {r['max']:.4g}")
+            print(f"           std {r['std']:.4g}  cv {r['cv']:.3f}  "
+                  f"dynamic range {r['dyn_range_db']:.1f} dB  "
+                  f"valid {r['valid']:.1%}")
+            print(f"    blur   rho1 y {r['rho1_y']:+.2f} x {r['rho1_x']:+.2f}   "
+                  f"res_eff y {r['res_eff_y_m']:.1f} m x {r['res_eff_x_m']:.1f} m   "
+                  f"oversmp y {r['oversmp_y']:.2f} x {r['oversmp_x']:.2f}   "
+                  f"aniso {r['aniso']:.2f}")
+            print(f"    noise  cv_floor {r['cv_floor']:.3f}  ENL {r['enl']:.2f}  "
+                  f"speckle corr {r['speckle_corr_m']:.1f} m")
+            cnr = {k: r[k] for k in r if k.startswith("cnr@")}
+            best = max(cnr.values()) if cnr else 0.0
+            verdict = ("features clearly visible" if best >= ROSE_CNR else
+                       "marginal -- only the strongest features" if best >= 3.0 else
+                       "nothing discernible above speckle")
+            print(f"    contr  cv_scene {r['cv_scene']:.3f}   " +
+                  "  ".join(f"{k} {v:.2f}" for k, v in cnr.items()) +
+                  f"   -> {verdict}")
+            if "warning" in r:
+                print(f"    !!     {r['warning']}")
+            if show_hist:
+                print_histogram(r["hist"], r["mean"], r["median"])
+            print("    tex    " + "  ".join(
+                f"{k} {r[k]:.2f}" for k in r if k.startswith("tex@")))
+        return {"path": path, "bands": results}
+
+
+def plot(reports, path, log_x=False, scale=TEXTURE_SCALES_M[-1]):
+    """Histogram overlay and a contrast-to-noise bar chart, one row per band.
+
+    Two panels because the question has two halves: what the pixel values look
+    like, and whether anything in them can be seen. Distributions are drawn as
+    step outlines rather than filled bars so overlapping products stay legible,
+    and as densities so a larger window does not simply draw a taller curve.
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")           # writes a file; never needs a display
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("\n[PLOT] matplotlib is not installed; --plot needs it "
+              "(pip install matplotlib). The numbers above are unaffected.")
+        return
+
+    series = []
+    for rep in reports:
+        for b in rep["bands"]:
+            if "note" not in b:
+                series.append((os.path.basename(rep["path"]), b))
+    if not series:
+        return
+    if len(series) > len(PLOT_SERIES):
+        print(f"\n[PLOT] {len(series)} series is past the {len(PLOT_SERIES)} "
+              f"the palette validates; plotting the first {len(PLOT_SERIES)}.")
+        series = series[:len(PLOT_SERIES)]
+
+    # Colour follows the RASTER, so one product keeps its hue down every band
+    # row. Keying on (file, band) instead repaints a product between rows and
+    # makes two views of the same thing look like four different things.
+    files = []
+    for name, _ in series:
+        if name not in files:
+            files.append(name)
+    colour_of = {name: PLOT_SERIES[i % len(PLOT_SERIES)]
+                 for i, name in enumerate(files)}
+
+    bands = sorted({b["band"] for _, b in series})
+    cnr_keys = [k for k in series[0][1] if k.startswith("cnr@")]
+    fig, axes = plt.subplots(len(bands), 2, squeeze=False,
+                             figsize=(12, 3.6 * len(bands)))
+    fig.patch.set_facecolor(PLOT_SURFACE)
+
+    for row, band in enumerate(bands):
+        rows = [(n, b) for n, b in series if b["band"] == band]
+        ax_h, ax_c = axes[row][0], axes[row][1]
+        for ax in (ax_h, ax_c):
+            ax.set_facecolor(PLOT_SURFACE)
+            for side in ("top", "right"):
+                ax.spines[side].set_visible(False)
+            for side in ("left", "bottom"):
+                ax.spines[side].set_color(PLOT_GRID)
+            ax.tick_params(colors=PLOT_INK_MUTED, labelsize=9)
+
+        for name, b in rows:
+            colour = colour_of[name]
+            h = b.get("hist_fine") or b["hist"]
+            edges = np.asarray(h["edges"])
+            counts = np.asarray(h["counts"], dtype="float64")
+            width = np.diff(edges)
+            total = counts.sum()
+            density = counts / (total * width) if total else counts
+            # Step outline, closed at both ends so the shape reads as a curve.
+            ax_h.step(edges[:-1] + width / 2.0, density, where="mid",
+                      color=colour, linewidth=2.0,
+                      label=f"{name[:24]} b{b['band']}\n"
+                            f"cv_scene {b['cv_scene']:.2f}, "
+                            f"{cnr_keys[-1]} {b[cnr_keys[-1]]:.1f}")
+            ax_h.axvline(b["median"], color=colour, linewidth=1.0,
+                         linestyle=":", alpha=0.7)
+
+        if log_x:
+            ax_h.set_xscale("log")
+        ax_h.set_title(f"band {band}: value distribution",
+                       color=PLOT_INK, fontsize=11, loc="left")
+        ax_h.set_xlabel("pixel value (p1..p99, dotted line = median)",
+                        color=PLOT_INK_MUTED, fontsize=9)
+        ax_h.set_ylabel("density", color=PLOT_INK_MUTED, fontsize=9)
+        ax_h.grid(axis="y", color=PLOT_GRID, linewidth=0.8)
+        ax_h.set_axisbelow(True)
+        ax_h.legend(fontsize=8, frameon=False, labelcolor=PLOT_INK_MUTED)
+
+        span = 0.8 / max(1, len(rows))
+        for i, (name, b) in enumerate(rows):
+            colour = colour_of[name]
+            xs = [j + (i - (len(rows) - 1) / 2.0) * span
+                  for j in range(len(cnr_keys))]
+            vals = [b[k] for k in cnr_keys]
+            ax_c.bar(xs, vals, width=span * 0.88, color=colour,
+                     label=f"{name[:24]} b{b['band']}")
+            for x, v in zip(xs, vals):
+                ax_c.text(x, v, f"{v:.1f}", ha="center", va="bottom",
+                          fontsize=8, color=PLOT_INK_MUTED)
+
+        # Headroom above the taller of the bars and the threshold, so the
+        # legend has somewhere to sit that is not on top of either.
+        tallest = max([b[k] for _, b in rows for k in cnr_keys] + [ROSE_CNR])
+        ax_c.set_ylim(0, tallest * 1.45)
+        ax_c.axhline(ROSE_CNR, color=PLOT_INK_MUTED, linewidth=1.2,
+                     linestyle="--")
+        # Its own legend: identity must never be colour alone, and this panel
+        # is read on its own as often as beside the distribution. Opaque, since
+        # the threshold line runs the full width and would strike through it.
+        leg = ax_c.legend(fontsize=8, frameon=True, labelcolor=PLOT_INK_MUTED,
+                          loc="upper left")
+        leg.get_frame().set_facecolor(PLOT_SURFACE)
+        leg.get_frame().set_edgecolor("none")
+        ax_c.text(len(cnr_keys) - 0.5, ROSE_CNR, " Rose: visible",
+                  va="bottom", ha="right", fontsize=8, color=PLOT_INK_MUTED)
+        ax_c.set_xticks(range(len(cnr_keys)))
+        ax_c.set_xticklabels([k.replace("cnr@", "") for k in cnr_keys])
+        ax_c.set_title(f"band {band}: contrast against speckle",
+                       color=PLOT_INK, fontsize=11, loc="left")
+        ax_c.set_xlabel("averaging scale", color=PLOT_INK_MUTED, fontsize=9)
+        ax_c.set_ylabel("speckle sigmas", color=PLOT_INK_MUTED, fontsize=9)
+        ax_c.grid(axis="y", color=PLOT_GRID, linewidth=0.8)
+        ax_c.set_axisbelow(True)
+
+    fig.tight_layout()
+    fig.savefig(path, dpi=150, facecolor=PLOT_SURFACE)
+    plt.close(fig)
+    print(f"\nwrote {path}")
+
+
+def compare(reports, scale=TEXTURE_SCALES_M[-1]):
+    """Split each raster's cnr ratio against the first into contrast x resolution."""
+    rows = []
+    for rep in reports:
+        for b in rep["bands"]:
+            if "note" in b:
+                continue
+            rows.append((rep["path"], b))
+    if len(rows) < 2:
+        return
+    key = f"cnr@{scale:g}m"
+    ref_path, ref = rows[0]
+    print(f"\nCOMPARISON at {scale:g} m, against {os.path.basename(ref_path)} "
+          f"{ref['name']}")
+    print(f"  {'raster':<34s} {'band':<8s} {'cv_scene':>8s} {'corr_m':>7s} "
+          f"{key:>8s} {'contrast':>9s} {'res':>6s} {'total':>6s}")
+    for path, b in rows:
+        contrast = b["cv_scene"] / ref["cv_scene"] if ref["cv_scene"] else float("nan")
+        res = ref["speckle_corr_m"] / b["speckle_corr_m"] if b["speckle_corr_m"] else float("nan")
+        total = b[key] / ref[key] if ref[key] else float("nan")
+        print(f"  {os.path.basename(path)[:34]:<34s} {b['name'][:8]:<8s} "
+              f"{b['cv_scene']:8.3f} {b['speckle_corr_m']:7.1f} {b[key]:8.2f} "
+              f"{contrast:8.2f}x {res:5.2f}x {total:5.2f}x")
+    print("  (contrast x res = total, exactly; both are ratios to the reference row)")
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("rasters", nargs="+")
+    p.add_argument("--size", type=int, default=1024,
+                   help="side of the sample window in pixels (default 1024)")
+    p.add_argument("--center", help="lon,lat to centre the window on; without "
+                                    "it the window sits mid-scene, which for a "
+                                    "slanted swath may be nodata")
+    p.add_argument("--band", type=int, action="append", dest="bands",
+                   help="band to analyse; repeatable, default all")
+    p.add_argument("--max-lag", type=int, default=16)
+    p.add_argument("--bins", type=int, default=HIST_BINS,
+                   help=f"histogram bins (default {HIST_BINS})")
+    p.add_argument("--no-hist", action="store_true",
+                   help="skip the printed histogram; --json still carries it")
+    p.add_argument("--plot", help="write distributions and contrast to this PNG")
+    p.add_argument("--plot-log", action="store_true",
+                   help="log x-axis on the distributions, which suits the long "
+                        "right tail of linear SAR amplitude")
+    p.add_argument("--json", help="also write the numbers to this file")
+    args = p.parse_args(argv)
+
+    center = None
+    if args.center:
+        lon, lat = (float(v) for v in args.center.split(","))
+        center = (lon, lat)
+
+    everything = [report(path, args.size, center, args.max_lag, args.bands,
+                         args.bins, not args.no_hist,
+                         PLOT_BINS if args.plot else None)
+                  for path in args.rasters]
+    compare(everything)
+    if args.plot:
+        plot(everything, args.plot, log_x=args.plot_log)
+    if args.json:
+        with open(args.json, "w") as fh:
+            json.dump(everything, fh, indent=2)
+        print(f"\nwrote {args.json}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
