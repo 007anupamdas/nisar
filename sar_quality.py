@@ -99,8 +99,25 @@ CALIBRATION
 
     The "clearly visible" verdict (cnr >= 5) is not reached by any fixture here
     -- synthetic multiplicative fields saturate near cv_scene 0.33, while real
-    L-band farmland measures 0.55. Real data exercises that tier, not this
-    table.
+    L-band farmland measures 0.46-0.50. Real data has since exercised it and
+    agreed with an observer: over one farmland window an analyst reported the
+    L-band product crisp and the S-band one featureless, and the tool returned
+    cnr@40m 6.56 / 5.13 against 2.61 / 1.67 -- "features clearly visible" on one
+    side of the Rose threshold and "nothing discernible" on the other.
+
+COMPARING TWO PRODUCTS
+    Give more than one raster and a comparison table follows, taking the first
+    as reference and splitting the cnr ratio into the two things that cause it.
+    cnr is cv_scene / (cv_speckle / sqrt(independent samples)), and the sample
+    count goes as the inverse square of the speckle correlation length, so
+
+        cnr_a / cnr_b = (cv_scene_a / cv_scene_b) * (corr_b / corr_a)
+
+    exactly -- a contrast factor times a resolution factor. Worth having because
+    the two are usually confused: on that farmland pair the L-band product beat
+    the S-band one by 2.5x overall, of which 1.9x was contrast and only 1.3x
+    resolution. Sharpening S to L's resolution would still not have made its
+    fields visible; the contrast was never there to sharpen.
 
 Usage:
     python sar_quality.py lsar.tif ssar.tif --center 78.03,16.80 --size 1024
@@ -111,6 +128,7 @@ Needs numpy and rasterio. Reads windows, so scene size does not matter.
 import argparse
 import json
 import math
+import os
 import sys
 
 import numpy as np
@@ -478,6 +496,32 @@ def report(path, size, center, max_lag, bands, hist_bins=HIST_BINS,
         return {"path": path, "bands": results}
 
 
+def compare(reports, scale=TEXTURE_SCALES_M[-1]):
+    """Split each raster's cnr ratio against the first into contrast x resolution."""
+    rows = []
+    for rep in reports:
+        for b in rep["bands"]:
+            if "note" in b:
+                continue
+            rows.append((rep["path"], b))
+    if len(rows) < 2:
+        return
+    key = f"cnr@{scale:g}m"
+    ref_path, ref = rows[0]
+    print(f"\nCOMPARISON at {scale:g} m, against {os.path.basename(ref_path)} "
+          f"{ref['name']}")
+    print(f"  {'raster':<34s} {'band':<8s} {'cv_scene':>8s} {'corr_m':>7s} "
+          f"{key:>8s} {'contrast':>9s} {'res':>6s} {'total':>6s}")
+    for path, b in rows:
+        contrast = b["cv_scene"] / ref["cv_scene"] if ref["cv_scene"] else float("nan")
+        res = ref["speckle_corr_m"] / b["speckle_corr_m"] if b["speckle_corr_m"] else float("nan")
+        total = b[key] / ref[key] if ref[key] else float("nan")
+        print(f"  {os.path.basename(path)[:34]:<34s} {b['name'][:8]:<8s} "
+              f"{b['cv_scene']:8.3f} {b['speckle_corr_m']:7.1f} {b[key]:8.2f} "
+              f"{contrast:8.2f}x {res:5.2f}x {total:5.2f}x")
+    print("  (contrast x res = total, exactly; both are ratios to the reference row)")
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(
         description=__doc__,
@@ -506,6 +550,7 @@ def main(argv=None):
     everything = [report(path, args.size, center, args.max_lag, args.bands,
                          args.bins, not args.no_hist)
                   for path in args.rasters]
+    compare(everything)
     if args.json:
         with open(args.json, "w") as fh:
             json.dump(everything, fh, indent=2)
