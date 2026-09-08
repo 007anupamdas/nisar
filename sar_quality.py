@@ -176,6 +176,19 @@ BRIGHT_TARGET_RATIO = 15.0
 HIST_BINS = 24
 HIST_WIDTH = 46
 
+# --plot uses finer bins than the terminal can show.
+PLOT_BINS = 96
+
+# Categorical series colours, assigned in this fixed order and never cycled --
+# a ninth raster would need faceting, not a ninth hue. Validated as a set: worst
+# adjacent CVD dE 24.7, normal-vision 33.6, all above 3:1 on the surface below.
+PLOT_SERIES = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100",
+               "#e87ba4", "#008300", "#4a3aa7", "#e34948")
+PLOT_SURFACE = "#fcfcfb"
+PLOT_INK = "#0b0b0b"
+PLOT_INK_MUTED = "#52514e"
+PLOT_GRID = "#dedcd5"
+
 
 def pick_window(ds, size, center):
     """A `size`-square window at `center` lon/lat when given, else mid-scene."""
@@ -374,7 +387,7 @@ def texture(a, cv_floor, px_m, res_eff_m, scales=TEXTURE_SCALES_M):
     return out
 
 
-def analyse_band(ds, band, win, max_lag, hist_bins=HIST_BINS):
+def analyse_band(ds, band, win, max_lag, hist_bins=HIST_BINS, plot_bins=None):
     data = ds.read(band, window=win).astype("float64")
     finite = np.isfinite(data)
     if ds.nodata is not None and not math.isnan(ds.nodata):
@@ -419,6 +432,8 @@ def analyse_band(ds, band, win, max_lag, hist_bins=HIST_BINS):
     }
     out.update(distribution(values))
     out["hist"] = histogram(values, bins=hist_bins)
+    if plot_bins:
+        out["hist_fine"] = histogram(values, bins=plot_bins)
     out.update({
         "rho1_y": rows[0], "rho1_x": cols[0],
         "res_eff_y_m": res_y, "res_eff_x_m": res_x,
@@ -450,7 +465,7 @@ def analyse_band(ds, band, win, max_lag, hist_bins=HIST_BINS):
 
 
 def report(path, size, center, max_lag, bands, hist_bins=HIST_BINS,
-           show_hist=True):
+           show_hist=True, plot_bins=None):
     with rasterio.open(path) as ds:
         win = pick_window(ds, size, center)
         print(f"\n{path}")
@@ -461,7 +476,7 @@ def report(path, size, center, max_lag, bands, hist_bins=HIST_BINS,
               f"{int(win.width)} x {int(win.height)}")
         results = []
         for band in (bands or range(1, ds.count + 1)):
-            r = analyse_band(ds, band, win, max_lag, hist_bins)
+            r = analyse_band(ds, band, win, max_lag, hist_bins, plot_bins)
             results.append(r)
             if "note" in r:
                 print(f"  {r['band']}: {r['note']} ({r['valid']:.0%} valid)")
@@ -494,6 +509,132 @@ def report(path, size, center, max_lag, bands, hist_bins=HIST_BINS,
             print("    tex    " + "  ".join(
                 f"{k} {r[k]:.2f}" for k in r if k.startswith("tex@")))
         return {"path": path, "bands": results}
+
+
+def plot(reports, path, log_x=False, scale=TEXTURE_SCALES_M[-1]):
+    """Histogram overlay and a contrast-to-noise bar chart, one row per band.
+
+    Two panels because the question has two halves: what the pixel values look
+    like, and whether anything in them can be seen. Distributions are drawn as
+    step outlines rather than filled bars so overlapping products stay legible,
+    and as densities so a larger window does not simply draw a taller curve.
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")           # writes a file; never needs a display
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("\n[PLOT] matplotlib is not installed; --plot needs it "
+              "(pip install matplotlib). The numbers above are unaffected.")
+        return
+
+    series = []
+    for rep in reports:
+        for b in rep["bands"]:
+            if "note" not in b:
+                series.append((os.path.basename(rep["path"]), b))
+    if not series:
+        return
+    if len(series) > len(PLOT_SERIES):
+        print(f"\n[PLOT] {len(series)} series is past the {len(PLOT_SERIES)} "
+              f"the palette validates; plotting the first {len(PLOT_SERIES)}.")
+        series = series[:len(PLOT_SERIES)]
+
+    # Colour follows the RASTER, so one product keeps its hue down every band
+    # row. Keying on (file, band) instead repaints a product between rows and
+    # makes two views of the same thing look like four different things.
+    files = []
+    for name, _ in series:
+        if name not in files:
+            files.append(name)
+    colour_of = {name: PLOT_SERIES[i % len(PLOT_SERIES)]
+                 for i, name in enumerate(files)}
+
+    bands = sorted({b["band"] for _, b in series})
+    cnr_keys = [k for k in series[0][1] if k.startswith("cnr@")]
+    fig, axes = plt.subplots(len(bands), 2, squeeze=False,
+                             figsize=(12, 3.6 * len(bands)))
+    fig.patch.set_facecolor(PLOT_SURFACE)
+
+    for row, band in enumerate(bands):
+        rows = [(n, b) for n, b in series if b["band"] == band]
+        ax_h, ax_c = axes[row][0], axes[row][1]
+        for ax in (ax_h, ax_c):
+            ax.set_facecolor(PLOT_SURFACE)
+            for side in ("top", "right"):
+                ax.spines[side].set_visible(False)
+            for side in ("left", "bottom"):
+                ax.spines[side].set_color(PLOT_GRID)
+            ax.tick_params(colors=PLOT_INK_MUTED, labelsize=9)
+
+        for name, b in rows:
+            colour = colour_of[name]
+            h = b.get("hist_fine") or b["hist"]
+            edges = np.asarray(h["edges"])
+            counts = np.asarray(h["counts"], dtype="float64")
+            width = np.diff(edges)
+            total = counts.sum()
+            density = counts / (total * width) if total else counts
+            # Step outline, closed at both ends so the shape reads as a curve.
+            ax_h.step(edges[:-1] + width / 2.0, density, where="mid",
+                      color=colour, linewidth=2.0,
+                      label=f"{name[:24]} b{b['band']}\n"
+                            f"cv_scene {b['cv_scene']:.2f}, "
+                            f"{cnr_keys[-1]} {b[cnr_keys[-1]]:.1f}")
+            ax_h.axvline(b["median"], color=colour, linewidth=1.0,
+                         linestyle=":", alpha=0.7)
+
+        if log_x:
+            ax_h.set_xscale("log")
+        ax_h.set_title(f"band {band}: value distribution",
+                       color=PLOT_INK, fontsize=11, loc="left")
+        ax_h.set_xlabel("pixel value (p1..p99, dotted line = median)",
+                        color=PLOT_INK_MUTED, fontsize=9)
+        ax_h.set_ylabel("density", color=PLOT_INK_MUTED, fontsize=9)
+        ax_h.grid(axis="y", color=PLOT_GRID, linewidth=0.8)
+        ax_h.set_axisbelow(True)
+        ax_h.legend(fontsize=8, frameon=False, labelcolor=PLOT_INK_MUTED)
+
+        span = 0.8 / max(1, len(rows))
+        for i, (name, b) in enumerate(rows):
+            colour = colour_of[name]
+            xs = [j + (i - (len(rows) - 1) / 2.0) * span
+                  for j in range(len(cnr_keys))]
+            vals = [b[k] for k in cnr_keys]
+            ax_c.bar(xs, vals, width=span * 0.88, color=colour,
+                     label=f"{name[:24]} b{b['band']}")
+            for x, v in zip(xs, vals):
+                ax_c.text(x, v, f"{v:.1f}", ha="center", va="bottom",
+                          fontsize=8, color=PLOT_INK_MUTED)
+
+        # Headroom above the taller of the bars and the threshold, so the
+        # legend has somewhere to sit that is not on top of either.
+        tallest = max([b[k] for _, b in rows for k in cnr_keys] + [ROSE_CNR])
+        ax_c.set_ylim(0, tallest * 1.45)
+        ax_c.axhline(ROSE_CNR, color=PLOT_INK_MUTED, linewidth=1.2,
+                     linestyle="--")
+        # Its own legend: identity must never be colour alone, and this panel
+        # is read on its own as often as beside the distribution. Opaque, since
+        # the threshold line runs the full width and would strike through it.
+        leg = ax_c.legend(fontsize=8, frameon=True, labelcolor=PLOT_INK_MUTED,
+                          loc="upper left")
+        leg.get_frame().set_facecolor(PLOT_SURFACE)
+        leg.get_frame().set_edgecolor("none")
+        ax_c.text(len(cnr_keys) - 0.5, ROSE_CNR, " Rose: visible",
+                  va="bottom", ha="right", fontsize=8, color=PLOT_INK_MUTED)
+        ax_c.set_xticks(range(len(cnr_keys)))
+        ax_c.set_xticklabels([k.replace("cnr@", "") for k in cnr_keys])
+        ax_c.set_title(f"band {band}: contrast against speckle",
+                       color=PLOT_INK, fontsize=11, loc="left")
+        ax_c.set_xlabel("averaging scale", color=PLOT_INK_MUTED, fontsize=9)
+        ax_c.set_ylabel("speckle sigmas", color=PLOT_INK_MUTED, fontsize=9)
+        ax_c.grid(axis="y", color=PLOT_GRID, linewidth=0.8)
+        ax_c.set_axisbelow(True)
+
+    fig.tight_layout()
+    fig.savefig(path, dpi=150, facecolor=PLOT_SURFACE)
+    plt.close(fig)
+    print(f"\nwrote {path}")
 
 
 def compare(reports, scale=TEXTURE_SCALES_M[-1]):
@@ -539,6 +680,10 @@ def main(argv=None):
                    help=f"histogram bins (default {HIST_BINS})")
     p.add_argument("--no-hist", action="store_true",
                    help="skip the printed histogram; --json still carries it")
+    p.add_argument("--plot", help="write distributions and contrast to this PNG")
+    p.add_argument("--plot-log", action="store_true",
+                   help="log x-axis on the distributions, which suits the long "
+                        "right tail of linear SAR amplitude")
     p.add_argument("--json", help="also write the numbers to this file")
     args = p.parse_args(argv)
 
@@ -548,9 +693,12 @@ def main(argv=None):
         center = (lon, lat)
 
     everything = [report(path, args.size, center, args.max_lag, args.bands,
-                         args.bins, not args.no_hist)
+                         args.bins, not args.no_hist,
+                         PLOT_BINS if args.plot else None)
                   for path in args.rasters]
     compare(everything)
+    if args.plot:
+        plot(everything, args.plot, log_x=args.plot_log)
     if args.json:
         with open(args.json, "w") as fh:
             json.dump(everything, fh, indent=2)
