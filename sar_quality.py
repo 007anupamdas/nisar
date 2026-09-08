@@ -12,6 +12,16 @@ DISTRIBUTION
     range in dB. The percentiles matter more than min/max: one bright scatterer
     or one un-flagged fill pixel sets min/max and tells you nothing.
 
+    A histogram is printed with them, binned over p1..p99 rather than min..max
+    for the same reason -- a single outlier otherwise puts every real pixel in
+    the first bin -- with the counts that fall outside reported at the ends.
+    The shape says things the summary cannot: single-look SAR amplitude over
+    homogeneous ground is Rayleigh, leaning left with a long tail, so a
+    symmetric bell means something has averaged the image, a spike at zero
+    means fill is being counted as data, and a second mode means the window
+    straddles two surfaces and the looks estimate below will read low. Exact
+    bin edges and counts go to --json for plotting elsewhere.
+
 BLUR -- how much ground one pixel really represents
     rho1        lag-1 autocorrelation of amplitude, along each map axis. A
                 critically sampled image has near-independent neighbours
@@ -103,6 +113,10 @@ RES_EFF_FLOOR = 1.0 - 1.0 / math.e
 # Ground scales, in metres, at which texture is reported.
 TEXTURE_SCALES_M = (10.0, 20.0, 40.0)
 
+# Histogram: bins, and the width in characters of the printed bar.
+HIST_BINS = 24
+HIST_WIDTH = 46
+
 
 def pick_window(ds, size, center):
     """A `size`-square window at `center` lon/lat when given, else mid-scene."""
@@ -132,6 +146,41 @@ def distribution(values):
         "cv": std / mean if mean else float("nan"),
         "dyn_range_db": 20.0 * math.log10(float(p99) / lo) if lo > 0 else float("nan"),
     }
+
+
+def histogram(values, bins=HIST_BINS):
+    """Counts over p1..p99, plus what fell outside at each end."""
+    lo, hi = np.percentile(values, [1, 99])
+    if not (hi > lo):
+        lo, hi = float(values.min()), float(values.max())
+    if not (hi > lo):
+        hi = lo + 1e-9
+    inside = values[(values >= lo) & (values <= hi)]
+    counts, edges = np.histogram(inside, bins=bins, range=(float(lo), float(hi)))
+    return {
+        "lo": float(lo), "hi": float(hi), "bins": int(bins),
+        "counts": [int(c) for c in counts],
+        "edges": [float(e) for e in edges],
+        "below": int((values < lo).sum()), "above": int((values > hi).sum()),
+    }
+
+
+def print_histogram(h, mean, median, width=HIST_WIDTH):
+    peak = max(h["counts"]) or 1
+    edges = h["edges"]
+    print(f"    hist   {h['bins']} bins over p1..p99 "
+          f"{h['lo']:.4g}..{h['hi']:.4g}   "
+          f"{h['below']} below, {h['above']} above")
+    for i, count in enumerate(h["counts"]):
+        # One marker column, so mean and median are placed rather than described.
+        mark = " "
+        if edges[i] <= median < edges[i + 1]:
+            mark = "M"
+        if edges[i] <= mean < edges[i + 1]:
+            mark = "X" if mark == "M" else "m"
+        bar = "#" * int(round(width * count / peak))
+        print(f"      {edges[i]:>10.4g} {mark}|{bar:<{width}} {count}")
+    print("             (M median, m mean, X both)")
 
 
 def autocorr_profile(a, axis, max_lag):
@@ -216,7 +265,7 @@ def texture(a, cv_floor, px_m, res_eff_m, scales=TEXTURE_SCALES_M):
     return out
 
 
-def analyse_band(ds, band, win, max_lag):
+def analyse_band(ds, band, win, max_lag, hist_bins=HIST_BINS):
     data = ds.read(band, window=win).astype("float64")
     finite = np.isfinite(data)
     if ds.nodata is not None and not math.isnan(ds.nodata):
@@ -245,6 +294,7 @@ def analyse_band(ds, band, win, max_lag):
         "px_m": px, "py_m": py,
     }
     out.update(distribution(values))
+    out["hist"] = histogram(values, bins=hist_bins)
     out.update({
         "rho1_y": rows[0], "rho1_x": cols[0],
         "res_eff_y_m": res_y, "res_eff_x_m": res_x,
@@ -258,7 +308,8 @@ def analyse_band(ds, band, win, max_lag):
     return out
 
 
-def report(path, size, center, max_lag, bands):
+def report(path, size, center, max_lag, bands, hist_bins=HIST_BINS,
+           show_hist=True):
     with rasterio.open(path) as ds:
         win = pick_window(ds, size, center)
         print(f"\n{path}")
@@ -269,7 +320,7 @@ def report(path, size, center, max_lag, bands):
               f"{int(win.width)} x {int(win.height)}")
         results = []
         for band in (bands or range(1, ds.count + 1)):
-            r = analyse_band(ds, band, win, max_lag)
+            r = analyse_band(ds, band, win, max_lag, hist_bins)
             results.append(r)
             if "note" in r:
                 print(f"  {r['band']}: {r['note']} ({r['valid']:.0%} valid)")
@@ -286,6 +337,8 @@ def report(path, size, center, max_lag, bands):
                   f"oversmp y {r['oversmp_y']:.2f} x {r['oversmp_x']:.2f}   "
                   f"aniso {r['aniso']:.2f}")
             print(f"    noise  cv_floor {r['cv_floor']:.3f}  ENL {r['enl']:.2f}")
+            if show_hist:
+                print_histogram(r["hist"], r["mean"], r["median"])
             print("    tex    " + "  ".join(
                 f"{k} {r[k]:.2f}" for k in r if k.startswith("tex@")))
         return {"path": path, "bands": results}
@@ -304,6 +357,10 @@ def main(argv=None):
     p.add_argument("--band", type=int, action="append", dest="bands",
                    help="band to analyse; repeatable, default all")
     p.add_argument("--max-lag", type=int, default=16)
+    p.add_argument("--bins", type=int, default=HIST_BINS,
+                   help=f"histogram bins (default {HIST_BINS})")
+    p.add_argument("--no-hist", action="store_true",
+                   help="skip the printed histogram; --json still carries it")
     p.add_argument("--json", help="also write the numbers to this file")
     args = p.parse_args(argv)
 
@@ -312,7 +369,8 @@ def main(argv=None):
         lon, lat = (float(v) for v in args.center.split(","))
         center = (lon, lat)
 
-    everything = [report(path, args.size, center, args.max_lag, args.bands)
+    everything = [report(path, args.size, center, args.max_lag, args.bands,
+                         args.bins, not args.no_hist)
                   for path in args.rasters]
     if args.json:
         with open(args.json, "w") as fh:
