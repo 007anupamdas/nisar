@@ -1,0 +1,2419 @@
+"""RADIAL - RADiometric Image Assessment and Logger (QGIS).
+
+One canvas, a set of ROIs drawn on it, and the radiometry of each one.
+
+Where RIVAL measures WHERE a product puts the ground, this measures WHAT it
+reports there: mark small rectangles or polygons over targets whose backscatter
+you know something about -- a calibration site, a stretch of rainforest, a
+reservoir, a bare field -- and read gamma0, its spread, and the number of looks
+behind it. The ROIs and every statistic they produced export as one shapefile.
+
+Two canvases were RIVAL's whole point: a measurement there is a correspondence
+between an image and a reference, so both had to be on screen. Radiometry is a
+measurement of one product against a known ground, so there is one canvas here,
+and the second product enters by being loaded in turn over the same ROIs.
+
+WORKFLOW
+    Load GCOV        a GeoTIFF or VRT, or a NISAR GCOV '.h5' (see below)
+    Rect / Polygon   draw ROIs; the table fills as each one closes
+    Pan / Zoom       the view tools; Ctrl+1..5 selects any of the five
+    Normalize        stretch the view, so the ROI is drawn on a legible scene
+    Export SHP       the ROIs as polygons, every statistic in the table
+
+    Loading another product does not clear the ROIs -- they are re-measured
+    against it. That is the cross-product comparison: draw once, load each
+    product in turn, export each one, and the difference between two exports is
+    the radiometric difference between the products over the same ground.
+
+    'Load ROIs' reads a polygon shapefile back in and re-measures it, so an ROI
+    set outlives the session that drew it and can be shared between analysts.
+
+STATISTICS, per ROI and per band
+    Everything is computed on LINEAR POWER. GCOV carries gamma0 as power, and
+    that is the only domain in which these quantities mean what they are called:
+    the mean of dB pixels is not the dB of the mean (single-look speckle puts
+    about 2.5 dB between them), and looks estimated from dB values are not
+    looks. 'Domain' states what the raster holds -- power (the GCOV case),
+    amplitude, or dB -- and the pixels are converted from it once, up front.
+
+    n           valid pixels: finite, not nodata, and not zero unless
+                'Zeros are data' is ticked. A SAR product means fill by zero.
+    mean, std   linear power, and cv = std/mean
+    enl         equivalent number of looks, (mean/std)^2 over the ROI. This is
+                the ROI's own homogeneity, not the product's: over anything but
+                a uniform target it reads low, because the scene's variation is
+                counted as speckle. Read it on the rainforest patch, not on the
+                one straddling a field boundary.
+    mean_db     10log10(mean) -- the calibrated figure to quote and compare
+    sdev_db     spread of the dB pixels, which is what the stretch shows
+    min/p5/median/p95/max, in dB, from percentiles of the power
+    nonpos      pixels at or below zero. Noise subtraction can leave a GCOV
+                pixel slightly negative; those are kept in the linear mean,
+                where they belong, and excluded from the dB spread, where they
+                are undefined. A large count here means the dB columns describe
+                only part of the ROI.
+
+    The footer summarises the selected band across ROIs: the mean of the ROI
+    means, the spread between the brightest and darkest, and the median ENL.
+    Over patches of one cover type that spread is the product's uniformity.
+
+EXPORT
+    'Export SHP' writes one polygon per ROI in the working CRS, carrying every
+    statistic for every band: <pol>_mean_db, <pol>_enl and the rest, with the
+    polarization taken from the band's own name (a GCOV 'HHHH' term is the HH
+    power, so it prefixes HH_). DBF caps a field name at 10 characters, so the
+    same numbers are written again beside the shapefile as '<stem>_stats.csv',
+    one row per ROI and band, under names that are not truncated. 'Export CSV'
+    writes that table alone.
+
+    The export also records the domain the pixels were read as and the raster
+    they came from, because a gamma0 figure without them is not reproducible.
+
+NISAR GCOV '.h5'
+    A GCOV product ships as HDF5, not as a COG. Handed one, this builds a VRT
+    beside it stacking the frequency's covariance terms as bands -- HHHH, HVHV,
+    VVVV in that order -- with the grid's own geotransform and projection, and
+    loads that. Nothing is copied: the VRT reads the HDF5 in place. It needs
+    GDAL's HDF5 driver; without it, convert with DPQED_h52tif.py and load the
+    TIF instead.
+
+    Only the diagonal terms are offered. The off-diagonal terms are complex
+    covariances, whose magnitude is not a backscatter and does not belong in a
+    gamma0 column.
+
+ADOPTED FROM RIVAL
+    Normalize is the same translucent per-canvas tool with the same clip: it
+    measures WHAT IS IN VIEW, applies the SAR sqrt-gamma stretch, and pins the
+    result, so panning and zooming cannot re-stretch the scene under an ROI
+    being drawn. The R/G/B band picker, the exclusive Pan/Zoom row on Ctrl+1..5,
+    the sampled statistics that keep a big COG from freezing the window, and the
+    working CRS adopted from the raster all behave as they do there.
+
+    The stretch is a rendering. It does not touch the statistics, which are
+    always read from the source pixels at full resolution.
+
+Run it from the QGIS Python console:
+
+    exec(open(r"path/to/DPQED_radial.py").read())
+"""
+
+import csv
+import math
+import os
+import re
+import sys
+import threading
+import numpy as np
+from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+                             QTableWidget, QTableWidgetItem, QPushButton,
+                             QFileDialog, QHeaderView, QCheckBox, QComboBox,
+                             QMessageBox, QApplication, QShortcut, QLabel,
+                             QFrame, QButtonGroup, QPlainTextEdit, QAbstractItemView)
+from PyQt5.QtCore import Qt, QObject, QEvent, QVariant
+from PyQt5.QtGui import QKeySequence, QFont, QColor
+from qgis.gui import (QgsMapCanvas, QgsMapTool, QgsMapToolPan, QgsMapToolZoom,
+                      QgsRubberBand)
+from qgis.core import (QgsProject, QgsPointXY, QgsRasterLayer, QgsVectorLayer,
+                       QgsGeometry, QgsCoordinateReferenceSystem,
+                       QgsCoordinateTransform, QgsSingleBandGrayRenderer,
+                       QgsMultiBandColorRenderer, QgsContrastEnhancement,
+                       QgsRasterBandStats, QgsRectangle, QgsFields, QgsField,
+                       QgsFeature, QgsVectorFileWriter, QgsWkbTypes)
+
+
+# ── CONSTANTS ─────────────────────────────────────────────────────────────────
+# NORMALIZE. Identical in behaviour to RIVAL's, and the reasoning is the same:
+# a SAR scene stretched on a plain min/max is set by a handful of bright
+# scatterers and renders black, and re-measuring on every pan changes the
+# picture under a measurement in progress.
+NORM_GAMMA = 0.5                 # sqrt stretch
+NORM_CLIP_CHOICES = (0.0, 0.5, 1.0, 2.0, 5.0)
+NORM_CLIP_DEFAULT = 2.0
+NORM_USE_DATA_RANGE = True
+NORM_MIN = 0                     # fallback range, only when nothing measurable
+NORM_MAX = 1500
+
+# Working (projected) CRS the ROI geometry and the exported shapefile live in.
+# Adopted from the raster when it carries a projected CRS; this is the fallback.
+# Areas are quoted in its units squared, so a geographic CRS is refused.
+WORKING_CRS_DEFAULT = "EPSG:32644"      # UTM 44N
+
+RASTER_EXTS = (".tif", ".tiff", ".vrt")
+H5_EXTS = (".h5", ".hdf5", ".he5")
+
+# Map tools, in button order. The two ROI tools draw; the rest move the view.
+TOOL_RECT = "rect"
+TOOL_POLY = "polygon"
+TOOL_PAN = "pan"
+TOOL_ZOOM_IN = "zoom in"
+TOOL_ZOOM_OUT = "zoom out"
+MAP_TOOLS = (TOOL_RECT, TOOL_POLY, TOOL_PAN, TOOL_ZOOM_IN, TOOL_ZOOM_OUT)
+
+# ROI outlines. Cyan reads over the red/magenta a two-band SAR composite tends
+# toward, and over grey; the selected ROI goes yellow so the table and the
+# canvas always agree about which one is being read.
+ROI_COLOR = (0, 255, 255)
+ROI_COLOR_SELECTED = (255, 255, 0)
+ROI_COLOR_DRAWING = (255, 0, 255)
+ROI_WIDTH = 2
+ROI_WIDTH_SELECTED = 3
+ROI_FILL_ALPHA = 40             # a hint of fill, so a small ROI is findable
+
+# A polygon closed by double-click receives the same vertex twice -- the press
+# that precedes the double-click has already added it. Consecutive vertices
+# within this many screen pixels of each other are one vertex.
+VERTEX_MERGE_PX = 3
+
+# An ROI smaller than this is a misclick, not a measurement.
+MIN_ROI_PIXELS = 4
+
+# This tool is for small ROIs over uniform targets: the pixels are read at full
+# resolution, and they are read per band. A window past this is refused rather
+# than left to swap the machine to a halt -- zoom in and draw a smaller one.
+ROI_MAX_PIXELS = 20_000_000
+
+# What the pixels hold. Everything is converted to linear power before anything
+# is computed: the mean of dB pixels is not the dB of the mean, and looks
+# estimated from dB values are not looks. NISAR GCOV is power.
+DOMAIN_POWER = "power"
+DOMAIN_AMPLITUDE = "amplitude"
+DOMAIN_DB = "db"
+DOMAIN_CHOICES = (
+    (DOMAIN_POWER, "Power (GCOV gamma0)"),
+    (DOMAIN_AMPLITUDE, "Amplitude (|GSLC|)"),
+    (DOMAIN_DB, "dB"),
+)
+DOMAIN_DEFAULT = DOMAIN_POWER
+
+# Zero is how a SAR product says 'no data' when it declares no nodata value --
+# outside the swath, beyond the frame, masked in processing. Counted as data it
+# drags every mean down and puts an ROI's looks estimate on the floor. Untick
+# only for a raster where zero is a real measurement.
+ZERO_IS_NODATA = True
+
+# Statistics computed per ROI per band: key, column header, DBF type, format.
+# The keys double as the DBF field suffixes, so they are already at the length
+# a 2-character polarization prefix leaves -- do not lengthen them.
+STAT_FIELDS = (
+    ("n",       "N",         "int",    "{:.0f}"),
+    ("mean",    "Mean",      "double", "{:.6g}"),
+    ("std",     "Std",       "double", "{:.6g}"),
+    ("cv",      "CV",        "double", "{:.3f}"),
+    ("enl",     "ENL",       "double", "{:.2f}"),
+    ("mean_db", "Mean dB",   "double", "{:.2f}"),
+    ("sdev_db", "Std dB",    "double", "{:.2f}"),
+    ("min_db",  "Min dB",    "double", "{:.2f}"),
+    ("p5_db",   "P5 dB",     "double", "{:.2f}"),
+    ("med_db",  "Median dB", "double", "{:.2f}"),
+    ("p95_db",  "P95 dB",    "double", "{:.2f}"),
+    ("max_db",  "Max dB",    "double", "{:.2f}"),
+    ("nonpos",  "Non-pos",   "int",    "{:.0f}"),
+)
+STAT_KEYS = tuple(key for key, _, _, _ in STAT_FIELDS)
+
+# Which of those the table shows for the selected band. The rest are in the
+# detail panel, which shows every band at once, and in both exports.
+TABLE_STATS = ("n", "mean_db", "sdev_db", "cv", "enl", "med_db", "p5_db", "p95_db")
+
+# Per-ROI fields, written before the per-band statistics. 'domain' and 'src'
+# are not decoration: a gamma0 figure is not reproducible without knowing what
+# the pixels were read as and which raster they came from.
+ROI_FIELDS = (
+    ("roi",     "int"),
+    ("name",    "string"),
+    ("kind",    "string"),
+    ("npix",    "int"),
+    ("area_m2", "double"),
+    ("cx",      "double"),
+    ("cy",      "double"),
+    ("lon",     "double"),
+    ("lat",     "double"),
+    ("domain",  "string"),
+    ("src",     "string"),
+)
+ROI_TABLE_COLUMNS = ("roi", "name", "kind", "npix", "area_m2")
+
+# DBF caps a field name at 10 characters and silently truncates past it, which
+# turns HH_mean_db and HH_med_db into one column. Names are built to fit and
+# checked for collisions instead; the companion CSV carries the full names.
+DBF_NAME_LIMIT = 10
+
+# Percentile clip for the initial composite, before Normalize is pressed.
+RGB_CLIP_LOW = 0.02
+RGB_CLIP_HIGH = 0.98
+
+# Pixels sampled when working out a stretch. Unbounded, QGIS reads the WHOLE
+# raster at full resolution to build the histogram, per band, on the GUI thread.
+# This is the figure QGIS itself uses for its estimated min/max. It bounds the
+# RENDERING only -- ROI statistics are never sampled.
+RASTER_SAMPLE_SIZE = 250000
+
+RGB_DEFAULT_BANDS = (1, 1, 1)    # all three on band 1 renders grey
+
+# A GCOV grid in the HDF5 tree: science/<LSAR|SSAR>/GCOV/grids/frequency<A|B>.
+# The diagonal covariance terms are the backscatter; the off-diagonal ones are
+# complex and are not offered.
+GCOV_POL_TERMS = ("HHHH", "HVHV", "VHVH", "VVVV", "RHRH", "RVRV")
+GCOV_GRID_RE = re.compile(
+    r"science/(?P<band>[LS]SAR)/GCOV/grids/frequency(?P<freq>[A-Z])/"
+    r"(?P<term>[A-Z]{4})$")
+
+
+# ── BEGIN PURE HELPERS ────────────────────────────────────────────────────────
+# Everything between these markers is plain Python and numpy -- no Qt, no QGIS,
+# no GDAL -- so the statistics, the polygon rasterization and the field naming
+# can be exercised without a QGIS session. tests_radial_stats.py execs exactly
+# this slice, so what is tested is the code that ships rather than a copy.
+
+def to_power(values, domain=DOMAIN_DEFAULT):
+    """Pixel values as linear power, whatever domain the raster carries.
+
+    Every statistic below is computed here and nowhere else. Averaging dB is
+    averaging logarithms: over single-look speckle the mean of the dB pixels
+    sits about 2.5 dB below the dB of the mean, and an ENL taken from dB values
+    is not a number of looks at all. Converting once, up front, is what makes
+    the rest of this file allowed to be simple.
+    """
+    values = np.asarray(values, dtype=float)
+    if domain == DOMAIN_POWER:
+        return values
+    if domain == DOMAIN_AMPLITUDE:
+        return values * values
+    if domain == DOMAIN_DB:
+        return np.power(10.0, values / 10.0)
+    raise ValueError(f"unknown domain {domain!r}")
+
+
+def to_db(value):
+    """10log10, with anything at or below zero returned as NaN.
+
+    Noise subtraction can leave a GCOV pixel slightly negative. That is a real
+    measurement and belongs in the linear mean; its logarithm does not exist,
+    and inventing one -- clamping to a floor, dropping it silently -- would put
+    a number in a dB column that no pixel supports.
+    """
+    value = np.asarray(value, dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        out = 10.0 * np.log10(np.where(value > 0, value, np.nan))
+    return out if out.ndim else float(out)
+
+
+def valid_mask(data, nodata=None, zero_is_nodata=ZERO_IS_NODATA,
+               domain=DOMAIN_DEFAULT):
+    """Which pixels are measurements: finite, not nodata, and not fill.
+
+    NaN must be excluded explicitly rather than left to the nodata test: NaN
+    never equals anything, itself included, so a `data != nodata` test passes
+    every NaN through, and one NaN makes every percentile NaN.
+
+    Zero is how a SAR product says 'nothing here' when it declares no nodata
+    value. That is true of power and of amplitude, and false in dB, where 0 dB
+    is a power of 1 -- a perfectly ordinary bright pixel. The domain decides.
+    """
+    data = np.asarray(data, dtype=float)
+    mask = np.isfinite(data)
+    if nodata is not None and np.isfinite(nodata):
+        mask &= (data != nodata)
+    if zero_is_nodata and domain in (DOMAIN_POWER, DOMAIN_AMPLITUDE):
+        mask &= (data != 0.0)
+    return mask
+
+
+def empty_statistics():
+    """The statistics of no pixels: counts zero, everything else undefined."""
+    stats = {key: float("nan") for key in STAT_KEYS}
+    stats["n"] = 0
+    stats["nonpos"] = 0
+    return stats
+
+
+def roi_statistics(values, domain=DOMAIN_DEFAULT):
+    """Radiometry of one ROI in one band, from its already-valid pixels.
+
+    `values` is what the caller decided was data -- validity is a property of
+    the raster, and is settled before this is called. Everything here is the
+    arithmetic.
+
+    The linear moments carry every pixel, negatives included, because dropping
+    the low tail of a noise-subtracted product biases the mean upward by
+    exactly the amount the noise subtraction was trying to remove. The dB
+    columns carry only the positive pixels, since the others have no logarithm,
+    and `nonpos` says how many were left out so the reader can judge whether
+    the dB figures describe the ROI or a part of it.
+    """
+    power = to_power(np.asarray(values, dtype=float).ravel(), domain)
+    power = power[np.isfinite(power)]
+    if power.size == 0:
+        return empty_statistics()
+
+    mean = float(power.mean())
+    std = float(power.std())
+    positive = power[power > 0]
+    nan = float("nan")
+
+    stats = {
+        "n": int(power.size),
+        "mean": mean,
+        "std": std,
+        "cv": std / mean if mean > 0 else nan,
+        # ENL as the ROI reports it: (mean/std)^2 of the intensity. Over a
+        # uniform target this is the product's looks; over anything else the
+        # scene's own variation is counted as speckle and it reads low.
+        "enl": (mean / std) ** 2 if (mean > 0 and std > 0) else nan,
+        "mean_db": float(to_db(mean)) if mean > 0 else nan,
+        "nonpos": int(power.size - positive.size),
+    }
+    lo, p5, med, p95, hi = (float(v) for v in np.percentile(
+        power, [0.0, 5.0, 50.0, 95.0, 100.0]))
+    for key, value in (("min_db", lo), ("p5_db", p5), ("med_db", med),
+                       ("p95_db", p95), ("max_db", hi)):
+        stats[key] = float(to_db(value)) if value > 0 else nan
+    # The spread the eye sees: dB pixels, not the dB of the linear spread.
+    stats["sdev_db"] = (float(np.std(to_db(positive)))
+                        if positive.size > 1 else nan)
+    return stats
+
+
+def summarise(stats_list):
+    """Across ROIs, for one band: brightness, uniformity, looks.
+
+    The spread between the brightest and darkest ROI mean is the useful figure
+    when the ROIs are patches of one cover type -- it is the product's
+    radiometric uniformity over that ground, in dB. The median ENL is taken
+    rather than the mean because one ROI landing on a field boundary drags an
+    average down and cannot drag a median far.
+    """
+    means = [s["mean_db"] for s in stats_list
+             if s and np.isfinite(s.get("mean_db", float("nan")))]
+    enls = [s["enl"] for s in stats_list
+            if s and np.isfinite(s.get("enl", float("nan")))]
+    nan = float("nan")
+    return {
+        "count": len(means),
+        "mean_db": float(np.mean(means)) if means else nan,
+        "spread_db": float(max(means) - min(means)) if len(means) > 1 else nan,
+        "enl": float(np.median(enls)) if enls else nan,
+    }
+
+
+# ── ROI GEOMETRY ──────────────────────────────────────────────────────────────
+# A ring is a list of (x, y) in the working CRS, open: the closing edge runs
+# from the last vertex back to the first and is never stored, so a ring has
+# exactly as many vertices as were clicked.
+
+def rect_ring(x0, y0, x1, y1):
+    """The rectangle spanned by two corners, counter-clockwise from its origin."""
+    xmin, xmax = (x0, x1) if x0 <= x1 else (x1, x0)
+    ymin, ymax = (y0, y1) if y0 <= y1 else (y1, y0)
+    return [(xmin, ymin), (xmax, ymin), (xmax, ymax), (xmin, ymax)]
+
+
+def dedupe_ring(ring, tol):
+    """Drop vertices within `tol` of the one before, and of the first.
+
+    Closing a polygon by double-click hands the tool the same vertex twice --
+    the press that precedes the double-click has already added it -- and a
+    repeated vertex is a zero-length edge, which a scanline fill counts as a
+    crossing and a shoelace area does not.
+    """
+    out = []
+    for x, y in ring:
+        if out and math.hypot(x - out[-1][0], y - out[-1][1]) <= tol:
+            continue
+        out.append((float(x), float(y)))
+    while len(out) > 1 and math.hypot(out[-1][0] - out[0][0],
+                                      out[-1][1] - out[0][1]) <= tol:
+        out.pop()
+    return out
+
+
+def ring_bounds(ring):
+    """(xmin, ymin, xmax, ymax), or None for a ring with no vertices."""
+    if not ring:
+        return None
+    xs = [p[0] for p in ring]
+    ys = [p[1] for p in ring]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def ring_area(ring):
+    """Absolute shoelace area, in the ring's own units squared."""
+    if len(ring) < 3:
+        return 0.0
+    total = 0.0
+    for i, (x1, y1) in enumerate(ring):
+        x2, y2 = ring[(i + 1) % len(ring)]
+        total += x1 * y2 - x2 * y1
+    return abs(total) / 2.0
+
+
+def ring_centroid(ring):
+    """Area-weighted centroid, falling back to the vertex mean when degenerate.
+
+    The vertex mean is not the centroid of a polygon -- a run of closely spaced
+    vertices along one edge pulls it there -- so it is only used when the
+    shoelace area is zero and the real centroid does not exist.
+    """
+    if not ring:
+        return None
+    if len(ring) >= 3:
+        cross_sum = cx = cy = 0.0
+        for i, (x1, y1) in enumerate(ring):
+            x2, y2 = ring[(i + 1) % len(ring)]
+            cross = x1 * y2 - x2 * y1
+            cross_sum += cross
+            cx += (x1 + x2) * cross
+            cy += (y1 + y2) * cross
+        if cross_sum != 0.0:
+            return (cx / (3.0 * cross_sum), cy / (3.0 * cross_sum))
+    return (sum(p[0] for p in ring) / len(ring),
+            sum(p[1] for p in ring) / len(ring))
+
+
+def pixel_window(bounds, origin_x, origin_y, px, py, width, height):
+    """`bounds` as a whole-pixel window clipped to the raster, or None.
+
+    (col0, row0, ncol, nrow), north-up: `origin_y` is the TOP edge and rows run
+    downward. The window is grown outward to pixel boundaries so no pixel whose
+    centre may fall inside the ROI is cut off before the mask is applied.
+    """
+    if bounds is None or px <= 0 or py <= 0:
+        return None
+    xmin, ymin, xmax, ymax = bounds
+    col0 = int(math.floor((xmin - origin_x) / px))
+    col1 = int(math.ceil((xmax - origin_x) / px))
+    row0 = int(math.floor((origin_y - ymax) / py))
+    row1 = int(math.ceil((origin_y - ymin) / py))
+    col0, row0 = max(col0, 0), max(row0, 0)
+    col1, row1 = min(col1, int(width)), min(row1, int(height))
+    if col1 <= col0 or row1 <= row0:
+        return None             # the ROI does not overlap the raster
+    return (col0, row0, col1 - col0, row1 - row0)
+
+
+def ring_to_pixels(ring, origin_x, origin_y, px, py, col0=0, row0=0):
+    """A ring in map units as one in pixels, relative to a window's corner."""
+    return [((x - origin_x) / px - col0, (origin_y - y) / py - row0)
+            for x, y in ring]
+
+
+def polygon_mask(ring_px, ncol, nrow):
+    """Which pixels of a window fall inside a ring, by even-odd at the centre.
+
+    A pixel is in the ROI when its CENTRE is, which is the same rule QGIS's
+    zonal statistics and gdal_rasterize apply by default: it is unbiased over a
+    large ROI and, unlike an any-touch rule, it cannot pull a neighbouring
+    field's pixels into a small one.
+
+    Vectorized per edge rather than per pixel: each edge toggles every pixel to
+    the right of where it crosses that row, and an odd number of toggles leaves
+    a pixel inside. A 40 x 40 ROI is 1600 pixels and this is not the expensive
+    part of a measurement -- reading them off disk is.
+    """
+    ncol, nrow = int(ncol), int(nrow)
+    mask = np.zeros((nrow, ncol), dtype=bool)
+    if ncol <= 0 or nrow <= 0 or len(ring_px) < 3:
+        return mask
+    ys = np.arange(nrow, dtype=float) + 0.5
+    xs = np.arange(ncol, dtype=float) + 0.5
+    for i, (x1, y1) in enumerate(ring_px):
+        x2, y2 = ring_px[(i + 1) % len(ring_px)]
+        if y1 == y2:
+            continue            # horizontal edges cross no row
+        # Half-open in y, so a vertex exactly on a row's centre is counted once
+        crosses = (y1 <= ys) != (y2 <= ys)
+        if not crosses.any():
+            continue
+        with np.errstate(divide="ignore", invalid="ignore"):
+            at = x1 + (ys - y1) * (x2 - x1) / (y2 - y1)
+        mask ^= crosses[:, None] & (xs[None, :] > at[:, None])
+    return mask
+
+
+# ── FIELD NAMING ──────────────────────────────────────────────────────────────
+
+# A polarization as a band name declares it. Bounded by a non-letter or the
+# ends of the name, so a word that merely contains the pair -- and a term that
+# doubles it, as a GCOV diagonal does -- are told apart.
+POL_IN_NAME_RE = re.compile(
+    r"(?i)(?:^|[^A-Za-z])(HH|HV|VH|VV|RH|RV|LH|LV)"
+    r"(?:HH|HV|VH|VV|RH|RV|LH|LV)?(?:$|[^A-Za-z])")
+
+
+def band_prefix(label, index):
+    """A short, safe column prefix for one band, from whatever it is called.
+
+    The polarization is what an analyst reads the column by, so it is looked
+    for first and kept whole: a GCOV diagonal term names the product of one
+    polarization with itself -- HHHH is the HH power -- and a GeoTIFF written
+    by cog_locate or DPQED_h52tif calls the same band 'gamma0_HH'. Both give
+    HH, where truncating to the first six characters would give 'HHHH' and
+    'gamma0' and lose which channel the second one was.
+
+    A raster that names nothing falls back to its band number: 'b2_mean_db' at
+    least says which band it came from.
+    """
+    text = str(label or "").strip()
+    text = re.sub(r"^\s*\d+\s*:\s*", "", text)          # RIVAL's '2: HV'
+    if not text or re.fullmatch(r"(?i)band\s*0*\d*", text):
+        return f"b{int(index)}"
+    pol = POL_IN_NAME_RE.search(text)
+    if pol:
+        return pol.group(1).upper()
+    text = re.sub(r"[^0-9A-Za-z]+", "", text)
+    if not text:
+        return f"b{int(index)}"
+    return text[:6].upper()
+
+
+def dbf_field_names(prefixes, keys=STAT_KEYS, reserved=(),
+                    limit=DBF_NAME_LIMIT):
+    """{(prefix, key): column name}, each inside DBF's 10-character cap.
+
+    DBF does not reject a long name, it truncates it -- and two truncations
+    that collide become one column holding whichever was written last, with no
+    error anywhere. Names are built to fit and de-duplicated here instead, and
+    the companion CSV carries the untruncated ones for anyone who needs them.
+    """
+    taken = {str(name).lower() for name in reserved}
+    out = {}
+    for prefix in prefixes:
+        for key in keys:
+            base = f"{prefix}_{key}"[:limit]
+            name, n = base, 1
+            while name.lower() in taken:
+                tail = str(n)
+                name = base[:max(limit - len(tail), 1)] + tail
+                n += 1
+            taken.add(name.lower())
+            out[(prefix, key)] = name
+    return out
+
+
+def stat_rows(rois, bands):
+    """The ROI table in long form: one row per ROI and band, full names.
+
+    Long rather than wide because it is what anything downstream wants -- a
+    pivot table, a groupby, a plot of mean_db against band -- and because it
+    does not have to be redesigned when a product carries four polarizations
+    instead of two.
+    """
+    header = ([name for name, _ in ROI_FIELDS] + ["band"]
+              + [key for key in STAT_KEYS])
+    rows = [header]
+    for roi in rois:
+        base = [roi.get(name) for name, _ in ROI_FIELDS]
+        for band in bands:
+            stats = (roi.get("stats") or {}).get(band) or {}
+            rows.append(base + [band] + [stats.get(key) for key in STAT_KEYS])
+    return rows
+
+
+def format_stat(value, fmt="{:.3f}"):
+    """A statistic as the table shows it; an undefined one as a dash."""
+    try:
+        if value is None:
+            return "--"
+        number = float(value)
+        if not math.isfinite(number):
+            return "--"
+        return fmt.format(number)
+    except (TypeError, ValueError):
+        return "--"
+
+
+# ── NISAR GCOV HDF5 ───────────────────────────────────────────────────────────
+
+def gcov_grids(subdataset_names):
+    """GDAL's subdataset list as {(band, frequency): {term: name}}.
+
+    GDAL reports every dataset in the HDF5 tree, which for a GCOV is the
+    covariance terms plus coordinate vectors, masks and metadata. Only the
+    grids under a frequency are of interest, and only their four-letter terms.
+    """
+    grids = {}
+    for name in subdataset_names:
+        match = GCOV_GRID_RE.search(str(name).strip())
+        if match:
+            key = (match.group("band"), match.group("freq"))
+            grids.setdefault(key, {})[match.group("term")] = str(name).strip()
+    return grids
+
+
+def gcov_diagonal_terms(terms):
+    """The diagonal covariance terms, in a fixed order, from what a grid holds.
+
+    Only the diagonal is offered. An off-diagonal term such as HHHV is a
+    complex covariance between two channels: its magnitude is a correlation,
+    not a backscatter, and averaging it into a gamma0 column would produce a
+    number that looks like a measurement and is not one.
+    """
+    return [term for term in GCOV_POL_TERMS if term in set(terms)]
+
+
+def geotransform_from_coords(x_coords, y_coords, tol=1e-6):
+    """A north-up geotransform from a GCOV grid's coordinate vectors.
+
+    The vectors give pixel CENTRES; a geotransform is anchored on the outer
+    EDGE of the first pixel, so each origin steps back half a pixel. Getting
+    that wrong offsets every ROI by half a pixel -- 15 m on a 30 m GCOV grid,
+    which is the size of the errors RIVAL exists to measure.
+    """
+    x = np.asarray(x_coords, dtype=float).ravel()
+    y = np.asarray(y_coords, dtype=float).ravel()
+    if x.size < 2 or y.size < 2:
+        raise ValueError("coordinate vectors need at least two samples")
+    dx = float(x[1] - x[0])
+    dy = float(y[1] - y[0])
+    for name, values, step in (("x", x, dx), ("y", y, dy)):
+        spacing = np.diff(values)
+        if not np.all(np.abs(spacing - step) <= abs(step) * tol):
+            raise ValueError(f"{name} coordinates are not evenly spaced; "
+                             "a VRT cannot describe that grid")
+    return (float(x[0] - dx / 2.0), dx, 0.0, float(y[0] - dy / 2.0), 0.0, dy)
+
+
+def _xml_escape(text):
+    return (str(text).replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;"))
+
+
+def gcov_vrt_xml(sources, width, height, geotransform, srs, dtype="Float32",
+                 nodata="nan"):
+    """A VRT stacking GCOV covariance terms as bands, georeferenced.
+
+    `sources` is [(band description, GDAL dataset name)] in band order. Written
+    out rather than built with gdal.BuildVRT because the HDF5 subdatasets carry
+    no geotransform of their own -- the grid states its corner in coordinate
+    vectors beside the data -- and a VRT built from them would stack the bands
+    correctly and place them nowhere.
+
+    Nothing is copied: the VRT reads the HDF5 in place, so it costs a few
+    hundred bytes and stays valid as long as the product sits where it is.
+    """
+    lines = [f'<VRTDataset rasterXSize="{int(width)}" '
+             f'rasterYSize="{int(height)}">',
+             f'  <SRS>{_xml_escape(srs)}</SRS>',
+             '  <GeoTransform>' +
+             ', '.join(f"{v:.16g}" for v in geotransform) + '</GeoTransform>']
+    for index, (description, source) in enumerate(sources, start=1):
+        lines += [
+            f'  <VRTRasterBand dataType="{dtype}" band="{index}">',
+            f'    <Description>{_xml_escape(description)}</Description>',
+            f'    <NoDataValue>{nodata}</NoDataValue>',
+            '    <SimpleSource>',
+            '      <SourceFilename relativeToVRT="0">'
+            f'{_xml_escape(source)}</SourceFilename>',
+            '      <SourceBand>1</SourceBand>',
+            f'      <SrcRect xOff="0" yOff="0" xSize="{int(width)}" '
+            f'ySize="{int(height)}"/>',
+            f'      <DstRect xOff="0" yOff="0" xSize="{int(width)}" '
+            f'ySize="{int(height)}"/>',
+            '    </SimpleSource>',
+            '  </VRTRasterBand>',
+        ]
+    lines.append('</VRTDataset>')
+    return "\n".join(lines) + "\n"
+
+
+# ── END PURE HELPERS ──────────────────────────────────────────────────────────
+
+
+# ── ROI DRAWING TOOL ──────────────────────────────────────────────────────────
+class RoiMapTool(QgsMapTool):
+    """Draw one ROI: a dragged rectangle, or a polygon clicked corner by corner.
+
+    One class for both because they differ only in how the ring is collected --
+    the preview, the cancel, and the handoff to the table are the same, and two
+    classes would be two places to fix the next thing found wrong with either.
+
+    A rectangle finishes on the mouse release. A polygon finishes on a
+    right-click or a double-click, needs three corners, and takes Backspace to
+    undo the last one; Escape abandons whatever is in progress.
+    """
+
+    def __init__(self, canvas, dashboard, mode):
+        super().__init__(canvas)
+        self.canvas = canvas
+        self.dashboard = dashboard
+        self.mode = mode
+        self.anchor = None          # rectangle: where the drag started
+        self.vertices = []          # polygon: the corners clicked so far
+        self.band = None
+        self.setCursor(Qt.CrossCursor)
+
+    # ── preview ──
+    def _rubber(self):
+        if self.band is None:
+            self.band = QgsRubberBand(self.canvas, QgsWkbTypes.PolygonGeometry)
+            colour = QColor(*ROI_COLOR_DRAWING)
+            fill = QColor(*ROI_COLOR_DRAWING)
+            fill.setAlpha(ROI_FILL_ALPHA)
+            self.band.setColor(colour)
+            self.band.setFillColor(fill)
+            self.band.setWidth(ROI_WIDTH)
+        return self.band
+
+    def _preview(self, ring):
+        band = self._rubber()
+        band.reset(QgsWkbTypes.PolygonGeometry)
+        for index, (x, y) in enumerate(ring):
+            band.addPoint(QgsPointXY(x, y), index == len(ring) - 1)
+        band.show()
+
+    def _merge_tolerance(self):
+        """Screen pixels as map units, for merging a double-click's two clicks."""
+        try:
+            return float(self.canvas.mapUnitsPerPixel()) * VERTEX_MERGE_PX
+        except Exception:
+            return 0.0
+
+    # ── mouse ──
+    def canvasPressEvent(self, e):
+        point = self.toMapCoordinates(e.pos())
+        if self.mode == TOOL_RECT:
+            if e.button() == Qt.LeftButton:
+                self.anchor = (point.x(), point.y())
+            return
+        if e.button() == Qt.RightButton:
+            self.finish()
+            return
+        self.vertices.append((point.x(), point.y()))
+        self._preview(self.vertices)
+
+    def canvasMoveEvent(self, e):
+        point = self.toMapCoordinates(e.pos())
+        if self.mode == TOOL_RECT:
+            if self.anchor is not None:
+                self._preview(rect_ring(self.anchor[0], self.anchor[1],
+                                        point.x(), point.y()))
+        elif self.vertices:
+            self._preview(self.vertices + [(point.x(), point.y())])
+
+    def canvasReleaseEvent(self, e):
+        if self.mode != TOOL_RECT or self.anchor is None:
+            return
+        if e.button() != Qt.LeftButton:
+            return
+        point = self.toMapCoordinates(e.pos())
+        ring = rect_ring(self.anchor[0], self.anchor[1], point.x(), point.y())
+        self.cancel()
+        self.dashboard.add_roi(ring, "rect")
+
+    def canvasDoubleClickEvent(self, e):
+        if self.mode == TOOL_POLY:
+            self.finish()
+
+    def keyPressEvent(self, e):
+        try:
+            key = e.key()
+        except Exception:
+            return
+        if key == Qt.Key_Escape:
+            self.cancel()
+        elif key == Qt.Key_Backspace and self.mode == TOOL_POLY and self.vertices:
+            self.vertices.pop()
+            self._preview(self.vertices)
+
+    # ── lifecycle ──
+    def finish(self):
+        """Close the polygon being drawn and hand it to the table."""
+        ring = dedupe_ring(self.vertices, self._merge_tolerance())
+        self.cancel()
+        if len(ring) >= 3:
+            self.dashboard.add_roi(ring, "polygon")
+        elif ring:
+            print(f"[ROI] {len(ring)} corner(s) is not a polygon; discarded")
+
+    def cancel(self):
+        self.anchor = None
+        self.vertices = []
+        if self.band is not None:
+            self.band.reset(QgsWkbTypes.PolygonGeometry)
+
+    def deactivate(self):
+        # A half-drawn polygon left behind would reappear, with corners from
+        # one view, the moment this tool was picked up again.
+        self.cancel()
+        try:
+            super().deactivate()
+        except Exception:
+            pass
+
+
+class OverlayResizeFilter(QObject):
+    """Keep a translucent overlay spanning the canvas it sits on."""
+
+    def __init__(self, parent, container, height=35):
+        super().__init__(parent)
+        self.container = container
+        self.parent_widget = parent
+        self.height = height
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Resize:
+            self.container.setGeometry(10, 10, self.parent_widget.width() - 20,
+                                       self.height)
+        return super().eventFilter(obj, event)
+
+
+# ── MAIN WINDOW ───────────────────────────────────────────────────────────────
+class RadiometricDashboard(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("RADIAL - Radiometric Image Assessment and Logger")
+        self.resize(1500, 950)
+
+        self.raster_layer = None
+        self.raster_path = ""
+        self.band_labels = []           # what each band is called, in band order
+        self.band_prefixes = []         # the column prefix each one exports under
+        self.rois = []                  # plain data; see add_roi for the shape
+        self.roi_bands = {}             # id -> QgsRubberBand drawn on the canvas
+        self._next_roi_id = 1
+        self._stretch_cache = {}
+        # Bounds pinned by Normalize, per band. Set only when the button is
+        # pressed and kept until it is pressed again or another raster loads:
+        # a scene that re-stretches while an ROI is being drawn over it is a
+        # scene whose two halves were judged against different pictures.
+        self.norm_bounds = {}
+        self._filling_table = False
+
+        self.wgs84_crs = QgsCoordinateReferenceSystem("EPSG:4326")
+        self.proj_crs = QgsCoordinateReferenceSystem(WORKING_CRS_DEFAULT)
+        self._rebuild_transforms()
+        self._configure_gdal_cache()
+
+        self.canvas = QgsMapCanvas()
+        self.canvas.enableAntiAliasing(False)
+        self.canvas.setCachingEnabled(True)
+        self.canvas.setParallelRenderingEnabled(True)
+
+        # Normalize and the band picker ride on the canvas, not in the button
+        # row: they act on what is in view, so they belong with the thing they
+        # measure. The row below is for actions on the ROIs.
+        self.overlay = QWidget(self.canvas)
+        self.overlay.setGeometry(10, 10, 460, 35)
+        self.overlay.setStyleSheet("background-color: rgba(255,255,255,153);")
+        overlay_layout = QHBoxLayout(self.overlay)
+        overlay_layout.setContentsMargins(5, 5, 5, 5)
+        self.btn_norm = self._normalize_button(
+            "Stretch the view to what is currently in it  (Ctrl+R).\n"
+            "The result is kept until you press it again -- panning and\n"
+            "zooming do not re-stretch, so the scene an ROI was drawn on is\n"
+            "the same scene when you come back to it.\n\n"
+            "Rendering only: ROI statistics are read from the source pixels.")
+        self.clip_combo = self._clip_combo()
+        overlay_layout.addWidget(self.btn_norm)
+        overlay_layout.addWidget(self.clip_combo)
+        overlay_layout.addWidget(QLabel("R G B"))
+        self.band_combos = []
+        for channel in ("red", "green", "blue"):
+            combo = QComboBox()
+            combo.setToolTip(
+                f"Band shown as {channel}.\nSet all three for a composite; "
+                f"the same band in all three renders grey.")
+            overlay_layout.addWidget(combo, 1)
+            self.band_combos.append(combo)
+        self.overlay.hide()
+        self.overlay_filter = OverlayResizeFilter(self.canvas, self.overlay)
+        self.canvas.installEventFilter(self.overlay_filter)
+
+        # ── the ROI table, and one ROI in full beside it ──
+        self.table = QTableWidget(0, len(ROI_TABLE_COLUMNS) + len(TABLE_STATS))
+        self.table.setHorizontalHeaderLabels(self._table_headers())
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeToContents)
+        self.table.setToolTip(
+            "One row per ROI, for the band selected below.\n"
+            "Double-click a name to label it; the label is exported.")
+
+        self.detail = QPlainTextEdit()
+        self.detail.setReadOnly(True)
+        self.detail.setMinimumWidth(430)
+        self.detail.setMaximumWidth(560)
+        detail_font = QFont("Monospace")
+        detail_font.setStyleHint(QFont.TypeWriter)
+        detail_font.setPointSize(9)
+        self.detail.setFont(detail_font)
+        self.detail.setPlaceholderText(
+            "Every band of the selected ROI, in full, ready to paste into a "
+            "report.")
+
+        # ── buttons ──
+        self.btn_load = QPushButton("Load GCOV")
+        self.btn_load.setToolTip(
+            "Load a GCOV raster: a GeoTIFF or VRT, or a NISAR '.h5', which is\n"
+            "wrapped in a VRT beside it  (Ctrl+L).\n\n"
+            "ROIs are kept and re-measured against the new raster -- that is\n"
+            "how two products are compared over the same ground.")
+        self.btn_load_rois = QPushButton("Load ROIs")
+        self.btn_load_rois.setToolTip(
+            "Read ROIs back from a polygon shapefile and measure them here "
+            "(Ctrl+O).")
+        self.btn_shp = QPushButton("Export SHP")
+        self.btn_shp.setToolTip(
+            "Write the ROIs as polygons with every statistic  (Ctrl+Shift+S).\n"
+            "The same numbers are written beside it as '<stem>_stats.csv',\n"
+            "under names DBF's 10-character cap cannot hold.")
+        self.btn_csv = QPushButton("Export CSV")
+        self.btn_csv.setToolTip(
+            "Write the statistics alone, one row per ROI and band  (Ctrl+S).")
+        self.btn_del = QPushButton("Delete ROI")
+        self.btn_del.setToolTip("Delete the selected ROI  (Ctrl+Delete)")
+        self.btn_clear = QPushButton("Clear ROIs")
+        self.btn_clear.setToolTip("Delete every ROI")
+
+        self.tool_buttons = {}
+        self.tool_group = QButtonGroup(self)
+        self.tool_group.setExclusive(True)
+        tips = {
+            TOOL_RECT: "Drag a rectangle over the target  (Ctrl+1)",
+            TOOL_POLY: "Click the corners; right-click or double-click to "
+                       "close, Backspace undoes one  (Ctrl+2)",
+            TOOL_PAN: "Drag to move the view  (Ctrl+3)",
+            TOOL_ZOOM_IN: "Drag a box, or click, to zoom in  (Ctrl+4)",
+            TOOL_ZOOM_OUT: "Drag a box, or click, to zoom out  (Ctrl+5)",
+        }
+        labels = {TOOL_RECT: "Rect", TOOL_POLY: "Polygon", TOOL_PAN: "Pan",
+                  TOOL_ZOOM_IN: "Zoom In", TOOL_ZOOM_OUT: "Zoom Out"}
+        for index, mode in enumerate(MAP_TOOLS):
+            button = QPushButton(labels[mode])
+            button.setCheckable(True)
+            button.setToolTip(tips[mode])
+            self.tool_group.addButton(button, index)
+            self.tool_buttons[mode] = button
+        self.tool_buttons[TOOL_RECT].setChecked(True)
+
+        self.stats_band_combo = QComboBox()
+        self.stats_band_combo.setToolTip(
+            "Which band the table and the summary below report.\n"
+            "Both exports carry every band whatever this says.")
+        self.domain_combo = QComboBox()
+        for value, label in DOMAIN_CHOICES:
+            self.domain_combo.addItem(label, value)
+        self.domain_combo.setCurrentIndex(
+            [value for value, _ in DOMAIN_CHOICES].index(DOMAIN_DEFAULT))
+        self.domain_combo.setToolTip(
+            "What the pixels hold. Everything is computed on linear power, so\n"
+            "this is what they are converted FROM -- get it wrong and the dB\n"
+            "figures and the looks estimate are both wrong, silently.\n\n"
+            "NISAR GCOV carries gamma0 as power. A GSLC magnitude is\n"
+            "amplitude. Only pick dB for a raster already in dB.")
+        self.cb_zero_data = QCheckBox("Zeros are data")
+        self.cb_zero_data.setChecked(not ZERO_IS_NODATA)
+        self.cb_zero_data.setToolTip(
+            "Off (the default): zero is fill, as a SAR product means it, and\n"
+            "is left out of the statistics. On: zero is a measurement.\n"
+            "Ignored for a raster in dB, where 0 dB is a power of 1.")
+
+        summary_font = QFont()
+        summary_font.setBold(True)
+        summary_font.setPointSize(10)
+        self.lbl_mean = QLabel("Mean:    -- dB")
+        self.lbl_spread = QLabel("Spread:  -- dB")
+        self.lbl_enl = QLabel("ENL:     --")
+        self.lbl_mean.setToolTip("Mean of the ROI means, for the selected band.")
+        self.lbl_spread.setToolTip(
+            "Brightest ROI mean minus darkest, in dB. Over patches of one "
+            "cover type\nthis is the product's radiometric uniformity across "
+            "the scene.")
+        self.lbl_enl.setToolTip(
+            "Median ENL across the ROIs. The median, not the mean, so one ROI "
+            "on a\nfield boundary cannot drag the figure down.")
+        for label in (self.lbl_mean, self.lbl_spread, self.lbl_enl):
+            label.setFont(summary_font)
+            label.setAlignment(Qt.AlignCenter)
+            label.setFrameShape(QFrame.StyledPanel)
+            label.setStyleSheet(
+                "QLabel {"
+                "  background-color: #1e1e2e;"
+                "  color: #cdd6f4;"
+                "  border: 1px solid #45475a;"
+                "  border-radius: 4px;"
+                "  padding: 4px 10px;"
+                "}")
+
+        tool_row = QHBoxLayout()
+        for mode in MAP_TOOLS:
+            tool_row.addWidget(self.tool_buttons[mode])
+        tool_row.addSpacing(20)
+        tool_row.addWidget(QLabel("Stats band:"))
+        tool_row.addWidget(self.stats_band_combo)
+        tool_row.addSpacing(12)
+        tool_row.addWidget(QLabel("Domain:"))
+        tool_row.addWidget(self.domain_combo)
+        tool_row.addWidget(self.cb_zero_data)
+        tool_row.addStretch()
+
+        action_row = QHBoxLayout()
+        for widget in (self.btn_load, self.btn_load_rois, self.btn_shp,
+                       self.btn_csv, self.btn_del, self.btn_clear):
+            action_row.addWidget(widget)
+        action_row.addStretch()
+        for label in (self.lbl_mean, self.lbl_spread, self.lbl_enl):
+            action_row.addWidget(label)
+
+        bottom = QHBoxLayout()
+        bottom.addWidget(self.table, 3)
+        bottom.addWidget(self.detail, 1)
+
+        main_layout = QVBoxLayout()
+        main_layout.addWidget(self.canvas, 4)
+        main_layout.addLayout(tool_row)
+        main_layout.addLayout(action_row)
+        main_layout.addLayout(bottom, 2)
+
+        central = QWidget()
+        central.setLayout(main_layout)
+        self.setCentralWidget(central)
+
+        self.btn_load.clicked.connect(self.load_raster)
+        self.btn_load_rois.clicked.connect(self.load_rois)
+        self.btn_shp.clicked.connect(self.export_shapefile)
+        self.btn_csv.clicked.connect(self.export_csv)
+        self.btn_del.clicked.connect(self.delete_roi)
+        self.btn_clear.clicked.connect(self.clear_rois)
+        self.btn_norm.clicked.connect(self.normalize_to_view)
+        self.tool_group.buttonClicked.connect(lambda _: self.apply_map_tool())
+        self.table.itemSelectionChanged.connect(self.on_selection_changed)
+        self.table.itemChanged.connect(self.on_item_changed)
+        self.stats_band_combo.currentIndexChanged.connect(
+            lambda _: self.refresh_table())
+        self.domain_combo.currentIndexChanged.connect(
+            lambda _: self.recompute_all("domain changed"))
+        self.cb_zero_data.stateChanged.connect(
+            lambda _: self.recompute_all("zero handling changed"))
+        for combo in self.band_combos:
+            combo.currentIndexChanged.connect(lambda _: self.apply_bands())
+
+        QShortcut(QKeySequence("Ctrl+L"), self).activated.connect(self.load_raster)
+        QShortcut(QKeySequence("Ctrl+O"), self).activated.connect(self.load_rois)
+        QShortcut(QKeySequence("Ctrl+S"), self).activated.connect(self.export_csv)
+        QShortcut(QKeySequence("Ctrl+Shift+S"), self).activated.connect(
+            self.export_shapefile)
+        QShortcut(QKeySequence("Ctrl+R"), self).activated.connect(
+            self.normalize_to_view)
+        QShortcut(QKeySequence("Ctrl+Delete"), self).activated.connect(
+            self.delete_roi)
+        QShortcut(QKeySequence("F5"), self).activated.connect(self.zoom_to_roi)
+        QShortcut(QKeySequence("Escape"), self).activated.connect(self.cancel_drawing)
+        for index, mode in enumerate(MAP_TOOLS, start=1):
+            QShortcut(QKeySequence(f"Ctrl+{index}"), self).activated.connect(
+                lambda m=mode: self.set_map_tool(m))
+
+        self.adopt_existing_layer()
+        self.init_map_tools()
+        self.update_summary()
+
+    # ── small builders ──────────────────────────────────────────────────────
+    @staticmethod
+    def _table_headers():
+        headers = {"roi": "ROI", "name": "Name", "kind": "Kind",
+                   "npix": "Pixels", "area_m2": "Area m²"}
+        titles = {key: title for key, title, _, _ in STAT_FIELDS}
+        return ([headers[key] for key in ROI_TABLE_COLUMNS]
+                + [titles[key] for key in TABLE_STATS])
+
+    @staticmethod
+    def _clip_combo():
+        """The percentage Normalize clips off each end."""
+        combo = QComboBox()
+        combo.setFixedWidth(64)
+        for pct in NORM_CLIP_CHOICES:
+            combo.addItem(f"{pct:g}%", pct)
+        combo.setCurrentIndex(NORM_CLIP_CHOICES.index(NORM_CLIP_DEFAULT))
+        combo.setToolTip(
+            "Percentage clipped off each end when Normalize measures.\n"
+            "2% ignores the brightest and darkest 2%, so a handful of bright\n"
+            "scatterers cannot set the whole scene. 0% is a true min/max.")
+        combo.setStyleSheet(
+            "QComboBox { background-color: rgba(255,255,255,170); }")
+        return combo
+
+    @staticmethod
+    def _normalize_button(tooltip):
+        button = QPushButton("Normalize")
+        button.setToolTip(tooltip)
+        button.setFixedWidth(90)
+        button.setStyleSheet(
+            "QPushButton { background-color: rgba(255,255,255,170);"
+            " border: 1px solid rgba(0,0,0,90); border-radius: 3px;"
+            " padding: 2px 6px; }"
+            "QPushButton:hover { background-color: rgba(255,255,255,215); }")
+        return button
+
+    def clip_percent(self):
+        try:
+            value = self.clip_combo.currentData()
+            if value is None:
+                value = float(self.clip_combo.currentText().rstrip("%"))
+            return float(value)
+        except Exception:
+            return NORM_CLIP_DEFAULT
+
+    def domain(self):
+        """What the pixels hold, as one of the DOMAIN_* values."""
+        try:
+            value = self.domain_combo.currentData()
+            if value in (DOMAIN_POWER, DOMAIN_AMPLITUDE, DOMAIN_DB):
+                return value
+        except Exception:
+            pass
+        return DOMAIN_DEFAULT
+
+    def zero_is_nodata(self):
+        try:
+            return not bool(self.cb_zero_data.isChecked())
+        except Exception:
+            return ZERO_IS_NODATA
+
+    def _configure_gdal_cache(self):
+        try:
+            from osgeo import gdal
+            gdal.SetCacheMax(512 * 1024 * 1024)
+            gdal.SetConfigOption("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
+            gdal.SetConfigOption("VSI_CACHE", "TRUE")
+            gdal.SetConfigOption("VSI_CACHE_SIZE", "20000000")
+            gdal.SetConfigOption("GDAL_NUM_THREADS", "ALL_CPUS")
+        except Exception as e:
+            print(f"GDAL cache config skipped: {e}")
+
+    def ensure_overviews(self, path):
+        """Build overviews in the background, so panning a big GCOV is usable."""
+        def _build():
+            ds = None
+            try:
+                from osgeo import gdal
+                ds = gdal.Open(path, gdal.GA_ReadOnly)
+                if (ds and ds.GetRasterBand(1) and
+                        ds.GetRasterBand(1).GetOverviewCount() == 0):
+                    print(f"[OVR] Building: {os.path.basename(path)} ...")
+                    ds.BuildOverviews("AVERAGE", [2, 4, 8, 16, 32])
+                    print("[OVR] Done.")
+            except Exception as e:
+                print(f"[OVR] Skipped for {os.path.basename(path)}: {e}")
+            finally:
+                ds = None
+        threading.Thread(target=_build, daemon=True).start()
+
+    # ── CRS ──────────────────────────────────────────────────────────────────
+    def _rebuild_transforms(self):
+        self.transform_proj_to_wgs = QgsCoordinateTransform(
+            self.proj_crs, self.wgs84_crs, QgsProject.instance())
+        self.transform_wgs_to_proj = QgsCoordinateTransform(
+            self.wgs84_crs, self.proj_crs, QgsProject.instance())
+        self._apply_canvas_crs()
+
+    def _apply_canvas_crs(self):
+        """Pin the canvas to the working CRS.
+
+        A bare QgsMapCanvas inherits the project's CRS, so an ROI could be
+        drawn in whatever CRS the project happened to carry while its area was
+        quoted in the raster's -- wrong numbers, and no error anywhere.
+        """
+        canvas = getattr(self, "canvas", None)
+        if canvas is None:
+            return
+        try:
+            canvas.setDestinationCrs(self.proj_crs)
+            print(f"[CRS] canvas "
+                  f"{self.proj_crs.authid() or self.proj_crs.description()}")
+        except Exception as e:
+            print(f"[CRS] could not pin canvas CRS: {e}")
+
+    def adopt_working_crs(self, crs):
+        """Take the working CRS from the raster, bringing the ROIs with it.
+
+        ROI geometry, the exported shapefile and the area column all live in
+        this CRS, so a hard-coded zone is wrong the moment a scene sits in
+        another one. Existing ROIs are reprojected rather than left behind: the
+        whole point of keeping them across a load is that they describe the
+        same ground in the next product.
+
+        Geographic CRSs are refused. An area in square degrees is not an area.
+        """
+        if crs is None or not crs.isValid() or crs.isGeographic():
+            return False
+        if crs.authid() and crs.authid() == self.proj_crs.authid():
+            return False
+        old_crs, old_name = self.proj_crs, (self.proj_crs.authid()
+                                            or self.proj_crs.description())
+        self.proj_crs = crs
+        self._rebuild_transforms()
+        self._reproject_rois(old_crs, crs)
+        print(f"[CRS] Working CRS {old_name} -> "
+              f"{crs.authid() or crs.description()} (from the raster)")
+        return True
+
+    def _reproject_rois(self, old_crs, new_crs):
+        if not self.rois:
+            return
+        try:
+            transform = QgsCoordinateTransform(old_crs, new_crs,
+                                               QgsProject.instance())
+        except Exception as e:
+            print(f"[CRS] ROIs could not be reprojected: {e}")
+            return
+        for roi in self.rois:
+            moved = []
+            for x, y in roi["ring"]:
+                point = transform.transform(QgsPointXY(x, y))
+                moved.append((point.x(), point.y()))
+            roi["ring"] = moved
+        print(f"[CRS] {len(self.rois)} ROI(s) reprojected")
+
+    def _to_lonlat(self, x, y):
+        try:
+            point = self.transform_proj_to_wgs.transform(QgsPointXY(x, y))
+            return (point.x(), point.y())
+        except Exception:
+            return (None, None)
+
+    def _ring_in_layer_crs(self, ring):
+        """An ROI ring in the raster's own CRS, for reading its pixels."""
+        layer = self.raster_layer
+        if layer is None:
+            return ring
+        try:
+            src, dst = self.proj_crs, layer.crs()
+            if src.authid() and dst.authid() and src.authid() == dst.authid():
+                return ring
+            transform = QgsCoordinateTransform(src, dst, QgsProject.instance())
+            return [(lambda p: (p.x(), p.y()))(transform.transform(
+                QgsPointXY(x, y))) for x, y in ring]
+        except Exception as e:
+            print(f"[ROI] ring transform: {e}")
+            return ring
+
+    # ── RASTER LOADING ───────────────────────────────────────────────────────
+    @staticmethod
+    def _open_filter():
+        """The file dialog's filter, from the extensions the loader handles."""
+        rasters = " ".join(f"*{ext}" for ext in RASTER_EXTS)
+        hdf5 = " ".join(f"*{ext}" for ext in H5_EXTS)
+        return (f"GCOV raster or HDF5 ({rasters} {hdf5});;"
+                f"Raster ({rasters});;NISAR HDF5 ({hdf5});;All files (*)")
+
+    def load_raster(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select a GCOV raster or NISAR HDF5", "", self._open_filter())
+        if path:
+            self.load_path(path)
+
+    def load_path(self, path):
+        """Load a raster, keeping the ROIs and re-measuring them against it."""
+        source = path
+        if path.lower().endswith(H5_EXTS):
+            source = self.gcov_vrt_for(path)
+            if not source:
+                return False
+        layer = QgsRasterLayer(source, os.path.basename(source))
+        if not layer.isValid():
+            QMessageBox.critical(
+                self, "Load", f"QGIS could not open:\n{source}")
+            return False
+        if self.raster_layer is not None:
+            try:
+                QgsProject.instance().removeMapLayer(self.raster_layer.id())
+            except Exception:
+                pass
+        QgsProject.instance().addMapLayer(layer, False)
+        self.raster_layer = layer
+        self.raster_path = source
+        self.ensure_overviews(source)
+        self.adopt_working_crs(layer.crs())
+        self.canvas.setLayers([layer])
+        self.canvas.setExtent(layer.extent())
+        self.populate_band_picker(layer)
+        self.canvas.refresh()
+        print(f"[LOAD] {source}")
+        if self.rois:
+            self.recompute_all(f"loaded {os.path.basename(source)}")
+        else:
+            self.refresh_table()
+        return True
+
+    def adopt_existing_layer(self):
+        """Take a raster already in the project, so the tool opens on it."""
+        layers = [lyr for lyr in QgsProject.instance().mapLayers().values()
+                  if isinstance(lyr, QgsRasterLayer) and lyr.isValid()]
+        if not layers:
+            return
+        layer = layers[0]
+        self.raster_layer = layer
+        self.raster_path = layer.source()
+        self.ensure_overviews(layer.source())
+        self.adopt_working_crs(layer.crs())
+        self.canvas.setLayers([layer])
+        self.canvas.setExtent(layer.extent())
+        self.populate_band_picker(layer)
+        self.canvas.refresh()
+        print(f"[LOAD] adopted {layer.name()} from the project")
+
+    # ── NISAR GCOV HDF5 -> VRT ───────────────────────────────────────────────
+    def gcov_vrt_for(self, h5_path):
+        """Wrap a GCOV's covariance terms in a VRT beside it, and return it.
+
+        The HDF5 subdatasets carry no georeferencing of their own -- the grid
+        states its corner in coordinate vectors sitting beside the data -- so
+        the VRT is written out rather than built by gdal.BuildVRT, which would
+        stack the bands correctly and place them nowhere.
+
+        Nothing is copied. The VRT is a few hundred bytes that read the HDF5 in
+        place, so it costs nothing to leave beside the product and re-use.
+        """
+        try:
+            import h5py
+        except Exception as e:
+            QMessageBox.critical(
+                self, "GCOV",
+                "Reading a NISAR '.h5' needs h5py, which is not available "
+                f"here:\n{e}\n\nConvert the product with DPQED_h52tif.py and "
+                "load the GeoTIFF instead.")
+            return None
+        try:
+            with h5py.File(h5_path, "r") as handle:
+                paths = []
+                handle.visit(lambda name: paths.append(name))
+                grids = gcov_grids(paths)
+                if not grids:
+                    QMessageBox.critical(
+                        self, "GCOV",
+                        "No GCOV grids in this file. RADIAL reads GCOV "
+                        "products;\na GSLC or RSLC has to be converted with "
+                        "DPQED_h52tif.py first.")
+                    return None
+                # Frequency A is the wideband channel and is what a GCOV
+                # carries when it carries one; B is stated when it is chosen.
+                key = sorted(grids, key=lambda k: (k[1] != "A", k))[0]
+                terms = gcov_diagonal_terms(grids[key])
+                if not terms:
+                    QMessageBox.critical(
+                        self, "GCOV",
+                        f"{key[0]} frequency{key[1]} holds no diagonal "
+                        "covariance term.\nOnly HHHH, HVHV, VHVH and VVVV are "
+                        "backscatter; the off-diagonal\nterms are complex "
+                        "correlations and are not measured here.")
+                    return None
+                group = f"science/{key[0]}/GCOV/grids/frequency{key[1]}"
+                first = handle[f"{group}/{terms[0]}"]
+                height, width = int(first.shape[0]), int(first.shape[1])
+                dtype = {"float32": "Float32", "float64": "Float64"}.get(
+                    str(first.dtype), "Float32")
+                geotransform = geotransform_from_coords(
+                    handle[f"{group}/xCoordinates"][()],
+                    handle[f"{group}/yCoordinates"][()])
+                epsg = int(np.asarray(handle[f"{group}/projection"][()]).ravel()[0])
+        except KeyError as e:
+            QMessageBox.critical(
+                self, "GCOV",
+                f"The grid is missing {e}, which the georeferencing needs.")
+            return None
+        except Exception as e:
+            QMessageBox.critical(self, "GCOV", f"Could not read the HDF5:\n{e}")
+            return None
+
+        sources = [(term, f'HDF5:"{h5_path}"://{group}/{term}')
+                   for term in terms]
+        xml = gcov_vrt_xml(sources, width, height, geotransform, f"EPSG:{epsg}",
+                           dtype)
+        vrt_path = os.path.splitext(h5_path)[0] + "_gcov.vrt"
+        try:
+            with open(vrt_path, "w", encoding="utf-8") as fh:
+                fh.write(xml)
+        except OSError as e:
+            import tempfile
+            vrt_path = os.path.join(
+                tempfile.gettempdir(),
+                os.path.splitext(os.path.basename(h5_path))[0] + "_gcov.vrt")
+            print(f"[GCOV] {e}; writing the VRT to {vrt_path} instead")
+            try:
+                with open(vrt_path, "w", encoding="utf-8") as fh:
+                    fh.write(xml)
+            except OSError as inner:
+                QMessageBox.critical(self, "GCOV",
+                                     f"Could not write a VRT:\n{inner}")
+                return None
+        print(f"[GCOV] {key[0]} frequency{key[1]}: {', '.join(terms)} "
+              f"({width} x {height}, EPSG:{epsg}) -> {vrt_path}")
+        return vrt_path
+
+    # ── NORMALIZE: SAR SQRT-GAMMA STRETCH ────────────────────────────────────
+    def view_extent(self):
+        """The canvas's view as a rectangle in the raster's own CRS."""
+        layer = self.raster_layer
+        if layer is None:
+            return None
+        try:
+            extent = self.canvas.extent()
+        except Exception:
+            return None
+        try:
+            src, dst = self.proj_crs, layer.crs()
+            if src.authid() and dst.authid() and src.authid() == dst.authid():
+                return extent
+            return QgsCoordinateTransform(
+                src, dst, QgsProject.instance()).transformBoundingBox(extent)
+        except Exception as e:
+            print(f"[NORM] view extent: {e}")
+            return None
+
+    def view_pixel_window(self, extent):
+        """`extent`, in the layer's CRS, as a raster pixel window, or None."""
+        layer = self.raster_layer
+        if extent is None or layer is None:
+            return None
+        try:
+            full = layer.extent()
+            px = abs(float(layer.rasterUnitsPerPixelX()))
+            py = abs(float(layer.rasterUnitsPerPixelY()))
+            if px <= 0 or py <= 0:
+                return None
+            x0 = int((extent.xMinimum() - full.xMinimum()) / px)
+            y0 = int((full.yMaximum() - extent.yMaximum()) / py)
+            w = int(max(extent.xMaximum() - extent.xMinimum(), px) / px)
+            h = int(max(extent.yMaximum() - extent.yMinimum(), py) / py)
+            return (x0, y0, max(w, 1), max(h, 1))
+        except Exception as e:
+            print(f"[NORM] pixel window: {e}")
+            return None
+
+    def normalize_range(self, provider, band, extent=None):
+        """The range to apply the gamma over, read from the raster itself.
+
+        Full min/max of a bounded sample rather than a percentile clip: the
+        percentiles are taken later, on the stretched values, and clipping
+        twice would compound.
+        """
+        if NORM_USE_DATA_RANGE:
+            lo, hi = self.sampled_cut(provider, band, 0.0, 1.0, extent)
+            if lo is None or hi is None or hi <= lo:
+                stats = self.sampled_stats(provider, band, extent)
+                if stats is not None:
+                    lo, hi = stats.minimumValue, stats.maximumValue
+            if lo is not None and hi is not None and hi > lo:
+                return (float(lo), float(hi))
+            print(f"[NORM] band {band}: could not measure a range, "
+                  f"falling back to {NORM_MIN}..{NORM_MAX}")
+        return (float(NORM_MIN), float(NORM_MAX))
+
+    def _gamma_bounds(self, source, band_no, dn_min, dn_max, window, clip_pct):
+        """(min, max) for the SAR sqrt-gamma stretch, or (None, None).
+
+        Reads a downsampled tile, applies the power stretch, and inverse-maps
+        the output percentiles back to input values, so the result drives a
+        plain QgsContrastEnhancement and QGIS does the rest.
+        """
+        try:
+            from osgeo import gdal
+            ds = gdal.Open(source, gdal.GA_ReadOnly)
+            if not ds:
+                return (None, None)
+            band = ds.GetRasterBand(band_no)
+            if band is None:
+                return (None, None)
+            x0, y0, w, h = window or (0, 0, band.XSize, band.YSize)
+            x0 = max(0, min(int(x0), band.XSize - 1))
+            y0 = max(0, min(int(y0), band.YSize - 1))
+            w = max(1, min(int(w), band.XSize - x0))
+            h = max(1, min(int(h), band.YSize - y0))
+            data = band.ReadAsArray(x0, y0, w, h,
+                                    min(w, 1000), min(h, 1000)).astype(float)
+            nodata = band.GetNoDataValue()
+            ds = None
+
+            # Zeros stay in: this measures the PICTURE, and fill that
+            # renders black is part of what is in view. The statistics have
+            # their own, stricter, view of what counts as a pixel.
+            mask = valid_mask(data, nodata, zero_is_nodata=False)
+            dn_range = float(dn_max - dn_min)
+            if not np.isfinite(dn_range) or dn_range <= 0:
+                return (None, None)
+            norm = (np.clip(data, dn_min, dn_max) - dn_min) / dn_range
+            stretched = np.power(norm, NORM_GAMMA) * 255.0
+            valid = stretched[mask]
+            if valid.size == 0:
+                return (None, None)
+
+            clip = min(max(float(clip_pct), 0.0), 49.0)
+            lo_out = float(np.percentile(valid, clip))
+            hi_out = float(np.percentile(valid, 100.0 - clip))
+            if not (np.isfinite(lo_out) and np.isfinite(hi_out)):
+                return (None, None)
+            inv = 1.0 / NORM_GAMMA
+            min_dn = dn_min + dn_range * ((lo_out / 255.0) ** inv)
+            max_dn = dn_min + dn_range * ((hi_out / 255.0) ** inv)
+            if not (np.isfinite(min_dn) and np.isfinite(max_dn)) or max_dn <= min_dn:
+                return (None, None)
+            return (min_dn, max_dn)
+        except Exception as e:
+            print(f"[NORM] {e}")
+            return (None, None)
+
+    def normalize_to_view(self):
+        """Stretch the canvas to what is currently in view, and keep it."""
+        layer = self.raster_layer
+        if layer is None or not layer.isValid():
+            QMessageBox.warning(self, "Normalize", "No raster loaded.")
+            return
+        provider = layer.dataProvider()
+        extent = self.view_extent()
+        window = self.view_pixel_window(extent)
+        clip = self.clip_percent()
+        pinned = {}
+        for band in sorted(set(self._selected_bands())) or [1]:
+            base_lo, base_hi = self.normalize_range(provider, band, extent)
+            lo, hi = self._gamma_bounds(layer.source(), band, base_lo, base_hi,
+                                        window, clip)
+            if lo is None or hi is None or hi <= lo:
+                print(f"[NORM] band {band}: view has no usable range, "
+                      f"leaving it as it was")
+                continue
+            pinned[band] = (lo, hi)
+            print(f"[NORM] band {band}: view {base_lo:.6g}..{base_hi:.6g} "
+                  f"clip {clip:g}% -> stretch {lo:.6g}..{hi:.6g}")
+        if not pinned:
+            QMessageBox.warning(
+                self, "Normalize",
+                "Nothing measurable in the current view -- it may be all "
+                "nodata. Move to where there is data and press again.")
+            return
+        self.norm_bounds.update(pinned)
+        self.apply_bands()
+
+    # ── BAND PICKER ──────────────────────────────────────────────────────────
+    def _band_labels(self, layer):
+        """Human labels for a raster's bands, using the names it carries."""
+        provider = layer.dataProvider()
+        labels = []
+        for band in range(1, provider.bandCount() + 1):
+            name = ""
+            try:
+                name = (layer.bandName(band) or "").strip()
+            except Exception:
+                pass
+            if not name or re.fullmatch(r"Band\s*0*\d+", name):
+                name = f"Band {band}"
+            elif not name.lower().startswith("band"):
+                name = f"{band}: {name}"
+            labels.append(name)
+        return labels
+
+    def clear_stretch_cache(self, source=None):
+        if source is None:
+            self._stretch_cache = {}
+        else:
+            for key in [k for k in self._stretch_cache if k[0] == source]:
+                del self._stretch_cache[key]
+
+    def populate_band_picker(self, layer):
+        """Fill the R/G/B combos and the stats-band list from the raster."""
+        if layer is None or not layer.isValid():
+            self.overlay.hide()
+            self.band_labels, self.band_prefixes = [], []
+            return
+        self.clear_stretch_cache(layer.source())
+        self.norm_bounds = {}
+        labels = self._band_labels(layer)
+        self.band_labels = labels
+        self.band_prefixes = [band_prefix(label, index)
+                              for index, label in enumerate(labels, start=1)]
+        count = len(labels)
+        if count < 1:
+            self.overlay.hide()
+            return
+        try:
+            for combo, default in zip(self.band_combos, RGB_DEFAULT_BANDS):
+                combo.blockSignals(True)
+                combo.clear()
+                for label in labels:
+                    combo.addItem(label)
+                combo.setCurrentIndex(min(default - 1, count - 1))
+        finally:
+            for combo in self.band_combos:
+                combo.blockSignals(False)
+        for combo in self.band_combos:
+            combo.setVisible(count >= 2)
+        try:
+            self.stats_band_combo.blockSignals(True)
+            self.stats_band_combo.clear()
+            for label in labels:
+                self.stats_band_combo.addItem(label)
+            self.stats_band_combo.setCurrentIndex(0)
+        finally:
+            self.stats_band_combo.blockSignals(False)
+        self.overlay.show()
+        self.overlay.raise_()
+        print(f"[BANDS] {count}: {', '.join(labels)} "
+              f"-> {', '.join(self.band_prefixes)}")
+        self.apply_bands()
+
+    def _selected_bands(self):
+        return [max(combo.currentIndex(), 0) + 1 for combo in self.band_combos]
+
+    def stats_band(self):
+        """The band the table and the summary report."""
+        try:
+            index = self.stats_band_combo.currentIndex()
+            if 0 <= index < len(self.band_labels):
+                return self.band_labels[index]
+        except Exception:
+            pass
+        return self.band_labels[0] if self.band_labels else ""
+
+    @staticmethod
+    def sampled_cut(provider, band, low, high, extent=None):
+        """cumulativeCut over a bounded sample, or (None, None).
+
+        The sampled overload is tried first: unsampled means a full-resolution
+        pass over the whole raster, per band, on the GUI thread.
+        """
+        try:
+            return provider.cumulativeCut(
+                band, low, high,
+                extent if extent is not None else QgsRectangle(),
+                RASTER_SAMPLE_SIZE)
+        except TypeError:
+            pass
+        except Exception:
+            return (None, None)
+        try:
+            return provider.cumulativeCut(band, low, high)
+        except Exception:
+            return (None, None)
+
+    @staticmethod
+    def sampled_stats(provider, band, extent=None):
+        """bandStatistics over a bounded sample, or None. Same reasoning."""
+        try:
+            return provider.bandStatistics(
+                band, QgsRasterBandStats.Min | QgsRasterBandStats.Max,
+                extent if extent is not None else QgsRectangle(),
+                RASTER_SAMPLE_SIZE)
+        except TypeError:
+            pass
+        except Exception:
+            return None
+        try:
+            return provider.bandStatistics(band)
+        except Exception:
+            return None
+
+    def _stretch_for(self, layer, band):
+        """Contrast enhancement for one band, pinned bounds winning outright."""
+        provider = layer.dataProvider()
+        pinned = self.norm_bounds.get(band)
+        if pinned is None:
+            key = (layer.source(), band)
+            cached = self._stretch_cache.get(key)
+            if cached is not None:
+                pinned = cached
+            else:
+                lo, hi = self.sampled_cut(provider, band, RGB_CLIP_LOW,
+                                          RGB_CLIP_HIGH)
+                if lo is None or hi is None or hi <= lo:
+                    stats = self.sampled_stats(provider, band)
+                    if stats is not None:
+                        lo, hi = stats.minimumValue, stats.maximumValue
+                if lo is None or hi is None or hi <= lo:
+                    lo, hi = 0.0, 1.0
+                pinned = (lo, hi)
+                self._stretch_cache[key] = pinned
+        ce = QgsContrastEnhancement(provider.dataType(band))
+        ce.setContrastEnhancementAlgorithm(
+            QgsContrastEnhancement.StretchToMinimumMaximum)
+        ce.setMinimumValue(pinned[0])
+        ce.setMaximumValue(pinned[1])
+        return ce
+
+    def apply_bands(self):
+        """Render the canvas from the picked bands. Rendering only."""
+        layer = self.raster_layer
+        if layer is None or not layer.isValid():
+            return
+        provider = layer.dataProvider()
+        try:
+            count = max(provider.bandCount(), 1)
+            red, green, blue = [min(b, count) for b in self._selected_bands()]
+            if count < 2:
+                renderer = QgsSingleBandGrayRenderer(provider, 1)
+                renderer.setContrastEnhancement(self._stretch_for(layer, 1))
+                shown = "grey band 1"
+            else:
+                renderer = QgsMultiBandColorRenderer(provider, red, green, blue)
+                renderer.setRedContrastEnhancement(self._stretch_for(layer, red))
+                renderer.setGreenContrastEnhancement(self._stretch_for(layer, green))
+                renderer.setBlueContrastEnhancement(self._stretch_for(layer, blue))
+                shown = f"R={red} G={green} B={blue}"
+            layer.setRenderer(renderer)
+            layer.triggerRepaint()
+            self.canvas.refresh()
+            stretch = ("pinned" if self.norm_bounds
+                       else f"{RGB_CLIP_LOW:.0%}-{RGB_CLIP_HIGH:.0%}")
+            print(f"[BANDS] rendered as {shown} ({stretch} stretch)")
+        except Exception as e:
+            print(f"[BANDS] {e}")
+
+    # ── ROIs ─────────────────────────────────────────────────────────────────
+    def add_roi(self, ring, kind, name=None, select=True):
+        """Record a drawn ROI, measure it, and put it in the table.
+
+        An ROI is plain data -- ring, name, and one statistics dict per band --
+        so everything that reads one (the table, the detail panel, both
+        exports) reads the same thing, and none of them needs a canvas.
+        """
+        ring = [(float(x), float(y)) for x, y in ring]
+        if len(ring) < 3 or ring_area(ring) <= 0.0:
+            print("[ROI] no area; discarded")
+            return None
+        roi_id = self._next_roi_id
+        roi = {
+            "roi": roi_id,
+            "name": name or f"ROI {roi_id}",
+            "kind": kind,
+            "ring": ring,
+            "npix": 0,
+            "area_m2": 0.0,
+            "cx": None, "cy": None, "lon": None, "lat": None,
+            "domain": self.domain(),
+            "src": os.path.basename(self.raster_path),
+            "stats": {},
+        }
+        self._geometry_fields(roi)
+        self.measure_roi(roi)
+        if self.raster_layer is not None and roi["npix"] < MIN_ROI_PIXELS:
+            # A stray click during a drag, or an ROI drawn off the edge of the
+            # scene. Either way there is nothing in it to measure.
+            print(f"[ROI] {roi['npix']} pixel(s) inside -- too small to "
+                  f"measure, discarded")
+            return None
+        self._next_roi_id += 1
+        self.rois.append(roi)
+        self.draw_roi(roi)
+        self.refresh_table()
+        if select:
+            self.select_roi(roi_id)
+        print(f"[ROI] {roi['name']}: {kind}, {roi['npix']} px, "
+              f"{roi['area_m2']:.0f} m²")
+        return roi
+
+    def _geometry_fields(self, roi):
+        """Area, centroid and lon/lat, all from the ring in the working CRS."""
+        roi["area_m2"] = ring_area(roi["ring"])
+        centroid = ring_centroid(roi["ring"])
+        if centroid is not None:
+            roi["cx"], roi["cy"] = centroid
+            roi["lon"], roi["lat"] = self._to_lonlat(*centroid)
+
+    def draw_roi(self, roi, selected=False):
+        """Outline one ROI on the canvas, in its selected or ordinary colour."""
+        band = self.roi_bands.get(roi["roi"])
+        if band is None:
+            band = QgsRubberBand(self.canvas, QgsWkbTypes.PolygonGeometry)
+            self.roi_bands[roi["roi"]] = band
+        try:
+            band.reset(QgsWkbTypes.PolygonGeometry)
+            for index, (x, y) in enumerate(roi["ring"]):
+                band.addPoint(QgsPointXY(x, y),
+                              index == len(roi["ring"]) - 1)
+            rgb = ROI_COLOR_SELECTED if selected else ROI_COLOR
+            fill = QColor(*rgb)
+            fill.setAlpha(ROI_FILL_ALPHA)
+            band.setColor(QColor(*rgb))
+            band.setFillColor(fill)
+            band.setWidth(ROI_WIDTH_SELECTED if selected else ROI_WIDTH)
+            band.show()
+        except Exception as e:
+            print(f"[ROI] draw: {e}")
+
+    def redraw_rois(self):
+        """Re-outline every ROI, so the selected one is the one in yellow."""
+        selected = self.selected_roi()
+        selected_id = selected["roi"] if selected else None
+        for roi in self.rois:
+            self.draw_roi(roi, selected=(roi["roi"] == selected_id))
+
+    def _drop_roi_band(self, roi_id):
+        band = self.roi_bands.pop(roi_id, None)
+        if band is None:
+            return
+        try:
+            band.reset(QgsWkbTypes.PolygonGeometry)
+            scene = self.canvas.scene()
+            if scene:
+                scene.removeItem(band)
+        except Exception as e:
+            print(f"[ROI] remove: {e}")
+
+    def selected_roi(self):
+        try:
+            row = self.table.currentRow()
+        except Exception:
+            return None
+        if row is None or row < 0 or row >= len(self.rois):
+            return None
+        return self.rois[row]
+
+    def select_roi(self, roi_id):
+        for row, roi in enumerate(self.rois):
+            if roi["roi"] == roi_id:
+                self.table.setCurrentCell(row, 0)
+                return
+
+    def delete_roi(self):
+        roi = self.selected_roi()
+        if roi is None:
+            return
+        self._drop_roi_band(roi["roi"])
+        self.rois.remove(roi)
+        self.refresh_table()
+        self.canvas.refresh()
+        print(f"[ROI] deleted {roi['name']}")
+
+    def clear_rois(self):
+        if not self.rois:
+            return
+        answer = QMessageBox.question(
+            self, "Clear ROIs",
+            f"Delete all {len(self.rois)} ROI(s)?\n"
+            "Export them first if they are not saved.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if answer != QMessageBox.Yes:
+            return
+        for roi in list(self.rois):
+            self._drop_roi_band(roi["roi"])
+        self.rois = []
+        self._next_roi_id = 1
+        self.refresh_table()
+        self.canvas.refresh()
+        print("[ROI] all cleared")
+
+    def cancel_drawing(self):
+        """Escape: abandon the polygon in progress, or drop the selection."""
+        tool = getattr(self, "map_tools", {}).get(self.current_map_tool())
+        if isinstance(tool, RoiMapTool):
+            tool.cancel()
+        self.table.clearSelection()
+        self.redraw_rois()
+
+    def zoom_to_roi(self):
+        """Bring the selected ROI up, with room around it to see its setting."""
+        roi = self.selected_roi()
+        if roi is None:
+            return
+        bounds = ring_bounds(roi["ring"])
+        if bounds is None:
+            return
+        xmin, ymin, xmax, ymax = bounds
+        pad = max(xmax - xmin, ymax - ymin, 1.0) * 0.5
+        try:
+            self.canvas.setExtent(QgsRectangle(xmin - pad, ymin - pad,
+                                               xmax + pad, ymax + pad))
+            self.canvas.refresh()
+        except Exception as e:
+            print(f"[ROI] zoom: {e}")
+
+    # ── MEASUREMENT ──────────────────────────────────────────────────────────
+    def measure_roi(self, roi):
+        """Read the ROI's pixels from the source raster and compute its stats.
+
+        Read from the source at full resolution through GDAL, not from what the
+        canvas is showing: the renderer's business is a stretch over a
+        downsampled overview, and a measurement taken off that would be a
+        measurement of the picture rather than of the product.
+        """
+        roi["stats"] = {}
+        roi["npix"] = 0
+        roi["domain"] = self.domain()
+        roi["src"] = os.path.basename(self.raster_path)
+        layer = self.raster_layer
+        if layer is None or not layer.isValid() or not self.band_labels:
+            return False
+        try:
+            from osgeo import gdal
+            ds = gdal.Open(layer.source(), gdal.GA_ReadOnly)
+        except Exception as e:
+            print(f"[STATS] GDAL could not open the raster: {e}")
+            return False
+        if ds is None:
+            print(f"[STATS] GDAL could not open {layer.source()}")
+            return False
+        try:
+            gt = ds.GetGeoTransform()
+            if gt is None or gt[2] or gt[4]:
+                print("[STATS] the raster's geotransform is rotated; "
+                      "ROI statistics need a north-up grid")
+                return False
+            if gt[5] > 0:
+                print("[STATS] the raster runs south-up, which this does not "
+                      "read")
+                return False
+            px, py = abs(gt[1]), abs(gt[5])
+            ring = self._ring_in_layer_crs(roi["ring"])
+            window = pixel_window(ring_bounds(ring), gt[0], gt[3], px, py,
+                                  ds.RasterXSize, ds.RasterYSize)
+            if window is None:
+                print(f"[STATS] {roi['name']} does not overlap the raster")
+                return False
+            col0, row0, ncol, nrow = window
+            if ncol * nrow > ROI_MAX_PIXELS:
+                QMessageBox.warning(
+                    self, "ROI too large",
+                    f"That ROI spans {ncol * nrow:,} pixels of the raster. "
+                    f"RADIAL reads every\none of them, for every band, at "
+                    f"full resolution -- draw a smaller\none over the target "
+                    f"you mean to measure.\n\nA long diagonal polygon spans "
+                    f"far more than it encloses; a\nrectangle over the same "
+                    f"target may fit where it does not.")
+                return False
+            mask = polygon_mask(
+                ring_to_pixels(ring, gt[0], gt[3], px, py, col0, row0),
+                ncol, nrow)
+            roi["npix"] = int(mask.sum())
+            if roi["npix"] == 0:
+                return False
+            domain = self.domain()
+            zero_nodata = self.zero_is_nodata()
+            for index, label in enumerate(self.band_labels, start=1):
+                band = ds.GetRasterBand(index)
+                if band is None:
+                    continue
+                data = band.ReadAsArray(col0, row0, ncol, nrow)
+                if data is None:
+                    continue
+                if np.iscomplexobj(data):
+                    # A complex band is an off-diagonal covariance term or a
+                    # GSLC channel. Its magnitude is a correlation or an
+                    # amplitude, not a backscatter, and quietly taking one
+                    # would put a number in a gamma0 column that means
+                    # something else.
+                    print(f"[STATS] band {index} ({label}) is complex; "
+                          f"not a backscatter, so it is left unmeasured")
+                    continue
+                data = data.astype(float)
+                good = mask & valid_mask(data, band.GetNoDataValue(),
+                                         zero_nodata, domain)
+                roi["stats"][label] = roi_statistics(data[good], domain)
+            return True
+        except Exception as e:
+            print(f"[STATS] {roi['name']}: {e}")
+            return False
+        finally:
+            ds = None
+
+    def recompute_all(self, reason=""):
+        """Re-measure every ROI, after a change to what is being measured."""
+        if not self.rois:
+            self.refresh_table()
+            return
+        for roi in self.rois:
+            self.measure_roi(roi)
+        note = f" ({reason})" if reason else ""
+        print(f"[STATS] {len(self.rois)} ROI(s) re-measured{note}")
+        self.refresh_table()
+
+    # ── TABLE, SUMMARY, DETAIL ───────────────────────────────────────────────
+    def refresh_table(self):
+        """Rebuild the table for the selected band, keeping the selection."""
+        selected = self.selected_roi()
+        selected_id = selected["roi"] if selected else None
+        band = self.stats_band()
+        formats = {key: fmt for key, _, _, fmt in STAT_FIELDS}
+        name_column = ROI_TABLE_COLUMNS.index("name")
+        self._filling_table = True
+        try:
+            self.table.setRowCount(0)
+            self.table.setRowCount(len(self.rois))
+            for row, roi in enumerate(self.rois):
+                stats = (roi.get("stats") or {}).get(band) or {}
+                values = [str(roi["roi"]), roi["name"], roi["kind"],
+                          f"{roi['npix']}", f"{roi['area_m2']:.1f}"]
+                values += [format_stat(stats.get(key), formats[key])
+                           for key in TABLE_STATS]
+                for column, text in enumerate(values):
+                    item = QTableWidgetItem(text)
+                    if column != name_column:
+                        item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                    self.table.setItem(row, column, item)
+        finally:
+            self._filling_table = False
+        if selected_id is not None:
+            self.select_roi(selected_id)
+        self.update_summary()
+        self.update_detail()
+        self.redraw_rois()
+
+    def on_selection_changed(self):
+        if self._filling_table:
+            return
+        self.update_detail()
+        self.redraw_rois()
+
+    def on_item_changed(self, item):
+        """A typed label belongs to the ROI, and goes out with the export."""
+        if self._filling_table or item is None:
+            return
+        try:
+            row, column = item.row(), item.column()
+        except Exception:
+            return
+        if column != ROI_TABLE_COLUMNS.index("name"):
+            return
+        if 0 <= row < len(self.rois):
+            self.rois[row]["name"] = item.text().strip() or self.rois[row]["name"]
+            self.update_detail()
+
+    def update_summary(self):
+        """The footer: how bright the ROIs are, how alike, and how many looks."""
+        band = self.stats_band()
+        summary = summarise([(roi.get("stats") or {}).get(band)
+                             for roi in self.rois])
+        self.lbl_mean.setText(
+            f"Mean:    {format_stat(summary['mean_db'], '{:.2f}')} dB"
+            f"  ({summary['count']} ROI)")
+        self.lbl_spread.setText(
+            f"Spread:  {format_stat(summary['spread_db'], '{:.2f}')} dB")
+        self.lbl_enl.setText(f"ENL:     {format_stat(summary['enl'], '{:.2f}')}")
+
+    def update_detail(self):
+        """The selected ROI, every band, in a block that pastes into a report."""
+        roi = self.selected_roi()
+        if roi is None:
+            self.detail.setPlainText("")
+            return
+        lon = format_stat(roi.get("lon"), "{:.6f}")
+        lat = format_stat(roi.get("lat"), "{:.6f}")
+        lines = [
+            f"ROI {roi['roi']}  {roi['name']}  [{roi['kind']}]",
+            f"  {roi['npix']} px   {roi['area_m2']:.0f} m²   "
+            f"lon/lat {lon}, {lat}",
+            f"  read as {roi.get('domain')} from {roi.get('src') or '(no raster)'}",
+            "",
+            f"  {'band':<10}{'n':>8}{'mean dB':>10}{'std dB':>9}{'cv':>8}"
+            f"{'ENL':>8}{'p5 dB':>9}{'p95 dB':>9}{'nonpos':>8}",
+        ]
+        for label in self.band_labels:
+            stats = (roi.get("stats") or {}).get(label) or {}
+            lines.append(
+                f"  {label[:10]:<10}"
+                f"{format_stat(stats.get('n'), '{:.0f}'):>8}"
+                f"{format_stat(stats.get('mean_db'), '{:.2f}'):>10}"
+                f"{format_stat(stats.get('sdev_db'), '{:.2f}'):>9}"
+                f"{format_stat(stats.get('cv'), '{:.3f}'):>8}"
+                f"{format_stat(stats.get('enl'), '{:.2f}'):>8}"
+                f"{format_stat(stats.get('p5_db'), '{:.2f}'):>9}"
+                f"{format_stat(stats.get('p95_db'), '{:.2f}'):>9}"
+                f"{format_stat(stats.get('nonpos'), '{:.0f}'):>8}")
+        lines += ["", "  linear power (mean, std):"]
+        for label in self.band_labels:
+            stats = (roi.get("stats") or {}).get(label) or {}
+            lines.append(f"  {label[:10]:<10}"
+                         f"{format_stat(stats.get('mean'), '{:.6g}'):>14}"
+                         f"{format_stat(stats.get('std'), '{:.6g}'):>14}")
+        self.detail.setPlainText("\n".join(lines))
+
+    # ── EXPORT ───────────────────────────────────────────────────────────────
+    def export_fields(self):
+        """(QgsFields, [(field name, roi key, band label, stat key)]).
+
+        Built from the raster actually loaded, so a two-polarization product
+        exports two sets of columns and a quad-pol one exports four, rather
+        than every product exporting a fixed grid mostly full of nulls.
+        """
+        fields = QgsFields()
+        types = {"int": QVariant.Int, "double": QVariant.Double,
+                 "string": QVariant.String}
+        plan = []
+        for name, kind in ROI_FIELDS:
+            field = (QgsField(name, types[kind], "", 64)
+                     if kind == "string" else QgsField(name, types[kind]))
+            fields.append(field)
+            plan.append((name, name, None, None))
+        names = dbf_field_names(self.band_prefixes, STAT_KEYS,
+                                reserved=[name for name, _ in ROI_FIELDS])
+        kinds = {key: kind for key, _, kind, _ in STAT_FIELDS}
+        for prefix, label in zip(self.band_prefixes, self.band_labels):
+            for key in STAT_KEYS:
+                name = names[(prefix, key)]
+                fields.append(QgsField(name, types[kinds[key]]))
+                plan.append((name, None, label, key))
+        return fields, plan
+
+    def export_shapefile(self):
+        """Write the ROIs as polygons carrying every statistic.
+
+        Polygons, not the points RIVAL exports: the measurement IS the area,
+        and a point in the middle of it would throw away the only record of
+        which pixels produced the numbers. The same file reloads through 'Load
+        ROIs', so an ROI set can be drawn once and run over every product.
+        """
+        if not self.rois:
+            QMessageBox.warning(self, "Export SHP", "No ROIs to export.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export ROI shapefile", "", "Shapefile (*.shp)")
+        if not path:
+            return
+        if not path.lower().endswith(".shp"):
+            path += ".shp"
+
+        fields, plan = self.export_fields()
+        try:
+            writer = self._make_writer(path, fields)
+            if writer is None:
+                return
+            for roi in self.rois:
+                feature = QgsFeature(fields)
+                ring = [QgsPointXY(x, y) for x, y in roi["ring"]]
+                ring.append(ring[0])         # a shapefile ring is closed
+                feature.setGeometry(QgsGeometry.fromPolygonXY([ring]))
+                feature.setAttributes(self.feature_attributes(roi, plan))
+                writer.addFeature(feature)
+            del writer          # flushes and closes the .shp/.dbf/.shx/.prj
+        except Exception as e:
+            QMessageBox.critical(self, "Export SHP", f"Could not write:\n{e}")
+            return
+
+        # DBF caps a field name at 10 characters, so the same numbers go out
+        # again under names that say what they are.
+        csv_path = os.path.splitext(path)[0] + "_stats.csv"
+        written = self._write_csv(csv_path)
+        crs = self.proj_crs.authid() or self.proj_crs.description()
+        print(f"[EXPORT] {len(self.rois)} ROI(s) -> {path} [{crs}]")
+        QMessageBox.information(
+            self, "Export SHP",
+            f"{len(self.rois)} ROI(s) written to\n{path}\n\n"
+            f"CRS: {crs}\nBands: {', '.join(self.band_labels) or '(none)'}\n"
+            + (f"\nFull-length statistics beside it:\n{csv_path}"
+               if written else ""))
+
+    def feature_attributes(self, roi, plan):
+        """One ROI's attributes, in the order `plan` declared the fields.
+
+        The order is the plan's, not a second traversal that happens to match:
+        a shapefile's attributes are positional, so a field list and an
+        attribute list built separately drift into each other's columns and the
+        writer reports nothing wrong.
+        """
+        attributes = []
+        for _, roi_key, label, stat_key in plan:
+            if roi_key is not None:
+                attributes.append(roi.get(roi_key))
+            else:
+                stats = (roi.get("stats") or {}).get(label) or {}
+                attributes.append(self._dbf_value(stats.get(stat_key)))
+        return attributes
+
+    @staticmethod
+    def _dbf_value(value):
+        """NaN as NULL. A DBF holding 'nan' is a column no reader can total."""
+        try:
+            if value is None:
+                return None
+            number = float(value)
+            return None if not math.isfinite(number) else value
+        except (TypeError, ValueError):
+            return value
+
+    def _make_writer(self, path, fields):
+        """QgsVectorFileWriter across the versions that changed its API."""
+        try:
+            options = QgsVectorFileWriter.SaveVectorOptions()
+            options.driverName = "ESRI Shapefile"
+            options.fileEncoding = "UTF-8"
+        except Exception:
+            options = None
+        if options is not None:
+            for factory in ("create", "createWriter"):
+                make = getattr(QgsVectorFileWriter, factory, None)
+                if make is None:
+                    continue
+                try:
+                    return make(path, fields, QgsWkbTypes.Polygon, self.proj_crs,
+                                QgsProject.instance().transformContext(),
+                                options)
+                except Exception:
+                    continue
+        try:
+            return QgsVectorFileWriter(path, "UTF-8", fields,
+                                       QgsWkbTypes.Polygon, self.proj_crs,
+                                       "ESRI Shapefile")
+        except Exception as e:
+            QMessageBox.critical(self, "Export SHP",
+                                 f"No usable shapefile writer:\n{e}")
+            return None
+
+    def export_csv(self):
+        if not self.rois:
+            QMessageBox.warning(self, "Export CSV", "No ROIs to export.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export ROI statistics", "", "CSV (*.csv)")
+        if not path:
+            return
+        if not path.lower().endswith(".csv"):
+            path += ".csv"
+        if self._write_csv(path):
+            QMessageBox.information(
+                self, "Export CSV",
+                f"{len(self.rois)} ROI(s) x {len(self.band_labels)} band(s) "
+                f"written to\n{path}")
+
+    def _write_csv(self, path):
+        """The statistics in long form: one row per ROI and band."""
+        try:
+            with open(path, "w", newline="", encoding="utf-8-sig") as handle:
+                csv.writer(handle).writerows(
+                    stat_rows(self.rois, self.band_labels))
+            print(f"[EXPORT] statistics -> {path}")
+            return True
+        except OSError as e:
+            QMessageBox.critical(self, "Export CSV", f"Could not write:\n{e}")
+            return False
+
+    # ── ROI IMPORT ───────────────────────────────────────────────────────────
+    def load_rois(self):
+        """Read ROIs back from a polygon layer and measure them here.
+
+        An ROI set outlives the session that drew it: the same rectangles over
+        the same calibration sites can be run over next month's product, or
+        over a second product of the same ground, and the two exports differ
+        only by what the products say.
+        """
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load ROIs", "",
+            "Polygon layers (*.shp *.gpkg *.geojson *.json);;All files (*)")
+        if not path:
+            return
+        layer = QgsVectorLayer(path, "rois", "ogr")
+        if not layer.isValid():
+            QMessageBox.critical(self, "Load ROIs",
+                                 f"QGIS could not open:\n{path}")
+            return
+        transform = None
+        try:
+            if layer.crs().authid() != self.proj_crs.authid():
+                transform = QgsCoordinateTransform(layer.crs(), self.proj_crs,
+                                                   QgsProject.instance())
+        except Exception as e:
+            print(f"[ROI] import transform: {e}")
+        name_index = -1
+        try:
+            lowered = [f.name().lower() for f in layer.fields()]
+            for candidate in ("name", "roi_name", "label", "site"):
+                if candidate in lowered:
+                    name_index = lowered.index(candidate)
+                    break
+        except Exception:
+            pass
+
+        added = skipped = 0
+        for feature in layer.getFeatures():
+            label = None
+            if name_index >= 0:
+                try:
+                    value = feature.attributes()[name_index]
+                    label = str(value) if value not in (None, "") else None
+                except Exception:
+                    label = None
+            for ring in self._rings_from_geometry(feature.geometry()):
+                if transform is not None:
+                    ring = [(lambda p: (p.x(), p.y()))(
+                        transform.transform(QgsPointXY(x, y)))
+                        for x, y in ring]
+                if self.add_roi(ring, "polygon", name=label, select=False):
+                    added += 1
+                else:
+                    skipped += 1
+        self.refresh_table()
+        self.canvas.refresh()
+        print(f"[ROI] imported {added} from {os.path.basename(path)}"
+              + (f", {skipped} skipped" if skipped else ""))
+        if not added:
+            QMessageBox.warning(
+                self, "Load ROIs",
+                "Nothing was imported. The layer needs polygons, and they "
+                "have to\nfall on the raster that is loaded.")
+
+    @staticmethod
+    def _rings_from_geometry(geometry):
+        """Exterior rings of a (multi)polygon, open, as (x, y) tuples.
+
+        Holes are dropped rather than honoured. A hole would have to be carried
+        through the mask, the area and the shapefile alike, and an ROI over a
+        uniform target is not the place for one -- if a corner has to come out,
+        draw two ROIs.
+        """
+        if geometry is None:
+            return []
+        try:
+            if geometry.isEmpty():
+                return []
+            parts = (geometry.asMultiPolygon()
+                     if QgsWkbTypes.isMultiType(geometry.wkbType())
+                     else [geometry.asPolygon()])
+        except Exception as e:
+            print(f"[ROI] geometry: {e}")
+            return []
+        rings = []
+        for part in parts or []:
+            if not part:
+                continue
+            points = [(p.x(), p.y()) for p in part[0]]
+            if len(points) > 1 and points[0] == points[-1]:
+                points = points[:-1]        # a stored ring is closed; ours are not
+            if len(points) >= 3:
+                rings.append(points)
+        return rings
+
+    # ── MAP TOOLS ────────────────────────────────────────────────────────────
+    def init_map_tools(self):
+        self._apply_canvas_crs()
+        self.map_tools = {
+            TOOL_RECT: RoiMapTool(self.canvas, self, TOOL_RECT),
+            TOOL_POLY: RoiMapTool(self.canvas, self, TOOL_POLY),
+            TOOL_PAN: QgsMapToolPan(self.canvas),
+            TOOL_ZOOM_IN: QgsMapToolZoom(self.canvas, False),
+            TOOL_ZOOM_OUT: QgsMapToolZoom(self.canvas, True),
+        }
+        self.apply_map_tool()
+
+    def current_map_tool(self):
+        for mode, button in self.tool_buttons.items():
+            if button.isChecked():
+                return mode
+        return TOOL_RECT
+
+    def set_map_tool(self, mode):
+        button = self.tool_buttons.get(mode)
+        if button is None:
+            return
+        button.setChecked(True)
+        self.apply_map_tool()
+
+    def apply_map_tool(self, _checked=None):
+        """Put the selected tool on the canvas.
+
+        Read from the button row rather than from a signal argument, which
+        arrives differently depending on how the change was made.
+        """
+        tools = getattr(self, "map_tools", None)
+        if not tools:
+            return              # called before init_map_tools
+        mode = self.current_map_tool()
+        self.canvas.setMapTool(tools[mode])
+        cursor = {TOOL_PAN: Qt.OpenHandCursor}.get(mode, Qt.CrossCursor)
+        try:
+            self.canvas.setCursor(cursor)
+        except Exception:
+            pass
+        print(f"[TOOL] {mode}")
+
+
+# ── ENTRY POINT ───────────────────────────────────────────────────────────────
+app = QApplication.instance() or QApplication(sys.argv)
+win = RadiometricDashboard()
+win.show()
