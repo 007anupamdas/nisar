@@ -364,6 +364,47 @@ check("no field name exceeds the DBF 10-character limit",
       max(len(f) for f in fields) <= 10, True)
 check("field names are unique", len(set(fields)), len(fields))
 
+# ── 11. accuracy statistics ──────────────────────────────────────────────────
+# The original CE90 summed the squares without dividing by n, so the figure
+# grew as sqrt(n) with the number of picks: ten picks at RMSE 4.132/6.292
+# reported 23.8 m against a true 11.42 m. Pinned so it cannot come back.
+st = H["accuracy_stats"]([3.0] * 10, [4.0] * 10)
+check("rmse_x is a mean, not a sum", round(st["rmse_x"], 6), 3.0)
+check("rmse_y is a mean, not a sum", round(st["rmse_y"], 6), 4.0)
+check("ce90 = 2.146 * sigma", round(st["ce90"], 4),
+      round(2.146 * ((3.0 ** 2 + 4.0 ** 2) / 2.0) ** 0.5, 4))
+check("ce90 is 1.5175 x the radial rmse", round(st["ce90"], 4),
+      round(1.51745 * (3.0 ** 2 + 4.0 ** 2) ** 0.5, 4))
+
+# the same errors repeated more times describe the same accuracy
+st_wide = H["accuracy_stats"]([3.0] * 40, [4.0] * 40)
+check("ce90 does not grow with the number of picks",
+      round(st_wide["ce90"], 9), round(st["ce90"], 9))
+
+# the reported case, to the figures the analyst read off the panel
+rx, ry = 4.132, 6.292
+st_real = H["accuracy_stats"]([rx] * 10, [ry] * 10)
+check("the 10-pick case reads 11.4 m, not 23.8",
+      round(st_real["ce90"], 2), 11.42)
+
+# RMSE is about zero: a systematic shift is an error, not something to remove
+st_bias = H["accuracy_stats"]([5.0] * 6, [0.0] * 6)
+check("a pure bias is not subtracted out", round(st_bias["rmse_x"], 6), 5.0)
+
+# the circularity caveat
+check("equal axes are circular", H["accuracy_stats"]([3.0], [3.0])["circular"],
+      True)
+check("4.132/6.292 = 0.657 is inside the NSSDA band", st_real["circular"], True)
+check("a 10:1 ellipse is flagged",
+      H["accuracy_stats"]([1.0], [10.0])["circular"], False)
+
+# an empty panel, and a mismatched pair, are zeros rather than an exception
+check("no picks", H["accuracy_stats"]([], []),
+      {"n": 0, "rmse_x": 0.0, "rmse_y": 0.0, "ce90": 0.0, "circular": True})
+check("mismatched lengths", H["accuracy_stats"]([1.0, 2.0], [1.0])["n"], 0)
+check("all-zero errors do not divide by zero",
+      H["accuracy_stats"]([0.0], [0.0])["ce90"], 0.0)
+
 print()
 if failures:
     print(f"{len(failures)} FAILURE(S)")

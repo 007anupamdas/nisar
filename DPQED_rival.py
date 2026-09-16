@@ -235,6 +235,15 @@ SHP_FIELDS = [
 
 # Percentile clip for the input composite. A min/max stretch on SAR is dominated
 # by a handful of bright scatterers and leaves the scene black.
+# CE90: the radius holding 90% of a circular normal error. The radial error is
+# then Rayleigh and its 90th percentile is 2.146 sigma, with sigma the RMS of
+# the two axes -- equivalently 1.5175 x the radial RMSE. The circle is only a
+# fair model while the two axes are comparable; NSSDA draws that line at a
+# min/max ratio of 0.6, below which the figure is reported with a caveat rather
+# than presented as if the error really were circular.
+CE90_SIGMA = 2.146
+CE90_MIN_AXIS_RATIO = 0.6
+
 RGB_CLIP_LOW  = 0.02
 RGB_CLIP_HIGH = 0.98
 
@@ -720,6 +729,32 @@ def quiver_row(index, ix, iy, rx, ry, in_lonlat=None, ref_lonlat=None):
         row[f"{prefix}_lon"] = None if lon is None else float(lon)
         row[f"{prefix}_lat"] = None if lat is None else float(lat)
     return row
+
+
+def accuracy_stats(err_x, err_y):
+    """Per-axis RMSE and CE90 for a set of picked errors, in map metres.
+
+    RMSE is taken about zero, not about the mean, so a systematic shift counts
+    against the accuracy instead of being quietly subtracted out of it -- an
+    absolute location error is the whole point of the measurement.
+
+    'circular' reports whether the two axes are close enough for CE90 to mean
+    what it says; see CE90_MIN_AXIS_RATIO. The number is returned either way,
+    so the caller can caveat it rather than withhold it. No picks is all zeros,
+    not an error: the panel shows this before anything has been marked.
+    """
+    n = len(err_x)
+    if n == 0 or n != len(err_y):
+        return {"n": 0, "rmse_x": 0.0, "rmse_y": 0.0, "ce90": 0.0,
+                "circular": True}
+    rmse_x = math.sqrt(sum(e * e for e in err_x) / n)
+    rmse_y = math.sqrt(sum(e * e for e in err_y) / n)
+    sigma = math.sqrt((rmse_x ** 2 + rmse_y ** 2) / 2.0)
+    hi = max(rmse_x, rmse_y)
+    ratio = min(rmse_x, rmse_y) / hi if hi else 1.0
+    return {"n": n, "rmse_x": rmse_x, "rmse_y": rmse_y,
+            "ce90": CE90_SIGMA * sigma,
+            "circular": ratio >= CE90_MIN_AXIS_RATIO}
 
 
 # ── END PURE HELPERS ──────────────────────────────────────────────────────────
@@ -2216,19 +2251,13 @@ class QCDashboard(QMainWindow):
                     err_y_list.append(float(item_y.text()))
             except (ValueError, AttributeError):
                 continue
-        if not err_x_list:
-            self.lbl_rmse_x.setText("RMSE X:  0.000 m")
-            self.lbl_rmse_y.setText("RMSE Y:  0.000 m")
-            self.lbl_ce90.setText("CE90:    0.000 m")
-            return
-        ex_arr = np.array(err_x_list)
-        ey_arr = np.array(err_y_list)
-        rmse_x = np.sqrt(np.mean(ex_arr ** 2))
-        rmse_y = np.sqrt(np.mean(ey_arr ** 2))
-        ce90   = np.sqrt(np.sum(ex_arr ** 2) + np.sum(ey_arr ** 2))
-        self.lbl_rmse_x.setText(f"RMSE X:  {rmse_x:.3f} m")
-        self.lbl_rmse_y.setText(f"RMSE Y:  {rmse_y:.3f} m")
-        self.lbl_ce90.setText(f"CE90:    {ce90:.3f} m")
+        stats = accuracy_stats(err_x_list, err_y_list)
+        self.lbl_rmse_x.setText(f"RMSE X:  {stats['rmse_x']:.3f} m")
+        self.lbl_rmse_y.setText(f"RMSE Y:  {stats['rmse_y']:.3f} m")
+        # A CE90 on plainly elliptical errors is still worth showing -- it is
+        # the right order of magnitude -- but not worth showing unqualified.
+        caveat = "" if stats["circular"] else "  (axes uneven)"
+        self.lbl_ce90.setText(f"CE90:    {stats['ce90']:.3f} m{caveat}")
 
     # ── CSV ───────────────────────────────────────────────────────────────────
     def load_csv_smart(self):
