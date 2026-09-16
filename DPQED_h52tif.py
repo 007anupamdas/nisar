@@ -1,4 +1,5 @@
 import os.path
+import re
 import h5py as hp
 import numpy as np
 import matplotlib
@@ -21,16 +22,95 @@ tif_path = os.path.join(root, prod + '1.tif')
 # o3 = rxr.open_rasterio(r'X:\APA\SAN\NIS\SS\2026\JAN\NISAR_S2_PR_GSLC_010_170_A_013_3700_DHNA_A_20260120T232921_20260120T232958_D00407_M_F_I_001\NISAR_S2_PR_GSLC_010_170_A_013_3700_DHNA_A_20260120T232921_20260120T232958_D00407_M_F_I_001.h5')
 # ds = rxr.open_rasterio(os.path.join(root, prod) + '.h5')
 
-group_path = "science/SSAR/GSLC/grids/frequencyA"
+# The group path is found in the file rather than written into the script. It
+# encodes four independent things -- band (LSAR/SSAR), product (GSLC/GCOV/
+# RSLC), grids vs swaths, and frequency (A/B) -- so a literal only ever works
+# for the one granule it was written against and fails on the next with a bare
+# KeyError. Set GROUP_PATH_OVERRIDE to force a particular group.
+#
+# cog_locate's nisar_h5.describe() walks the same layout for the streaming
+# reader; this is kept self-contained so the script can be copied on its own.
+GROUP_PATH_OVERRIDE = None
+FREQUENCY_PREFERENCE = ("A", "B")   # A is the wider band, so the finer posting
+
+POL_NAMES = ("HH", "HV", "VH", "VV", "RH", "RV",
+             "HHHH", "HVHV", "VHVH", "VVVV", "HHHV", "HHVV", "HVVV")
+
+_GRID_RE = re.compile(
+    r"^/science/(?P<band>[LS]SAR)/(?P<product>[A-Z]+)/"
+    r"(?P<space>grids|swaths)/frequency(?P<freq>[AB])$")
+
+
+def find_grid_groups(f):
+    """Every frequency group in the file, and what each one carries."""
+    found = {}
+
+    def visit(name, obj):
+        if not isinstance(obj, hp.Group):
+            return
+        path = "/" + name
+        m = _GRID_RE.match(path)
+        if not m:
+            return
+        found[path] = {
+            "band": m.group("band"), "product": m.group("product"),
+            "space": m.group("space"), "freq": m.group("freq"),
+            "pols": [p for p in POL_NAMES
+                     if isinstance(obj.get(p), hp.Dataset) and obj[p].ndim == 2],
+            # A north-up GeoTIFF needs a map grid. RSLC swaths are in slant
+            # range and carry no projection, so there is no transform to write.
+            "geocoded": "xCoordinates" in obj and "yCoordinates" in obj,
+        }
+
+    f.visititems(visit)
+    return found
+
+
+def pick_grid_group(f):
+    """(path, info) for the group to convert. Prints everything it found."""
+    groups = find_grid_groups(f)
+    if not groups:
+        raise SystemExit(
+            "no /science/<band>/<product>/(grids|swaths)/frequency* group in "
+            + h5_path)
+
+    for path in sorted(groups):
+        info = groups[path]
+        print(f"[H5] {path}  pols={','.join(info['pols']) or '(none)'}"
+              f"  {'geocoded' if info['geocoded'] else 'no map grid'}")
+
+    if GROUP_PATH_OVERRIDE:
+        path = "/" + GROUP_PATH_OVERRIDE.strip("/")
+        if path not in groups:
+            raise SystemExit(f"GROUP_PATH_OVERRIDE {path} is not in this file")
+        return path, groups[path]
+
+    usable = {p: i for p, i in groups.items() if i["geocoded"] and i["pols"]}
+    if not usable:
+        raise SystemExit(
+            "no geocoded frequency group holding imagery. This writes a "
+            "north-up GeoTIFF, so it needs xCoordinates/yCoordinates -- which "
+            "an RSLC, being in slant range, does not carry.")
+
+    for freq in FREQUENCY_PREFERENCE:
+        for path in sorted(usable):
+            if usable[path]["freq"] == freq:
+                return path, usable[path]
+    path = sorted(usable)[0]
+    return path, usable[path]
+
 
 with hp.File(h5_path, 'r') as f:
+    group_path, info = pick_grid_group(f)
+    pols = info["pols"]
+    print(f"[H5] using {group_path}  ({info['band']} {info['product']} "
+          f"frequency{info['freq']}, {len(pols)} band(s): {', '.join(pols)})")
     grp = f[group_path]
-    grp.keys()
-    print(grp.keys())
-    hh_cmp = grp['HH'][()]
-    hv_cmp = grp['HV'][()]
-    hh_amp = np.abs(hh_cmp).astype('float32')
-    hv_amp = np.abs(hv_cmp).astype('float32')
+
+    # One band per polarization the group actually holds, rather than assuming
+    # HH and HV: a single-pol product carries only one of them, a quad-pol
+    # four, and a GCOV names them HHHH/HVHV instead.
+    amps = [np.abs(grp[pol][()]).astype('float32') for pol in pols]
 
     x_coord = grp['xCoordinates'][()]
     y_coord = grp['yCoordinates'][()]
@@ -59,10 +139,10 @@ with hp.File(h5_path, 'r') as f:
         tif_path,
         'w',
         driver="GTiff",
-        height=hh_amp.shape[0],
-        width=hh_amp.shape[1],
-        count=2,
-        dtype=hh_amp.dtype,
+        height=amps[0].shape[0],
+        width=amps[0].shape[1],
+        count=len(amps),
+        dtype=amps[0].dtype,
         crs=crs1,
         transform=transform,
         compress="DEFLATE",
@@ -72,8 +152,11 @@ with hp.File(h5_path, 'r') as f:
         blockxsize=256,
         blockysize=256
     ) as dst:
-        dst.write(hh_amp, 1)
-        dst.write(hv_amp, 2)
+        for i, (pol, amp) in enumerate(zip(pols, amps), start=1):
+            dst.write(amp, i)
+            # With the band count no longer fixed at HH+HV, the names are the
+            # only way to tell which band is which -- and QGIS lists them.
+            dst.set_band_description(i, pol)
 
 # hh = ds[8].science_LSAR_RSLC_swaths_frequencyA_HH.squeeze('band', drop=True)
 # hv = ds[8].science_LSAR_RSLC_swaths_frequencyA_HV.squeeze('band', drop=True)
