@@ -349,6 +349,12 @@ def fake_layer(source="/data/gcov.vrt", crs="EPSG:32644", bands=2):
     layer.extent.return_value = _Rect(0, 0, 1, 1)
     provider = MagicMock()
     provider.bandCount.return_value = bands
+    # Real numbers, not a mock: `lo, hi = provider.cumulativeCut(...)` unpacks
+    # its result, and a mock unpacks to nothing -- which apply_bands catches
+    # and prints, so the stretch path would look exercised and never run.
+    provider.cumulativeCut = MagicMock(return_value=(0.0, 1.0))
+    provider.bandStatistics = MagicMock(
+        return_value=MagicMock(minimumValue=0.0, maximumValue=1.0))
     layer.dataProvider.return_value = provider
     return layer
 
@@ -366,8 +372,14 @@ reads = install_gdal([hh, hv], GT)
 win.raster_layer = fake_layer()
 win.raster_path = "/data/gcov.vrt"
 win.band_labels = ["HHHH", "HVHV"]
+win.measure_bands = list(enumerate(win.band_labels, start=1))
+win.factor_band = None
 win.band_prefixes = [R.band_prefix(label, i)
                      for i, label in enumerate(win.band_labels, start=1)]
+win.backscatter_combo = _Combo(
+    [(label, value) for value, label in R.BACKSCATTER_CHOICES], index=0)
+win.backscatter_combo.setEnabled = lambda v: setattr(
+    win.backscatter_combo, "_enabled", bool(v))
 
 # ── 1. an ROI reads the ground it was drawn over ──────────────────────────────
 print("\n── measuring an ROI ──")
@@ -695,6 +707,89 @@ check("a line is not an ROI",
 check("no geometry at all",
       R.RadiometricDashboard._rings_from_geometry(None), [])
 
+# ── 10b. sigma0, through the product's own RTC factor ────────────────────────
+# A GCOV loaded from its '.h5' carries rtcGammaToSigmaFactor as a band. It is
+# not a channel: it must stay out of the measured bands and out of the export's
+# columns, and selecting sigma0 must move every figure by exactly the factor.
+print("\n── sigma0 ──")
+factor = np.full((200, 200), 2.0)           # +3.0103 dB everywhere
+install_gdal([hh, hv, factor], GT)
+sigma_layer = fake_layer(bands=3)
+sigma_layer.bandName.side_effect = lambda b: [
+    "HHHH", "HVHV", "rtcGammaToSigmaFactor"][b - 1]
+win.raster_layer = sigma_layer
+win.raster_path = "/data/gcov.vrt"
+win.band_combos = [_Combo(), _Combo(), _Combo()]
+win.stats_band_combo = _Combo()
+win.populate_band_picker(sigma_layer)
+
+check("the factor is found", win.factor_band, 3)
+check("and is not one of the measured bands",
+      [label for _, label in win.measure_bands], ["1: HHHH", "2: HVHV"])
+check("the R/G/B picker still offers it, to look at",
+      [text for text, _ in win.band_combos[0]._items],
+      ["1: HHHH", "2: HVHV", "3: rtcGammaToSigmaFactor"])
+check("the stats band list leaves it out",
+      [text for text, _ in win.stats_band_combo._items], ["1: HHHH", "2: HVHV"])
+check("no factor column is exported", win.band_prefixes, ["HH", "HV"])
+ok("sigma0 became selectable", win.backscatter_combo._enabled)
+
+win.rois = []
+win._next_roi_id = 1
+patch_ring = R.rect_ring(500300.0, 3999700.0, 500480.0, 3999880.0)
+gamma_roi = win.add_roi(patch_ring, "rect")
+check("gamma0 by default", gamma_roi["backscat"], R.BACKSCATTER_GAMMA0)
+# recompute_all measures IN PLACE, so the gamma0 figures have to be copied out
+# before they are overwritten -- comparing the dict with itself afterwards
+# would show no movement whatever the conversion did.
+before = {band: dict(stats) for band, stats in gamma_roi["stats"].items()}
+
+win.backscatter_combo.setCurrentIndex(1)
+win.recompute_all("sigma0")
+sigma_roi = win.rois[0]
+check("now recorded as sigma0", sigma_roi["backscat"], R.BACKSCATTER_SIGMA0)
+for band in ("1: HHHH", "2: HVHV"):
+    moved = abs(sigma_roi["stats"][band]["mean_db"]
+                - before[band]["mean_db"] - 3.0103) < 1e-3
+    ok(f"{band} moved by the factor, exactly",
+       moved, f"{before[band]['mean_db']:.4f} dB gamma0 -> "
+              f"{sigma_roi['stats'][band]['mean_db']:.4f} dB sigma0")
+check("the same pixels were measured",
+      sigma_roi["stats"]["1: HHHH"]["n"], before["1: HHHH"]["n"])
+ok("speckle statistics did not move, the factor being flat here",
+   abs(sigma_roi["stats"]["1: HHHH"]["enl"]
+       - before["1: HHHH"]["enl"]) < 1e-9)
+
+# The convention rides with the numbers, in both exports.
+R.QgsFields = list
+R.QgsField = lambda name, *a: name
+fields, plan = win.export_fields()
+ok("no factor columns in the shapefile",
+   not any(f.upper().startswith(("RTC", "GAMMA")) for f in fields),
+   ", ".join(fields[len(R.ROI_FIELDS):][:4]))
+check("the convention is a column", "backscat" in fields, True)
+check("and carries the right value",
+      win.feature_attributes(sigma_roi, plan)[fields.index("backscat")],
+      R.BACKSCATTER_SIGMA0)
+
+# A plain GeoTIFF has no factor, so sigma0 cannot be offered at all.
+install_gdal([hh, hv], GT)
+plain = fake_layer(bands=2)
+plain.bandName.side_effect = lambda b: ["HHHH", "HVHV"][b - 1]
+win.band_combos = [_Combo(), _Combo(), _Combo()]
+win.stats_band_combo = _Combo()
+win.populate_band_picker(plain)
+check("no factor band", win.factor_band, None)
+ok("so sigma0 is not selectable", not win.backscatter_combo._enabled)
+win.raster_layer = plain
+win.backscatter_combo.setCurrentIndex(1)     # as if it had been left there
+win.rois = []
+win._next_roi_id = 1
+no_factor = win.add_roi(patch_ring, "rect")
+check("and a figure is never labelled sigma0 without the conversion",
+      no_factor["backscat"], R.BACKSCATTER_GAMMA0)
+win.backscatter_combo.setCurrentIndex(0)
+
 # ── 11. a NISAR GCOV '.h5' becomes a georeferenced VRT ───────────────────────
 print("\n── GCOV HDF5 ──")
 
@@ -730,7 +825,17 @@ class _H5File:
             fn(name)
 
     def __getitem__(self, name):
-        return self._c[name]
+        if name in self._c:
+            return self._c[name]
+        # h5py hands back a Group for a path that is not a dataset, and
+        # iterating one yields its children's names -- which is how the RTC
+        # factor is looked for beside the covariance terms.
+        prefix = name.rstrip("/") + "/"
+        children = [key[len(prefix):] for key in self._c
+                    if key.startswith(prefix) and "/" not in key[len(prefix):]]
+        if not children:
+            raise KeyError(name)
+        return children
 
 
 def install_h5py(contents):
@@ -745,6 +850,8 @@ install_h5py({
     f"{GRID}/HHHH": _Dataset(np.zeros((120, 100), dtype=np.float32)),
     f"{GRID}/HVHV": _Dataset(np.zeros((120, 100), dtype=np.float32)),
     f"{GRID}/HHHV": _Dataset(np.zeros((120, 100), dtype=np.complex64)),
+    f"{GRID}/rtcGammaToSigmaFactor": _Dataset(
+        np.ones((120, 100), dtype=np.float32)),
     f"{GRID}/xCoordinates": _Dataset(500015.0 + 30.0 * np.arange(100)),
     f"{GRID}/yCoordinates": _Dataset(4000985.0 - 30.0 * np.arange(120)),
     f"{GRID}/projection": _Dataset(np.array(32644)),
@@ -764,9 +871,14 @@ with tempfile.TemporaryDirectory() as tmp:
     check("georeferenced from the coordinate vectors, half a pixel back",
           [float(v) for v in root.findtext("GeoTransform").split(",")],
           [500000.0, 30.0, 0.0, 4001000.0, 0.0, -30.0])
-    check("the diagonal terms become bands -- not the complex one",
+    check("the diagonal terms become bands -- not the complex one, and the "
+          "RTC factor rides along",
           [b.findtext("Description") for b in root.findall("VRTRasterBand")],
-          ["HHHH", "HVHV"])
+          ["HHHH", "HVHV", "rtcGammaToSigmaFactor"])
+    check("so sigma0 is available from the '.h5' alone",
+          R.factor_band_index(
+              [b.findtext("Description")
+               for b in root.findall("VRTRasterBand")]), 3)
     check("each band reads its own subdataset in place",
           root.find("VRTRasterBand/SimpleSource/SourceFilename").text,
           f'HDF5:"{h5_path}"://{GRID}/HHHH')

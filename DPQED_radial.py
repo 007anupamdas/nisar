@@ -185,6 +185,26 @@ DOMAIN_CHOICES = (
 )
 DOMAIN_DEFAULT = DOMAIN_POWER
 
+# GCOV carries RTC-corrected gamma0: backscatter referred to the terrain's own
+# sloped area. Sigma0 refers the same measurement to a flat ground area
+# instead, and the product ships the conversion beside the data as a per-pixel
+# layer -- sigma0 = gamma0 x rtcGammaToSigmaFactor. The two differ by several
+# dB on any slope and not at all on flat ground, so which one a figure is
+# cannot be read off the number, and every export records it.
+BACKSCATTER_GAMMA0 = "gamma0"
+BACKSCATTER_SIGMA0 = "sigma0"
+BACKSCATTER_CHOICES = (
+    (BACKSCATTER_GAMMA0, "gamma0 (as stored)"),
+    (BACKSCATTER_SIGMA0, "sigma0 (RTC factor)"),
+)
+BACKSCATTER_DEFAULT = BACKSCATTER_GAMMA0
+
+# The band holding that factor. NISAR names it 'rtcGammaToSigmaFactor'; the
+# match is loose so a GeoTIFF carrying the same layer under a tidied-up name is
+# still recognised, and it is a search rather than an equality so a band
+# described as '3: rtcGammaToSigmaFactor' matches too.
+RTC_FACTOR_RE = re.compile(r"(?i)gamma.?to.?sigma")
+
 # Zero is how a SAR product says 'no data' when it declares no nodata value --
 # outside the swath, beyond the frame, masked in processing. Counted as data it
 # drags every mean down and puts an ROI's looks estimate on the floor. Untick
@@ -229,6 +249,7 @@ ROI_FIELDS = (
     ("lon",     "double"),
     ("lat",     "double"),
     ("domain",  "string"),
+    ("backscat", "string"),
     ("src",     "string"),
 )
 ROI_TABLE_COLUMNS = ("roi", "name", "kind", "npix", "area_m2")
@@ -327,12 +348,17 @@ def empty_statistics():
     return stats
 
 
-def roi_statistics(values, domain=DOMAIN_DEFAULT):
+def roi_statistics(values, domain=DOMAIN_DEFAULT, scale=None):
     """Radiometry of one ROI in one band, from its already-valid pixels.
 
     `values` is what the caller decided was data -- validity is a property of
     the raster, and is settled before this is called. Everything here is the
     arithmetic.
+
+    `scale` multiplies the pixels once they are power, which is the only place
+    the RTC gamma-to-sigma factor can be applied: it is a ratio of reference
+    areas, so it scales a backscatter. Applied to amplitudes it would be out by
+    a square, and to dB pixels it would be an addition rather than a product.
 
     The linear moments carry every pixel, negatives included, because dropping
     the low tail of a noise-subtracted product biases the mean upward by
@@ -342,6 +368,8 @@ def roi_statistics(values, domain=DOMAIN_DEFAULT):
     the dB figures describe the ROI or a part of it.
     """
     power = to_power(np.asarray(values, dtype=float).ravel(), domain)
+    if scale is not None:
+        power = power * np.asarray(scale, dtype=float).ravel()
     power = power[np.isfinite(power)]
     if power.size == 0:
         return empty_statistics()
@@ -372,6 +400,24 @@ def roi_statistics(values, domain=DOMAIN_DEFAULT):
     stats["sdev_db"] = (float(np.std(to_db(positive)))
                         if positive.size > 1 else nan)
     return stats
+
+
+def factor_band_index(labels):
+    """1-based band number of the RTC gamma-to-sigma factor, or None.
+
+    The factor is not a channel and is taken out of the bands that get
+    measured: its mean is a ratio of areas, and a column of those sitting
+    beside the gamma0 columns, under the same headings, would be read as a
+    backscatter by anyone who did not write this.
+
+    It stays in the raster and in the R/G/B picker, because looking at it is
+    how you see where the terrain correction is doing the most work -- and
+    therefore where gamma0 and sigma0 have least to do with each other.
+    """
+    for index, label in enumerate(labels, start=1):
+        if RTC_FACTOR_RE.search(str(label or "")):
+            return index
+    return None
 
 
 def summarise(stats_list):
@@ -867,7 +913,11 @@ class RadiometricDashboard(QMainWindow):
         self.raster_layer = None
         self.raster_path = ""
         self.band_labels = []           # what each band is called, in band order
+        # The bands that are backscatter, as (GDAL band number, label): the RTC
+        # factor is a band of the raster and not one of these.
+        self.measure_bands = []
         self.band_prefixes = []         # the column prefix each one exports under
+        self.factor_band = None         # GDAL band number of the RTC factor
         self.rois = []                  # plain data; see add_roi for the shape
         self.roi_bands = {}             # id -> QgsRubberBand drawn on the canvas
         self._next_roi_id = 1
@@ -1002,6 +1052,20 @@ class RadiometricDashboard(QMainWindow):
             "figures and the looks estimate are both wrong, silently.\n\n"
             "NISAR GCOV carries gamma0 as power. A GSLC magnitude is\n"
             "amplitude. Only pick dB for a raster already in dB.")
+        self.backscatter_combo = QComboBox()
+        for value, label in BACKSCATTER_CHOICES:
+            self.backscatter_combo.addItem(label, value)
+        self.backscatter_combo.setCurrentIndex(0)
+        self.backscatter_combo.setEnabled(False)
+        self.backscatter_combo.setToolTip(
+            "Which backscatter convention the statistics are in.\n\n"
+            "GCOV stores gamma0, referred to the terrain's own sloped area.\n"
+            "sigma0 refers it to flat ground instead, using the product's own\n"
+            "per-pixel rtcGammaToSigmaFactor -- several dB apart on a slope,\n"
+            "identical on the flat.\n\n"
+            "Only selectable when the raster carries that factor, which a GCOV\n"
+            "loaded from its '.h5' does. Every export records which one it is.")
+
         self.cb_zero_data = QCheckBox("Zeros are data")
         self.cb_zero_data.setChecked(not ZERO_IS_NODATA)
         self.cb_zero_data.setToolTip(
@@ -1045,6 +1109,9 @@ class RadiometricDashboard(QMainWindow):
         tool_row.addSpacing(12)
         tool_row.addWidget(QLabel("Domain:"))
         tool_row.addWidget(self.domain_combo)
+        tool_row.addSpacing(12)
+        tool_row.addWidget(QLabel("As:"))
+        tool_row.addWidget(self.backscatter_combo)
         tool_row.addWidget(self.cb_zero_data)
         tool_row.addStretch()
 
@@ -1084,6 +1151,8 @@ class RadiometricDashboard(QMainWindow):
             lambda _: self.refresh_table())
         self.domain_combo.currentIndexChanged.connect(
             lambda _: self.recompute_all("domain changed"))
+        self.backscatter_combo.currentIndexChanged.connect(
+            lambda _: self.recompute_all("backscatter convention changed"))
         self.cb_zero_data.stateChanged.connect(
             lambda _: self.recompute_all("zero handling changed"))
         for combo in self.band_combos:
@@ -1163,6 +1232,16 @@ class RadiometricDashboard(QMainWindow):
         except Exception:
             pass
         return DOMAIN_DEFAULT
+
+    def backscatter(self):
+        """gamma0 as stored, or sigma0 through the RTC factor."""
+        try:
+            value = self.backscatter_combo.currentData()
+            if value in (BACKSCATTER_GAMMA0, BACKSCATTER_SIGMA0):
+                return value
+        except Exception:
+            pass
+        return BACKSCATTER_DEFAULT
 
     def zero_is_nodata(self):
         try:
@@ -1399,6 +1478,12 @@ class RadiometricDashboard(QMainWindow):
                         "correlations and are not measured here.")
                     return None
                 group = f"science/{key[0]}/GCOV/grids/frequency{key[1]}"
+                # The RTC factor rides along when the product has it, so
+                # sigma0 is available without a second file to keep aligned
+                # with this one. It is a band of the raster and not one of the
+                # measured ones -- factor_band_index takes it back out.
+                extras = [name for name in handle[group]
+                          if RTC_FACTOR_RE.search(name)]
                 first = handle[f"{group}/{terms[0]}"]
                 height, width = int(first.shape[0]), int(first.shape[1])
                 dtype = {"float32": "Float32", "float64": "Float64"}.get(
@@ -1417,7 +1502,7 @@ class RadiometricDashboard(QMainWindow):
             return None
 
         sources = [(term, f'HDF5:"{h5_path}"://{group}/{term}')
-                   for term in terms]
+                   for term in terms + extras]
         xml = gcov_vrt_xml(sources, width, height, geotransform, f"EPSG:{epsg}",
                            dtype)
         vrt_path = os.path.splitext(h5_path)[0] + "_gcov.vrt"
@@ -1437,8 +1522,9 @@ class RadiometricDashboard(QMainWindow):
                 QMessageBox.critical(self, "GCOV",
                                      f"Could not write a VRT:\n{inner}")
                 return None
-        print(f"[GCOV] {key[0]} frequency{key[1]}: {', '.join(terms)} "
-              f"({width} x {height}, EPSG:{epsg}) -> {vrt_path}")
+        print(f"[GCOV] {key[0]} frequency{key[1]}: {', '.join(terms)}"
+              + (f" (+ {', '.join(extras)})" if extras else "")
+              + f" ({width} x {height}, EPSG:{epsg}) -> {vrt_path}")
         return vrt_path
 
     # ── NORMALIZE: SAR SQRT-GAMMA STRETCH ────────────────────────────────────
@@ -1614,13 +1700,18 @@ class RadiometricDashboard(QMainWindow):
         if layer is None or not layer.isValid():
             self.overlay.hide()
             self.band_labels, self.band_prefixes = [], []
+            self.measure_bands, self.factor_band = [], None
             return
         self.clear_stretch_cache(layer.source())
         self.norm_bounds = {}
         labels = self._band_labels(layer)
         self.band_labels = labels
+        self.factor_band = factor_band_index(labels)
+        self.measure_bands = [(index, label)
+                              for index, label in enumerate(labels, start=1)
+                              if index != self.factor_band]
         self.band_prefixes = [band_prefix(label, index)
-                              for index, label in enumerate(labels, start=1)]
+                              for index, label in self.measure_bands]
         count = len(labels)
         if count < 1:
             self.overlay.hide()
@@ -1640,15 +1731,25 @@ class RadiometricDashboard(QMainWindow):
         try:
             self.stats_band_combo.blockSignals(True)
             self.stats_band_combo.clear()
-            for label in labels:
+            for _, label in self.measure_bands:
                 self.stats_band_combo.addItem(label)
             self.stats_band_combo.setCurrentIndex(0)
         finally:
             self.stats_band_combo.blockSignals(False)
+        # sigma0 is only offerable when the conversion is in the raster.
+        try:
+            self.backscatter_combo.setEnabled(self.factor_band is not None)
+            if self.factor_band is None:
+                self.backscatter_combo.setCurrentIndex(0)
+        except Exception:
+            pass
         self.overlay.show()
         self.overlay.raise_()
         print(f"[BANDS] {count}: {', '.join(labels)} "
               f"-> {', '.join(self.band_prefixes)}")
+        if self.factor_band is not None:
+            print(f"[BANDS] band {self.factor_band} is the RTC "
+                  f"gamma-to-sigma factor: not measured, sigma0 available")
         self.apply_bands()
 
     def _selected_bands(self):
@@ -1658,11 +1759,11 @@ class RadiometricDashboard(QMainWindow):
         """The band the table and the summary report."""
         try:
             index = self.stats_band_combo.currentIndex()
-            if 0 <= index < len(self.band_labels):
-                return self.band_labels[index]
+            if 0 <= index < len(self.measure_bands):
+                return self.measure_bands[index][1]
         except Exception:
             pass
-        return self.band_labels[0] if self.band_labels else ""
+        return self.measure_bands[0][1] if self.measure_bands else ""
 
     @staticmethod
     def sampled_cut(provider, band, low, high, extent=None):
@@ -1928,9 +2029,10 @@ class RadiometricDashboard(QMainWindow):
         roi["stats"] = {}
         roi["npix"] = 0
         roi["domain"] = self.domain()
+        roi["backscat"] = BACKSCATTER_GAMMA0
         roi["src"] = os.path.basename(self.raster_path)
         layer = self.raster_layer
-        if layer is None or not layer.isValid() or not self.band_labels:
+        if layer is None or not layer.isValid() or not self.measure_bands:
             return False
         try:
             from osgeo import gdal
@@ -1977,7 +2079,10 @@ class RadiometricDashboard(QMainWindow):
                 return False
             domain = self.domain()
             zero_nodata = self.zero_is_nodata()
-            for index, label in enumerate(self.band_labels, start=1):
+            factor, factor_ok = self._rtc_factor(ds, window)
+            if factor is not None:
+                roi["backscat"] = BACKSCATTER_SIGMA0
+            for index, label in self.measure_bands:
                 band = ds.GetRasterBand(index)
                 if band is None:
                     continue
@@ -1996,13 +2101,46 @@ class RadiometricDashboard(QMainWindow):
                 data = data.astype(float)
                 good = mask & valid_mask(data, band.GetNoDataValue(),
                                          zero_nodata, domain)
-                roi["stats"][label] = roi_statistics(data[good], domain)
+                if factor is not None:
+                    good = good & factor_ok
+                roi["stats"][label] = roi_statistics(
+                    data[good], domain,
+                    None if factor is None else factor[good])
             return True
         except Exception as e:
             print(f"[STATS] {roi['name']}: {e}")
             return False
         finally:
             ds = None
+
+    def _rtc_factor(self, ds, window):
+        """The gamma-to-sigma factor over a window, and where it is usable.
+
+        (None, None) unless sigma0 was asked for AND the raster carries the
+        factor -- in which case the ROI is measured as the gamma0 it holds,
+        and says so, rather than being relabelled sigma0 on the strength of a
+        conversion that never happened.
+        """
+        if (self.backscatter() != BACKSCATTER_SIGMA0
+                or self.factor_band is None):
+            return (None, None)
+        try:
+            band = ds.GetRasterBand(self.factor_band)
+            if band is None:
+                return (None, None)
+            col0, row0, ncol, nrow = window
+            data = band.ReadAsArray(col0, row0, ncol, nrow)
+            if data is None:
+                return (None, None)
+            data = data.astype(float)
+            # A factor at or below zero is not a ratio of areas. Those pixels
+            # have no sigma0, so they leave the measurement rather than
+            # becoming one.
+            return (data, valid_mask(data, band.GetNoDataValue(), False)
+                    & (data > 0))
+        except Exception as e:
+            print(f"[STATS] RTC factor: {e}")
+            return (None, None)
 
     def recompute_all(self, reason=""):
         """Re-measure every ROI, after a change to what is being measured."""
@@ -2090,12 +2228,13 @@ class RadiometricDashboard(QMainWindow):
             f"ROI {roi['roi']}  {roi['name']}  [{roi['kind']}]",
             f"  {roi['npix']} px   {roi['area_m2']:.0f} m²   "
             f"lon/lat {lon}, {lat}",
-            f"  read as {roi.get('domain')} from {roi.get('src') or '(no raster)'}",
+            f"  {roi.get('backscat')}, read as {roi.get('domain')}, "
+            f"from {roi.get('src') or '(no raster)'}",
             "",
             f"  {'band':<10}{'n':>8}{'mean dB':>10}{'std dB':>9}{'cv':>8}"
             f"{'ENL':>8}{'p5 dB':>9}{'p95 dB':>9}{'nonpos':>8}",
         ]
-        for label in self.band_labels:
+        for _, label in self.measure_bands:
             stats = (roi.get("stats") or {}).get(label) or {}
             lines.append(
                 f"  {label[:10]:<10}"
@@ -2108,7 +2247,7 @@ class RadiometricDashboard(QMainWindow):
                 f"{format_stat(stats.get('p95_db'), '{:.2f}'):>9}"
                 f"{format_stat(stats.get('nonpos'), '{:.0f}'):>8}")
         lines += ["", "  linear power (mean, std):"]
-        for label in self.band_labels:
+        for _, label in self.measure_bands:
             stats = (roi.get("stats") or {}).get(label) or {}
             lines.append(f"  {label[:10]:<10}"
                          f"{format_stat(stats.get('mean'), '{:.6g}'):>14}"
@@ -2135,7 +2274,7 @@ class RadiometricDashboard(QMainWindow):
         names = dbf_field_names(self.band_prefixes, STAT_KEYS,
                                 reserved=[name for name, _ in ROI_FIELDS])
         kinds = {key: kind for key, _, kind, _ in STAT_FIELDS}
-        for prefix, label in zip(self.band_prefixes, self.band_labels):
+        for prefix, (_, label) in zip(self.band_prefixes, self.measure_bands):
             for key in STAT_KEYS:
                 name = names[(prefix, key)]
                 fields.append(QgsField(name, types[kinds[key]]))
@@ -2186,7 +2325,9 @@ class RadiometricDashboard(QMainWindow):
         QMessageBox.information(
             self, "Export SHP",
             f"{len(self.rois)} ROI(s) written to\n{path}\n\n"
-            f"CRS: {crs}\nBands: {', '.join(self.band_labels) or '(none)'}\n"
+            f"CRS: {crs}\n"
+            f"Bands: {', '.join(l for _, l in self.measure_bands) or '(none)'}\n"
+            f"As: {self.backscatter()}\n"
             + (f"\nFull-length statistics beside it:\n{csv_path}"
                if written else ""))
 
@@ -2259,7 +2400,7 @@ class RadiometricDashboard(QMainWindow):
         if self._write_csv(path):
             QMessageBox.information(
                 self, "Export CSV",
-                f"{len(self.rois)} ROI(s) x {len(self.band_labels)} band(s) "
+                f"{len(self.rois)} ROI(s) x {len(self.measure_bands)} band(s) "
                 f"written to\n{path}")
 
     def _write_csv(self, path):
@@ -2267,7 +2408,8 @@ class RadiometricDashboard(QMainWindow):
         try:
             with open(path, "w", newline="", encoding="utf-8-sig") as handle:
                 csv.writer(handle).writerows(
-                    stat_rows(self.rois, self.band_labels))
+                    stat_rows(self.rois,
+                              [label for _, label in self.measure_bands]))
             print(f"[EXPORT] statistics -> {path}")
             return True
         except OSError as e:

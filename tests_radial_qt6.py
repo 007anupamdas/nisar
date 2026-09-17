@@ -312,6 +312,8 @@ win.raster_layer = layer
 win.raster_path = "/data/gcov.vrt"
 win.proj_crs = _CRS()
 win.band_labels = ["HHHH", "HVHV"]
+win.measure_bands = list(enumerate(win.band_labels, start=1))
+win.factor_band = None
 win.band_prefixes = [R.band_prefix(b, i)
                      for i, b in enumerate(win.band_labels, start=1)]
 win.stats_band_combo.clear()
@@ -346,6 +348,53 @@ check("a typed label reaches the ROI", win.rois[0]["name"], "calibration site")
 win.refresh_table()
 check("refilling the table does not rename anything",
       win.rois[0]["name"], "calibration site")
+
+# ── 4b. sigma0, through a real QComboBox ─────────────────────────────────────
+print("\n── sigma0 ──")
+factor = np.full((200, 200), 2.0)               # +3.0103 dB everywhere
+install_gdal([hh, hv, factor], GT)
+sigma_layer = MagicMock()
+sigma_layer.isValid.return_value = True
+sigma_layer.source.return_value = "/data/gcov.vrt"
+sigma_layer.crs.return_value = _CRS()
+sigma_layer.bandName.side_effect = lambda b: [
+    "HHHH", "HVHV", "rtcGammaToSigmaFactor"][b - 1]
+provider = MagicMock()
+provider.bandCount.return_value = 3
+provider.cumulativeCut = MagicMock(return_value=(0.0, 1.0))
+provider.bandStatistics = MagicMock(
+    return_value=MagicMock(minimumValue=0.0, maximumValue=1.0))
+sigma_layer.dataProvider.return_value = provider
+win.raster_layer = sigma_layer
+win.populate_band_picker(sigma_layer)
+
+check("the factor band is found", win.factor_band, 3)
+check("and left out of the measured bands",
+      [label for _, label in win.measure_bands], ["1: HHHH", "2: HVHV"])
+ok("the real combo became selectable", win.backscatter_combo.isEnabled())
+check("it offers both conventions", win.backscatter_combo.count(),
+      len(R.BACKSCATTER_CHOICES))
+check("starting on gamma0", win.backscatter(), R.BACKSCATTER_GAMMA0)
+
+win.rois = []
+win._next_roi_id = 1
+ring = R.rect_ring(500300.0, 3999700.0, 500480.0, 3999880.0)
+roi = win.add_roi(ring, "rect")
+check("recorded as gamma0", roi["backscat"], R.BACKSCATTER_GAMMA0)
+before = {band: dict(stats) for band, stats in roi["stats"].items()}
+
+win.backscatter_combo.setCurrentIndex(1)        # the real signal fires here
+check("selecting sigma0 re-measures on its own", win.rois[0]["backscat"],
+      R.BACKSCATTER_SIGMA0)
+for band in ("1: HHHH", "2: HVHV"):
+    ok(f"{band} moved by exactly the factor",
+       abs(win.rois[0]["stats"][band]["mean_db"]
+           - before[band]["mean_db"] - 3.0103) < 1e-3,
+       f"{before[band]['mean_db']:.4f} -> "
+       f"{win.rois[0]['stats'][band]['mean_db']:.4f} dB")
+check("the detail panel names the convention",
+      R.BACKSCATTER_SIGMA0 in win.detail.toPlainText(), True)
+win.backscatter_combo.setCurrentIndex(0)
 
 # ── 5. the drawing tools, with real Qt mouse buttons ─────────────────────────
 print("\n── drawing, with real Qt buttons ──")
@@ -434,6 +483,7 @@ check("drawing gets the cross", win.canvas.cursor().shape(),
 print("\n── export ──")
 R.QgsFields = list
 R.QgsField = lambda name, *a: name
+win.rois[0]["name"] = "calibration site"    # a typed label has to be exported
 fields, plan = win.export_fields()
 check("a column per ROI field, band and statistic",
       len(fields), len(R.ROI_FIELDS) + 2 * len(R.STAT_KEYS))

@@ -151,6 +151,59 @@ all_negative = H["roi_statistics"](np.array([-1.0, -2.0]), "power")
 is_nan("every pixel negative: mean_db", all_negative["mean_db"])
 is_nan("every pixel negative: ENL", all_negative["enl"])
 
+# ── 4b. GAMMA0 TO SIGMA0 ──────────────────────────────────────────────────────
+# GCOV stores gamma0. Sigma0 is the same measurement against a flat reference
+# area, and the product ships the conversion as a per-pixel factor. It is a
+# ratio of areas, so it multiplies POWER -- and the test that matters is that
+# it is not applied anywhere else, because applying it to amplitudes would be
+# out by a square and to dB pixels it would be an addition.
+print("\n── sigma0 ──")
+gamma = rng.exponential(0.05, 50_000)
+flat = H["roi_statistics"](gamma, "power")
+doubled = H["roi_statistics"](gamma, "power", scale=np.full(gamma.size, 2.0))
+close("a factor of 2 is +3.01 dB", doubled["mean_db"] - flat["mean_db"],
+      10.0 * math.log10(2.0), 1e-9)
+close("and the linear mean doubles", doubled["mean"], flat["mean"] * 2.0, 1e-12)
+# A constant factor rescales every pixel alike, so the speckle statistics --
+# which are ratios -- cannot move. A real factor varies with slope and does
+# move them, which is a property of the terrain, not an error.
+close("a constant factor leaves cv alone", doubled["cv"], flat["cv"], 1e-12)
+close("and leaves ENL alone", doubled["enl"], flat["enl"], 1e-9)
+
+# The same conversion reached through each domain must give one answer: the
+# factor is applied after the pixels are power, never to what the raster held.
+for domain, held in (("power", gamma), ("amplitude", np.sqrt(gamma)),
+                     ("db", 10.0 * np.log10(gamma))):
+    scaled = H["roi_statistics"](held, domain, scale=np.full(gamma.size, 3.0))
+    close(f"via {domain}", scaled["mean_db"],
+          flat["mean_db"] + 10.0 * math.log10(3.0), 1e-9)
+
+# A varying factor is the real case: every pixel gets its own.
+factor = rng.uniform(0.5, 2.0, gamma.size)
+varied = H["roi_statistics"](gamma, "power", scale=factor)
+close("a per-pixel factor is a per-pixel product", varied["mean"],
+      float((gamma * factor).mean()), 1e-12)
+# A factor that is missing or non-positive takes its pixel out rather than
+# inventing a sigma0 for it.
+holed = factor.copy()
+holed[:100] = np.nan
+check("pixels with no factor leave the measurement",
+      H["roi_statistics"](gamma, "power", scale=holed)["n"], gamma.size - 100)
+check("no scale at all is the gamma0 case",
+      H["roi_statistics"](gamma, "power", scale=None), flat)
+
+print("\n── finding the factor band ──")
+check("NISAR's own name", H["factor_band_index"](
+    ["HHHH", "HVHV", "rtcGammaToSigmaFactor"]), 3)
+check("however QGIS labelled it", H["factor_band_index"](
+    ["1: HHHH", "2: rtcGammaToSigmaFactor"]), 2)
+check("case and separators do not matter", H["factor_band_index"](
+    ["gamma_to_sigma", "HHHH"]), 1)
+check("a product without one", H["factor_band_index"](["HHHH", "HVHV"]), None)
+check("and a band that merely mentions sigma is not it",
+      H["factor_band_index"](["sigma0_HH", "gamma0_HV"]), None)
+check("no bands at all", H["factor_band_index"]([]), None)
+
 # ── 5. WHAT COUNTS AS A PIXEL ─────────────────────────────────────────────────
 # Zero is fill in power and in amplitude, and a perfectly ordinary bright pixel
 # in dB. NaN has to be excluded explicitly: it equals nothing, itself included,

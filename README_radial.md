@@ -51,6 +51,35 @@ The two exports differ only by what the products say. `Load ROIs` reads a
 shapefile back in, so a set drawn today can be run over next month's product,
 or handed to someone else.
 
+## gamma0 or sigma0
+
+GCOV stores **gamma0** — backscatter referred to the terrain's own sloped area.
+**sigma0** refers the same measurement to a flat ground area instead. On flat
+ground they are identical; on a slope they are several dB apart, and which one
+a figure is cannot be read off the number.
+
+The product ships the conversion with the data, as a per-pixel layer:
+
+```
+sigma0 = gamma0 × rtcGammaToSigmaFactor
+```
+
+Load a GCOV from its `.h5` and that layer rides along in the VRT, so the **As:**
+selector offers sigma0. Pick it and every ROI is re-measured; the factor is
+applied to **linear power**, which is the only place a ratio of areas belongs —
+on amplitudes it would be out by a square, on dB pixels it would be an addition.
+
+The factor is a band of the raster but not a channel. It stays out of the
+measured bands and out of the export's columns (its mean is a ratio of areas,
+and a column of those under the same headings as the gamma0 columns would be
+read as a backscatter), but it stays in the R/G/B picker — looking at it is how
+you see where the terrain correction is doing the most work, and therefore where
+the two conventions have least to do with each other.
+
+Every ROI records which convention produced it, in the `backscat` column. A
+raster with no factor layer cannot offer sigma0 at all, and nothing is ever
+labelled sigma0 on the strength of a conversion that did not happen.
+
 ## The statistics
 
 Everything is computed on **linear power**, per ROI and per band.
@@ -65,6 +94,10 @@ Everything is computed on **linear power**, per ROI and per band.
 | `sdev_db` | spread of the dB pixels, which is what the stretch shows |
 | `min_db` `p5_db` `med_db` `p95_db` `max_db` | percentiles of the power, in dB |
 | `nonpos` | pixels at or below zero, excluded from the dB columns |
+
+A constant factor rescales every pixel alike, so switching to sigma0 moves
+`mean_db` and leaves `cv` and `enl` where they were. A real factor varies with
+slope and moves them too — that is the terrain, not an error.
 
 The footer summarises the selected band across ROIs: the mean of the ROI means,
 the spread between brightest and darkest, and the median ENL.
@@ -103,7 +136,7 @@ means the dB columns describe only part of the ROI.
 `Export SHP` writes one polygon per ROI in the working CRS:
 
 ```
-roi  name  kind  npix  area_m2  cx  cy  lon  lat  domain  src
+roi  name  kind  npix  area_m2  cx  cy  lon  lat  domain  backscat  src
 HH_n  HH_mean  HH_std  HH_cv  HH_enl  HH_mean_db  HH_sdev_db  HH_min_db …
 HV_n  HV_mean  …
 ```
@@ -112,8 +145,11 @@ The prefix comes from the band's own name: a GCOV `HHHH` term is the HH power,
 and a GeoTIFF band called `gamma0_HH` is the same channel, so both export under
 `HH_`. A raster that names nothing falls back to `b1_`, `b2_`.
 
-`domain` and `src` are not decoration — a gamma0 figure is not reproducible
-without knowing what the pixels were read as and which raster they came from.
+`domain`, `backscat` and `src` are not decoration — a backscatter figure is not
+reproducible without knowing what the pixels were read as, which convention
+they are in, and which raster they came from. The statistic columns keep the
+same names under either convention, so a gamma0 export and a sigma0 export of
+one ROI set compare column by column.
 
 DBF caps a field name at 10 characters and **truncates silently** past it, so
 the same numbers are written again beside the shapefile as `<stem>_stats.csv`,
@@ -127,8 +163,10 @@ band's `n` may be lower where that band has nodata.
 
 A GCOV product ships as HDF5. Handed one, RADIAL writes a VRT beside it
 (`<product>_gcov.vrt`) stacking the frequency's **diagonal** covariance terms
-as bands — HHHH, HVHV, VHVH, VVVV — with the grid's own geotransform and
-projection. Nothing is copied; the VRT reads the HDF5 in place.
+as bands — HHHH, HVHV, VHVH, VVVV — plus `rtcGammaToSigmaFactor` when the
+product carries it, with the grid's own geotransform and projection. Nothing is
+copied; the VRT reads the HDF5 in place. That is what makes sigma0 available
+from the `.h5` alone, with no second file to keep aligned with the first.
 
 Off-diagonal terms are complex covariances. Their magnitude is a correlation,
 not a backscatter, so they are not offered and a complex band is never measured.
