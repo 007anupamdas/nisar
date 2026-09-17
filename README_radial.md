@@ -80,6 +80,38 @@ Every ROI records which convention produced it, in the `backscat` column. A
 raster with no factor layer cannot offer sigma0 at all, and nothing is ever
 labelled sigma0 on the strength of a conversion that did not happen.
 
+## ROI classes
+
+Each ROI carries a **class** — what it is over. The **Drawing:** picker sets the
+class of the next ROI you draw, so you mark ten vegetation patches, switch, and
+mark eight water ones; the **Class** cell in each row is editable afterwards.
+The picker is editable too, so `vegetation`, `water` and `snow` are the common
+cases rather than the permitted ones — type anything and it becomes a class.
+
+Statistics are then summarised **per class**, in the table beside the ROI list:
+
+| Class | ROIs | Mean dB | Spread dB | ENL |
+|---|---|---|---|---|
+| vegetation | 10 | −7.55 | 0.90 | 4.1 |
+| water | 8 | −22.35 | 0.70 | 3.9 |
+| all | 18 | −13.12 | 15.60 | 4.0 |
+
+This is the point of the feature. **Spread** is the brightest ROI mean minus the
+darkest: within one land cover that is the product's radiometric uniformity,
+and across two it is just the gap between vegetation and water — 15.6 dB of
+land cover, which you knew before you drew anything. The `all` row is kept, and
+labelled, because scene-wide brightness is worth a glance; it is not a
+uniformity figure. It is left out when there is only one class.
+
+Classes are case-folded to group and shown as first typed, so `Water` and
+`water` are one class. A misspelling stays its own class — which is how you
+notice it, rather than having it quietly folded into the one you meant.
+
+The class is a column in the shapefile and in the per-ROI CSV, and **Export SHP**
+writes the summary itself beside them as `<stem>_by_class.csv`, one row per
+class and band. That is the table a report quotes, and no per-ROI listing states
+it outright.
+
 ## Incidence angle
 
 Each ROI reports the incidence angle at its **centre**, in degrees, in the
@@ -172,7 +204,7 @@ means the dB columns describe only part of the ROI.
 `Export SHP` writes one polygon per ROI in the working CRS:
 
 ```
-roi  name  kind  npix  area_m2  cx  cy  lon  lat  domain  backscat  inc_deg  src
+roi  name  kind  npix  area_m2  cx  cy  lon  lat  domain  class  backscat  inc_deg  src
 HH_n  HH_mean  HH_std  HH_cv  HH_enl  HH_mean_db  HH_sdev_db  HH_min_db …
 HV_n  HV_mean  …
 ```

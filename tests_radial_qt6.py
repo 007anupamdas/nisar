@@ -258,7 +258,7 @@ print("\n── Qt6 enums, as Qt itself resolves them ──")
 win.canvas.setCursor(Qt.CursorShape.CrossCursor)
 check("the cursor the tool row sets", win.canvas.cursor().shape(),
       Qt.CursorShape.CrossCursor)
-check("the summary labels are centred", win.lbl_mean.alignment(),
+check("the context label is centred", win.lbl_context.alignment(),
       Qt.AlignmentFlag.AlignCenter)
 check("the detail panel is read-only", win.detail.isReadOnly(), True)
 
@@ -333,13 +333,18 @@ ok("and reads the patch's gamma0",
 # only way to find out whether the guard against them is doing its job.
 check("a real row appeared", win.table.rowCount(), 1)
 check("with the ROI's own columns",
-      [win.table.item(0, c).text() for c in range(3)], ["1", "ROI 1", "rect"])
+      [win.table.item(0, c).text() for c in range(4)],
+      ["1", "ROI 1", "vegetation", "rect"])
 name_column = R.ROI_TABLE_COLUMNS.index("name")
-ok("only the name cell is editable",
+class_column = R.ROI_TABLE_COLUMNS.index("class")
+ok("the name and class cells are editable, and nothing else",
    bool(win.table.item(0, name_column).flags() & Qt.ItemFlag.ItemIsEditable)
+   and bool(win.table.item(0, class_column).flags() & Qt.ItemFlag.ItemIsEditable)
    and not bool(win.table.item(0, 0).flags() & Qt.ItemFlag.ItemIsEditable))
-check("the footer reports the band",
-      win.lbl_mean.text().startswith("Mean:"), True)
+ok("the footer names the band and convention the figures are in",
+   win.band_labels[0] in win.lbl_context.text()
+   and R.BACKSCATTER_GAMMA0 in win.lbl_context.text(),
+   win.lbl_context.text())
 
 # itemChanged fires for real here: renaming must reach the ROI, and refilling
 # the table must not be mistaken for a rename.
@@ -395,6 +400,41 @@ for band in ("1: HHHH", "2: HVHV"):
 check("the detail panel names the convention",
       R.BACKSCATTER_SIGMA0 in win.detail.toPlainText(), True)
 win.backscatter_combo.setCurrentIndex(0)
+
+# ── 4d. classes, through a real editable QComboBox and QTableWidget ──────────
+print("\n── by class ──")
+check("the picker offers the classes", win.class_combo.count(),
+      len(R.ROI_CLASSES))
+ok("and is editable, so it is not a closed list", win.class_combo.isEditable())
+check("starting on the first", win.roi_class(), R.ROI_CLASS_DEFAULT)
+
+win.rois = []
+win._next_roi_id = 1
+veg = win.add_roi(R.rect_ring(500300.0, 3999700.0, 500480.0, 3999880.0), "rect")
+check("a drawn ROI takes the picker's class", veg["class"], "vegetation")
+win.class_combo.setCurrentText("water")
+wet = win.add_roi(R.rect_ring(503000.0, 3994000.0, 503180.0, 3994180.0), "rect")
+check("typing into the picker classes the next one", wet["class"], "water")
+
+# The by-class table is a real QTableWidget, filled from the same helper.
+check("a row per class and one for all", win.class_table.rowCount(), 3)
+check("naming them",
+      [win.class_table.item(r, 0).text() for r in range(3)],
+      ["vegetation", "water", "all"])
+check("with their counts",
+      [win.class_table.item(r, 1).text() for r in range(3)], ["1", "1", "2"])
+ok("and none of it is editable",
+   not any(win.class_table.item(r, c).flags() & Qt.ItemFlag.ItemIsEditable
+           for r in range(3) for c in range(win.class_table.columnCount())))
+
+# Editing the class cell fires the real itemChanged signal.
+win.table.item(1, R.ROI_TABLE_COLUMNS.index("class")).setText("vegetation")
+check("re-classing in the table reaches the ROI", win.rois[1]["class"],
+      "vegetation")
+check("and the summary follows, with no combined row left to draw",
+      win.class_table.rowCount(), 1)
+check("that one row holding both", win.class_table.item(0, 1).text(), "2")
+win.class_combo.setCurrentText(R.ROI_CLASS_DEFAULT)
 
 # ── 5. the drawing tools, with real Qt mouse buttons ─────────────────────────
 print("\n── drawing, with real Qt buttons ──")
@@ -494,6 +534,8 @@ attributes = win.feature_attributes(win.rois[0], plan)
 check("an attribute per field", len(attributes), len(fields))
 check("the ROI's own fields lead", attributes[:3],
       [1, "calibration site", "rect"])
+check("class among them, where ROI_FIELDS puts it",
+      attributes[[n for n, _ in R.ROI_FIELDS].index("class")], "vegetation")
 
 with tempfile.TemporaryDirectory() as tmp:
     path = os.path.join(tmp, "stats.csv")
@@ -501,7 +543,8 @@ with tempfile.TemporaryDirectory() as tmp:
     import csv as _csv
     with open(path, encoding="utf-8-sig") as handle:
         rows = list(_csv.reader(handle))
-    check("a row per ROI and band, plus a header", len(rows), 1 + 1 * 2)
+    # Two ROIs by now, both drawn in the class section above.
+    check("a row per ROI and band, plus a header", len(rows), 1 + 2 * 2)
     check("under untruncated names", rows[0][-len(R.STAT_KEYS):],
           list(R.STAT_KEYS))
 

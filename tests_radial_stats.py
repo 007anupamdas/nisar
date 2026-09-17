@@ -456,6 +456,70 @@ check("nothing measurable", undefined["count"], 0)
 is_nan("no mean to report", undefined["mean_db"])
 is_nan("spread needs two ROIs", H["summarise"]([{"mean_db": -10.0}])["spread_db"])
 
+# ── 11b. STATISTICS PER CLASS ─────────────────────────────────────────────────
+# Ten vegetation ROIs and eight water ones share a scene, not a population. A
+# spread taken across both is the difference between two land covers, not the
+# product's uniformity, so the figures are grouped before they are summarised.
+print("\n── by class ──")
+
+
+def roi(label, mean_db, enl=4.0):
+    return {"class": label, "stats": {"HH": {"mean_db": mean_db, "enl": enl}}}
+
+
+mixed = ([roi("vegetation", -8.0 + 0.1 * i) for i in range(10)]
+         + [roi("water", -22.0 - 0.1 * i) for i in range(8)])
+by_class = dict(H["class_summary"](mixed, "HH"))
+check("a row per class, and one for all of them", list(by_class),
+      ["vegetation", "water", "all"])
+check("each counting its own", by_class["vegetation"]["count"], 10)
+check("and the other's", by_class["water"]["count"], 8)
+close("vegetation reads its own brightness",
+      by_class["vegetation"]["mean_db"], -7.55, 0.01)
+close("water reads its own", by_class["water"]["mean_db"], -22.35, 0.01)
+# The point of the whole exercise: a spread within a class is uniformity; the
+# spread across both is 14 dB of land cover.
+close("spread within vegetation", by_class["vegetation"]["spread_db"], 0.9, 1e-9)
+close("spread within water", by_class["water"]["spread_db"], 0.7, 1e-9)
+# -7.1 (the brightest vegetation) down to -22.7 (the darkest water).
+close("and across everything, which is not a uniformity figure",
+      by_class["all"]["spread_db"], 15.6, 1e-9)
+
+check("one class needs no combined row",
+      [label for label, _ in H["class_summary"](mixed[:10], "HH")],
+      ["vegetation"])
+check("no ROIs at all", H["class_summary"]([], "HH"), [])
+
+print("\n── grouping ──")
+check("classes keep the order they first appear",
+      [label for label, _ in H["group_by_class"](
+          [roi("water", -20), roi("snow", -5), roi("water", -21)])],
+      ["water", "snow"])
+check("and their members", [len(m) for _, m in H["group_by_class"](
+    [roi("water", -20), roi("snow", -5), roi("water", -21)])], [2, 1])
+# Case-folded to group, shown as first typed: 'Water' and 'water' are one
+# class. A misspelling stays its own, which is how it gets noticed.
+check("case does not split a class",
+      [(label, len(m)) for label, m in H["group_by_class"](
+          [roi("Water", -20), roi("water", -21), roi("wate", -22)])],
+      [("Water", 2), ("wate", 1)])
+check("an unset class has a name of its own",
+      H["group_by_class"]([{"stats": {}}])[0][0], H["ROI_CLASS_UNSET"])
+check("and so does an empty one",
+      H["class_key"]("   "), H["ROI_CLASS_UNSET"])
+check("whitespace does not make a new class",
+      H["class_key"]("  Water  "), "water")
+
+print("\n── the by-class export ──")
+rows = H["class_summary_rows"](mixed, ["HH", "HV"])
+check("a header and a row per class and band", len(rows), 1 + 3 * 2)
+check("under names that say what they are", rows[0],
+      ["class", "band", "rois", "mean_db", "spread_db", "enl"])
+check("the band is named in the row", [r[1] for r in rows[1:]],
+      ["HH"] * 3 + ["HV"] * 3)
+check("and the class", [r[0] for r in rows[1:4]],
+      ["vegetation", "water", "all"])
+
 print("\n── formatting ──")
 check("a number", H["format_stat"](3.14159, "{:.2f}"), "3.14")
 check("NaN", H["format_stat"](float("nan")), "--")

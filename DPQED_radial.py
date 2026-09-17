@@ -222,6 +222,20 @@ RADAR_GRID_RE = re.compile(
     r"science/(?P<band>[LS]SAR)/GCOV/metadata/radarGrid/(?P<name>[A-Za-z0-9_]+)$")
 INCIDENCE_NAME = "incidenceAngle"
 
+# ── ROI CLASSES ───────────────────────────────────────────────────────────────
+# What an ROI is over. Statistics are reported per class, because the figures
+# that matter -- the spread between ROIs, the median ENL -- only mean anything
+# within one land cover. A spread taken across water and vegetation together is
+# not a measure of the product's uniformity; it is the difference between two
+# land covers, which is something you knew before you drew them.
+#
+# The picker is editable, so this list is the common cases rather than the
+# permitted ones: anything typed becomes a class, here or in the table.
+ROI_CLASSES = ("vegetation", "water", "snow")
+ROI_CLASS_DEFAULT = ROI_CLASSES[0]
+ROI_CLASS_UNSET = "unclassified"
+ROI_CLASS_ALL = "all"
+
 # Zero is how a SAR product says 'no data' when it declares no nodata value --
 # outside the swath, beyond the frame, masked in processing. Counted as data it
 # drags every mean down and puts an ROI's looks estimate on the floor. Untick
@@ -266,11 +280,17 @@ ROI_FIELDS = (
     ("lon",     "double"),
     ("lat",     "double"),
     ("domain",  "string"),
+    ("class",   "string"),
     ("backscat", "string"),
     ("inc_deg", "double"),
     ("src",     "string"),
 )
-ROI_TABLE_COLUMNS = ("roi", "name", "kind", "npix", "area_m2", "inc_deg")
+ROI_TABLE_COLUMNS = ("roi", "name", "class", "kind", "npix", "area_m2",
+                     "inc_deg")
+
+# The by-class summary beside the ROI table: one row per class, for the band
+# the table is showing.
+CLASS_TABLE_COLUMNS = ("Class", "ROIs", "Mean dB", "Spread dB", "ENL")
 
 # DBF caps a field name at 10 characters and silently truncates past it, which
 # turns HH_mean_db and HH_med_db into one column. Names are built to fit and
@@ -496,6 +516,58 @@ def bilinear_at(x_coords, y_coords, values, at_x, at_y):
                  + grid[j, i + 1] * fx * (1 - fy)
                  + grid[j + 1, i] * (1 - fx) * fy
                  + grid[j + 1, i + 1] * fx * fy)
+
+
+def class_key(value):
+    """The label an ROI groups under: trimmed and case-folded."""
+    text = str(value or "").strip()
+    return text.lower() if text else ROI_CLASS_UNSET
+
+
+def group_by_class(rois):
+    """[(label, [roi])], in the order the classes first appear.
+
+    Case-folded to group and shown as first typed, so 'Water' and 'water' are
+    one class rather than two. A misspelling is still its own class, which is
+    the right answer: it shows up as a group of one rather than being quietly
+    folded into the class it was meant to be.
+    """
+    groups = {}
+    for roi in rois:
+        key = class_key(roi.get("class"))
+        if key not in groups:
+            label = str(roi.get("class") or "").strip() or ROI_CLASS_UNSET
+            groups[key] = (label, [])
+        groups[key][1].append(roi)
+    return list(groups.values())
+
+
+def class_summary(rois, band):
+    """[(label, summary)] per class for one band, then all of them together.
+
+    The combined row comes last and is labelled: it is the scene-wide
+    brightness, which is worth a glance, and it is not a uniformity figure once
+    more than one land cover is in it. It is left out entirely when there is
+    only one class, where it would just repeat that class's row.
+    """
+    groups = group_by_class(rois)
+    summaries = [(label, summarise([(roi.get("stats") or {}).get(band)
+                                    for roi in members]))
+                 for label, members in groups]
+    if len(groups) > 1:
+        summaries.append((ROI_CLASS_ALL, summarise(
+            [(roi.get("stats") or {}).get(band) for roi in rois])))
+    return summaries
+
+
+def class_summary_rows(rois, bands):
+    """The by-class summary in long form: a row per class and band."""
+    rows = [["class", "band", "rois", "mean_db", "spread_db", "enl"]]
+    for band in bands:
+        for label, summary in class_summary(rois, band):
+            rows.append([label, band, summary["count"], summary["mean_db"],
+                         summary["spread_db"], summary["enl"]])
+    return rows
 
 
 def summarise(stats_list):
@@ -1166,6 +1238,19 @@ class RadiometricDashboard(QMainWindow):
             "from its '.h5' does, and a GeoTIFF does when it was written by\n"
             "DPQED_gcov2tif.py. Every export records which one it is.")
 
+        self.class_combo = QComboBox()
+        self.class_combo.setEditable(True)
+        self.class_combo.addItems(list(ROI_CLASSES))
+        self.class_combo.setCurrentIndex(
+            list(ROI_CLASSES).index(ROI_CLASS_DEFAULT))
+        self.class_combo.setToolTip(
+            "What the next ROI you draw is over.\n\n"
+            "Statistics are reported per class, because a spread taken across\n"
+            "water and vegetation together is not the product's uniformity --\n"
+            "it is the difference between two land covers.\n\n"
+            "Editable: type anything and it becomes a class. The class of an\n"
+            "ROI already drawn is editable in its table row.")
+
         self.cb_zero_data = QCheckBox("Zeros are data")
         self.cb_zero_data.setChecked(not ZERO_IS_NODATA)
         self.cb_zero_data.setToolTip(
@@ -1173,32 +1258,38 @@ class RadiometricDashboard(QMainWindow):
             "is left out of the statistics. On: zero is a measurement.\n"
             "Ignored for a raster in dB, where 0 dB is a power of 1.")
 
+        # One set of figures for a mixed population of ROIs answered the wrong
+        # question, so the footer's three labels became a row per class. What
+        # is left in the footer is context: which band and convention the
+        # numbers above are in.
         summary_font = QFont()
         summary_font.setBold(True)
         summary_font.setPointSize(10)
-        self.lbl_mean = QLabel("Mean:    -- dB")
-        self.lbl_spread = QLabel("Spread:  -- dB")
-        self.lbl_enl = QLabel("ENL:     --")
-        self.lbl_mean.setToolTip("Mean of the ROI means, for the selected band.")
-        self.lbl_spread.setToolTip(
-            "Brightest ROI mean minus darkest, in dB. Over patches of one "
-            "cover type\nthis is the product's radiometric uniformity across "
-            "the scene.")
-        self.lbl_enl.setToolTip(
-            "Median ENL across the ROIs. The median, not the mean, so one ROI "
-            "on a\nfield boundary cannot drag the figure down.")
-        for label in (self.lbl_mean, self.lbl_spread, self.lbl_enl):
-            label.setFont(summary_font)
-            label.setAlignment(Qt.AlignCenter)
-            label.setFrameShape(QFrame.StyledPanel)
-            label.setStyleSheet(
-                "QLabel {"
-                "  background-color: #1e1e2e;"
-                "  color: #cdd6f4;"
-                "  border: 1px solid #45475a;"
-                "  border-radius: 4px;"
-                "  padding: 4px 10px;"
-                "}")
+        self.lbl_context = QLabel("--")
+        self.lbl_context.setFont(summary_font)
+        self.lbl_context.setAlignment(Qt.AlignCenter)
+        self.lbl_context.setFrameShape(QFrame.StyledPanel)
+        self.lbl_context.setStyleSheet(
+            "QLabel {"
+            "  background-color: #1e1e2e;"
+            "  color: #cdd6f4;"
+            "  border: 1px solid #45475a;"
+            "  border-radius: 4px;"
+            "  padding: 4px 10px;"
+            "}")
+
+        self.class_table = QTableWidget(0, len(CLASS_TABLE_COLUMNS))
+        self.class_table.setHorizontalHeaderLabels(list(CLASS_TABLE_COLUMNS))
+        self.class_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeToContents)
+        self.class_table.setMaximumHeight(170)
+        self.class_table.setToolTip(
+            "The selected band, summarised within each class.\n\n"
+            "Spread is the brightest ROI mean minus the darkest: over patches\n"
+            "of one cover type that is the product's radiometric uniformity.\n"
+            "ENL is the median, so one ROI on a boundary cannot set it.\n\n"
+            "The 'all' row is the scene-wide brightness, and is not a\n"
+            "uniformity figure once more than one land cover is in it.")
 
         tool_row = QHBoxLayout()
         for mode in MAP_TOOLS:
@@ -1213,6 +1304,9 @@ class RadiometricDashboard(QMainWindow):
         tool_row.addWidget(QLabel("Backscatter:"))
         tool_row.addWidget(self.backscatter_combo)
         tool_row.addWidget(self.cb_zero_data)
+        tool_row.addSpacing(12)
+        tool_row.addWidget(QLabel("Drawing:"))
+        tool_row.addWidget(self.class_combo)
         tool_row.addStretch()
 
         action_row = QHBoxLayout()
@@ -1220,12 +1314,14 @@ class RadiometricDashboard(QMainWindow):
                        self.btn_csv, self.btn_del, self.btn_clear):
             action_row.addWidget(widget)
         action_row.addStretch()
-        for label in (self.lbl_mean, self.lbl_spread, self.lbl_enl):
-            action_row.addWidget(label)
+        action_row.addWidget(self.lbl_context)
 
+        right = QVBoxLayout()
+        right.addWidget(self.class_table, 1)
+        right.addWidget(self.detail, 2)
         bottom = QHBoxLayout()
         bottom.addWidget(self.table, 3)
-        bottom.addWidget(self.detail, 1)
+        bottom.addLayout(right, 1)
 
         main_layout = QVBoxLayout()
         main_layout.addWidget(self.canvas, 4)
@@ -1280,8 +1376,8 @@ class RadiometricDashboard(QMainWindow):
     # ── small builders ──────────────────────────────────────────────────────
     @staticmethod
     def _table_headers():
-        headers = {"roi": "ROI", "name": "Name", "kind": "Kind",
-                   "npix": "Pixels", "area_m2": "Area m²",
+        headers = {"roi": "ROI", "name": "Name", "class": "Class",
+                   "kind": "Kind", "npix": "Pixels", "area_m2": "Area m²",
                    "inc_deg": "Inc \u00b0"}
         titles = {key: title for key, title, _, _ in STAT_FIELDS}
         return ([headers[key] for key in ROI_TABLE_COLUMNS]
@@ -1333,6 +1429,16 @@ class RadiometricDashboard(QMainWindow):
         except Exception:
             pass
         return DOMAIN_DEFAULT
+
+    def roi_class(self):
+        """The class the next ROI drawn will carry."""
+        try:
+            text = str(self.class_combo.currentText()).strip()
+            if text:
+                return text
+        except Exception:
+            pass
+        return ROI_CLASS_DEFAULT
 
     def backscatter(self):
         """gamma0 as stored, or sigma0 through the RTC factor."""
@@ -2066,6 +2172,7 @@ class RadiometricDashboard(QMainWindow):
             "roi": roi_id,
             "name": name or f"ROI {roi_id}",
             "kind": kind,
+            "class": self.roi_class(),
             "ring": ring,
             "npix": 0,
             "area_m2": 0.0,
@@ -2408,21 +2515,23 @@ class RadiometricDashboard(QMainWindow):
         selected_id = selected["roi"] if selected else None
         band = self.stats_band()
         formats = {key: fmt for key, _, _, fmt in STAT_FIELDS}
-        name_column = ROI_TABLE_COLUMNS.index("name")
+        editable = {ROI_TABLE_COLUMNS.index("name"),
+                    ROI_TABLE_COLUMNS.index("class")}
         self._filling_table = True
         try:
             self.table.setRowCount(0)
             self.table.setRowCount(len(self.rois))
             for row, roi in enumerate(self.rois):
                 stats = (roi.get("stats") or {}).get(band) or {}
-                values = [str(roi["roi"]), roi["name"], roi["kind"],
+                values = [str(roi["roi"]), roi["name"],
+                          roi.get("class") or ROI_CLASS_UNSET, roi["kind"],
                           f"{roi['npix']}", f"{roi['area_m2']:.1f}",
                           format_stat(roi.get("inc_deg"), "{:.2f}")]
                 values += [format_stat(stats.get(key), formats[key])
                            for key in TABLE_STATS]
                 for column, text in enumerate(values):
                     item = QTableWidgetItem(text)
-                    if column != name_column:
+                    if column not in editable:
                         item.setFlags(item.flags() & ~Qt.ItemIsEditable)
                     self.table.setItem(row, column, item)
         finally:
@@ -2447,23 +2556,45 @@ class RadiometricDashboard(QMainWindow):
             row, column = item.row(), item.column()
         except Exception:
             return
-        if column != ROI_TABLE_COLUMNS.index("name"):
+        if not 0 <= row < len(self.rois):
             return
-        if 0 <= row < len(self.rois):
-            self.rois[row]["name"] = item.text().strip() or self.rois[row]["name"]
+        if column == ROI_TABLE_COLUMNS.index("name"):
+            self.rois[row]["name"] = (item.text().strip()
+                                      or self.rois[row]["name"])
+            self.update_detail()
+        elif column == ROI_TABLE_COLUMNS.index("class"):
+            # Re-classing an ROI moves it between groups, so the summary has
+            # to be redrawn -- the figures it was in are no longer its.
+            self.rois[row]["class"] = item.text().strip() or ROI_CLASS_UNSET
+            self.update_summary()
             self.update_detail()
 
     def update_summary(self):
-        """The footer: how bright the ROIs are, how alike, and how many looks."""
+        """One row per class: how bright, how alike, how many looks.
+
+        Per class rather than over everything drawn, because the spread and
+        the median ENL only mean anything within one land cover -- ten
+        vegetation ROIs and eight water ones share a scene, not a population.
+        """
         band = self.stats_band()
-        summary = summarise([(roi.get("stats") or {}).get(band)
-                             for roi in self.rois])
-        self.lbl_mean.setText(
-            f"Mean:    {format_stat(summary['mean_db'], '{:.2f}')} dB"
-            f"  ({summary['count']} ROI)")
-        self.lbl_spread.setText(
-            f"Spread:  {format_stat(summary['spread_db'], '{:.2f}')} dB")
-        self.lbl_enl.setText(f"ENL:     {format_stat(summary['enl'], '{:.2f}')}")
+        rows = class_summary(self.rois, band)
+        try:
+            self.class_table.setRowCount(0)
+            self.class_table.setRowCount(len(rows))
+            for row, (label, summary) in enumerate(rows):
+                values = [label, str(summary["count"]),
+                          format_stat(summary["mean_db"], "{:.2f}"),
+                          format_stat(summary["spread_db"], "{:.2f}"),
+                          format_stat(summary["enl"], "{:.2f}")]
+                for column, text in enumerate(values):
+                    item = QTableWidgetItem(text)
+                    item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                    self.class_table.setItem(row, column, item)
+        except Exception as e:
+            print(f"[SUMMARY] {e}")
+        self.lbl_context.setText(
+            f"{band or '(no band)'}   \u00b7   {self.backscatter()}   \u00b7   "
+            f"{len(self.rois)} ROI in {len(group_by_class(self.rois))} class(es)")
 
     def update_detail(self):
         """The selected ROI, every band, in a block that pastes into a report."""
@@ -2474,7 +2605,8 @@ class RadiometricDashboard(QMainWindow):
         lon = format_stat(roi.get("lon"), "{:.6f}")
         lat = format_stat(roi.get("lat"), "{:.6f}")
         lines = [
-            f"ROI {roi['roi']}  {roi['name']}  [{roi['kind']}]",
+            f"ROI {roi['roi']}  {roi['name']}  "
+            f"[{roi.get('class') or ROI_CLASS_UNSET}, {roi['kind']}]",
             f"  {roi['npix']} px   {roi['area_m2']:.0f} m²   "
             f"lon/lat {lon}, {lat}",
             f"  {roi.get('backscat')}, read as {roi.get('domain')}, "
@@ -2567,9 +2699,16 @@ class RadiometricDashboard(QMainWindow):
             return
 
         # DBF caps a field name at 10 characters, so the same numbers go out
-        # again under names that say what they are.
-        csv_path = os.path.splitext(path)[0] + "_stats.csv"
+        # again under names that say what they are -- and beside them the
+        # by-class summary, which is the thing a report quotes and which no
+        # per-ROI table states outright.
+        stem = os.path.splitext(path)[0]
+        csv_path = stem + "_stats.csv"
+        class_path = stem + "_by_class.csv"
         written = self._write_csv(csv_path)
+        written_classes = self._write_rows(
+            class_path, class_summary_rows(
+                self.rois, [label for _, label in self.measure_bands]))
         crs = self.proj_crs.authid() or self.proj_crs.description()
         print(f"[EXPORT] {len(self.rois)} ROI(s) -> {path} [{crs}]")
         QMessageBox.information(
@@ -2579,7 +2718,8 @@ class RadiometricDashboard(QMainWindow):
             f"Bands: {', '.join(l for _, l in self.measure_bands) or '(none)'}\n"
             f"As: {self.backscatter()}\n"
             + (f"\nFull-length statistics beside it:\n{csv_path}"
-               if written else ""))
+               if written else "")
+            + (f"\nBy class:\n{class_path}" if written_classes else ""))
 
     def feature_attributes(self, roi, plan):
         """One ROI's attributes, in the order `plan` declared the fields.
@@ -2655,12 +2795,16 @@ class RadiometricDashboard(QMainWindow):
 
     def _write_csv(self, path):
         """The statistics in long form: one row per ROI and band."""
+        return self._write_rows(
+            path, stat_rows(self.rois,
+                            [label for _, label in self.measure_bands]))
+
+    def _write_rows(self, path, rows):
+        """Write a table of rows, or say why it could not be written."""
         try:
             with open(path, "w", newline="", encoding="utf-8-sig") as handle:
-                csv.writer(handle).writerows(
-                    stat_rows(self.rois,
-                              [label for _, label in self.measure_bands]))
-            print(f"[EXPORT] statistics -> {path}")
+                csv.writer(handle).writerows(rows)
+            print(f"[EXPORT] {len(rows) - 1} row(s) -> {path}")
             return True
         except OSError as e:
             QMessageBox.critical(self, "Export CSV", f"Could not write:\n{e}")

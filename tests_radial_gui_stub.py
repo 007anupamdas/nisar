@@ -293,6 +293,9 @@ win.table = _Table()
 win.domain_combo = _Combo([(label, value) for value, label in R.DOMAIN_CHOICES],
                           index=0)
 win.cb_zero_data = _Check(False)
+win.class_combo = _Combo([(name, None) for name in R.ROI_CLASSES], index=0)
+win.class_table = _Table()
+win.lbl_context = MagicMock()
 win.stats_band_combo = _Combo()
 win.band_combos = [_Combo(), _Combo(), _Combo()]
 win.proj_crs = _CRS("EPSG:32644")
@@ -548,10 +551,12 @@ check("headers name every column",
       len(R.RadiometricDashboard._table_headers()),
       len(R.ROI_TABLE_COLUMNS) + len(R.TABLE_STATS))
 check("the ROI's own columns come first",
-      win.table.row_texts(0)[:3], ["1", "ROI 1", "rect"])
+      win.table.row_texts(0)[:4], ["1", "ROI 1", "vegetation", "rect"])
 name_column = R.ROI_TABLE_COLUMNS.index("name")
-ok("the name is the only editable cell",
+class_column = R.ROI_TABLE_COLUMNS.index("class")
+ok("the name and the class are the editable cells, and nothing else",
    win.table.item(0, name_column).flags() == _Item.EDITABLE
+   and win.table.item(0, class_column).flags() == _Item.EDITABLE
    and win.table.item(0, 0).flags() != _Item.EDITABLE)
 win.table.item(0, name_column)._text = "calibration site"
 win.on_item_changed(win.table.item(0, name_column))
@@ -560,7 +565,8 @@ win.stats_band_combo.setCurrentIndex(1)
 win.refresh_table()
 hh_row = None
 check("switching band re-reads the table, not the raster",
-      win.table.row_texts(0)[:3], ["1", "calibration site", "rect"])
+      win.table.row_texts(0)[:4],
+      ["1", "calibration site", "vegetation", "rect"])
 mean_column = len(R.ROI_TABLE_COLUMNS) + R.TABLE_STATS.index("mean_db")
 check("and shows that band's figure",
       win.table.text(0, mean_column),
@@ -587,8 +593,10 @@ ok("the polarizations name their columns",
 
 attributes = win.feature_attributes(win.rois[0], plan)
 check("an attribute per field", len(attributes), len(fields))
-check("the ROI's own fields lead",
+check("the ROI's own fields lead, in ROI_FIELDS order",
       attributes[:3], [1, "calibration site", "rect"])
+check("class among them, where ROI_FIELDS puts it",
+      attributes[[n for n, _ in R.ROI_FIELDS].index("class")], "vegetation")
 check("then the statistics, band by band",
       attributes[fields.index("HH_mean_db")],
       win.rois[0]["stats"]["HHHH"]["mean_db"])
@@ -858,6 +866,96 @@ far = win.add_roi(R.rect_ring(9e6, 9e6, 9e6 + 200, 9e6 + 200), "rect")
 check("an ROI off the cube gets no angle rather than an extrapolated one",
       far["inc_deg"] if far else None, None)
 win.incidence_cube = None
+
+# ── 10d. statistics per class ────────────────────────────────────────────────
+# Ten vegetation ROIs and eight water ones: the whole point is that they are
+# summarised apart.
+print("\n── by class ──")
+install_gdal([hh, hv], GT)
+plain2 = fake_layer(bands=2)
+plain2.bandName.side_effect = lambda b: ["HHHH", "HVHV"][b - 1]
+win.band_combos = [_Combo(), _Combo(), _Combo()]
+win.stats_band_combo = _Combo()
+win.populate_band_picker(plain2)
+win.raster_layer = plain2
+win.rois = []
+win._next_roi_id = 1
+
+# Two patches of the scene, drawn as two classes: the -10 dB patch as
+# vegetation, the -20 dB background as water.
+bright = R.rect_ring(500300.0, 3999700.0, 500480.0, 3999880.0)
+dark = R.rect_ring(503000.0, 3994000.0, 503180.0, 3994180.0)
+win.class_combo.setCurrentIndex(0)                 # vegetation
+check("the picker sets the class of what is drawn next",
+      win.roi_class(), "vegetation")
+veg = win.add_roi(bright, "rect")
+check("and the ROI carries it", veg["class"], "vegetation")
+win.class_combo.setCurrentIndex(1)                 # water
+wet = win.add_roi(dark, "rect")
+check("switching the picker switches what the next ROI is",
+      wet["class"], "water")
+
+band = win.stats_band()
+summary = dict(R.class_summary(win.rois, band))
+check("a row per class, plus all", list(summary),
+      ["vegetation", "water", "all"])
+ok("vegetation reads the bright patch",
+   abs(summary["vegetation"]["mean_db"] + 10.0) < 1.5,
+   f"{summary['vegetation']['mean_db']:.2f} dB")
+ok("water reads the dark one",
+   abs(summary["water"]["mean_db"] + 20.0) < 1.5,
+   f"{summary['water']['mean_db']:.2f} dB")
+ok("the spread within a class is not the gap between them",
+   summary["all"]["spread_db"] > 8.0
+   and not np.isfinite(summary["vegetation"]["spread_db"]),
+   f"all {summary['all']['spread_db']:.2f} dB, "
+   f"one ROI per class so no within-class spread")
+
+# The GUI table shows the same thing.
+win.refresh_table()
+check("the by-class table has a row per class and the total",
+      win.class_table.rowCount(), 3)
+check("naming the classes", [win.class_table.text(r, 0) for r in range(3)],
+      ["vegetation", "water", "all"])
+check("with their ROI counts",
+      [win.class_table.text(r, 1) for r in range(3)], ["1", "1", "2"])
+
+# Re-classing an ROI in its table row moves it between groups.
+win.table.item(1, class_column)._text = "vegetation"
+win.on_item_changed(win.table.item(1, class_column))
+check("a re-typed class sticks to the ROI", win.rois[1]["class"], "vegetation")
+check("and the groups follow it",
+      [label for label, _ in R.group_by_class(win.rois)], ["vegetation"])
+check("one class, so no combined row", win.class_table.rowCount(), 1)
+check("and it now holds both", win.class_table.text(0, 1), "2")
+
+# An emptied class cell is not an empty class.
+win.table.item(1, class_column)._text = "   "
+win.on_item_changed(win.table.item(1, class_column))
+check("blanking a class does not make one with no name",
+      win.rois[1]["class"], R.ROI_CLASS_UNSET)
+
+# Both exports carry it.
+R.QgsFields = list
+R.QgsField = lambda name, *a: name
+fields, plan = win.export_fields()
+check("class is a shapefile column", "class" in fields, True)
+check("and carries the ROI's own",
+      win.feature_attributes(win.rois[0], plan)[fields.index("class")],
+      "vegetation")
+with tempfile.TemporaryDirectory() as tmp2:
+    path = os.path.join(tmp2, "by_class.csv")
+    ok("the by-class summary writes",
+       win._write_rows(path, R.class_summary_rows(
+           win.rois, [label for _, label in win.measure_bands])))
+    import csv as _csv2
+    with open(path, encoding="utf-8-sig") as handle:
+        crows = list(_csv2.reader(handle))
+    # Two classes by now -- vegetation, and the one just blanked -- so three
+    # rows per band: each class, then all.
+    check("a header and a row per class and band", len(crows), 1 + 3 * 2)
+    check("under names that say what they are", crows[0],
+          ["class", "band", "rois", "mean_db", "spread_db", "enl"])
 
 # ── 11. a NISAR GCOV '.h5' becomes a georeferenced VRT ───────────────────────
 print("\n── GCOV HDF5 ──")
