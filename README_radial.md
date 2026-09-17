@@ -8,8 +8,15 @@ Where [`DPQED_rival.py`](DPQED_rival.py) measures **where** a product puts the
 ground, this measures **what** it reports there.
 
 ```
-exec(open(r"path/to/DPQED_radial.py").read())      # QGIS Python console
+exec(open(r"path/to/DPQED_radial.py").read())       # QGIS 3.x  (Qt5)
+exec(open(r"path/to/DPQED_radial_qt6.py").read())   # QGIS 4.x  (Qt6)
 ```
+
+**Which file.** Run the Qt6 one if QGIS greets you with `PyQt5 classes cannot be
+imported in a QGIS build based on Qt6` — that is QGIS 4.x, and anything else
+built against Qt6. The two are the same tool: they differ only in how they name
+Qt and QGIS things, and everything between the `PURE HELPERS` markers is
+byte-identical, which `tests_radial_stats.py` checks so they cannot drift.
 
 Pan, zoom, Normalize and the R/G/B band picker behave exactly as they do in
 RIVAL — same stretch, same clip, same pinning. The differences are one canvas
@@ -132,15 +139,47 @@ and GDAL's HDF5 driver. Without them, convert with
 
 ## Tests
 
-No QGIS needed for either:
+No QGIS needed for any of them:
 
 ```bash
-python3 tests_radial_stats.py      # the statistics, masking and field naming
-python3 tests_radial_gui_stub.py   # the window, with PyQt5/QGIS/GDAL stubbed
+python3 tests_radial_stats.py                          # statistics, masking, field naming
+python3 tests_radial_gui_stub.py                       # the Qt5 window, QGIS stubbed
+QT_QPA_PLATFORM=offscreen python3 tests_radial_qt6.py  # the Qt6 window, for real
 ```
+
+The Qt6 suite is the odd one out, deliberately. Mocking PyQt away is right for
+testing wiring and wrong for testing a port: a mock answers to any spelling, so
+`Qt.CrossCursor` and `Qt.CursorShape.CrossCursor` would both pass and only one
+of them works on a Qt6 build. So it installs real PyQt6, runs Qt offscreen and
+stubs only QGIS — every widget built, every signal connected, every enum
+resolved by Qt itself. Its QGIS stub offers the QGIS 4 spellings only, then
+reloads the module against a QGIS 3 stub, so both halves of the name resolution
+are exercised rather than only the half the author's own build has.
 
 `tests_radial_stats.py` execs the pure-helper slice of the module itself, so it
 tests the code that ships. It checks the things a plausible implementation gets
 quietly wrong: that the three domains describe one scene, that ENL recovers a
 known number of looks, that the 2.5 dB log bias is not in `mean_db`, and that
 two long field names cannot truncate into one DBF column.
+
+## Porting notes, if you touch the Qt6 file
+
+The two builds differ in exactly these places, each verified against real
+PyQt5 5.15.11 and PyQt6 6.11:
+
+| | Qt5 | Qt6 |
+|---|---|---|
+| enums | `Qt.CrossCursor` | `Qt.CursorShape.CrossCursor`, and so on throughout |
+| `QShortcut` | `QtWidgets` | `QtGui` |
+| field types | `QVariant.Int` | `QMetaType.Type.Int` — `QVariant` still imports on Qt6 but carries no type members |
+| geometry / WKB types | `QgsWkbTypes.*` | `Qgis.GeometryType.*`, `Qgis.WkbType.*` |
+| raster stat flags | `QgsRasterBandStats.*` | `Qgis.RasterBandStatistic.*` |
+
+The QGIS rows are a QGIS-version difference rather than a Qt one, so the Qt6
+file resolves them at import with a fallback to the older spelling. A build
+with neither fails there, naming the symbol, rather than three layers down in
+an export at the end of a session's work.
+
+Every scoped enum spelling above also works under PyQt5 5.15, so one file
+using `qgis.PyQt.*` imports could serve both builds. That is a different change
+from a port, and is not what is here.

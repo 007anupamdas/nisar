@@ -1,4 +1,4 @@
-"""RADIAL - RADiometric Image Assessment and Logger (QGIS).
+"""RADIAL - RADiometric Image Assessment and Logger (QGIS 4 / Qt 6).
 
 One canvas, a set of ROIs drawn on it, and the radiometry of each one.
 
@@ -92,9 +92,29 @@ ADOPTED FROM RIVAL
     The stretch is a rendering. It does not touch the statistics, which are
     always read from the source pixels at full resolution.
 
+QT 6 / QGIS 4
+    This is the Qt6 twin of DPQED_radial.py, for a QGIS built against Qt6 --
+    QGIS 4.x, and any 3.x build that reports 'PyQt5 classes cannot be imported
+    in a QGIS build based on Qt6'. Behaviour is identical: the two files differ
+    only in how they name Qt and QGIS things.
+
+      - Qt 6 scoped every enum. Qt.CursorShape.CrossCursor is Qt.CursorShape.CrossCursor,
+        Qt.MouseButton.LeftButton is Qt.MouseButton.LeftButton, and so on throughout.
+      - QShortcut moved from QtWidgets to QtGui.
+      - QVariant still imports on Qt6 but carries none of its type members, so
+        a field's type comes from QMetaType instead.
+      - QGIS 4 dropped the deprecated aliases 3.x carried: the geometry and WKB
+        types are on Qgis rather than QgsWkbTypes, and the raster statistic
+        flags on Qgis rather than QgsRasterBandStats. Those are resolved once
+        at import, against whichever spelling the build has.
+
+    Everything between the PURE HELPERS markers is byte-identical to
+    DPQED_radial.py -- no Qt in it to differ -- and tests_radial_stats.py
+    checks that it stays so.
+
 Run it from the QGIS Python console:
 
-    exec(open(r"path/to/DPQED_radial.py").read())
+    exec(open(r"path/to/DPQED_radial_qt6.py").read())
 """
 
 import csv
@@ -104,21 +124,73 @@ import re
 import sys
 import threading
 import numpy as np
-from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QTableWidget, QTableWidgetItem, QPushButton,
                              QFileDialog, QHeaderView, QCheckBox, QComboBox,
-                             QMessageBox, QApplication, QShortcut, QLabel,
+                             QMessageBox, QApplication, QLabel,
                              QFrame, QButtonGroup, QPlainTextEdit, QAbstractItemView)
-from PyQt5.QtCore import Qt, QObject, QEvent, QVariant
-from PyQt5.QtGui import QKeySequence, QFont, QColor
+from PyQt6.QtCore import Qt, QObject, QEvent, QMetaType
+from PyQt6.QtGui import QKeySequence, QFont, QColor, QShortcut
 from qgis.gui import (QgsMapCanvas, QgsMapTool, QgsMapToolPan, QgsMapToolZoom,
                       QgsRubberBand)
-from qgis.core import (QgsProject, QgsPointXY, QgsRasterLayer, QgsVectorLayer,
-                       QgsGeometry, QgsCoordinateReferenceSystem,
-                       QgsCoordinateTransform, QgsSingleBandGrayRenderer,
-                       QgsMultiBandColorRenderer, QgsContrastEnhancement,
-                       QgsRasterBandStats, QgsRectangle, QgsFields, QgsField,
-                       QgsFeature, QgsVectorFileWriter, QgsWkbTypes)
+from qgis.core import (Qgis, QgsProject, QgsPointXY, QgsRasterLayer,
+                       QgsVectorLayer, QgsGeometry,
+                       QgsCoordinateReferenceSystem, QgsCoordinateTransform,
+                       QgsSingleBandGrayRenderer, QgsMultiBandColorRenderer,
+                       QgsContrastEnhancement, QgsRectangle, QgsFields,
+                       QgsField, QgsFeature, QgsVectorFileWriter)
+
+
+# ── QGIS 4 NAMES ──────────────────────────────────────────────────────────────
+# Qt's own renames are spelled out where they are used -- a scoped enum is not
+# worth a layer of indirection. QGIS's are not so simple: 4.x dropped the
+# deprecated aliases 3.x carried, and which spelling a given build has is not
+# something this file can assume. Each is resolved once, here, so a build that
+# differs fails at import with the name in the message rather than three layers
+# down in an export nobody ran until the end of a session's work.
+try:
+    from qgis.core import QgsWkbTypes
+except ImportError:                     # removed in a future QGIS
+    QgsWkbTypes = None
+try:
+    from qgis.core import QgsRasterBandStats
+except ImportError:
+    QgsRasterBandStats = None
+
+
+def _resolve(label, *candidates):
+    """The first spelling of `label` this QGIS build actually has."""
+    for candidate in candidates:
+        try:
+            value = candidate()
+        except (AttributeError, NameError, TypeError):
+            continue
+        if value is not None:
+            return value
+    raise ImportError(
+        f"RADIAL: this QGIS build exposes no spelling this file knows for "
+        f"{label}. Report the QGIS version and this message.")
+
+
+GEOMETRY_POLYGON = _resolve(
+    "the polygon geometry type",
+    lambda: Qgis.GeometryType.Polygon,              # QGIS 3.30+
+    lambda: QgsWkbTypes.PolygonGeometry)            # older
+WKB_POLYGON = _resolve(
+    "the polygon WKB type",
+    lambda: Qgis.WkbType.Polygon,
+    lambda: QgsWkbTypes.Polygon)
+RASTER_STATS_MINMAX = _resolve(
+    "the raster min/max statistic flags",
+    lambda: Qgis.RasterBandStatistic.Min | Qgis.RasterBandStatistic.Max,
+    lambda: QgsRasterBandStats.Min | QgsRasterBandStats.Max)
+
+# A field's type. QVariant still imports under PyQt6 but carries none of its
+# type members -- QVariant.Int is gone -- so there is no Qt5 spelling to fall
+# back to here, and QMetaType is the only way to say 'integer' at all.
+FIELD_TYPES = {"int": QMetaType.Type.Int,
+               "double": QMetaType.Type.Double,
+               "string": QMetaType.Type.QString}
 
 
 # ── CONSTANTS ─────────────────────────────────────────────────────────────────
@@ -720,6 +792,20 @@ def gcov_vrt_xml(sources, width, height, geotransform, srs, dtype="Float32",
 
 
 # ── ROI DRAWING TOOL ──────────────────────────────────────────────────────────
+def _event_pos(event):
+    """A mouse event's position in widget pixels, either way Qt 6 spells it.
+
+    Qt 6 deprecated QMouseEvent::pos() in favour of position(), which returns a
+    QPointF. Both are present in Qt 6.11, so this is insurance rather than a
+    fix -- but the day pos() goes, the failure would be at the first click on
+    the canvas rather than at import, which is the worst place to find it.
+    """
+    try:
+        return event.pos()
+    except AttributeError:
+        return event.position().toPoint()
+
+
 class RoiMapTool(QgsMapTool):
     """Draw one ROI: a dragged rectangle, or a polygon clicked corner by corner.
 
@@ -740,12 +826,12 @@ class RoiMapTool(QgsMapTool):
         self.anchor = None          # rectangle: where the drag started
         self.vertices = []          # polygon: the corners clicked so far
         self.band = None
-        self.setCursor(Qt.CrossCursor)
+        self.setCursor(Qt.CursorShape.CrossCursor)
 
     # ── preview ──
     def _rubber(self):
         if self.band is None:
-            self.band = QgsRubberBand(self.canvas, QgsWkbTypes.PolygonGeometry)
+            self.band = QgsRubberBand(self.canvas, GEOMETRY_POLYGON)
             colour = QColor(*ROI_COLOR_DRAWING)
             fill = QColor(*ROI_COLOR_DRAWING)
             fill.setAlpha(ROI_FILL_ALPHA)
@@ -756,7 +842,7 @@ class RoiMapTool(QgsMapTool):
 
     def _preview(self, ring):
         band = self._rubber()
-        band.reset(QgsWkbTypes.PolygonGeometry)
+        band.reset(GEOMETRY_POLYGON)
         for index, (x, y) in enumerate(ring):
             band.addPoint(QgsPointXY(x, y), index == len(ring) - 1)
         band.show()
@@ -770,19 +856,19 @@ class RoiMapTool(QgsMapTool):
 
     # ── mouse ──
     def canvasPressEvent(self, e):
-        point = self.toMapCoordinates(e.pos())
+        point = self.toMapCoordinates(_event_pos(e))
         if self.mode == TOOL_RECT:
-            if e.button() == Qt.LeftButton:
+            if e.button() == Qt.MouseButton.LeftButton:
                 self.anchor = (point.x(), point.y())
             return
-        if e.button() == Qt.RightButton:
+        if e.button() == Qt.MouseButton.RightButton:
             self.finish()
             return
         self.vertices.append((point.x(), point.y()))
         self._preview(self.vertices)
 
     def canvasMoveEvent(self, e):
-        point = self.toMapCoordinates(e.pos())
+        point = self.toMapCoordinates(_event_pos(e))
         if self.mode == TOOL_RECT:
             if self.anchor is not None:
                 self._preview(rect_ring(self.anchor[0], self.anchor[1],
@@ -793,9 +879,9 @@ class RoiMapTool(QgsMapTool):
     def canvasReleaseEvent(self, e):
         if self.mode != TOOL_RECT or self.anchor is None:
             return
-        if e.button() != Qt.LeftButton:
+        if e.button() != Qt.MouseButton.LeftButton:
             return
-        point = self.toMapCoordinates(e.pos())
+        point = self.toMapCoordinates(_event_pos(e))
         ring = rect_ring(self.anchor[0], self.anchor[1], point.x(), point.y())
         self.cancel()
         self.dashboard.add_roi(ring, "rect")
@@ -809,9 +895,9 @@ class RoiMapTool(QgsMapTool):
             key = e.key()
         except Exception:
             return
-        if key == Qt.Key_Escape:
+        if key == Qt.Key.Key_Escape:
             self.cancel()
-        elif key == Qt.Key_Backspace and self.mode == TOOL_POLY and self.vertices:
+        elif key == Qt.Key.Key_Backspace and self.mode == TOOL_POLY and self.vertices:
             self.vertices.pop()
             self._preview(self.vertices)
 
@@ -829,7 +915,7 @@ class RoiMapTool(QgsMapTool):
         self.anchor = None
         self.vertices = []
         if self.band is not None:
-            self.band.reset(QgsWkbTypes.PolygonGeometry)
+            self.band.reset(GEOMETRY_POLYGON)
 
     def deactivate(self):
         # A half-drawn polygon left behind would reappear, with corners from
@@ -851,7 +937,7 @@ class OverlayResizeFilter(QObject):
         self.height = height
 
     def eventFilter(self, obj, event):
-        if event.type() == QEvent.Resize:
+        if event.type() == QEvent.Type.Resize:
             self.container.setGeometry(10, 10, self.parent_widget.width() - 20,
                                        self.height)
         return super().eventFilter(obj, event)
@@ -922,10 +1008,10 @@ class RadiometricDashboard(QMainWindow):
         # ── the ROI table, and one ROI in full beside it ──
         self.table = QTableWidget(0, len(ROI_TABLE_COLUMNS) + len(TABLE_STATS))
         self.table.setHorizontalHeaderLabels(self._table_headers())
-        self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeToContents)
+            QHeaderView.ResizeMode.ResizeToContents)
         self.table.setToolTip(
             "One row per ROI, for the band selected below.\n"
             "Double-click a name to label it; the label is exported.")
@@ -935,7 +1021,7 @@ class RadiometricDashboard(QMainWindow):
         self.detail.setMinimumWidth(430)
         self.detail.setMaximumWidth(560)
         detail_font = QFont("Monospace")
-        detail_font.setStyleHint(QFont.TypeWriter)
+        detail_font.setStyleHint(QFont.StyleHint.TypeWriter)
         detail_font.setPointSize(9)
         self.detail.setFont(detail_font)
         self.detail.setPlaceholderText(
@@ -1025,8 +1111,8 @@ class RadiometricDashboard(QMainWindow):
             "on a\nfield boundary cannot drag the figure down.")
         for label in (self.lbl_mean, self.lbl_spread, self.lbl_enl):
             label.setFont(summary_font)
-            label.setAlignment(Qt.AlignCenter)
-            label.setFrameShape(QFrame.StyledPanel)
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            label.setFrameShape(QFrame.Shape.StyledPanel)
             label.setStyleSheet(
                 "QLabel {"
                 "  background-color: #1e1e2e;"
@@ -1690,7 +1776,7 @@ class RadiometricDashboard(QMainWindow):
         """bandStatistics over a bounded sample, or None. Same reasoning."""
         try:
             return provider.bandStatistics(
-                band, QgsRasterBandStats.Min | QgsRasterBandStats.Max,
+                band, RASTER_STATS_MINMAX,
                 extent if extent is not None else QgsRectangle(),
                 RASTER_SAMPLE_SIZE)
         except TypeError:
@@ -1812,10 +1898,10 @@ class RadiometricDashboard(QMainWindow):
         """Outline one ROI on the canvas, in its selected or ordinary colour."""
         band = self.roi_bands.get(roi["roi"])
         if band is None:
-            band = QgsRubberBand(self.canvas, QgsWkbTypes.PolygonGeometry)
+            band = QgsRubberBand(self.canvas, GEOMETRY_POLYGON)
             self.roi_bands[roi["roi"]] = band
         try:
-            band.reset(QgsWkbTypes.PolygonGeometry)
+            band.reset(GEOMETRY_POLYGON)
             for index, (x, y) in enumerate(roi["ring"]):
                 band.addPoint(QgsPointXY(x, y),
                               index == len(roi["ring"]) - 1)
@@ -1841,7 +1927,7 @@ class RadiometricDashboard(QMainWindow):
         if band is None:
             return
         try:
-            band.reset(QgsWkbTypes.PolygonGeometry)
+            band.reset(GEOMETRY_POLYGON)
             scene = self.canvas.scene()
             if scene:
                 scene.removeItem(band)
@@ -1880,8 +1966,8 @@ class RadiometricDashboard(QMainWindow):
             self, "Clear ROIs",
             f"Delete all {len(self.rois)} ROI(s)?\n"
             "Export them first if they are not saved.",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if answer != QMessageBox.Yes:
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
             return
         for roi in list(self.rois):
             self._drop_roi_band(roi["roi"])
@@ -2036,7 +2122,7 @@ class RadiometricDashboard(QMainWindow):
                 for column, text in enumerate(values):
                     item = QTableWidgetItem(text)
                     if column != name_column:
-                        item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                     self.table.setItem(row, column, item)
         finally:
             self._filling_table = False
@@ -2124,8 +2210,7 @@ class RadiometricDashboard(QMainWindow):
         than every product exporting a fixed grid mostly full of nulls.
         """
         fields = QgsFields()
-        types = {"int": QVariant.Int, "double": QVariant.Double,
-                 "string": QVariant.String}
+        types = FIELD_TYPES
         plan = []
         for name, kind in ROI_FIELDS:
             field = (QgsField(name, types[kind], "", 64)
@@ -2232,14 +2317,14 @@ class RadiometricDashboard(QMainWindow):
                 if make is None:
                     continue
                 try:
-                    return make(path, fields, QgsWkbTypes.Polygon, self.proj_crs,
+                    return make(path, fields, WKB_POLYGON, self.proj_crs,
                                 QgsProject.instance().transformContext(),
                                 options)
                 except Exception:
                     continue
         try:
             return QgsVectorFileWriter(path, "UTF-8", fields,
-                                       QgsWkbTypes.Polygon, self.proj_crs,
+                                       WKB_POLYGON, self.proj_crs,
                                        "ESRI Shapefile")
         except Exception as e:
             QMessageBox.critical(self, "Export SHP",
@@ -2404,7 +2489,7 @@ class RadiometricDashboard(QMainWindow):
             return              # called before init_map_tools
         mode = self.current_map_tool()
         self.canvas.setMapTool(tools[mode])
-        cursor = {TOOL_PAN: Qt.OpenHandCursor}.get(mode, Qt.CrossCursor)
+        cursor = {TOOL_PAN: Qt.CursorShape.OpenHandCursor}.get(mode, Qt.CursorShape.CrossCursor)
         try:
             self.canvas.setCursor(cursor)
         except Exception:

@@ -678,7 +678,7 @@ def fake_geometry(rings, multi=False):
     geometry.asPolygon.return_value = [[_PointXY(x, y) for x, y in rings[0]]]
     geometry.asMultiPolygon.return_value = [
         [[_PointXY(x, y) for x, y in ring]] for ring in rings]
-    R.QgsWkbTypes.isMultiType = MagicMock(return_value=multi)
+    geometry.isMultipart.return_value = multi
     return geometry
 
 
