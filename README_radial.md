@@ -114,6 +114,13 @@ Compare ENL **between products over the same ROI**, not between ROIs.
 
 ### Three traps worth knowing
 
+**Domain is not the sigma0 control.** Two selectors sit side by side and they do
+different jobs. **Domain** says what the pixels *hold* — power, amplitude or dB
+— and never changes the convention. **Backscatter** converts gamma0 to sigma0,
+and is the only thing that does. Picking `Power` does not give you sigma0; if
+the Backscatter selector is greyed out, the raster carries no RTC factor and
+every figure is gamma0.
+
 **Domain.** The selector states what the pixels hold — it is not a display
 option. Everything is converted from it to power once, up front, because the
 mean of dB pixels is not the dB of the mean: over single-look speckle the log
@@ -159,7 +166,56 @@ table alone.
 `npix` is the ROI's geometry — pixels whose centre falls inside the ring. A
 band's `n` may be lower where that band has nodata.
 
-## NISAR GCOV `.h5`
+## Getting a GCOV in: `.h5`, or a TIF
+
+RADIAL reads a GCOV `.h5` directly **where QGIS has h5py**. Many builds do not,
+and then it says so and sends you to a converter.
+
+```bash
+python3 DPQED_gcov2tif.py NISAR_..._GCOV.h5      # -> NISAR_..._GCOV_gcov.tif
+python3 DPQED_gcov2tif.py in.h5 --list           # what is in the file
+```
+
+Use `DPQED_gcov2tif.py`, not `DPQED_h52tif.py`. The older script predates GCOV
+— it is written for a GSLC, takes the magnitude of complex channels, and leaves
+three things behind, none of which announces itself:
+
+| | |
+|---|---|
+| **band names** | RADIAL reads the polarization from a band's description. Unnamed, every column exports as `b1_`, `b2_`, and two products' exports stop lining up by name. |
+| **the RTC factor** | not carried across at all, so the TIF cannot offer sigma0. |
+| **the half pixel** | a grid states pixel *centres*; a geotransform is anchored on the *edge*. 15 m on a 30 m grid. |
+
+The output is a **Cloud Optimized GeoTIFF** — tiled, with an averaged overview
+pyramid, laid out by GDAL's own COG driver so headers and overviews precede the
+full-resolution data. That is what makes panning a 20000 px scene bearable, and
+it is what `cog_locate.py` expects of a raster. `--no-cog` writes a plain tiled
+GeoTIFF instead.
+
+### "Can I store the factor as an attribute or a header?"
+
+No — and this is worth being clear about. `rtcGammaToSigmaFactor` is a value
+**per pixel**: it depends on the local slope, which is the entire reason it
+exists. A single number in the TIFF tags would be a different measurement,
+correct only where the ground happens to be flat. It goes in as a **band**.
+
+What does go in the header is *which band that is*:
+
+```
+RTC_GAMMA_TO_SIGMA_BAND = 3
+```
+
+a plain GDAL metadata item. RADIAL looks for a band whose name matches first,
+and falls back to that tag — so a TIF written by some other tool can declare
+its factor band without renaming anything. Set it with
+`gdal_edit.py -mo RTC_GAMMA_TO_SIGMA_BAND=3 your.tif`, provided the band is
+actually in the file; no tag can conjure a layer that was never written.
+
+The converter writes gamma0, as the product holds it, plus the factor. It does
+not bake in sigma0 — that would produce a file indistinguishable from a gamma0
+one. RADIAL does the conversion, and records which convention each figure is in.
+
+## Reading a GCOV `.h5` directly
 
 A GCOV product ships as HDF5. Handed one, RADIAL writes a VRT beside it
 (`<product>_gcov.vrt`) stacking the frequency's **diagonal** covariance terms
@@ -182,6 +238,7 @@ No QGIS needed for any of them:
 ```bash
 python3 tests_radial_stats.py                          # statistics, masking, field naming
 python3 tests_radial_gui_stub.py                       # the Qt5 window, QGIS stubbed
+python3 tests_gcov2tif.py                              # a real .h5 -> a real COG
 QT_QPA_PLATFORM=offscreen python3 tests_radial_qt6.py  # the Qt6 window, for real
 ```
 

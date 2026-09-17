@@ -205,6 +205,12 @@ BACKSCATTER_DEFAULT = BACKSCATTER_GAMMA0
 # described as '3: rtcGammaToSigmaFactor' matches too.
 RTC_FACTOR_RE = re.compile(r"(?i)gamma.?to.?sigma")
 
+# A GeoTIFF whose bands carry no description -- which is most of them, since a
+# writer has to go out of its way to set one -- can still declare which band
+# holds the factor, as a plain GDAL metadata item. DPQED_gcov2tif.py writes
+# both; the name is tried first and this is the fallback.
+RTC_FACTOR_BAND_KEY = "RTC_GAMMA_TO_SIGMA_BAND"
+
 # Zero is how a SAR product says 'no data' when it declares no nodata value --
 # outside the swath, beyond the frame, masked in processing. Counted as data it
 # drags every mean down and puts an ROI's looks estimate on the floor. Untick
@@ -1063,8 +1069,12 @@ class RadiometricDashboard(QMainWindow):
             "sigma0 refers it to flat ground instead, using the product's own\n"
             "per-pixel rtcGammaToSigmaFactor -- several dB apart on a slope,\n"
             "identical on the flat.\n\n"
-            "Only selectable when the raster carries that factor, which a GCOV\n"
-            "loaded from its '.h5' does. Every export records which one it is.")
+            "This is NOT the Domain selector beside it. Domain says what the\n"
+            "pixels hold -- power, amplitude, dB -- and never changes the\n"
+            "convention; this does, and only this.\n\n"
+            "Selectable only when the raster carries the factor: a GCOV loaded\n"
+            "from its '.h5' does, and a GeoTIFF does when it was written by\n"
+            "DPQED_gcov2tif.py. Every export records which one it is.")
 
         self.cb_zero_data = QCheckBox("Zeros are data")
         self.cb_zero_data.setChecked(not ZERO_IS_NODATA)
@@ -1110,7 +1120,7 @@ class RadiometricDashboard(QMainWindow):
         tool_row.addWidget(QLabel("Domain:"))
         tool_row.addWidget(self.domain_combo)
         tool_row.addSpacing(12)
-        tool_row.addWidget(QLabel("As:"))
+        tool_row.addWidget(QLabel("Backscatter:"))
         tool_row.addWidget(self.backscatter_combo)
         tool_row.addWidget(self.cb_zero_data)
         tool_row.addStretch()
@@ -1706,7 +1716,8 @@ class RadiometricDashboard(QMainWindow):
         self.norm_bounds = {}
         labels = self._band_labels(layer)
         self.band_labels = labels
-        self.factor_band = factor_band_index(labels)
+        self.factor_band = (factor_band_index(labels)
+                            or self._factor_band_from_metadata(layer, len(labels)))
         self.measure_bands = [(index, label)
                               for index, label in enumerate(labels, start=1)
                               if index != self.factor_band]
@@ -1741,6 +1752,13 @@ class RadiometricDashboard(QMainWindow):
             self.backscatter_combo.setEnabled(self.factor_band is not None)
             if self.factor_band is None:
                 self.backscatter_combo.setCurrentIndex(0)
+                self.backscatter_combo.setToolTip(
+                    "sigma0 needs this product's rtcGammaToSigmaFactor, and\n"
+                    "this raster does not carry it -- so every figure here is\n"
+                    "gamma0, as stored.\n\n"
+                    "A GCOV loaded from its '.h5' carries it. A GeoTIFF does\n"
+                    "when DPQED_gcov2tif.py wrote it; DPQED_h52tif.py does not\n"
+                    "write it, and names no bands either.")
         except Exception:
             pass
         self.overlay.show()
@@ -1751,6 +1769,35 @@ class RadiometricDashboard(QMainWindow):
             print(f"[BANDS] band {self.factor_band} is the RTC "
                   f"gamma-to-sigma factor: not measured, sigma0 available")
         self.apply_bands()
+
+    def _factor_band_from_metadata(self, layer, band_count):
+        """The factor's band number as the raster's header declares it, or None.
+
+        A GeoTIFF band carries a description, but a writer has to go out of its
+        way to set one and most do not -- so a TIF can hold the factor in a
+        band nothing names. RTC_GAMMA_TO_SIGMA_BAND says which band that is.
+        It is only consulted when no band name matches, so a file that says
+        both and disagrees with itself is read the way a person would read it.
+        """
+        try:
+            from osgeo import gdal
+            ds = gdal.Open(layer.source(), gdal.GA_ReadOnly)
+            if ds is None:
+                return None
+            raw = ds.GetMetadataItem(RTC_FACTOR_BAND_KEY)
+            ds = None
+            if raw is None:
+                return None
+            number = int(str(raw).strip())
+        except Exception:
+            return None
+        if not 1 <= number <= band_count:
+            print(f"[BANDS] {RTC_FACTOR_BAND_KEY}={raw} is not one of this "
+                  f"raster's {band_count} band(s); ignored")
+            return None
+        print(f"[BANDS] band {number} declared as the RTC factor by the "
+              f"raster's {RTC_FACTOR_BAND_KEY} header")
+        return number
 
     def _selected_bands(self):
         return [max(combo.currentIndex(), 0) + 1 for combo in self.band_combos]
