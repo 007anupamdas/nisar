@@ -528,6 +528,31 @@ def bilinear_at(x_coords, y_coords, values, at_x, at_y):
                  + grid[j + 1, i + 1] * fx * fy)
 
 
+def roi_conventions(roi):
+    """The backscatter conventions an ROI was measured in, gamma0 first.
+
+    A GCOV carrying its RTC factor gets both out of one read of the pixels, so
+    an export can state both and a reader need not be told which one to ask
+    for. A product without the factor has only the gamma0 it holds.
+    """
+    stats = roi.get("stats") or {}
+    return [name for name in (BACKSCATTER_GAMMA0, BACKSCATTER_SIGMA0)
+            if stats.get(name)]
+
+
+def roi_stats(roi, band, backscatter=None):
+    """One band's statistics in one convention, or None.
+
+    `roi["stats"]` is keyed by convention and then by band. Defaulting to the
+    ROI's own `backscat` means every caller that does not care which
+    convention it is looking at gets the one the window is showing.
+    """
+    stats = roi.get("stats") or {}
+    if backscatter is None:
+        backscatter = roi.get("backscat") or BACKSCATTER_GAMMA0
+    return (stats.get(backscatter) or {}).get(band)
+
+
 def class_key(value):
     """The label an ROI groups under: trimmed and case-folded."""
     text = str(value or "").strip()
@@ -552,7 +577,7 @@ def group_by_class(rois):
     return list(groups.values())
 
 
-def class_summary(rois, band):
+def class_summary(rois, band, backscatter=None):
     """[(label, summary)] per class for one band, then all of them together.
 
     The combined row comes last and is labelled: it is the scene-wide
@@ -561,22 +586,36 @@ def class_summary(rois, band):
     only one class, where it would just repeat that class's row.
     """
     groups = group_by_class(rois)
-    summaries = [(label, summarise([(roi.get("stats") or {}).get(band)
+    summaries = [(label, summarise([roi_stats(roi, band, backscatter)
                                     for roi in members]))
                  for label, members in groups]
     if len(groups) > 1:
         summaries.append((ROI_CLASS_ALL, summarise(
-            [(roi.get("stats") or {}).get(band) for roi in rois])))
+            [roi_stats(roi, band, backscatter) for roi in rois])))
     return summaries
 
 
 def class_summary_rows(rois, bands):
-    """The by-class summary in long form: a row per class and band."""
-    rows = [["class", "band", "rois", "mean_db", "spread_db", "enl"]]
+    """The by-class summary in long form: a row per class, band and convention.
+
+    Both conventions where both were measured, for the same reason the per-ROI
+    table carries both: exporting twice to compare gamma0 with sigma0 is two
+    files that have to be lined up by hand, and the second one is the one that
+    gets forgotten.
+    """
+    rows = [["class", "band", "backscat", "rois", "mean_db", "spread_db",
+             "enl"]]
+    conventions = []
+    for roi in rois:
+        for name in roi_conventions(roi):
+            if name not in conventions:
+                conventions.append(name)
     for band in bands:
-        for label, summary in class_summary(rois, band):
-            rows.append([label, band, summary["count"], summary["mean_db"],
-                         summary["spread_db"], summary["enl"]])
+        for convention in conventions or [BACKSCATTER_GAMMA0]:
+            for label, summary in class_summary(rois, band, convention):
+                rows.append([label, band, convention, summary["count"],
+                             summary["mean_db"], summary["spread_db"],
+                             summary["enl"]])
     return rows
 
 
@@ -839,14 +878,21 @@ def stat_rows(rois, bands):
     does not have to be redesigned when a product carries four polarizations
     instead of two.
     """
-    header = ([name for name, _ in ROI_FIELDS] + ["band"]
-              + [key for key in STAT_KEYS])
-    rows = [header]
+    names = [name for name, _ in ROI_FIELDS]
+    rows = [names + ["band"] + list(STAT_KEYS)]
+    convention_at = names.index("backscat")
     for roi in rois:
-        base = [roi.get(name) for name, _ in ROI_FIELDS]
-        for band in bands:
-            stats = (roi.get("stats") or {}).get(band) or {}
-            rows.append(base + [band] + [stats.get(key) for key in STAT_KEYS])
+        base = [roi.get(name) for name in names]
+        for convention in roi_conventions(roi) or [roi.get("backscat")]:
+            # The convention varies down the rows rather than across the
+            # columns: one more row per ROI costs nothing, where one more set
+            # of columns would need every statistic renamed to fit beside it.
+            row_base = list(base)
+            row_base[convention_at] = convention
+            for band in bands:
+                stats = roi_stats(roi, band, convention) or {}
+                rows.append(row_base + [band]
+                            + [stats.get(key) for key in STAT_KEYS])
     return rows
 
 
@@ -1486,7 +1532,7 @@ class RadiometricDashboard(QMainWindow):
         self.domain_combo.currentIndexChanged.connect(
             lambda _: self.recompute_all("domain changed"))
         self.backscatter_combo.currentIndexChanged.connect(
-            lambda _: self.recompute_all("backscatter convention changed"))
+            lambda _: self.apply_backscatter())
         self.cb_zero_data.stateChanged.connect(
             lambda _: self.recompute_all("zero handling changed"))
         for combo in self.band_combos:
@@ -2581,9 +2627,17 @@ class RadiometricDashboard(QMainWindow):
                 return False
             domain = self.domain()
             zero_nodata = self.zero_is_nodata()
+            # Read once, measure twice. The factor costs one window read, and
+            # with it in hand gamma0 and sigma0 are two cheap passes over
+            # pixels already in memory -- so both are stored, and switching
+            # between them later reads nothing from disk.
             factor, factor_ok = self._rtc_factor(ds, window)
+            roi["stats"] = {BACKSCATTER_GAMMA0: {}}
             if factor is not None:
-                roi["backscat"] = BACKSCATTER_SIGMA0
+                roi["stats"][BACKSCATTER_SIGMA0] = {}
+            wanted = self.backscatter()
+            roi["backscat"] = (wanted if wanted in roi["stats"]
+                               else BACKSCATTER_GAMMA0)
             angle = self._incidence_from_band(ds, window, mask, ring, gt, px, py)
             if angle is not None:
                 roi["inc_deg"] = angle
@@ -2606,11 +2660,16 @@ class RadiometricDashboard(QMainWindow):
                 data = data.astype(float)
                 good = mask & valid_mask(data, band.GetNoDataValue(),
                                          zero_nodata, domain)
+                # gamma0 keeps every valid pixel: a factor missing somewhere
+                # is a gap in the conversion, not in what the product
+                # recorded, and dropping those pixels here would make the two
+                # conventions disagree about which ROI they describe.
+                roi["stats"][BACKSCATTER_GAMMA0][label] = roi_statistics(
+                    data[good], domain)
                 if factor is not None:
-                    good = good & factor_ok
-                roi["stats"][label] = roi_statistics(
-                    data[good], domain,
-                    None if factor is None else factor[good])
+                    converted = good & factor_ok
+                    roi["stats"][BACKSCATTER_SIGMA0][label] = roi_statistics(
+                        data[converted], domain, factor[converted])
             return True
         except Exception as e:
             print(f"[STATS] {roi['name']}: {e}")
@@ -2621,13 +2680,14 @@ class RadiometricDashboard(QMainWindow):
     def _rtc_factor(self, ds, window):
         """The gamma-to-sigma factor over a window, and where it is usable.
 
-        (None, None) unless sigma0 was asked for AND the raster carries the
-        factor -- in which case the ROI is measured as the gamma0 it holds,
-        and says so, rather than being relabelled sigma0 on the strength of a
-        conversion that never happened.
+        Read whenever the raster carries it, not only when sigma0 is the
+        selection: both conventions are measured from one read, so the
+        selection decides what is DISPLAYED and never what was measured. A
+        raster without the factor returns (None, None) and the ROI has the
+        gamma0 it holds -- never relabelled on a conversion that never
+        happened.
         """
-        if (self.backscatter() != BACKSCATTER_SIGMA0
-                or self.factor_band is None):
+        if self.factor_band is None:
             return (None, None)
         try:
             band = ds.GetRasterBand(self.factor_band)
@@ -2700,6 +2760,22 @@ class RadiometricDashboard(QMainWindow):
         value = bilinear_at(cube[0], cube[1], cube[2], centre[0], centre[1])
         return None if not np.isfinite(value) else float(value)
 
+    def apply_backscatter(self):
+        """Switch which convention the window and the shapefile report.
+
+        Nothing is re-read: both were measured when the ROI was, so this picks
+        which of two stored answers is being looked at. An ROI whose raster
+        had no factor stays on the gamma0 it holds rather than following the
+        selection into a convention it was never measured in.
+        """
+        wanted = self.backscatter()
+        for roi in self.rois:
+            available = roi_conventions(roi)
+            roi["backscat"] = (wanted if wanted in available
+                               else (available[0] if available
+                                     else BACKSCATTER_GAMMA0))
+        self.refresh_table()
+
     def recompute_all(self, reason=""):
         """Re-measure every ROI, after a change to what is being measured."""
         if not self.rois:
@@ -2725,7 +2801,7 @@ class RadiometricDashboard(QMainWindow):
             self.table.setRowCount(0)
             self.table.setRowCount(len(self.rois))
             for row, roi in enumerate(self.rois):
-                stats = (roi.get("stats") or {}).get(band) or {}
+                stats = roi_stats(roi, band) or {}
                 values = [str(roi["roi"]), roi["name"],
                           roi.get("class") or ROI_CLASS_UNSET, roi["kind"],
                           f"{roi['npix']}", f"{roi['area_m2']:.1f}",
@@ -2812,15 +2888,18 @@ class RadiometricDashboard(QMainWindow):
             f"[{roi.get('class') or ROI_CLASS_UNSET}, {roi['kind']}]",
             f"  {roi['npix']} px   {roi['area_m2']:.0f} m²   "
             f"lon/lat {lon}, {lat}",
-            f"  {roi.get('backscat')}, read as {roi.get('domain')}, "
-            f"from {roi.get('src') or '(no raster)'}",
+            f"  {roi.get('backscat')}"
+            + (", both conventions in the CSV"
+               if len(roi_conventions(roi)) > 1 else "")
+            + f", read as {roi.get('domain')}, "
+            + f"from {roi.get('src') or '(no raster)'}",
             f"  incidence {format_stat(roi.get('inc_deg'), '{:.2f}')} deg",
             "",
             f"  {'band':<10}{'n':>8}{'mean dB':>10}{'std dB':>9}{'cv':>8}"
             f"{'ENL':>8}{'p5 dB':>9}{'p95 dB':>9}{'nonpos':>8}",
         ]
         for _, label in self.measure_bands:
-            stats = (roi.get("stats") or {}).get(label) or {}
+            stats = roi_stats(roi, label) or {}
             lines.append(
                 f"  {label[:10]:<10}"
                 f"{format_stat(stats.get('n'), '{:.0f}'):>8}"
@@ -2833,7 +2912,7 @@ class RadiometricDashboard(QMainWindow):
                 f"{format_stat(stats.get('nonpos'), '{:.0f}'):>8}")
         lines += ["", "  linear power (mean, std):"]
         for _, label in self.measure_bands:
-            stats = (roi.get("stats") or {}).get(label) or {}
+            stats = roi_stats(roi, label) or {}
             lines.append(f"  {label[:10]:<10}"
                          f"{format_stat(stats.get('mean'), '{:.6g}'):>14}"
                          f"{format_stat(stats.get('std'), '{:.6g}'):>14}")
@@ -2937,7 +3016,7 @@ class RadiometricDashboard(QMainWindow):
             if roi_key is not None:
                 attributes.append(roi.get(roi_key))
             else:
-                stats = (roi.get("stats") or {}).get(label) or {}
+                stats = roi_stats(roi, label) or {}
                 attributes.append(self._dbf_value(stats.get(stat_key)))
         return attributes
 

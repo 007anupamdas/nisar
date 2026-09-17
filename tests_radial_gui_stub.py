@@ -393,16 +393,19 @@ roi = win.add_roi(patch, "rect")
 ok("the ROI was accepted", roi is not None)
 check("every pixel of the window is in it", roi["npix"], 36)
 check("the window read is the patch", reads[-1], (10, 4, 6, 6))
-check("one statistics block per band", sorted(roi["stats"]), ["HHHH", "HVHV"])
+check("statistics are keyed by convention first", sorted(roi["stats"]),
+      [R.BACKSCATTER_GAMMA0])
+check("with a block per measured band",
+      sorted(roi["stats"][R.BACKSCATTER_GAMMA0]), ["HHHH", "HVHV"])
 ok("HH reads the patch's own gamma0",
-   abs(roi["stats"]["HHHH"]["mean_db"] + 10.0) < 1.5,
-   f"{roi['stats']['HHHH']['mean_db']:.2f} dB")
+   abs(R.roi_stats(roi, "HHHH")["mean_db"] + 10.0) < 1.5,
+   f"{R.roi_stats(roi, 'HHHH')['mean_db']:.2f} dB")
 ok("HV reads its own, 7 dB below",
-   abs(roi["stats"]["HVHV"]["mean_db"] + 17.0) < 1.5,
-   f"{roi['stats']['HVHV']['mean_db']:.2f} dB")
+   abs(R.roi_stats(roi, "HVHV")["mean_db"] + 17.0) < 1.5,
+   f"{R.roi_stats(roi, 'HVHV')['mean_db']:.2f} dB")
 ok("single-look speckle reads about one look",
-   abs(roi["stats"]["HHHH"]["enl"] - 1.0) < 0.5,
-   f"ENL {roi['stats']['HHHH']['enl']:.2f}")
+   abs(R.roi_stats(roi, "HHHH")["enl"] - 1.0) < 0.5,
+   f"ENL {R.roi_stats(roi, 'HHHH')['enl']:.2f}")
 check("area from the ring, not the pixels", round(roi["area_m2"]), 32400)
 check("the raster is recorded with the numbers", roi["src"], "gcov.vrt")
 check("and so is the domain", roi["domain"], R.DOMAIN_POWER)
@@ -411,8 +414,8 @@ check("and so is the domain", roi["domain"], R.DOMAIN_POWER)
 background = win.add_roi(R.rect_ring(503000.0, 3994000.0, 503180.0, 3994180.0),
                          "rect")
 ok("a second ROI elsewhere reads the background",
-   abs(background["stats"]["HHHH"]["mean_db"] + 20.0) < 1.5,
-   f"{background['stats']['HHHH']['mean_db']:.2f} dB")
+   abs(R.roi_stats(background, "HHHH")["mean_db"] + 20.0) < 1.5,
+   f"{R.roi_stats(background, 'HHHH')['mean_db']:.2f} dB")
 check("two ROIs, numbered in order",
       [r["roi"] for r in win.rois], [1, 2])
 
@@ -502,7 +505,7 @@ win.add_roi = R.RadiometricDashboard.add_roi.__get__(win, R.RadiometricDashboard
 
 # ── 4. one ROI set, two products ─────────────────────────────────────────────
 print("\n── carrying ROIs to the next product ──")
-first = [dict(r["stats"]["HHHH"]) for r in win.rois]
+first = [dict(R.roi_stats(r, "HHHH")) for r in win.rois]
 brighter = [hh * 2.0, hv * 2.0]          # the same scene, 3 dB up
 install_gdal(brighter, GT)
 R.QgsRasterLayer = MagicMock(
@@ -512,7 +515,7 @@ win.load_path("/data/second_gcov.vrt")
 check("the ROIs survived the load", len(win.rois), 2)
 check("and were re-measured against it",
       [r["src"] for r in win.rois], ["second_gcov.vrt"] * 2)
-gaps = [r["stats"]["HHHH"]["mean_db"] - f["mean_db"]
+gaps = [R.roi_stats(r, "HHHH")["mean_db"] - f["mean_db"]
         for r, f in zip(win.rois, first)]
 ok("a product 3 dB brighter reads 3 dB brighter",
    all(abs(gap - 3.0103) < 1e-6 for gap in gaps),
@@ -572,7 +575,7 @@ check("switching band re-reads the table, not the raster",
 mean_column = len(R.ROI_TABLE_COLUMNS) + R.TABLE_STATS.index("mean_db")
 check("and shows that band's figure",
       win.table.text(0, mean_column),
-      R.format_stat(win.rois[0]["stats"]["HVHV"]["mean_db"], "{:.2f}"))
+      R.format_stat(R.roi_stats(win.rois[0], "HVHV")["mean_db"], "{:.2f}"))
 win.stats_band_combo.setCurrentIndex(0)
 win.refresh_table()
 
@@ -601,7 +604,7 @@ check("class among them, where ROI_FIELDS puts it",
       attributes[[n for n, _ in R.ROI_FIELDS].index("class")], "vegetation")
 check("then the statistics, band by band",
       attributes[fields.index("HH_mean_db")],
-      win.rois[0]["stats"]["HHHH"]["mean_db"])
+      R.roi_stats(win.rois[0], "HHHH")["mean_db"])
 check("an undefined statistic is NULL, not the string 'nan'",
       win._dbf_value(float("nan")), None)
 
@@ -805,22 +808,30 @@ check("gamma0 by default", gamma_roi["backscat"], R.BACKSCATTER_GAMMA0)
 # recompute_all measures IN PLACE, so the gamma0 figures have to be copied out
 # before they are overwritten -- comparing the dict with itself afterwards
 # would show no movement whatever the conversion did.
-before = {band: dict(stats) for band, stats in gamma_roi["stats"].items()}
+before = {band: dict(stats) for band, stats
+          in gamma_roi["stats"][R.BACKSCATTER_GAMMA0].items()}
 
+# Switching convention must not touch the disk: both were measured when the
+# ROI was, so this is a change of which stored answer is being shown.
+reads_before = len(reads)
 win.backscatter_combo.setCurrentIndex(1)
-win.recompute_all("sigma0")
+win.apply_backscatter()
+check("switching to sigma0 re-reads nothing", len(reads), reads_before)
 sigma_roi = win.rois[0]
 check("now recorded as sigma0", sigma_roi["backscat"], R.BACKSCATTER_SIGMA0)
+check("and both conventions are held at once",
+      R.roi_conventions(sigma_roi),
+      [R.BACKSCATTER_GAMMA0, R.BACKSCATTER_SIGMA0])
 for band in ("1: HHHH", "2: HVHV"):
-    moved = abs(sigma_roi["stats"][band]["mean_db"]
+    moved = abs(R.roi_stats(sigma_roi, band)["mean_db"]
                 - before[band]["mean_db"] - 3.0103) < 1e-3
     ok(f"{band} moved by the factor, exactly",
        moved, f"{before[band]['mean_db']:.4f} dB gamma0 -> "
-              f"{sigma_roi['stats'][band]['mean_db']:.4f} dB sigma0")
+              f"{R.roi_stats(sigma_roi, band)['mean_db']:.4f} dB sigma0")
 check("the same pixels were measured",
-      sigma_roi["stats"]["1: HHHH"]["n"], before["1: HHHH"]["n"])
+      R.roi_stats(sigma_roi, "1: HHHH")["n"], before["1: HHHH"]["n"])
 ok("speckle statistics did not move, the factor being flat here",
-   abs(sigma_roi["stats"]["1: HHHH"]["enl"]
+   abs(R.roi_stats(sigma_roi, "1: HHHH")["enl"]
        - before["1: HHHH"]["enl"]) < 1e-9)
 
 # The convention rides with the numbers, in both exports.
@@ -851,6 +862,11 @@ win._next_roi_id = 1
 no_factor = win.add_roi(patch_ring, "rect")
 check("and a figure is never labelled sigma0 without the conversion",
       no_factor["backscat"], R.BACKSCATTER_GAMMA0)
+win.apply_backscatter()
+check("nor does switching the selector drag it into one",
+      win.rois[0]["backscat"], R.BACKSCATTER_GAMMA0)
+check("it simply has the one convention", R.roi_conventions(win.rois[0]),
+      [R.BACKSCATTER_GAMMA0])
 win.backscatter_combo.setCurrentIndex(0)
 
 # ── 10c. the incidence angle per ROI ─────────────────────────────────────────
@@ -1008,9 +1024,11 @@ with tempfile.TemporaryDirectory() as tmp2:
         crows = list(_csv2.reader(handle))
     # Two classes by now -- vegetation, and the one just blanked -- so three
     # rows per band: each class, then all.
-    check("a header and a row per class and band", len(crows), 1 + 3 * 2)
+    check("a header and a row per class, band and convention",
+          len(crows), 1 + 3 * 2)
     check("under names that say what they are", crows[0],
-          ["class", "band", "rois", "mean_db", "spread_db", "enl"])
+          ["class", "band", "backscat", "rois", "mean_db", "spread_db",
+           "enl"])
 
 # ── 11. a NISAR GCOV '.h5' becomes a georeferenced VRT ───────────────────────
 print("\n── GCOV HDF5 ──")

@@ -450,12 +450,13 @@ print("\n── long-format rows ──")
 rois = [
     {"roi": 1, "name": "forest", "kind": "rect", "npix": 36, "area_m2": 32400.0,
      "cx": 1.0, "cy": 2.0, "lon": 77.0, "lat": 13.0, "domain": "power",
-     "src": "a.vrt",
-     "stats": {"HHHH": H["roi_statistics"](power[:1000], "power"),
-               "HVHV": H["roi_statistics"](power[1000:2000], "power")}},
+     "src": "a.vrt", "backscat": H["BACKSCATTER_GAMMA0"],
+     "stats": {H["BACKSCATTER_GAMMA0"]: {
+         "HHHH": H["roi_statistics"](power[:1000], "power"),
+         "HVHV": H["roi_statistics"](power[1000:2000], "power")}}},
     {"roi": 2, "name": "water", "kind": "polygon", "npix": 12, "area_m2": 10800.0,
      "cx": 3.0, "cy": 4.0, "lon": 77.1, "lat": 13.1, "domain": "power",
-     "src": "a.vrt", "stats": {}},
+     "src": "a.vrt", "backscat": H["BACKSCATTER_GAMMA0"], "stats": {}},
 ]
 rows = H["stat_rows"](rois, ["HHHH", "HVHV"])
 check("a row per ROI and band, plus the header", len(rows), 5)
@@ -493,8 +494,13 @@ is_nan("spread needs two ROIs", H["summarise"]([{"mean_db": -10.0}])["spread_db"
 print("\n── by class ──")
 
 
-def roi(label, mean_db, enl=4.0):
-    return {"class": label, "stats": {"HH": {"mean_db": mean_db, "enl": enl}}}
+def roi(label, mean_db, enl=4.0, sigma=False):
+    """An ROI as measure_roi leaves one: statistics keyed by convention."""
+    stats = {H["BACKSCATTER_GAMMA0"]: {"HH": {"mean_db": mean_db, "enl": enl}}}
+    if sigma:
+        stats[H["BACKSCATTER_SIGMA0"]] = {
+            "HH": {"mean_db": mean_db + 1.5, "enl": enl}}
+    return {"class": label, "backscat": H["BACKSCATTER_GAMMA0"], "stats": stats}
 
 
 mixed = ([roi("vegetation", -8.0 + 0.1 * i) for i in range(10)]
@@ -544,11 +550,58 @@ print("\n── the by-class export ──")
 rows = H["class_summary_rows"](mixed, ["HH", "HV"])
 check("a header and a row per class and band", len(rows), 1 + 3 * 2)
 check("under names that say what they are", rows[0],
-      ["class", "band", "rois", "mean_db", "spread_db", "enl"])
+      ["class", "band", "backscat", "rois", "mean_db", "spread_db", "enl"])
 check("the band is named in the row", [r[1] for r in rows[1:]],
       ["HH"] * 3 + ["HV"] * 3)
+check("and the convention", {r[2] for r in rows[1:]},
+      {H["BACKSCATTER_GAMMA0"]})
 check("and the class", [r[0] for r in rows[1:4]],
       ["vegetation", "water", "all"])
+
+# ── 11c. BOTH CONVENTIONS, IN ONE EXPORT ──────────────────────────────────────
+# A GCOV carrying its RTC factor is measured both ways from one read, so an
+# export states both. Exporting twice to compare them is two files to line up
+# by hand, and the second is the one that gets forgotten.
+print("\n── gamma0 and sigma0 together ──")
+both = [roi("vegetation", -8.0, sigma=True), roi("water", -22.0, sigma=True)]
+check("an ROI measured both ways says so", H["roi_conventions"](both[0]),
+      [H["BACKSCATTER_GAMMA0"], H["BACKSCATTER_SIGMA0"]])
+check("one measured once says that", H["roi_conventions"](roi("water", -22.0)),
+      [H["BACKSCATTER_GAMMA0"]])
+check("and one not measured at all", H["roi_conventions"]({"stats": {}}), [])
+
+check("statistics come back by convention",
+      H["roi_stats"](both[0], "HH", H["BACKSCATTER_SIGMA0"])["mean_db"], -6.5)
+check("defaulting to the one the ROI is showing",
+      H["roi_stats"](both[0], "HH")["mean_db"], -8.0)
+check("a convention it was not measured in is absent, not invented",
+      H["roi_stats"](roi("water", -22.0), "HH", H["BACKSCATTER_SIGMA0"]), None)
+check("and so is a band", H["roi_stats"](both[0], "VV"), None)
+
+rows = H["stat_rows"](both, ["HH"])
+check("a row per ROI and convention", len(rows), 1 + 2 * 2)
+check("the convention varies down the rows, not across the columns",
+      [r[rows[0].index("backscat")] for r in rows[1:]],
+      [H["BACKSCATTER_GAMMA0"], H["BACKSCATTER_SIGMA0"]] * 2)
+mean_at = rows[0].index("mean_db")
+check("each row carrying its own figures",
+      [r[mean_at] for r in rows[1:]], [-8.0, -6.5, -22.0, -20.5])
+check("and the ROI's own fields repeated down them",
+      {r[rows[0].index("class")] for r in rows[1:3]}, {"vegetation"})
+
+class_rows = H["class_summary_rows"](both, ["HH"])
+check("the by-class summary covers both too", len(class_rows), 1 + 3 * 2)
+check("naming the convention on every row",
+      [r[2] for r in class_rows[1:]],
+      [H["BACKSCATTER_GAMMA0"]] * 3 + [H["BACKSCATTER_SIGMA0"]] * 3)
+close("and the sigma0 rows are the factor above the gamma0 ones",
+      class_rows[4][4] - class_rows[1][4], 1.5, 1e-9)
+
+# A mixed set -- one ROI with the factor, one without -- must not drop either.
+mixed_conventions = [roi("vegetation", -8.0, sigma=True), roi("water", -22.0)]
+rows = H["stat_rows"](mixed_conventions, ["HH"])
+check("an ROI measured once contributes one row, not a blank second",
+      len(rows), 1 + 2 + 1)
 
 print("\n── formatting ──")
 check("a number", H["format_stat"](3.14159, "{:.2f}"), "3.14")

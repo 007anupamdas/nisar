@@ -352,8 +352,8 @@ ok("the ROI was accepted", roi is not None)
 check("36 pixels inside", roi["npix"], 36)
 check("read from the patch's own window", reads[-1], (10, 4, 6, 6))
 ok("and reads the patch's gamma0",
-   abs(roi["stats"]["HHHH"]["mean_db"] + 10.0) < 1.5,
-   f"{roi['stats']['HHHH']['mean_db']:.2f} dB")
+   abs(R.roi_stats(roi, "HHHH")["mean_db"] + 10.0) < 1.5,
+   f"{R.roi_stats(roi, 'HHHH')['mean_db']:.2f} dB")
 
 # The table is a real QTableWidget, so its signals really fire -- which is the
 # only way to find out whether the guard against them is doing its job.
@@ -412,17 +412,18 @@ win._next_roi_id = 1
 ring = R.rect_ring(500300.0, 3999700.0, 500480.0, 3999880.0)
 roi = win.add_roi(ring, "rect")
 check("recorded as gamma0", roi["backscat"], R.BACKSCATTER_GAMMA0)
-before = {band: dict(stats) for band, stats in roi["stats"].items()}
+before = {band: dict(stats) for band, stats
+          in roi["stats"][R.BACKSCATTER_GAMMA0].items()}
 
 win.backscatter_combo.setCurrentIndex(1)        # the real signal fires here
 check("selecting sigma0 re-measures on its own", win.rois[0]["backscat"],
       R.BACKSCATTER_SIGMA0)
 for band in ("1: HHHH", "2: HVHV"):
     ok(f"{band} moved by exactly the factor",
-       abs(win.rois[0]["stats"][band]["mean_db"]
+       abs(R.roi_stats(win.rois[0], band)["mean_db"]
            - before[band]["mean_db"] - 3.0103) < 1e-3,
        f"{before[band]['mean_db']:.4f} -> "
-       f"{win.rois[0]['stats'][band]['mean_db']:.4f} dB")
+       f"{R.roi_stats(win.rois[0], band)['mean_db']:.4f} dB")
 check("the detail panel names the convention",
       R.BACKSCATTER_SIGMA0 in win.detail.toPlainText(), True)
 win.backscatter_combo.setCurrentIndex(0)
@@ -627,8 +628,13 @@ with tempfile.TemporaryDirectory() as tmp:
     import csv as _csv
     with open(path, encoding="utf-8-sig") as handle:
         rows = list(_csv.reader(handle))
-    # Two ROIs by now, both drawn in the class section above.
-    check("a row per ROI and band, plus a header", len(rows), 1 + 2 * 2)
+    # Two ROIs by now, on a raster carrying the RTC factor -- so each is
+    # measured both ways and each appears twice, once per convention.
+    check("a row per ROI, band and convention, plus a header",
+          len(rows), 1 + 2 * 2 * 2)
+    check("both conventions in the one file",
+          sorted({r[rows[0].index("backscat")] for r in rows[1:]}),
+          sorted([R.BACKSCATTER_GAMMA0, R.BACKSCATTER_SIGMA0]))
     check("under untruncated names", rows[0][-len(R.STAT_KEYS):],
           list(R.STAT_KEYS))
 

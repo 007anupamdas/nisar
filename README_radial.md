@@ -86,9 +86,26 @@ read as a backscatter), but it stays in the R/G/B picker — looking at it is ho
 you see where the terrain correction is doing the most work, and therefore where
 the two conventions have least to do with each other.
 
-Every ROI records which convention produced it, in the `backscat` column. A
-raster with no factor layer cannot offer sigma0 at all, and nothing is ever
-labelled sigma0 on the strength of a conversion that did not happen.
+**Both conventions are measured from one read of the pixels**, so the CSV
+exports gives both and you never have to export twice and line the files up by
+hand. The convention varies *down the rows* — a `backscat` column, beside
+`band` — rather than across the columns, where every statistic would have to be
+renamed to fit a second set beside it.
+
+The **Backscatter** selector therefore changes only what is *displayed*: the
+table, the by-class summary and the shapefile follow it, and switching it
+re-reads nothing. The shapefile carries one convention because DBF has a column
+budget; the CSV has no such limit and carries both.
+
+Every ROI records which convention is on display, in the `backscat` column. A
+raster with no factor layer has gamma0 alone — it cannot offer sigma0, and
+switching the selector will not drag it into a convention it was never measured
+in.
+
+One detail worth knowing: gamma0 keeps **every** valid pixel, while sigma0 keeps
+only those where the factor is also valid. A factor missing over part of an ROI
+is a gap in the conversion, not in what the product recorded, so the two
+conventions can report slightly different pixel counts for the same ROI.
 
 ## ROI classes
 
@@ -215,6 +232,7 @@ means the dB columns describe only part of the ROI.
 
 ```
 roi  name  kind  npix  area_m2  cx  cy  lon  lat  domain  class  backscat  inc_deg  src
+                                                    ^ varies per row in the CSV
 HH_n  HH_mean  HH_std  HH_cv  HH_enl  HH_mean_db  HH_sdev_db  HH_min_db …
 HV_n  HV_mean  …
 ```
