@@ -28,10 +28,20 @@ instead of two, ROIs instead of point picks, and statistics instead of offsets.
 |---|---|
 | **Load GCOV** | a GeoTIFF or VRT, or a NISAR `.h5` (wrapped in a VRT, below) |
 | **Normalize** | stretch the view so the target is legible before you draw on it |
+| **Select** | click an ROI to select it, on the canvas and in the table at once |
 | **Rect** / **Polygon** | draw ROIs; each one fills a row as it closes |
 | **Export SHP** | polygons plus every statistic, and a full-named CSV beside it |
 
-`Ctrl+1..5` selects the tool, `F5` zooms to the selected ROI, `Ctrl+Delete`
+Every ROI is **numbered on the canvas** at its centre, in its outline's colour
+— cyan, or yellow when selected — so the table's first column is not the only
+place that number exists.
+
+**Select** answers the question the canvas could not: *that one*. Click an ROI
+and its table row is selected, so `Ctrl+Delete` and the editable Name and Class
+cells apply to what you clicked. The **smallest** ROI under the click wins, so
+one drawn inside another is still reachable; clicking open ground deselects.
+
+`Ctrl+1..6` selects the tool, `F5` zooms to the selected ROI, `Ctrl+Delete`
 removes it, `Escape` abandons a polygon in progress. A polygon closes on a
 right-click or a double-click; `Backspace` takes back a corner.
 

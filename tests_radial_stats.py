@@ -373,6 +373,36 @@ check("degenerate ring falls back to the vertex mean",
 check("bounds", H["ring_bounds"](ell), (0, 0, 4, 4))
 check("no ring, no bounds", H["ring_bounds"]([]), None)
 
+print("\n── what is under a click ──")
+# The same even-odd rule polygon_mask applies to a grid, for one point: what
+# you select has to be what you measured.
+square = H["rect_ring"](0, 0, 10, 10)
+for x, y in ((5.0, 5.0), (0.1, 0.1), (9.9, 9.9)):
+    check(f"inside at ({x}, {y})", H["point_in_ring"](square, x, y), True)
+for x, y in ((-0.1, 5.0), (10.1, 5.0), (5.0, -0.1), (5.0, 10.1)):
+    check(f"outside at ({x}, {y})", H["point_in_ring"](square, x, y), False)
+check("the notch of a concave ROI is outside it",
+      H["point_in_ring"](ell, 2.5, 2.5), False)
+check("and its arm is inside", H["point_in_ring"](ell, 0.5, 2.5), True)
+check("two corners hold nothing",
+      H["point_in_ring"]([(0, 0), (1, 1)], 0.5, 0.5), False)
+check("nor does no ring", H["point_in_ring"]([], 0.0, 0.0), False)
+
+print("\n── which ROI a click picks ──")
+big = {"roi": 1, "ring": H["rect_ring"](0, 0, 100, 100)}
+small = {"roi": 2, "ring": H["rect_ring"](40, 40, 50, 50)}
+far = {"roi": 3, "ring": H["rect_ring"](200, 200, 210, 210)}
+check("a click in open ground picks the one holding it",
+      H["roi_at"]([big, small, far], 10.0, 10.0)["roi"], 1)
+# The one that matters: a small ROI inside a large one must still be pickable,
+# or it could only ever be reached from the table.
+check("a click in both picks the smaller",
+      H["roi_at"]([big, small, far], 45.0, 45.0)["roi"], 2)
+check("and the order they were drawn in does not decide it",
+      H["roi_at"]([small, big, far], 45.0, 45.0)["roi"], 2)
+check("a click on nothing", H["roi_at"]([big, small], 150.0, 150.0), None)
+check("no ROIs at all", H["roi_at"]([], 0.0, 0.0), None)
+
 print("\n── double-click duplicates ──")
 check("the repeated corner goes",
       H["dedupe_ring"]([(0, 0), (4, 0), (4, 4), (4, 4)], 0.5),

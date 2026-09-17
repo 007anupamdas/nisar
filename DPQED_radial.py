@@ -109,10 +109,11 @@ from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QFileDialog, QHeaderView, QCheckBox, QComboBox,
                              QMessageBox, QApplication, QShortcut, QLabel,
                              QFrame, QButtonGroup, QPlainTextEdit, QAbstractItemView)
-from PyQt5.QtCore import Qt, QObject, QEvent, QVariant
-from PyQt5.QtGui import QKeySequence, QFont, QColor
-from qgis.gui import (QgsMapCanvas, QgsMapTool, QgsMapToolPan, QgsMapToolZoom,
-                      QgsRubberBand)
+from PyQt5.QtCore import Qt, QObject, QEvent, QVariant, QRectF
+from PyQt5.QtGui import (QKeySequence, QFont, QColor, QFontMetricsF,
+                         QPainter)
+from qgis.gui import (QgsMapCanvas, QgsMapCanvasItem, QgsMapTool,
+                      QgsMapToolPan, QgsMapToolZoom, QgsRubberBand)
 from qgis.core import (QgsProject, QgsPointXY, QgsRasterLayer, QgsVectorLayer,
                        QgsGeometry, QgsCoordinateReferenceSystem,
                        QgsCoordinateTransform, QgsSingleBandGrayRenderer,
@@ -142,12 +143,14 @@ RASTER_EXTS = (".tif", ".tiff", ".vrt")
 H5_EXTS = (".h5", ".hdf5", ".he5")
 
 # Map tools, in button order. The two ROI tools draw; the rest move the view.
+TOOL_SELECT = "select"
 TOOL_RECT = "rect"
 TOOL_POLY = "polygon"
 TOOL_PAN = "pan"
 TOOL_ZOOM_IN = "zoom in"
 TOOL_ZOOM_OUT = "zoom out"
-MAP_TOOLS = (TOOL_RECT, TOOL_POLY, TOOL_PAN, TOOL_ZOOM_IN, TOOL_ZOOM_OUT)
+MAP_TOOLS = (TOOL_SELECT, TOOL_RECT, TOOL_POLY, TOOL_PAN, TOOL_ZOOM_IN,
+             TOOL_ZOOM_OUT)
 
 # ROI outlines. Cyan reads over the red/magenta a two-band SAR composite tends
 # toward, and over grey; the selected ROI goes yellow so the table and the
@@ -158,6 +161,13 @@ ROI_COLOR_DRAWING = (255, 0, 255)
 ROI_WIDTH = 2
 ROI_WIDTH_SELECTED = 3
 ROI_FILL_ALPHA = 40             # a hint of fill, so a small ROI is findable
+
+# The ROI's number, drawn at its centre. Colour alone tells you which ROI the
+# table is on; it does not tell you which of a dozen ROIs is number 7, and the
+# table's first column is the only place that number otherwise exists.
+ROI_LABEL_POINT = 9
+ROI_LABEL_PAD = 3.0
+ROI_LABEL_BACKDROP = (0, 0, 0, 160)     # so a number over bright scene reads
 
 # A polygon closed by double-click receives the same vertex twice -- the press
 # that precedes the double-click has already added it. Consecutive vertices
@@ -570,6 +580,41 @@ def class_summary_rows(rois, bands):
     return rows
 
 
+def point_in_ring(ring, x, y):
+    """Is (x, y) inside this ring? Even-odd, the same rule as the ROI mask.
+
+    The same test polygon_mask applies to a grid, for one point: an ROI that
+    holds a pixel's centre holds a click at that centre, so what you select is
+    what you measured.
+    """
+    inside = False
+    count = len(ring or ())
+    if count < 3:
+        return False
+    for i in range(count):
+        x1, y1 = ring[i]
+        x2, y2 = ring[(i + 1) % count]
+        if (y1 > y) != (y2 > y):
+            crossing = x1 + (y - y1) * (x2 - x1) / (y2 - y1)
+            if x < crossing:
+                inside = not inside
+    return inside
+
+
+def roi_at(rois, x, y):
+    """The ROI under a point, or None.
+
+    The smallest of the ones holding it, so a small ROI drawn inside a large
+    one can still be picked -- otherwise the big one would swallow every click
+    within it and the small one could only ever be reached from the table.
+    """
+    hits = [roi for roi in rois or ()
+            if point_in_ring(roi.get("ring") or [], x, y)]
+    if not hits:
+        return None
+    return min(hits, key=lambda roi: ring_area(roi.get("ring") or []))
+
+
 def summarise(stats_list):
     """Across ROIs, for one band: brightness, uniformity, looks.
 
@@ -929,6 +974,93 @@ def gcov_vrt_xml(sources, width, height, geotransform, srs, dtype="Float32",
 # ── END PURE HELPERS ──────────────────────────────────────────────────────────
 
 
+# ── ROI NUMBER ON THE CANVAS ──────────────────────────────────────────────────
+class RoiLabelItem(QgsMapCanvasItem):
+    """The ROI's number, drawn at its centre and kept there.
+
+    A canvas item rather than an annotation: the canvas repositions one of
+    these itself on every pan and zoom, which is the whole difficulty with
+    putting text on a map. An annotation would need that done by hand, and its
+    API has moved more between QGIS versions than this one has.
+
+    The number is drawn on a translucent backdrop because a thin glyph over a
+    bright scatterer is not readable, and the whole point of the label is to be
+    read at a glance.
+    """
+
+    def __init__(self, canvas, point, text, colour):
+        super().__init__(canvas)
+        self.canvas = canvas
+        self.point = point
+        self.text = str(text)
+        self.colour = colour
+        self.font = QFont()
+        self.font.setBold(True)
+        self.font.setPointSize(ROI_LABEL_POINT)
+        self.updatePosition()
+
+    def set_state(self, point, text, colour):
+        """Move and re-letter the label without rebuilding it."""
+        self.prepareGeometryChange()
+        self.point, self.text, self.colour = point, str(text), colour
+        self.updatePosition()
+        self.update()
+
+    def boundingRect(self):
+        try:
+            metrics = QFontMetricsF(self.font).boundingRect(self.text)
+            width, height = metrics.width(), metrics.height()
+        except Exception:
+            # Font metrics need a running application. Estimate rather than
+            # fail: a label the wrong size still says which ROI this is.
+            width, height = 7.0 * max(len(self.text), 1), 14.0
+        width += 2 * ROI_LABEL_PAD
+        height += 2 * ROI_LABEL_PAD
+        return QRectF(-width / 2.0, -height / 2.0, width, height)
+
+    def paint(self, painter, option=None, widget=None):
+        try:
+            rect = self.boundingRect()
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(*ROI_LABEL_BACKDROP))
+            painter.drawRoundedRect(rect, 3.0, 3.0)
+            painter.setPen(QColor(*self.colour))
+            painter.setFont(self.font)
+            painter.drawText(rect, Qt.AlignCenter, self.text)
+        except Exception as e:
+            print(f"[ROI] label: {e}")
+
+    def updatePosition(self):
+        try:
+            self.setPos(self.toCanvasCoordinates(self.point))
+        except Exception:
+            pass
+
+
+# ── ROI SELECTION TOOL ────────────────────────────────────────────────────────
+class RoiSelectTool(QgsMapTool):
+    """Click an ROI to select it, on the canvas and in the table at once.
+
+    Drawing tools make ROIs and the table edits them, which left the canvas
+    unable to answer 'that one' -- the thing you are looking at when you decide
+    an ROI is wrong. Selecting here selects the row, so Delete and the editable
+    cells apply to what was clicked.
+    """
+
+    def __init__(self, canvas, dashboard):
+        super().__init__(canvas)
+        self.canvas = canvas
+        self.dashboard = dashboard
+        self.setCursor(Qt.ArrowCursor)
+
+    def canvasReleaseEvent(self, e):
+        if e.button() != Qt.LeftButton:
+            return
+        point = self.toMapCoordinates(e.pos())
+        self.dashboard.select_roi_at(point.x(), point.y())
+
+
 # ── ROI DRAWING TOOL ──────────────────────────────────────────────────────────
 class RoiMapTool(QgsMapTool):
     """Draw one ROI: a dragged rectangle, or a polygon clicked corner by corner.
@@ -1088,6 +1220,7 @@ class RadiometricDashboard(QMainWindow):
         self.incidence_cube = None
         self.rois = []                  # plain data; see add_roi for the shape
         self.roi_bands = {}             # id -> QgsRubberBand drawn on the canvas
+        self.roi_labels = {}            # id -> its number, drawn at its centre
         self._next_roi_id = 1
         self._stretch_cache = {}
         # Bounds pinned by Normalize, per band. Set only when the button is
@@ -1188,14 +1321,19 @@ class RadiometricDashboard(QMainWindow):
         self.tool_group = QButtonGroup(self)
         self.tool_group.setExclusive(True)
         tips = {
-            TOOL_RECT: "Drag a rectangle over the target  (Ctrl+1)",
+            TOOL_SELECT: "Click an ROI to select it, here and in the table "
+                         "below  (Ctrl+1).\nThe smallest ROI under the click "
+                         "wins, so one drawn inside\nanother is still "
+                         "reachable. Click empty ground to deselect.",
+            TOOL_RECT: "Drag a rectangle over the target  (Ctrl+2)",
             TOOL_POLY: "Click the corners; right-click or double-click to "
-                       "close, Backspace undoes one  (Ctrl+2)",
-            TOOL_PAN: "Drag to move the view  (Ctrl+3)",
-            TOOL_ZOOM_IN: "Drag a box, or click, to zoom in  (Ctrl+4)",
-            TOOL_ZOOM_OUT: "Drag a box, or click, to zoom out  (Ctrl+5)",
+                       "close, Backspace undoes one  (Ctrl+3)",
+            TOOL_PAN: "Drag to move the view  (Ctrl+4)",
+            TOOL_ZOOM_IN: "Drag a box, or click, to zoom in  (Ctrl+5)",
+            TOOL_ZOOM_OUT: "Drag a box, or click, to zoom out  (Ctrl+6)",
         }
-        labels = {TOOL_RECT: "Rect", TOOL_POLY: "Polygon", TOOL_PAN: "Pan",
+        labels = {TOOL_SELECT: "Select", TOOL_RECT: "Rect",
+                  TOOL_POLY: "Polygon", TOOL_PAN: "Pan",
                   TOOL_ZOOM_IN: "Zoom In", TOOL_ZOOM_OUT: "Zoom Out"}
         for index, mode in enumerate(MAP_TOOLS):
             button = QPushButton(labels[mode])
@@ -2227,6 +2365,29 @@ class RadiometricDashboard(QMainWindow):
             band.show()
         except Exception as e:
             print(f"[ROI] draw: {e}")
+        self._draw_roi_label(roi, rgb)
+
+    def _draw_roi_label(self, roi, rgb):
+        """The ROI's number at its centre, in the outline's colour.
+
+        Guarded rather than assumed: a canvas item is the idiomatic way to put
+        text on a QGIS canvas, but if a build will not have one, an ROI with no
+        number is a smaller loss than a tool that will not start.
+        """
+        centre = ring_centroid(roi.get("ring") or [])
+        if centre is None:
+            return
+        try:
+            point = QgsPointXY(centre[0], centre[1])
+            label = self.roi_labels.get(roi["roi"])
+            if label is None:
+                self.roi_labels[roi["roi"]] = RoiLabelItem(
+                    self.canvas, point, roi["roi"], rgb)
+            else:
+                label.set_state(point, roi["roi"], rgb)
+        except Exception as e:
+            print(f"[ROI] label: {e}")
+            self.roi_labels.pop(roi["roi"], None)
 
     def redraw_rois(self):
         """Re-outline every ROI, so the selected one is the one in yellow."""
@@ -2237,15 +2398,26 @@ class RadiometricDashboard(QMainWindow):
 
     def _drop_roi_band(self, roi_id):
         band = self.roi_bands.pop(roi_id, None)
-        if band is None:
-            return
+        label = self.roi_labels.pop(roi_id, None)
+        scene = None
         try:
-            band.reset(QgsWkbTypes.PolygonGeometry)
             scene = self.canvas.scene()
-            if scene:
-                scene.removeItem(band)
-        except Exception as e:
-            print(f"[ROI] remove: {e}")
+        except Exception:
+            pass
+        if band is not None:
+            try:
+                band.reset(QgsWkbTypes.PolygonGeometry)
+                if scene:
+                    scene.removeItem(band)
+            except Exception as e:
+                print(f"[ROI] remove: {e}")
+        if label is not None and scene:
+            # A number left behind outlives the ROI it names, and then names
+            # whichever ROI is renumbered into its place.
+            try:
+                scene.removeItem(label)
+            except Exception as e:
+                print(f"[ROI] remove label: {e}")
 
     def selected_roi(self):
         try:
@@ -2261,6 +2433,37 @@ class RadiometricDashboard(QMainWindow):
             if roi["roi"] == roi_id:
                 self.table.setCurrentCell(row, 0)
                 return
+
+    def clear_selection(self):
+        """Leave no ROI selected.
+
+        clearSelection() alone is not enough: it drops the highlight and leaves
+        the CURRENT cell where it was, so selected_roi() -- which reads the
+        current row -- would still name the ROI that was just deselected, and
+        Delete would take it. The current cell has to go too.
+        """
+        try:
+            self.table.clearSelection()
+            self.table.setCurrentCell(-1, -1)
+        except Exception as e:
+            print(f"[ROI] deselect: {e}")
+
+    def select_roi_at(self, x, y):
+        """Select whatever ROI is under a map point, or clear the selection.
+
+        Selecting the table row rather than tracking a separate canvas
+        selection: there is one selected ROI, the table owns which, and Delete
+        and the editable cells already work off it.
+        """
+        roi = roi_at(self.rois, x, y)
+        if roi is None:
+            self.clear_selection()
+            self.redraw_rois()
+            self.canvas.refresh()
+            return None
+        self.select_roi(roi["roi"])
+        print(f"[ROI] selected {roi['roi']}: {roi['name']}")
+        return roi
 
     def delete_roi(self):
         roi = self.selected_roi()
@@ -2295,7 +2498,7 @@ class RadiometricDashboard(QMainWindow):
         tool = getattr(self, "map_tools", {}).get(self.current_map_tool())
         if isinstance(tool, RoiMapTool):
             tool.cancel()
-        self.table.clearSelection()
+        self.clear_selection()
         self.redraw_rois()
 
     def zoom_to_roi(self):
@@ -2908,6 +3111,7 @@ class RadiometricDashboard(QMainWindow):
     def init_map_tools(self):
         self._apply_canvas_crs()
         self.map_tools = {
+            TOOL_SELECT: RoiSelectTool(self.canvas, self),
             TOOL_RECT: RoiMapTool(self.canvas, self, TOOL_RECT),
             TOOL_POLY: RoiMapTool(self.canvas, self, TOOL_POLY),
             TOOL_PAN: QgsMapToolPan(self.canvas),
@@ -2940,7 +3144,8 @@ class RadiometricDashboard(QMainWindow):
             return              # called before init_map_tools
         mode = self.current_map_tool()
         self.canvas.setMapTool(tools[mode])
-        cursor = {TOOL_PAN: Qt.OpenHandCursor}.get(mode, Qt.CrossCursor)
+        cursor = {TOOL_PAN: Qt.OpenHandCursor,
+                  TOOL_SELECT: Qt.ArrowCursor}.get(mode, Qt.CrossCursor)
         try:
             self.canvas.setCursor(cursor)
         except Exception:

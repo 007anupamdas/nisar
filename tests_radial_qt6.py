@@ -145,6 +145,31 @@ class _Canvas(QWidget):
         return 10.0
 
 
+class _CanvasItem:
+    """QgsMapCanvasItem: a real class, because RoiLabelItem subclasses it.
+
+    The canvas normally owns the mapping from map coordinates to the scene;
+    here it is the identity, so a label's position is checkable.
+    """
+    def __init__(self, canvas=None):
+        self._canvas, self._pos = canvas, None
+
+    def toCanvasCoordinates(self, point):
+        return point
+
+    def setPos(self, pos):
+        self._pos = pos
+
+    def pos(self):
+        return self._pos
+
+    def prepareGeometryChange(self):
+        pass
+
+    def update(self):
+        pass
+
+
 class _MapTool:
     """QgsMapTool: a real class, because RoiMapTool subclasses it."""
     def __init__(self, canvas=None):
@@ -189,6 +214,7 @@ sys.modules.update({"qgis": qgis, "qgis.gui": qgis_gui, "qgis.core": qgis_core})
 
 qgis_gui.QgsMapCanvas = _Canvas
 qgis_gui.QgsMapTool = _MapTool
+qgis_gui.QgsMapCanvasItem = _CanvasItem
 qgis_gui.QgsMapToolPan = _tool_factory("pan")
 qgis_gui.QgsMapToolZoom = _tool_factory("zoom")
 qgis_gui.QgsRubberBand = lambda *a, **k: MagicMock(_args=a)
@@ -216,7 +242,7 @@ print("\n── the window, built for real ──")
 ok("it is a QMainWindow", win.isWidgetType())
 ok("the canvas is the real widget the overlay parents into",
    win.overlay.parent() is win.canvas)
-check("five tool buttons", len(win.tool_buttons), 5)
+check("six tool buttons", len(win.tool_buttons), 6)
 check("the table has a column per header",
    win.table.columnCount(),
    len(R.ROI_TABLE_COLUMNS) + len(R.TABLE_STATS))
@@ -507,8 +533,8 @@ for mode in R.MAP_TOOLS:
     ok(f"{mode} applied", win.canvas.tools_set[-1] is win.map_tools[mode])
     checked = [m for m, b in win.tool_buttons.items() if b.isChecked()]
     ok(f"{mode} is the only one checked", checked == [mode], str(checked))
-check("five distinct tools",
-      len({id(win.map_tools[m]) for m in R.MAP_TOOLS}), 5)
+check("six distinct tools",
+      len({id(win.map_tools[m]) for m in R.MAP_TOOLS}), 6)
 check("zoom out is the out variant",
       (win.map_tools[R.TOOL_ZOOM_IN]._args[1],
        win.map_tools[R.TOOL_ZOOM_OUT]._args[1]), (False, True))
@@ -518,6 +544,64 @@ check("pan gets the open hand", win.canvas.cursor().shape(),
 win.set_map_tool(R.TOOL_RECT)
 check("drawing gets the cross", win.canvas.cursor().shape(),
       Qt.CursorShape.CrossCursor)
+
+# ── 6b. the ROI's number, painted with a real QPainter ───────────────────────
+# The label is the one piece of this that draws rather than computes, so it is
+# driven against a real painter on a real image: a wrong enum or a bad rect is
+# an exception here rather than an empty canvas on someone's machine.
+print("\n── the number on the canvas ──")
+from PyQt6.QtGui import QImage, QPainter as _QPainter
+from PyQt6.QtCore import QRectF
+
+label = R.RoiLabelItem(win.canvas, _PointXY(500400.0, 3999800.0), 7,
+                       R.ROI_COLOR)
+check("it says which ROI it is", label.text, "7")
+rect = label.boundingRect()
+ok("its box is real and centred on the point",
+   isinstance(rect, QRectF) and rect.width() > 0 and rect.height() > 0
+   and abs(rect.center().x()) < 1e-9 and abs(rect.center().y()) < 1e-9,
+   f"{rect.width():.1f} x {rect.height():.1f} at {rect.center()}")
+wide = R.RoiLabelItem(win.canvas, _PointXY(0, 0), 1234, R.ROI_COLOR)
+ok("a longer number gets a wider box",
+   wide.boundingRect().width() > rect.width(),
+   f"{wide.boundingRect().width():.1f} vs {rect.width():.1f}")
+
+image = QImage(64, 32, QImage.Format.Format_ARGB32)
+image.fill(0)
+painter = _QPainter(image)
+try:
+    painter.translate(32, 16)
+    label.paint(painter)          # real Qt enums, real painter
+finally:
+    painter.end()
+ok("painting it puts ink on the canvas",
+   any(image.pixelColor(x, y).alpha() > 0
+       for x in range(64) for y in range(32)))
+
+label.set_state(_PointXY(1.0, 2.0), 8, R.ROI_COLOR_SELECTED)
+check("re-lettering it does not rebuild it", (label.text, label.colour),
+      ("8", R.ROI_COLOR_SELECTED))
+check("and it moves with the ROI", (label.pos().x(), label.pos().y()),
+      (1.0, 2.0))
+
+# ── 6c. selecting an ROI from the canvas ─────────────────────────────────────
+print("\n── select ──")
+win.rois = []
+win._next_roi_id = 1
+win.roi_labels = {}
+win.add_roi(R.rect_ring(500000.0, 3994000.0, 502000.0, 3996000.0), "rect")
+win.add_roi(R.rect_ring(500800.0, 3994800.0, 501000.0, 3995000.0), "rect")
+check("the smaller ROI under the click wins",
+      win.select_roi_at(500900.0, 3994900.0)["roi"], 2)
+check("and the real table row follows", win.table.currentRow(), 1)
+check("open ground clears it", win.select_roi_at(0.0, 0.0), None)
+check("leaving no row current", win.table.currentRow(), -1)
+ok("the select tool is a tool of its own",
+   isinstance(win.map_tools[R.TOOL_SELECT], R.RoiSelectTool))
+win.set_map_tool(R.TOOL_SELECT)
+check("with the pointer cursor", win.canvas.cursor().shape(),
+      Qt.CursorShape.ArrowCursor)
+win.set_map_tool(R.TOOL_RECT)
 
 # ── 7. export ────────────────────────────────────────────────────────────────
 print("\n── export ──")
@@ -597,6 +681,49 @@ finally:
     for name in ("QgsWkbTypes", "QgsRasterBandStats"):
         if hasattr(qgis_core, name):
             delattr(qgis_core, name)
+
+# ── 10. every Qt name in the file resolves against this PyQt6 ────────────────
+# The port is a rename, and a rename has one failure mode: one that was missed.
+# The suite above only exercises the lines it happens to reach, and an enum on
+# an untaken branch is exactly where a stale spelling survives -- two have, in
+# this file's history. So every Qt attribute in the source is looked up against
+# the real PyQt6, whether any test runs that line or not.
+print("\n── every Qt name, checked against PyQt6 itself ──")
+import ast as _ast
+
+_QT = {}
+for _module in ("PyQt6.QtWidgets", "PyQt6.QtCore", "PyQt6.QtGui"):
+    _mod = __import__(_module, fromlist=["*"])
+    for _name in dir(_mod):
+        if _name.startswith("Q"):
+            _QT[_name] = getattr(_mod, _name)
+
+_tree = _ast.parse(open(os.path.join(HERE, "DPQED_radial_qt6.py"),
+                        encoding="utf-8").read())
+_bad = []
+for _node in _ast.walk(_tree):
+    # Qt.CrossCursor -- an unscoped enum, which Qt6 does not have
+    if (isinstance(_node, _ast.Attribute)
+            and isinstance(_node.value, _ast.Name)
+            and _node.value.id in _QT
+            and isinstance(_QT[_node.value.id], type)
+            and not hasattr(_QT[_node.value.id], _node.attr)):
+        _bad.append(f"{_node.value.id}.{_node.attr} (line {_node.lineno})")
+    # Qt.CursorShape.CrossCursor -- scoped, but the member may still be wrong
+    if (isinstance(_node, _ast.Attribute)
+            and isinstance(_node.value, _ast.Attribute)
+            and isinstance(_node.value.value, _ast.Name)
+            and _node.value.value.id in _QT):
+        _scope = getattr(_QT[_node.value.value.id], _node.value.attr, None)
+        if isinstance(_scope, type) and not hasattr(_scope, _node.attr):
+            _bad.append(f"{_node.value.value.id}.{_node.value.attr}."
+                        f"{_node.attr} (line {_node.lineno})")
+ok("no Qt name in the file is unknown to PyQt6", not _bad,
+   ", ".join(sorted(set(_bad))))
+check("and the file names some Qt to check",
+      len([1 for n in _ast.walk(_tree)
+           if isinstance(n, _ast.Attribute) and isinstance(n.value, _ast.Name)
+           and n.value.id in _QT]) > 20, True)
 
 print("\n" + "=" * 70)
 if failures:

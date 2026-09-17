@@ -49,7 +49,7 @@ class _Base:
 
 
 for module, names in ((qw, ["QMainWindow", "QWidget"]),
-                      (qg, ["QgsMapTool"]),
+                      (qg, ["QgsMapTool", "QgsMapCanvasItem"]),
                       (qc, ["QObject"])):
     for name in names:
         setattr(module, name, type(name, (_Base,), {}))
@@ -206,7 +206,9 @@ class _Table:
         self._current = row
 
     def clearSelection(self):
-        self._current = -1
+        # Deliberately does NOT move the current cell -- a real QTableWidget
+        # does not either, and a stub that did hid exactly that bug once.
+        pass
 
     def setHorizontalHeaderLabels(self, _):
         pass
@@ -678,8 +680,8 @@ for mode in R.MAP_TOOLS:
     ok(f"{mode} is applied to the canvas", applied is win.map_tools[mode])
     checked = [m for m, b in win.tool_buttons.items() if b.isChecked()]
     ok(f"{mode} is the only tool selected", checked == [mode], str(checked))
-check("five distinct tools",
-      len({id(win.map_tools[m]) for m in R.MAP_TOOLS}), 5)
+check("six distinct tools",
+      len({id(win.map_tools[m]) for m in R.MAP_TOOLS}), 6)
 check("pan is the pan tool", win.map_tools[R.TOOL_PAN]._tool, "pan")
 check("zoom out is the out variant",
       (win.map_tools[R.TOOL_ZOOM_IN]._args[1],
@@ -687,6 +689,59 @@ check("zoom out is the out variant",
 ok("both ROI tools draw, in their own mode",
    isinstance(win.map_tools[R.TOOL_RECT], R.RoiMapTool)
    and win.map_tools[R.TOOL_POLY].mode == R.TOOL_POLY)
+
+# ── 9b. selecting an ROI on the canvas, and its number beside it ─────────────
+print("\n── select, and the numbers on the canvas ──")
+install_gdal([hh, hv], GT)
+sel_layer = fake_layer(bands=2)
+sel_layer.bandName.side_effect = lambda b: ["HHHH", "HVHV"][b - 1]
+win.band_combos = [_Combo(), _Combo(), _Combo()]
+win.stats_band_combo = _Combo()
+win.populate_band_picker(sel_layer)
+win.raster_layer = sel_layer
+win.rois = []
+win._next_roi_id = 1
+win.roi_labels = {}
+
+outer = win.add_roi(R.rect_ring(500000.0, 3994000.0, 502000.0, 3996000.0), "rect")
+inner = win.add_roi(R.rect_ring(500800.0, 3994800.0, 501000.0, 3995000.0), "rect")
+check("two ROIs, the second inside the first",
+      [r["roi"] for r in win.rois], [1, 2])
+
+# Every ROI gets a number drawn at its centre.
+check("a label per ROI", sorted(win.roi_labels), [1, 2])
+label = win.roi_labels[1]
+check("saying which ROI it is", label.text, "1")
+check("placed at the ROI's centre",
+      (round(label.point.x()), round(label.point.y())), (501000, 3995000))
+
+# Selecting: the smallest ROI under the click wins, so the inner one is
+# reachable even though the outer one also holds the point.
+picked = win.select_roi_at(500900.0, 3994900.0)
+check("the click picks the smaller of the two", picked["roi"], 2)
+check("and the table row follows it", win.table.currentRow(), 1)
+check("a click only the outer one holds picks the outer one",
+      win.select_roi_at(500100.0, 3994100.0)["roi"], 1)
+check("and moves the row again", win.table.currentRow(), 0)
+check("a click on open ground selects nothing",
+      win.select_roi_at(400000.0, 3000000.0), None)
+check("and clears the row", win.table.currentRow(), -1)
+
+# The selected ROI's number takes the selected colour, as its outline does.
+win.select_roi_at(500900.0, 3994900.0)
+win.redraw_rois()
+check("the selected ROI's number is the selected colour",
+      win.roi_labels[2].colour, R.ROI_COLOR_SELECTED)
+check("and the others are not", win.roi_labels[1].colour, R.ROI_COLOR)
+
+# Deleting takes the number with it: a label left behind would name whichever
+# ROI was renumbered into its place.
+win.table.setCurrentCell(1, 0)
+win.delete_roi()
+check("the ROI is gone", [r["roi"] for r in win.rois], [1])
+check("and so is its number", sorted(win.roi_labels), [1])
+win.clear_rois()
+check("clearing takes every number", win.roi_labels, {})
 
 # ── 10. reading an ROI set back in ───────────────────────────────────────────
 print("\n── importing ROIs ──")
