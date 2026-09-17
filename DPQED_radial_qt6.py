@@ -283,6 +283,17 @@ RTC_FACTOR_RE = re.compile(r"(?i)gamma.?to.?sigma")
 # both; the name is tried first and this is the fallback.
 RTC_FACTOR_BAND_KEY = "RTC_GAMMA_TO_SIGMA_BAND"
 
+# The incidence angle, in degrees. Like the RTC factor it is a band of the
+# raster and not a channel, and like it, it is reported per ROI rather than
+# measured as backscatter. DPQED_gcov2tif.py resamples it from the product's
+# metadata/radarGrid cube; a GCOV loaded straight from its '.h5' has the cube
+# itself, and is read from that instead.
+INCIDENCE_RE = re.compile(r"(?i)incidence.?angle")
+INCIDENCE_BAND_KEY = "INCIDENCE_ANGLE_BAND"
+RADAR_GRID_RE = re.compile(
+    r"science/(?P<band>[LS]SAR)/GCOV/metadata/radarGrid/(?P<name>[A-Za-z0-9_]+)$")
+INCIDENCE_NAME = "incidenceAngle"
+
 # Zero is how a SAR product says 'no data' when it declares no nodata value --
 # outside the swath, beyond the frame, masked in processing. Counted as data it
 # drags every mean down and puts an ROI's looks estimate on the floor. Untick
@@ -328,9 +339,10 @@ ROI_FIELDS = (
     ("lat",     "double"),
     ("domain",  "string"),
     ("backscat", "string"),
+    ("inc_deg", "double"),
     ("src",     "string"),
 )
-ROI_TABLE_COLUMNS = ("roi", "name", "kind", "npix", "area_m2")
+ROI_TABLE_COLUMNS = ("roi", "name", "kind", "npix", "area_m2", "inc_deg")
 
 # DBF caps a field name at 10 characters and silently truncates past it, which
 # turns HH_mean_db and HH_med_db into one column. Names are built to fit and
@@ -349,12 +361,15 @@ RASTER_SAMPLE_SIZE = 250000
 
 RGB_DEFAULT_BANDS = (1, 1, 1)    # all three on band 1 renders grey
 
-# A GCOV grid in the HDF5 tree: science/<LSAR|SSAR>/GCOV/grids/frequency<A|B>.
+# A GCOV grid in the HDF5 tree. Products differ over whether the frequency
+# groups sit under 'grids/' or directly under GCOV, so that segment is optional
+# and the group is taken from where a term was actually found rather than
+# rebuilt from a guess -- a layout this file assumed once and got wrong.
 # The diagonal covariance terms are the backscatter; the off-diagonal ones are
 # complex and are not offered.
 GCOV_POL_TERMS = ("HHHH", "HVHV", "VHVH", "VVVV", "RHRH", "RVRV")
 GCOV_GRID_RE = re.compile(
-    r"science/(?P<band>[LS]SAR)/GCOV/grids/frequency(?P<freq>[A-Z])/"
+    r"science/(?P<band>[LS]SAR)/GCOV/(?:grids/)?frequency(?P<freq>[A-Z])/"
     r"(?P<term>[A-Z]{4})$")
 
 
@@ -496,6 +511,63 @@ def factor_band_index(labels):
         if RTC_FACTOR_RE.search(str(label or "")):
             return index
     return None
+
+
+def incidence_band_index(labels):
+    """1-based band number of the incidence angle, or None.
+
+    Taken out of the measured bands for the same reason as the RTC factor: its
+    mean is an angle, and an angle in a column headed mean_db beside the
+    gamma0 columns would be read as a backscatter.
+    """
+    for index, label in enumerate(labels, start=1):
+        if INCIDENCE_RE.search(str(label or "")):
+            return index
+    return None
+
+
+def radar_grid_datasets(paths, band=None):
+    """{name: path} for a band's radarGrid metadata cubes."""
+    found = {}
+    for path in paths:
+        match = RADAR_GRID_RE.search(str(path).strip())
+        if match and (band is None or match.group("band") == band):
+            found[match.group("name")] = str(path).strip()
+    return found
+
+
+def bilinear_at(x_coords, y_coords, values, at_x, at_y):
+    """`values` sampled at one point, bilinearly, or NaN outside its grid.
+
+    For reading a geometry cube at an ROI's centre, where the cube is a few
+    hundred samples across and the point is one. Either coordinate vector may
+    descend -- a north-up grid's y does -- so both are put the same way round
+    first, taking the values with them.
+
+    Outside the grid it returns NaN rather than the nearest edge value: an
+    incidence angle from beyond the cube is an extrapolation, and a plausible
+    looking one, which is worse than a gap that says so.
+    """
+    x = np.asarray(x_coords, dtype=float).ravel()
+    y = np.asarray(y_coords, dtype=float).ravel()
+    grid = np.asarray(values, dtype=float)
+    nan = float("nan")
+    if x.size < 2 or y.size < 2 or grid.shape != (y.size, x.size):
+        return nan
+    if x[-1] < x[0]:
+        x, grid = x[::-1], grid[:, ::-1]
+    if y[-1] < y[0]:
+        y, grid = y[::-1], grid[::-1, :]
+    if not (x[0] <= at_x <= x[-1] and y[0] <= at_y <= y[-1]):
+        return nan
+    i = min(max(int(np.searchsorted(x, at_x, side="right")) - 1, 0), x.size - 2)
+    j = min(max(int(np.searchsorted(y, at_y, side="right")) - 1, 0), y.size - 2)
+    fx = (at_x - x[i]) / (x[i + 1] - x[i]) if x[i + 1] != x[i] else 0.0
+    fy = (at_y - y[j]) / (y[j + 1] - y[j]) if y[j + 1] != y[j] else 0.0
+    return float(grid[j, i] * (1 - fx) * (1 - fy)
+                 + grid[j, i + 1] * fx * (1 - fy)
+                 + grid[j + 1, i] * (1 - fx) * fy
+                 + grid[j + 1, i + 1] * fx * fy)
 
 
 def summarise(stats_list):
@@ -764,6 +836,20 @@ def gcov_grids(subdataset_names):
     return grids
 
 
+def gcov_group_of(dataset_name):
+    """The grid group one term's path sits in, whatever layout the product uses.
+
+    Taken from the match rather than rebuilt from the band and frequency,
+    because the 'grids/' segment is not there in every product and a rebuilt
+    path is a guess that fails as a missing dataset three steps later.
+    """
+    text = str(dataset_name).strip()
+    match = GCOV_GRID_RE.search(text)
+    if not match:
+        return None
+    return text[:match.start("term")].rstrip("/")
+
+
 def gcov_diagonal_terms(terms):
     """The diagonal covariance terms, in a fixed order, from what a grid holds.
 
@@ -1010,6 +1096,10 @@ class RadiometricDashboard(QMainWindow):
         self.measure_bands = []
         self.band_prefixes = []         # the column prefix each one exports under
         self.factor_band = None         # GDAL band number of the RTC factor
+        self.incidence_band = None      # GDAL band number of the incidence angle
+        # (x, y, degrees) read from a '.h5' product's radarGrid, for when the
+        # raster carries no incidence band of its own.
+        self.incidence_cube = None
         self.rois = []                  # plain data; see add_roi for the shape
         self.roi_bands = {}             # id -> QgsRubberBand drawn on the canvas
         self._next_roi_id = 1
@@ -1277,7 +1367,8 @@ class RadiometricDashboard(QMainWindow):
     @staticmethod
     def _table_headers():
         headers = {"roi": "ROI", "name": "Name", "kind": "Kind",
-                   "npix": "Pixels", "area_m2": "Area m²"}
+                   "npix": "Pixels", "area_m2": "Area m²",
+                   "inc_deg": "Inc \u00b0"}
         titles = {key: title for key, title, _, _ in STAT_FIELDS}
         return ([headers[key] for key in ROI_TABLE_COLUMNS]
                 + [titles[key] for key in TABLE_STATS])
@@ -1481,6 +1572,10 @@ class RadiometricDashboard(QMainWindow):
     def load_path(self, path):
         """Load a raster, keeping the ROIs and re-measuring them against it."""
         source = path
+        # A cube belongs to the product it came from, so it goes when another
+        # raster arrives -- otherwise the last GCOV's geometry would be
+        # reported against whatever is loaded next.
+        self.incidence_cube = None
         if path.lower().endswith(H5_EXTS):
             source = self.gcov_vrt_for(path)
             if not source:
@@ -1573,7 +1668,7 @@ class RadiometricDashboard(QMainWindow):
                         "backscatter; the off-diagonal\nterms are complex "
                         "correlations and are not measured here.")
                     return None
-                group = f"science/{key[0]}/GCOV/grids/frequency{key[1]}"
+                group = gcov_group_of(next(iter(grids[key].values())))
                 # The RTC factor rides along when the product has it, so
                 # sigma0 is available without a second file to keep aligned
                 # with this one. It is a band of the raster and not one of the
@@ -1588,6 +1683,8 @@ class RadiometricDashboard(QMainWindow):
                     handle[f"{group}/xCoordinates"][()],
                     handle[f"{group}/yCoordinates"][()])
                 epsg = int(np.asarray(handle[f"{group}/projection"][()]).ravel()[0])
+                self.incidence_cube = self._read_incidence_cube(handle, paths,
+                                                                key[0])
         except KeyError as e:
             QMessageBox.critical(
                 self, "GCOV",
@@ -1622,6 +1719,41 @@ class RadiometricDashboard(QMainWindow):
               + (f" (+ {', '.join(extras)})" if extras else "")
               + f" ({width} x {height}, EPSG:{epsg}) -> {vrt_path}")
         return vrt_path
+
+    @staticmethod
+    def _read_incidence_cube(handle, paths, band):
+        """(x, y, degrees) from a product's radarGrid, or None.
+
+        The layer nearest the ellipsoid is taken. Choosing between a cube's
+        heights properly needs a DEM, which this does not have; across the
+        heights a cube spans the angle moves far less than the difference
+        between two ROIs, so the nearest layer is used and the height is
+        printed rather than left implicit.
+        """
+        cubes = radar_grid_datasets(paths, band)
+        if INCIDENCE_NAME not in cubes:
+            return None
+        try:
+            values = np.asarray(handle[cubes[INCIDENCE_NAME]][()], dtype=float)
+            if values.ndim == 3:
+                index = 0
+                if "heightAboveEllipsoid" in cubes:
+                    heights = np.asarray(
+                        handle[cubes["heightAboveEllipsoid"]][()],
+                        dtype=float).ravel()
+                    index = int(np.argmin(np.abs(heights)))
+                    print(f"[GCOV] incidence angle at {heights[index]:.0f} m "
+                          f"above the ellipsoid")
+                values = values[index]
+            cube = (np.asarray(handle[cubes["xCoordinates"]][()], dtype=float),
+                    np.asarray(handle[cubes["yCoordinates"]][()], dtype=float),
+                    values)
+            print(f"[GCOV] incidence angle cube {values.shape}: ROI centres "
+                  f"will be interpolated from it")
+            return cube
+        except Exception as e:
+            print(f"[GCOV] incidence cube unreadable: {e}")
+            return None
 
     # ── NORMALIZE: SAR SQRT-GAMMA STRETCH ────────────────────────────────────
     def view_extent(self):
@@ -1797,16 +1929,22 @@ class RadiometricDashboard(QMainWindow):
             self.overlay.hide()
             self.band_labels, self.band_prefixes = [], []
             self.measure_bands, self.factor_band = [], None
+            self.incidence_band = None
             return
         self.clear_stretch_cache(layer.source())
         self.norm_bounds = {}
         labels = self._band_labels(layer)
         self.band_labels = labels
         self.factor_band = (factor_band_index(labels)
-                            or self._factor_band_from_metadata(layer, len(labels)))
+                            or self._band_from_metadata(
+                                layer, RTC_FACTOR_BAND_KEY, len(labels)))
+        self.incidence_band = (incidence_band_index(labels)
+                               or self._band_from_metadata(
+                                   layer, INCIDENCE_BAND_KEY, len(labels)))
+        skip = {self.factor_band, self.incidence_band}
         self.measure_bands = [(index, label)
                               for index, label in enumerate(labels, start=1)
-                              if index != self.factor_band]
+                              if index not in skip]
         self.band_prefixes = [band_prefix(label, index)
                               for index, label in self.measure_bands]
         count = len(labels)
@@ -1854,23 +1992,30 @@ class RadiometricDashboard(QMainWindow):
         if self.factor_band is not None:
             print(f"[BANDS] band {self.factor_band} is the RTC "
                   f"gamma-to-sigma factor: not measured, sigma0 available")
+        if self.incidence_band is not None:
+            print(f"[BANDS] band {self.incidence_band} is the incidence "
+                  f"angle: not measured, reported per ROI")
+        elif self.incidence_cube is None:
+            print("[BANDS] no incidence angle in this raster: the inc_deg "
+                  "column will be empty")
         self.apply_bands()
 
-    def _factor_band_from_metadata(self, layer, band_count):
-        """The factor's band number as the raster's header declares it, or None.
+    def _band_from_metadata(self, layer, key, band_count):
+        """A band number the raster's header declares, or None.
 
         A GeoTIFF band carries a description, but a writer has to go out of its
-        way to set one and most do not -- so a TIF can hold the factor in a
-        band nothing names. RTC_GAMMA_TO_SIGMA_BAND says which band that is.
-        It is only consulted when no band name matches, so a file that says
-        both and disagrees with itself is read the way a person would read it.
+        way to set one and most do not -- so a TIF can hold the RTC factor, or
+        the incidence angle, in a band nothing names. These headers say which
+        band that is. They are only consulted when no band name matches, so a
+        file that says both and disagrees with itself is read the way a person
+        would read it.
         """
         try:
             from osgeo import gdal
             ds = gdal.Open(layer.source(), gdal.GA_ReadOnly)
             if ds is None:
                 return None
-            raw = ds.GetMetadataItem(RTC_FACTOR_BAND_KEY)
+            raw = ds.GetMetadataItem(key)
             ds = None
             if raw is None:
                 return None
@@ -1878,11 +2023,10 @@ class RadiometricDashboard(QMainWindow):
         except Exception:
             return None
         if not 1 <= number <= band_count:
-            print(f"[BANDS] {RTC_FACTOR_BAND_KEY}={raw} is not one of this "
-                  f"raster's {band_count} band(s); ignored")
+            print(f"[BANDS] {key}={raw} is not one of this raster's "
+                  f"{band_count} band(s); ignored")
             return None
-        print(f"[BANDS] band {number} declared as the RTC factor by the "
-              f"raster's {RTC_FACTOR_BAND_KEY} header")
+        print(f"[BANDS] band {number} declared by the raster's {key} header")
         return number
 
     def _selected_bands(self):
@@ -2163,6 +2307,7 @@ class RadiometricDashboard(QMainWindow):
         roi["npix"] = 0
         roi["domain"] = self.domain()
         roi["backscat"] = BACKSCATTER_GAMMA0
+        roi["inc_deg"] = self._incidence_from_cube(roi)
         roi["src"] = os.path.basename(self.raster_path)
         layer = self.raster_layer
         if layer is None or not layer.isValid() or not self.measure_bands:
@@ -2215,6 +2360,9 @@ class RadiometricDashboard(QMainWindow):
             factor, factor_ok = self._rtc_factor(ds, window)
             if factor is not None:
                 roi["backscat"] = BACKSCATTER_SIGMA0
+            angle = self._incidence_from_band(ds, window, mask, ring, gt, px, py)
+            if angle is not None:
+                roi["inc_deg"] = angle
             for index, label in self.measure_bands:
                 band = ds.GetRasterBand(index)
                 if band is None:
@@ -2275,6 +2423,59 @@ class RadiometricDashboard(QMainWindow):
             print(f"[STATS] RTC factor: {e}")
             return (None, None)
 
+    def _incidence_from_band(self, ds, window, mask, ring, gt, px, py):
+        """The ROI's incidence angle, in degrees, from the raster's own band.
+
+        At the ROI's centre, which is the figure an incidence angle is quoted
+        as -- and where that pixel has none, the mean over the ROI, so a centre
+        landing on a gap does not lose the column. Incidence varies by well
+        under a degree across an ROI of the size this tool is for, so the two
+        agree to the second decimal; the fallback is about robustness, not
+        about a different measurement.
+        """
+        if self.incidence_band is None:
+            return None
+        try:
+            band = ds.GetRasterBand(self.incidence_band)
+            if band is None:
+                return None
+            col0, row0, ncol, nrow = window
+            data = band.ReadAsArray(col0, row0, ncol, nrow)
+            if data is None:
+                return None
+            data = data.astype(float)
+            good = mask & valid_mask(data, band.GetNoDataValue(), False)
+            if not good.any():
+                return None
+            centre = ring_centroid(ring)
+            if centre is not None:
+                col = int((centre[0] - gt[0]) / px) - col0
+                row = int((gt[3] - centre[1]) / py) - row0
+                if 0 <= row < nrow and 0 <= col < ncol and good[row, col]:
+                    return float(data[row, col])
+            return float(data[good].mean())
+        except Exception as e:
+            print(f"[STATS] incidence: {e}")
+            return None
+
+    def _incidence_from_cube(self, roi):
+        """The ROI centre's incidence angle from a '.h5' product's own cube.
+
+        Used when the raster carries no incidence band -- which is every VRT
+        built from an HDF5, since a VRT stacks datasets on one grid and the
+        geometry cubes are on another, coarser one at several heights. The cube
+        is read once when the product loads and sampled per ROI here, which is
+        cheaper than resampling it onto the image grid to read one value off it.
+        """
+        cube = self.incidence_cube
+        if not cube:
+            return None
+        centre = ring_centroid(roi.get("ring") or [])
+        if centre is None:
+            return None
+        value = bilinear_at(cube[0], cube[1], cube[2], centre[0], centre[1])
+        return None if not np.isfinite(value) else float(value)
+
     def recompute_all(self, reason=""):
         """Re-measure every ROI, after a change to what is being measured."""
         if not self.rois:
@@ -2301,7 +2502,8 @@ class RadiometricDashboard(QMainWindow):
             for row, roi in enumerate(self.rois):
                 stats = (roi.get("stats") or {}).get(band) or {}
                 values = [str(roi["roi"]), roi["name"], roi["kind"],
-                          f"{roi['npix']}", f"{roi['area_m2']:.1f}"]
+                          f"{roi['npix']}", f"{roi['area_m2']:.1f}",
+                          format_stat(roi.get("inc_deg"), "{:.2f}")]
                 values += [format_stat(stats.get(key), formats[key])
                            for key in TABLE_STATS]
                 for column, text in enumerate(values):
@@ -2363,6 +2565,7 @@ class RadiometricDashboard(QMainWindow):
             f"lon/lat {lon}, {lat}",
             f"  {roi.get('backscat')}, read as {roi.get('domain')}, "
             f"from {roi.get('src') or '(no raster)'}",
+            f"  incidence {format_stat(roi.get('inc_deg'), '{:.2f}')} deg",
             "",
             f"  {'band':<10}{'n':>8}{'mean dB':>10}{'std dB':>9}{'cv':>8}"
             f"{'ENL':>8}{'p5 dB':>9}{'p95 dB':>9}{'nonpos':>8}",

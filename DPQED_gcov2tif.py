@@ -83,7 +83,6 @@ BLOCK_ROWS = 1024
 TIFF_OPTIONS = ("TILED=YES", "BLOCKXSIZE=256", "BLOCKYSIZE=256",
                 "COMPRESS=DEFLATE", "PREDICTOR=3", "BIGTIFF=IF_SAFER",
                 "NUM_THREADS=ALL_CPUS")
-OVERVIEW_LEVELS = (2, 4, 8, 16, 32)
 
 # Cloud Optimized GeoTIFF, written by GDAL's own COG driver rather than
 # assembled here: the layout is the whole point of the format and a hand-rolled
@@ -97,6 +96,8 @@ COG_OPTIONS = ("COMPRESS=DEFLATE", "PREDICTOR=FLOATING_POINT", "BLOCKSIZE=256",
 # The header item naming the factor's band, for a reader that cannot rely on
 # band descriptions surviving whatever wrote the file.
 RTC_FACTOR_BAND_KEY = "RTC_GAMMA_TO_SIGMA_BAND"
+INCIDENCE_BAND_KEY = "INCIDENCE_ANGLE_BAND"
+INCIDENCE_HEIGHT_KEY = "INCIDENCE_ANGLE_HEIGHT_M"
 
 
 # ── BEGIN SHARED GCOV HELPERS ─────────────────────────────────────────────────
@@ -107,9 +108,20 @@ RTC_FACTOR_BAND_KEY = "RTC_GAMMA_TO_SIGMA_BAND"
 
 GCOV_POL_TERMS = ("HHHH", "HVHV", "VHVH", "VVVV", "RHRH", "RVRV")
 GCOV_GRID_RE = re.compile(
-    r"science/(?P<band>[LS]SAR)/GCOV/grids/frequency(?P<freq>[A-Z])/"
+    r"science/(?P<band>[LS]SAR)/GCOV/(?:grids/)?frequency(?P<freq>[A-Z])/"
     r"(?P<term>[A-Z]{4})$")
 RTC_FACTOR_RE = re.compile(r"(?i)gamma.?to.?sigma")
+
+# The geometry cubes, which sit under metadata rather than with the grids and
+# are sampled on their own coarse grid at several heights above the ellipsoid.
+RADAR_GRID_RE = re.compile(
+    r"science/(?P<band>[LS]SAR)/GCOV/metadata/radarGrid/(?P<name>[A-Za-z0-9_]+)$")
+INCIDENCE_NAME = "incidenceAngle"
+
+# Which height layer of a cube to take. Without a DEM there is nothing to
+# choose one with, so the layer nearest the ellipsoid is used and the height
+# actually taken is written into the TIFF's header rather than left implicit.
+INCIDENCE_HEIGHT_M = 0.0
 
 
 def gcov_grids(subdataset_names):
@@ -126,6 +138,20 @@ def gcov_grids(subdataset_names):
             key = (match.group("band"), match.group("freq"))
             grids.setdefault(key, {})[match.group("term")] = str(name).strip()
     return grids
+
+
+def gcov_group_of(dataset_name):
+    """The grid group one term's path sits in, whatever layout the product uses.
+
+    Taken from the match rather than rebuilt from the band and frequency,
+    because the 'grids/' segment is not there in every product and a rebuilt
+    path is a guess that fails as a missing dataset three steps later.
+    """
+    text = str(dataset_name).strip()
+    match = GCOV_GRID_RE.search(text)
+    if not match:
+        return None
+    return text[:match.start("term")].rstrip("/")
 
 
 def gcov_diagonal_terms(terms):
@@ -162,6 +188,85 @@ def geotransform_from_coords(x_coords, y_coords, tol=1e-6):
 
 
 # ── END SHARED GCOV HELPERS ───────────────────────────────────────────────────
+
+
+def _axis_weights(axis, wanted):
+    """Bracketing index and fraction along one ascending axis, per wanted value.
+
+    Values off either end come back flagged rather than clamped: an incidence
+    angle taken from beyond the cube is an extrapolation, and a plausible
+    looking one, which is worse than a gap that says so.
+    """
+    index = np.clip(np.searchsorted(axis, wanted, side="right") - 1,
+                    0, axis.size - 2)
+    lower, upper = axis[index], axis[index + 1]
+    span = np.where(upper > lower, upper - lower, 1.0)
+    frac = np.clip((wanted - lower) / span, 0.0, 1.0)
+    inside = (wanted >= axis[0]) & (wanted <= axis[-1])
+    return index, frac, inside
+
+
+def bilinear_grid(x_src, y_src, values, x_dst, y_dst):
+    """`values` resampled onto the destination coordinate vectors.
+
+    Bilinear, and vectorized over the whole destination block: a geometry cube
+    is a few hundred samples across and the image grid is tens of thousands, so
+    a per-pixel loop in Python would take longer than every other part of a
+    conversion put together.
+
+    Either set of coordinates may descend -- a north-up grid's y does -- so
+    both are put the same way round first, taking the values with them.
+    """
+    x = np.asarray(x_src, dtype=float).ravel()
+    y = np.asarray(y_src, dtype=float).ravel()
+    grid = np.asarray(values, dtype=float)
+    if x.size < 2 or y.size < 2 or grid.shape != (y.size, x.size):
+        raise ValueError(f"cube is {grid.shape}, not {(y.size, x.size)}")
+    if x[-1] < x[0]:
+        x, grid = x[::-1], grid[:, ::-1]
+    if y[-1] < y[0]:
+        y, grid = y[::-1], grid[::-1, :]
+    xi, fx, x_in = _axis_weights(x, np.asarray(x_dst, dtype=float).ravel())
+    yi, fy, y_in = _axis_weights(y, np.asarray(y_dst, dtype=float).ravel())
+    g00 = grid[np.ix_(yi, xi)]
+    g01 = grid[np.ix_(yi, xi + 1)]
+    g10 = grid[np.ix_(yi + 1, xi)]
+    g11 = grid[np.ix_(yi + 1, xi + 1)]
+    fx_, fy_ = fx[None, :], fy[:, None]
+    out = (g00 * (1 - fx_) * (1 - fy_) + g01 * fx_ * (1 - fy_)
+           + g10 * (1 - fx_) * fy_ + g11 * fx_ * fy_)
+    return np.where(y_in[:, None] & x_in[None, :], out, np.nan)
+
+
+def radar_grid_datasets(paths, band=None):
+    """{name: path} for a band's radarGrid metadata cubes."""
+    found = {}
+    for path in paths:
+        match = RADAR_GRID_RE.search(str(path).strip())
+        if match and (band is None or match.group("band") == band):
+            found[match.group("name")] = str(path).strip()
+    return found
+
+
+def height_layer(cube, heights=None, at_height=INCIDENCE_HEIGHT_M):
+    """One (y, x) layer of a cube, and the height it was taken at.
+
+    A radarGrid cube is sampled at several heights above the ellipsoid, because
+    where a point images from depends on how high it is. Choosing between them
+    properly needs a DEM; this has none, so it takes the layer nearest
+    `at_height` and returns which one it was, for the header to record. A cube
+    that is already two-dimensional is returned as it is.
+    """
+    cube = np.asarray(cube)
+    if cube.ndim == 2:
+        return cube, None
+    if cube.ndim != 3:
+        raise ValueError(f"a radarGrid cube is 2- or 3-D, not {cube.ndim}-D")
+    if heights is None:
+        return cube[0], None
+    heights = np.asarray(heights, dtype=float).ravel()
+    index = int(np.argmin(np.abs(heights - float(at_height))))
+    return cube[index], float(heights[index])
 
 
 def choose_grid(grids, band=None, frequency=None):
@@ -221,7 +326,7 @@ def describe(h5_path, handle=None):
         if not grids:
             return ["no GCOV grids in this file"]
         for key in sorted(grids):
-            group = f"science/{key[0]}/GCOV/grids/frequency{key[1]}"
+            group = gcov_group_of(next(iter(grids[key].values())))
             members = sorted(handle[group])
             terms = gcov_diagonal_terms(members)
             factor = [m for m in members if RTC_FACTOR_RE.search(m)]
@@ -256,23 +361,24 @@ def _pick_writer():
 
 
 def convert(h5_path, out_path=None, band=None, frequency=None,
-            with_factor=True, cog=True, verbose=True):
+            with_factor=True, with_incidence=True, cog=True, verbose=True):
     """Write one GCOV grid to a GeoTIFF. Returns the path written."""
     import h5py
 
     with h5py.File(h5_path, "r") as handle:
         paths = []
         handle.visit(paths.append)
-        key = choose_grid(gcov_grids(paths), band, frequency)
-        group = f"science/{key[0]}/GCOV/grids/frequency{key[1]}"
+        all_grids = gcov_grids(paths)
+        key = choose_grid(all_grids, band, frequency)
+        group = gcov_group_of(next(iter(all_grids[key].values())))
         members = list(handle[group])
         names, factor_band = plan_bands(members, with_factor)
 
         first = handle[f"{group}/{names[0]}"]
         height, width = int(first.shape[0]), int(first.shape[1])
-        geotransform = geotransform_from_coords(
-            handle[f"{group}/xCoordinates"][()],
-            handle[f"{group}/yCoordinates"][()])
+        x_grid = np.asarray(handle[f"{group}/xCoordinates"][()], dtype=float)
+        y_grid = np.asarray(handle[f"{group}/yCoordinates"][()], dtype=float)
+        geotransform = geotransform_from_coords(x_grid, y_grid)
         epsg = int(np.asarray(handle[f"{group}/projection"][()]).ravel()[0])
 
         for name in names:
@@ -282,6 +388,27 @@ def convert(h5_path, out_path=None, band=None, frequency=None,
                     f"{name} is {shape}, not {(height, width)}: the bands of "
                     "one GeoTIFF have to be on one grid")
 
+        # Each band is a name and a way to produce its rows, so a band that is
+        # computed rather than copied -- the incidence angle, resampled from a
+        # cube on another grid entirely -- is written by the same loop.
+        layers = [(name, _dataset_reader(handle[f"{group}/{name}"]))
+                  for name in names]
+        incidence_band = incidence_height = None
+        if with_incidence:
+            cubes = radar_grid_datasets(paths, key[0])
+            if INCIDENCE_NAME in cubes:
+                layer, incidence_height = height_layer(
+                    handle[cubes[INCIDENCE_NAME]][()],
+                    handle[cubes["heightAboveEllipsoid"]][()]
+                    if "heightAboveEllipsoid" in cubes else None)
+                layers.append((INCIDENCE_NAME, _cube_reader(
+                    handle[cubes["xCoordinates"]][()],
+                    handle[cubes["yCoordinates"]][()], layer, x_grid, y_grid)))
+                incidence_band = len(layers)
+            elif verbose:
+                print("[GCOV] no incidenceAngle cube under metadata/radarGrid: "
+                      "no incidence column from this TIF")
+
         if out_path is None:
             out_path = os.path.splitext(h5_path)[0] + "_gcov.tif"
         metadata = {
@@ -289,17 +416,25 @@ def convert(h5_path, out_path=None, band=None, frequency=None,
             "NISAR_BAND": key[0],
             "NISAR_FREQUENCY": key[1],
             "BACKSCATTER": "gamma0",
-            "GCOV2TIF_BANDS": ",".join(names),
+            "GCOV2TIF_BANDS": ",".join(name for name, _ in layers),
         }
         if factor_band:
             metadata[RTC_FACTOR_BAND_KEY] = str(factor_band)
+        if incidence_band:
+            metadata[INCIDENCE_BAND_KEY] = str(incidence_band)
+            if incidence_height is not None:
+                metadata[INCIDENCE_HEIGHT_KEY] = f"{incidence_height:.1f}"
 
         if verbose:
             print(f"[GCOV] {key[0]} frequency{key[1]}: {width} x {height}, "
                   f"EPSG:{epsg}")
-            for number, name in enumerate(names, start=1):
-                note = "  <- RTC gamma-to-sigma factor" if number == factor_band else ""
-                print(f"[GCOV]   band {number}: {name}{note}")
+            notes = {factor_band: "  <- RTC gamma-to-sigma factor",
+                     incidence_band: "  <- incidence angle, degrees"}
+            for number, (name, _) in enumerate(layers, start=1):
+                print(f"[GCOV]   band {number}: {name}{notes.get(number, '')}")
+            if incidence_height is not None:
+                print(f"[GCOV]   incidence taken at "
+                      f"{incidence_height:.1f} m above the ellipsoid")
             if factor_band is None:
                 print("[GCOV]   no RTC factor written: sigma0 will not be "
                       "selectable from this TIF")
@@ -314,8 +449,8 @@ def convert(h5_path, out_path=None, band=None, frequency=None,
         # 20 GB product is not copied across devices to finish.
         staged = out_path + ".building.tif" if cog else out_path
         try:
-            writer(staged, handle, group, names, width, height, geotransform,
-                   epsg, metadata, False, verbose)
+            writer(staged, layers, width, height, geotransform,
+                   epsg, metadata, verbose)
             if cog:
                 _to_cog(staged, out_path, verbose)
         finally:
@@ -359,16 +494,35 @@ def _to_cog(staged, out_path, verbose=True):
                          **dict(option.split("=", 1) for option in COG_OPTIONS))
 
 
+def _dataset_reader(dataset):
+    """Rows of an HDF5 dataset, as the writer asks for them."""
+    return lambda row0, rows: np.asarray(dataset[row0:row0 + rows, :],
+                                         dtype=np.float32)
+
+
+def _cube_reader(x_src, y_src, layer, x_grid, y_grid):
+    """Rows of a geometry cube resampled onto the image grid.
+
+    Resampled a block at a time rather than whole: the destination is the full
+    image grid, and materialising an incidence angle for twenty thousand rows
+    at once costs as much memory as a covariance term.
+    """
+    def read(row0, rows):
+        return bilinear_grid(x_src, y_src, layer, x_grid,
+                             y_grid[row0:row0 + rows]).astype(np.float32)
+    return read
+
+
 def _blocks(height, rows=BLOCK_ROWS):
     for row0 in range(0, height, rows):
         yield row0, min(rows, height - row0)
 
 
-def _gdal_writer(out_path, handle, group, names, width, height, geotransform,
-                 epsg, metadata, overviews=False, verbose=True):
+def _gdal_writer(out_path, layers, width, height, geotransform,
+                 epsg, metadata, verbose=True):
     from osgeo import gdal, osr
     driver = gdal.GetDriverByName("GTiff")
-    ds = driver.Create(out_path, width, height, len(names), gdal.GDT_Float32,
+    ds = driver.Create(out_path, width, height, len(layers), gdal.GDT_Float32,
                        options=list(TIFF_OPTIONS))
     if ds is None:
         raise RuntimeError(f"GDAL could not create {out_path}")
@@ -378,35 +532,26 @@ def _gdal_writer(out_path, handle, group, names, width, height, geotransform,
         srs.ImportFromEPSG(int(epsg))
         ds.SetProjection(srs.ExportToWkt())
         ds.SetMetadata({k: str(v) for k, v in metadata.items()})
-        for number, name in enumerate(names, start=1):
+        for number, (name, read) in enumerate(layers, start=1):
             band = ds.GetRasterBand(number)
             band.SetDescription(name)       # what RADIAL reads the column from
             band.SetNoDataValue(float("nan"))
-            source = handle[f"{group}/{name}"]
             for row0, rows in _blocks(height):
-                band.WriteArray(
-                    np.asarray(source[row0:row0 + rows, :], dtype=np.float32),
-                    0, row0)
+                band.WriteArray(read(row0, rows), 0, row0)
             band.FlushCache()
-        if overviews:
-            if verbose:
-                print("[GCOV] building overviews ...")
-            ds.BuildOverviews("AVERAGE", list(OVERVIEW_LEVELS))
     finally:
         ds = None
 
 
-def _rasterio_writer(out_path, handle, group, names, width, height,
-                     geotransform, epsg, metadata, overviews=False,
-                     verbose=True):
+def _rasterio_writer(out_path, layers, width, height,
+                     geotransform, epsg, metadata, verbose=True):
     import rasterio
     from rasterio.crs import CRS
-    from rasterio.enums import Resampling
     from rasterio.transform import Affine
     from rasterio.windows import Window
     profile = {
         "driver": "GTiff", "width": width, "height": height,
-        "count": len(names), "dtype": "float32",
+        "count": len(layers), "dtype": "float32",
         "crs": CRS.from_epsg(int(epsg)),
         "transform": Affine.from_gdal(*geotransform),
         "nodata": float("nan"), "tiled": True, "blockxsize": 256,
@@ -414,18 +559,12 @@ def _rasterio_writer(out_path, handle, group, names, width, height,
         "BIGTIFF": "IF_SAFER",
     }
     with rasterio.open(out_path, "w", **profile) as dst:
-        for number, name in enumerate(names, start=1):
-            source = handle[f"{group}/{name}"]
+        for number, (name, read) in enumerate(layers, start=1):
             for row0, rows in _blocks(height):
-                dst.write(
-                    np.asarray(source[row0:row0 + rows, :], dtype=np.float32),
-                    number, window=Window(0, row0, width, rows))
-        dst.descriptions = tuple(names)
+                dst.write(read(row0, rows), number,
+                          window=Window(0, row0, width, rows))
+        dst.descriptions = tuple(name for name, _ in layers)
         dst.update_tags(**{k: str(v) for k, v in metadata.items()})
-        if overviews:
-            if verbose:
-                print("[GCOV] building overviews ...")
-            dst.build_overviews(list(OVERVIEW_LEVELS), Resampling.average)
 
 
 def main(argv=None):
@@ -442,6 +581,9 @@ def main(argv=None):
     parser.add_argument("--no-factor", action="store_true",
                         help="leave out rtcGammaToSigmaFactor -- sigma0 is "
                              "then unavailable from the TIF")
+    parser.add_argument("--no-incidence", action="store_true",
+                        help="leave out the incidence angle band, which is "
+                             "resampled from metadata/radarGrid")
     parser.add_argument("--no-cog", action="store_true",
                         help="write a plain tiled GeoTIFF instead of a Cloud "
                              "Optimized one -- no overview pyramid, and no "
@@ -469,7 +611,8 @@ def main(argv=None):
                 print(line)
             return 0
         convert(args.input, args.output, args.band, args.frequency,
-                not args.no_factor, not args.no_cog, not args.quiet)
+                not args.no_factor, not args.no_incidence, not args.no_cog,
+                not args.quiet)
     except (ValueError, OSError, KeyError, RuntimeError) as e:
         print(f"DPQED_gcov2tif: {e}", file=sys.stderr)
         return 1

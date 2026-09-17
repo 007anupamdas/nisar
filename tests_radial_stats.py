@@ -204,6 +204,66 @@ check("and a band that merely mentions sigma is not it",
       H["factor_band_index"](["sigma0_HH", "gamma0_HV"]), None)
 check("no bands at all", H["factor_band_index"]([]), None)
 
+# ── 4c. SAMPLING A GEOMETRY CUBE ──────────────────────────────────────────────
+# The incidence angle comes off a coarse cube at the ROI's centre. A bilinear
+# interpolator has one defining property -- it reproduces a linear function
+# exactly -- and one decision worth pinning: what it does outside its grid.
+print("\n── sampling a cube ──")
+cx = np.linspace(500000.0, 500800.0, 9)
+cy = np.linspace(4001000.0, 4000200.0, 7)          # descending, as north-up is
+plane = 34.0 + 3e-5 * (cx[None, :] - cx[0]) + 1e-5 * (cy[0] - cy[:, None])
+
+
+def plane_at(x, y):
+    return 34.0 + 3e-5 * (x - cx[0]) + 1e-5 * (cy[0] - y)
+
+
+for x, y in ((500000.0, 4001000.0), (500413.0, 4000561.0),
+             (500800.0, 4000200.0), (500123.4, 4000987.6)):
+    close(f"a plane is reproduced at ({x:.0f}, {y:.0f})",
+          H["bilinear_at"](cx, cy, plane, x, y), plane_at(x, y), 1e-9)
+# Ascending y as well: the vectors are flipped internally, values with them.
+close("and with the y vector the other way up",
+      H["bilinear_at"](cx, cy[::-1], plane[::-1, :], 500413.0, 4000561.0),
+      plane_at(500413.0, 4000561.0), 1e-9)
+for x, y in ((499999.0, 4000600.0), (500801.0, 4000600.0),
+             (500400.0, 4001001.0), (500400.0, 4000199.0)):
+    is_nan(f"outside the cube at ({x:.0f}, {y:.0f})",
+           H["bilinear_at"](cx, cy, plane, x, y))
+is_nan("a cube whose shape does not match its vectors",
+       H["bilinear_at"](cx, cy, plane[:, :3], 500400.0, 4000600.0))
+is_nan("a one-sample axis", H["bilinear_at"]([1.0], cy, plane, 1.0, 4000600.0))
+
+print("\n── finding the incidence band ──")
+check("NISAR's own name", H["incidence_band_index"](
+    ["HHHH", "HVHV", "rtcGammaToSigmaFactor", "incidenceAngle"]), 4)
+check("however QGIS labelled it",
+      H["incidence_band_index"](["1: HHHH", "2: incidence_angle"]), 2)
+check("a product without one",
+      H["incidence_band_index"](["HHHH", "HVHV"]), None)
+check("the radarGrid cubes are found by band",
+      sorted(H["radar_grid_datasets"]([
+          "science/LSAR/GCOV/metadata/radarGrid/incidenceAngle",
+          "science/LSAR/GCOV/metadata/radarGrid/xCoordinates",
+          "science/SSAR/GCOV/metadata/radarGrid/incidenceAngle",
+      ], "LSAR")), ["incidenceAngle", "xCoordinates"])
+
+print("\n── either GCOV group layout ──")
+# The 'grids/' segment is not in every product, and the group is taken from
+# where a term was found rather than rebuilt from band and frequency.
+for layout in ("science/LSAR/GCOV/grids/frequencyA/HHHH",
+               "science/LSAR/GCOV/frequencyA/HHHH"):
+    check(f"{layout.split('GCOV/')[1]} parses",
+          sorted(H["gcov_grids"]([layout])), [("LSAR", "A")])
+check("and the group comes from the path",
+      H["gcov_group_of"]("science/LSAR/GCOV/frequencyA/HHHH"),
+      "science/LSAR/GCOV/frequencyA")
+check("including a GDAL subdataset spelling",
+      H["gcov_group_of"](
+          'HDF5:"/d/x.h5"://science/SSAR/GCOV/grids/frequencyB/VVVV'),
+      'HDF5:"/d/x.h5"://science/SSAR/GCOV/grids/frequencyB')
+check("something that is not a term", H["gcov_group_of"]("science/x"), None)
+
 # ── 5. WHAT COUNTS AS A PIXEL ─────────────────────────────────────────────────
 # Zero is fill in power and in amplitude, and a perfectly ordinary bright pixel
 # in dB. NaN has to be excluded explicitly: it equals nothing, itself included,

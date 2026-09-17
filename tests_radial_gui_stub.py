@@ -790,6 +790,75 @@ check("and a figure is never labelled sigma0 without the conversion",
       no_factor["backscat"], R.BACKSCATTER_GAMMA0)
 win.backscatter_combo.setCurrentIndex(0)
 
+# ── 10c. the incidence angle per ROI ─────────────────────────────────────────
+# A band named incidenceAngle is reported per ROI and never measured as
+# backscatter. The fixture's band is a plane, so the value at the ROI centre is
+# something the test can compute independently.
+print("\n── incidence angle ──")
+gt_x, gt_y, step = GT[0], GT[3], GT[1]
+cols = np.arange(200)
+rows = np.arange(200)
+xs = gt_x + step * (cols + 0.5)
+ys = gt_y - step * (rows + 0.5)
+incidence = 34.0 + 3e-5 * (xs[None, :] - gt_x) + 1e-5 * (gt_y - ys[:, None])
+install_gdal([hh, hv, factor, incidence], GT)
+inc_layer = fake_layer(bands=4)
+inc_layer.bandName.side_effect = lambda b: [
+    "HHHH", "HVHV", "rtcGammaToSigmaFactor", "incidenceAngle"][b - 1]
+win.raster_layer = inc_layer
+win.band_combos = [_Combo(), _Combo(), _Combo()]
+win.stats_band_combo = _Combo()
+win.populate_band_picker(inc_layer)
+
+check("the incidence band is found", win.incidence_band, 4)
+check("and is not measured as backscatter",
+      [label for _, label in win.measure_bands], ["1: HHHH", "2: HVHV"])
+check("nor exported as a column", win.band_prefixes, ["HH", "HV"])
+
+win.rois = []
+win._next_roi_id = 1
+inc_roi = win.add_roi(patch_ring, "rect")
+centre = R.ring_centroid(patch_ring)
+expected = 34.0 + 3e-5 * (centre[0] - gt_x) + 1e-5 * (gt_y - centre[1])
+ok("the ROI reports its centre's incidence",
+   abs(inc_roi["inc_deg"] - expected) < 0.01,
+   f"{inc_roi['inc_deg']:.4f} vs {expected:.4f} deg")
+check("it is a column of the table",
+      win.table.text(0, R.ROI_TABLE_COLUMNS.index("inc_deg")),
+      R.format_stat(inc_roi["inc_deg"], "{:.2f}"))
+check("and of the export", "inc_deg" in [n for n, _ in R.ROI_FIELDS], True)
+
+# A raster with no incidence at all leaves the column empty rather than
+# inventing a number.
+install_gdal([hh, hv], GT)
+bare = fake_layer(bands=2)
+bare.bandName.side_effect = lambda b: ["HHHH", "HVHV"][b - 1]
+win.band_combos = [_Combo(), _Combo(), _Combo()]
+win.stats_band_combo = _Combo()
+win.populate_band_picker(bare)
+win.raster_layer = bare
+win.rois = []
+win._next_roi_id = 1
+check("no incidence band", win.incidence_band, None)
+check("so no angle is reported", win.add_roi(patch_ring, "rect")["inc_deg"], None)
+
+# The other source: a '.h5' product's own cube, sampled at the ROI centre.
+print("\n── incidence from a cube ──")
+cube_x = np.linspace(gt_x - step, gt_x + 201 * step, 9)
+cube_y = np.linspace(gt_y + step, gt_y - 201 * step, 7)
+cube_v = 34.0 + 3e-5 * (cube_x[None, :] - gt_x) + 1e-5 * (gt_y - cube_y[:, None])
+win.incidence_cube = (cube_x, cube_y, cube_v)
+win.rois = []
+win._next_roi_id = 1
+from_cube = win.add_roi(patch_ring, "rect")
+ok("the cube is sampled at the ROI centre",
+   abs(from_cube["inc_deg"] - expected) < 0.01,
+   f"{from_cube['inc_deg']:.4f} vs {expected:.4f} deg")
+far = win.add_roi(R.rect_ring(9e6, 9e6, 9e6 + 200, 9e6 + 200), "rect")
+check("an ROI off the cube gets no angle rather than an extrapolated one",
+      far["inc_deg"] if far else None, None)
+win.incidence_cube = None
+
 # ── 11. a NISAR GCOV '.h5' becomes a georeferenced VRT ───────────────────────
 print("\n── GCOV HDF5 ──")
 
