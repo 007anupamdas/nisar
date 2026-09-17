@@ -347,6 +347,73 @@ except ValueError as e:
     ok("a frequency that is not there is refused, and says what is",
        "frequencyA" in str(e), str(e))
 
+# ── 5b. the band comes from the name, the file has the last word ─────────────
+print("\n── which band ──")
+# Real granule names put the band in the second field beside the processing
+# level, not as a whole 'LSAR' tag -- which is why RIVAL's band_from_name
+# returns None for every one of them and falls back to the sidecar.
+for name, want in (
+        ("NISAR_L2_PR_GCOV_028_084_A_010_4005_DHDH_A_20260819T001734.h5", "LSAR"),
+        ("NISAR_S2_PR_GCOV_019_105_A_018_3700_DHNA_A_20260504T111941.h5", "SSAR"),
+        ("NISAR_LSAR_GCOV_sample.h5", "LSAR"),
+        ("nisar_ssar_gcov.h5", "SSAR"),
+        ("/some/dir/NISAR_L2_PR_GCOV.h5", "LSAR"),
+        ("gcov_subset.h5", None),
+        ("S2A_MSIL2A_20260101.h5", None)):      # Sentinel-2, not NISAR S-band
+    check(f"{os.path.basename(name)[:46]}", C.band_from_filename(name), want)
+# The directory is not the name: a product filed under an LSAR/ folder is still
+# whatever its own file says.
+check("only the basename is read",
+      C.band_from_filename("/data/LSAR/NISAR_S2_PR_GCOV.h5"), "SSAR")
+
+both = write_h5(os.path.join(tmp, "NISAR_S2_PR_GCOV_both.h5"),
+                grids=(("LSAR", "A"), ("SSAR", "A")))
+picked = C.convert(both, os.path.join(tmp, "picked.tif"), verbose=False)
+with rasterio.open(picked) as ds:
+    check("the name chose the band out of a file holding both",
+          ds.tags().get("NISAR_BAND"), "SSAR")
+
+# A name that disagrees with its contents loses: the file is the measurement.
+wrong = write_h5(os.path.join(tmp, "NISAR_L2_PR_GCOV_mislabelled.h5"),
+                 grids=(("SSAR", "A"),))
+fallback = C.convert(wrong, os.path.join(tmp, "fallback.tif"), verbose=False)
+with rasterio.open(fallback) as ds:
+    check("a name the file contradicts is overruled",
+          ds.tags().get("NISAR_BAND"), "SSAR")
+
+# Frequency is never asked for either: A wins when both are there.
+twofreq = write_h5(os.path.join(tmp, "NISAR_L2_PR_GCOV_ab.h5"),
+                   grids=(("LSAR", "A"), ("LSAR", "B")))
+auto = C.convert(twofreq, os.path.join(tmp, "auto.tif"), verbose=False)
+with rasterio.open(auto) as ds:
+    check("and frequency A is taken without being asked for",
+          ds.tags().get("NISAR_FREQUENCY"), "A")
+
+# ── 5c. the factor's group is discovered, not spelled out ────────────────────
+# It is looked for among the members of whatever group the terms were found in,
+# so it follows the product's layout wherever that puts it.
+print("\n── finding the factor ──")
+check("named beside the terms, under grids/",
+      C.plan_bands(["HHHH", "rtcGammaToSigmaFactor"])[1], 2)
+check("or spelled another way",
+      C.plan_bands(["HHHH", "rtc_gamma_to_sigma"])[1], 2)
+check("and absent is absent, not assumed",
+      C.plan_bands(["HHHH", "HVHV"])[1], None)
+
+# ── 5d. no command line ──────────────────────────────────────────────────────
+print("\n── run by editing the file, not by flags ──")
+ok("argparse is gone", not hasattr(C, "argparse"))
+check("INPUT and OUTPUT are what main reads",
+      (hasattr(C, "INPUT"), hasattr(C, "OUTPUT")), (True, True))
+check("an unset INPUT is refused rather than half-run",
+      C.main("/no/such/product.h5"), 2)
+out_main = os.path.join(tmp, "viamain.tif")
+check("and main converts when it is set", C.main(h5_path, out_main), 0)
+ok("writing the file it was given", os.path.exists(out_main))
+with rasterio.open(out_main) as ds:
+    check("with everything discovered", list(ds.descriptions),
+          ["HHHH", "HVHV", "rtcGammaToSigmaFactor", "incidenceAngle"])
+
 # ── 6. what is not a GCOV ─────────────────────────────────────────────────────
 print("\n── refusals ──")
 gslc = write_h5(os.path.join(tmp, "gslc.h5"), product="GSLC")

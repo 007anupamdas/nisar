@@ -200,10 +200,28 @@ band's `n` may be lower where that band has nodata.
 RADIAL reads a GCOV `.h5` directly **where QGIS has h5py**. Many builds do not,
 and then it says so and sends you to a converter.
 
-```bash
-python3 DPQED_gcov2tif.py NISAR_..._GCOV.h5      # -> NISAR_..._GCOV_gcov.tif
-python3 DPQED_gcov2tif.py in.h5 --list           # what is in the file
+Set two lines at the top of `DPQED_gcov2tif.py` and run it, the way
+`DPQED_h52tif.py` is run:
+
+```python
+INPUT = r"V:\...\NISAR_L2_PR_GCOV_..._001.h5"
+OUTPUT = None       # None: '<input>_gcov.tif', beside the product
 ```
+
+There are no options, because there is nothing to choose that the product does
+not already say:
+
+| | |
+|---|---|
+| **band** | from the granule name — `NISAR_L2_…` is L-band, `NISAR_S2_…` is S — and from the file itself when the name says nothing, or says something the file does not hold. |
+| **frequency** | whichever the product carries; A when it carries both, that being the wideband channel. |
+| **terms** | the diagonal ones that are there. |
+| **RTC factor, incidence cube** | found beside the terms, in whatever group the product keeps them in. |
+
+Asking a person to repeat any of that is asking them to get it wrong. (Note
+that RIVAL's `band_from_name` only recognises a whole `LSAR`/`SSAR` tag, which
+no real granule name carries — it is why RIVAL falls back to the sidecar's
+Sensor field. Here the file itself is the fallback, and a better one.)
 
 Use `DPQED_gcov2tif.py`, not `DPQED_h52tif.py`. The older script predates GCOV
 — it is written for a GSLC, takes the magnitude of complex channels, and leaves
@@ -217,7 +235,7 @@ three things behind, none of which announces itself:
 
 It also carries the **incidence angle**, resampled from the product's
 `metadata/radarGrid` cube onto the image grid as one more named band, so
-`inc_deg` is available from the TIF alone. `--no-incidence` leaves it out.
+`inc_deg` is available from the TIF alone.
 
 A note on layout: RADIAL once assumed the frequency groups live under
 `GCOV/grids/`. Some products put them directly under `GCOV/`. Both are read
@@ -227,8 +245,7 @@ rather than rebuilt from the band and frequency.
 The output is a **Cloud Optimized GeoTIFF** — tiled, with an averaged overview
 pyramid, laid out by GDAL's own COG driver so headers and overviews precede the
 full-resolution data. That is what makes panning a 20000 px scene bearable, and
-it is what `cog_locate.py` expects of a raster. `--no-cog` writes a plain tiled
-GeoTIFF instead.
+it is what `cog_locate.py` expects of a raster.
 
 ### "Can I store the factor as an attribute or a header?"
 

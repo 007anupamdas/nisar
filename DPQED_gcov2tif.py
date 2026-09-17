@@ -55,22 +55,36 @@ produce a file that looks exactly like a gamma0 one.
 
 Usage
 -----
-    python3 DPQED_gcov2tif.py NISAR_..._GCOV.h5
-    python3 DPQED_gcov2tif.py in.h5 -o out.tif --frequency A --band LSAR
-    python3 DPQED_gcov2tif.py in.h5 --list          # what is in the file
-    python3 DPQED_gcov2tif.py in.h5 --no-factor     # terms only
-    python3 DPQED_gcov2tif.py in.h5 --no-cog        # plain GeoTIFF instead
+Set INPUT (and OUTPUT, if you want it somewhere particular) at the top of this
+file and run it, the way DPQED_h52tif.py is run. There are no options, because
+there is nothing to choose that the product does not already say:
+
+    band        from the granule name -- 'NISAR_L2_...' is L-band, 'NISAR_S2_'
+                is S -- and from the file itself when the name does not say, or
+                says something the file does not hold.
+    frequency   whichever the product carries; A when it carries both, since
+                that is the wideband channel.
+    terms       the diagonal ones that are there.
+    extras      the RTC factor and the incidence cube, when the product has
+                them.
+
+Asking a person to repeat any of that is asking them to get it wrong.
 
 Needs h5py and numpy, and either GDAL or rasterio to write -- whichever the
 environment that ran DPQED_h52tif.py already has.
 """
 
-import argparse
 import os
 import re
 import sys
 
 import numpy as np
+
+# ── WHAT TO CONVERT ───────────────────────────────────────────────────────────
+# Set these two and run the file. Everything below is read out of the product.
+INPUT = r"V:\ICIGDev\GPUPOC\input\dqe\inp\NISAR_L2_PR_GCOV.h5"
+OUTPUT = None       # None: '<input>_gcov.tif', written beside the product
+
 
 # Rows read and written at a time. A frequency-A GCOV term can be 20000 px
 # square, which is 1.6 GB per band in float32: reading one whole is how a
@@ -188,6 +202,33 @@ def geotransform_from_coords(x_coords, y_coords, tol=1e-6):
 
 
 # ── END SHARED GCOV HELPERS ───────────────────────────────────────────────────
+
+
+# The band a granule name declares, two ways. Some names carry the tag whole --
+# 'NISAR_LSAR_...' -- and the real ones do not: they put it in the second field
+# as a letter beside the processing level, 'NISAR_L2_PR_GCOV_...' for L-band
+# and 'NISAR_S2_...' for S. RIVAL's band_from_name only knows the first
+# spelling, which is why it falls back to the sidecar's Sensor field and the
+# centre frequency; here the file itself is the fallback, and a better one.
+# No word boundary: the tag is nearly always spelled between underscores, and
+# \b does not match between '_' and 'L'. A bare substring is safe here because
+# 'NISAR' contains neither LSAR nor SSAR, and only the basename is searched.
+BAND_TAG_RE = re.compile(r"(?i)([LS])SAR")
+BAND_FIELD_RE = re.compile(r"(?i)\bNISAR[_-]([LS])\d")
+
+
+def band_from_filename(path):
+    """LSAR or SSAR as the file's name declares it, or None.
+
+    A preference, not a verdict: a name is metadata someone typed, and what the
+    product actually holds wins when the two disagree.
+    """
+    name = os.path.basename(str(path or ""))
+    for pattern in (BAND_TAG_RE, BAND_FIELD_RE):
+        match = pattern.search(name)
+        if match:
+            return match.group(1).upper() + "SAR"
+    return None
 
 
 def _axis_weights(axis, wanted):
@@ -369,7 +410,18 @@ def convert(h5_path, out_path=None, band=None, frequency=None,
         paths = []
         handle.visit(paths.append)
         all_grids = gcov_grids(paths)
-        key = choose_grid(all_grids, band, frequency)
+        wanted = band or band_from_filename(h5_path)
+        present = sorted({key[0] for key in all_grids})
+        if wanted and wanted not in present:
+            # Said rather than silently overridden: a name and its contents
+            # disagreeing is worth knowing about, and the contents are right.
+            if verbose:
+                print(f"[GCOV] the name says {wanted}, the file holds "
+                      f"{', '.join(present)}; taking what is in the file")
+            wanted = None
+        elif wanted and verbose:
+            print(f"[GCOV] {wanted}, from the file name")
+        key = choose_grid(all_grids, wanted, frequency)
         group = gcov_group_of(next(iter(all_grids[key].values())))
         members = list(handle[group])
         names, factor_band = plan_bands(members, with_factor)
@@ -567,32 +619,20 @@ def _rasterio_writer(out_path, layers, width, height,
         dst.update_tags(**{k: str(v) for k, v in metadata.items()})
 
 
-def main(argv=None):
-    parser = argparse.ArgumentParser(
-        prog="DPQED_gcov2tif",
-        description=__doc__.split("Usage")[0].strip(),
-        formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("input", help="NISAR GCOV '.h5'")
-    parser.add_argument("-o", "--output", help="GeoTIFF to write "
-                        "(default: <input>_gcov.tif)")
-    parser.add_argument("--band", help="LSAR or SSAR (default: whichever is "
-                        "there)")
-    parser.add_argument("--frequency", help="A or B (default: A)")
-    parser.add_argument("--no-factor", action="store_true",
-                        help="leave out rtcGammaToSigmaFactor -- sigma0 is "
-                             "then unavailable from the TIF")
-    parser.add_argument("--no-incidence", action="store_true",
-                        help="leave out the incidence angle band, which is "
-                             "resampled from metadata/radarGrid")
-    parser.add_argument("--no-cog", action="store_true",
-                        help="write a plain tiled GeoTIFF instead of a Cloud "
-                             "Optimized one -- no overview pyramid, and no "
-                             "layout guarantee")
-    parser.add_argument("--list", action="store_true",
-                        help="print what the file holds and stop")
-    parser.add_argument("-q", "--quiet", action="store_true")
-    args = parser.parse_args(argv)
+def main(input_path=None, output_path=None):
+    """Convert INPUT to OUTPUT. Set them above and run the file.
 
+    There is nothing else to pass. Which band, which frequency, which terms,
+    whether the product carries an RTC factor or an incidence cube -- all of it
+    is in the file or in its name, and asking a person to repeat it is asking
+    them to get it wrong.
+    """
+    h5_path = input_path or INPUT
+    out_path = output_path or OUTPUT
+    if not h5_path or not os.path.exists(h5_path):
+        print(f"DPQED_gcov2tif: set INPUT at the top of this file to a NISAR "
+              f"GCOV '.h5'.\n  INPUT is currently {h5_path!r}", file=sys.stderr)
+        return 2
     try:
         import h5py  # noqa: F401
     except ImportError:
@@ -604,15 +644,10 @@ def main(argv=None):
         print("DPQED_gcov2tif needs GDAL or rasterio to write a GeoTIFF.",
               file=sys.stderr)
         return 2
-
     try:
-        if args.list:
-            for line in describe(args.input):
-                print(line)
-            return 0
-        convert(args.input, args.output, args.band, args.frequency,
-                not args.no_factor, not args.no_incidence, not args.no_cog,
-                not args.quiet)
+        for line in describe(h5_path):
+            print(f"[GCOV] {line}")
+        convert(h5_path, out_path)
     except (ValueError, OSError, KeyError, RuntimeError) as e:
         print(f"DPQED_gcov2tif: {e}", file=sys.stderr)
         return 1
