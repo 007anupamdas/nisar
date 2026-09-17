@@ -80,6 +80,35 @@ Every ROI records which convention produced it, in the `backscat` column. A
 raster with no factor layer cannot offer sigma0 at all, and nothing is ever
 labelled sigma0 on the strength of a conversion that did not happen.
 
+## Incidence angle
+
+Each ROI reports the incidence angle at its **centre**, in degrees, in the
+`inc_deg` column — in the table and in both exports. Backscatter depends on it,
+so two ROIs that disagree are not comparable until you know whether they were
+looked at from the same angle.
+
+It comes from the product's `metadata/radarGrid/incidenceAngle` cube, by
+whichever of two routes the raster allows:
+
+- a **band** named `incidenceAngle`, which `DPQED_gcov2tif.py` resamples onto
+  the image grid — the value at the ROI's centre pixel, or the ROI mean where
+  that pixel has no data;
+- the **cube itself**, when a GCOV was loaded straight from its `.h5`, sampled
+  bilinearly at the ROI centre. A VRT cannot carry the cube — it stacks
+  datasets on one grid, and the geometry cubes are on another, coarser one — so
+  it is read once at load and sampled per ROI.
+
+Either way it is **not measured as backscatter**: its mean is an angle, and an
+angle in a column headed `mean_db` beside the gamma0 columns would be read as
+one. A raster with neither route leaves `inc_deg` empty rather than guessing,
+and an ROI outside the cube gets nothing rather than an extrapolation — the
+failure that would otherwise look like a measurement.
+
+The cubes are sampled at several heights above the ellipsoid. Choosing between
+them properly needs a DEM, which this has none of, so the layer nearest the
+ellipsoid is used — and the height actually taken is written into the TIFF
+header as `INCIDENCE_ANGLE_HEIGHT_M` rather than left implicit.
+
 ## The statistics
 
 Everything is computed on **linear power**, per ROI and per band.
@@ -143,7 +172,7 @@ means the dB columns describe only part of the ROI.
 `Export SHP` writes one polygon per ROI in the working CRS:
 
 ```
-roi  name  kind  npix  area_m2  cx  cy  lon  lat  domain  backscat  src
+roi  name  kind  npix  area_m2  cx  cy  lon  lat  domain  backscat  inc_deg  src
 HH_n  HH_mean  HH_std  HH_cv  HH_enl  HH_mean_db  HH_sdev_db  HH_min_db …
 HV_n  HV_mean  …
 ```
@@ -186,6 +215,15 @@ three things behind, none of which announces itself:
 | **the RTC factor** | not carried across at all, so the TIF cannot offer sigma0. |
 | **the half pixel** | a grid states pixel *centres*; a geotransform is anchored on the *edge*. 15 m on a 30 m grid. |
 
+It also carries the **incidence angle**, resampled from the product's
+`metadata/radarGrid` cube onto the image grid as one more named band, so
+`inc_deg` is available from the TIF alone. `--no-incidence` leaves it out.
+
+A note on layout: RADIAL once assumed the frequency groups live under
+`GCOV/grids/`. Some products put them directly under `GCOV/`. Both are read
+now — the group is taken from where a covariance term was actually found
+rather than rebuilt from the band and frequency.
+
 The output is a **Cloud Optimized GeoTIFF** — tiled, with an averaged overview
 pyramid, laid out by GDAL's own COG driver so headers and overviews precede the
 full-resolution data. That is what makes panning a 20000 px scene bearable, and
@@ -207,7 +245,8 @@ RTC_GAMMA_TO_SIGMA_BAND = 3
 
 a plain GDAL metadata item. RADIAL looks for a band whose name matches first,
 and falls back to that tag — so a TIF written by some other tool can declare
-its factor band without renaming anything. Set it with
+its factor band without renaming anything. `INCIDENCE_ANGLE_BAND` does the
+same for the incidence angle. Set either with
 `gdal_edit.py -mo RTC_GAMMA_TO_SIGMA_BAND=3 your.tif`, provided the band is
 actually in the file; no tag can conjure a layer that was never written.
 
