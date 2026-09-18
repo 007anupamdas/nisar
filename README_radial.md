@@ -31,6 +31,7 @@ instead of two, ROIs instead of point picks, and statistics instead of offsets.
 | **Normalize** | stretch the view so the target is legible before you draw on it |
 | **Select** | click an ROI to select it, on the canvas and in the table at once |
 | **Rect** / **Polygon** | draw ROIs; each one fills a row as it closes |
+| **Point Buffer** | click a target; the ROI is a square of a chosen side |
 | **Export SHP** | polygons plus every statistic, and a full-named CSV beside it |
 
 Every ROI is **numbered on the canvas** at its centre, in its outline's colour
@@ -42,7 +43,7 @@ and its table row is selected, so `Ctrl+Delete` and the editable Name and Class
 cells apply to what you clicked. The **smallest** ROI under the click wins, so
 one drawn inside another is still reachable; clicking open ground deselects.
 
-`Ctrl+1..6` selects the tool, `F5` zooms to the selected ROI, `Ctrl+Delete`
+`Ctrl+1..7` selects the tool, `F5` zooms to the selected ROI, `Ctrl+Delete`
 removes it, `Escape` abandons a polygon in progress. A polygon closes on a
 right-click or a double-click; `Backspace` takes back a corner.
 
@@ -108,6 +109,35 @@ only those where the factor is also valid. A factor missing over part of an ROI
 is a gap in the conversion, not in what the product recorded, so the two
 conventions can report slightly different pixel counts for the same ROI.
 
+## Point buffer
+
+Some targets you can point at but cannot outline: a corner reflector, a buoy, a
+small clearing. **Point Buffer** takes one click and makes a square ROI of a
+stated size, centred on it. A **Side (m)** box appears beside the tool buttons
+while the tool is selected — and only while it is selected, since it means
+nothing under the others — and the square follows the cursor at that size
+before you click, so you can see what it covers on this scene.
+
+The side is in **metres of the working CRS**: a real size on the ground, not a
+number of pixels and not a size on screen, so the same setting gives the same
+ROI over a 30 m product and a 10 m one. It is read at the moment of the click,
+so changing the box changes the next ROI and never one already drawn.
+
+Square rather than round, deliberately. An ROI is rasterized by whether a pixel
+*centre* falls inside it, and a circle's edge is a staircase whose step count
+depends on where the centre landed within its pixel — two clicks a metre apart
+would give different pixel counts for the same radius. An axis-aligned square
+does not do that, and over a target small enough to click on, a square and a
+circle are not a radiometric difference.
+
+The point of the tool is that every ROI is then **the same size**, which is
+what makes a set of them comparable. At 30 m pixels the 300 m default is
+10 × 10 pixels, which is about the smallest an ENL estimate is worth quoting
+from; the `n` column says what each one actually got.
+
+Point ROIs carry `point` in the `kind` column, so an export says which ROIs
+were placed this way and which were outlined.
+
 ## ROI classes
 
 Each ROI carries a **class** — what it is over. The **Drawing:** picker says
@@ -121,10 +151,10 @@ which class you are working on, and it does both halves of that:
 The **Class** cell in each row is editable afterwards, and re-classing an ROI
 while a filter is on moves it out of view, because the filter is what it says.
 `(all)` at the top of the picker shows every ROI; nothing can be drawn there,
-so the Rect and Polygon tools switch off while it is selected — an ROI drawn
+so the three drawing tools switch off while it is selected — an ROI drawn
 under `all` would land in a class nobody chose. The picker is editable too, so
-`vegetation`, `water` and `snow` are the common cases rather than the permitted
-ones — type anything and it becomes a class.
+`vegetation`, `water`, `snow`, `old ice`, `new ice` and `sand` are the common
+cases rather than the permitted ones — type anything and it becomes a class.
 
 **Filtering changes what you see, never what you have.** Every export —
 `Export SHP`, `Export CSV` and the two CSVs written beside the shapefile —

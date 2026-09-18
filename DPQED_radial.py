@@ -16,7 +16,8 @@ and the second product enters by being loaded in turn over the same ROIs.
 WORKFLOW
     Load GCOV        a GeoTIFF or VRT, or a NISAR GCOV '.h5' (see below)
     Rect / Polygon   draw ROIs; the table fills as each one closes
-    Pan / Zoom       the view tools; Ctrl+1..5 selects any of the five
+    Point Buffer     click a target; the ROI is a square of a chosen side
+    Pan / Zoom       the view tools; Ctrl+1..7 selects any of the seven
     Normalize        stretch the view, so the ROI is drawn on a legible scene
     Export SHP       the ROIs as polygons, every statistic in the table
 
@@ -85,7 +86,7 @@ ADOPTED FROM RIVAL
     Normalize is the same translucent per-canvas tool with the same clip: it
     measures WHAT IS IN VIEW, applies the SAR sqrt-gamma stretch, and pins the
     result, so panning and zooming cannot re-stretch the scene under an ROI
-    being drawn. The R/G/B band picker, the exclusive Pan/Zoom row on Ctrl+1..5,
+    being drawn. The R/G/B band picker, the exclusive Pan/Zoom row on Ctrl+1..7,
     the sampled statistics that keep a big COG from freezing the window, and the
     working CRS adopted from the raster all behave as they do there.
 
@@ -108,6 +109,7 @@ from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QTableWidget, QTableWidgetItem, QPushButton,
                              QFileDialog, QHeaderView, QCheckBox, QComboBox,
                              QMessageBox, QApplication, QShortcut, QLabel,
+                             QDoubleSpinBox,
                              QFrame, QButtonGroup, QPlainTextEdit, QAbstractItemView)
 from PyQt5.QtCore import Qt, QObject, QEvent, QVariant, QRectF
 from PyQt5.QtGui import (QKeySequence, QFont, QColor, QFontMetricsF,
@@ -146,11 +148,21 @@ H5_EXTS = (".h5", ".hdf5", ".he5")
 TOOL_SELECT = "select"
 TOOL_RECT = "rect"
 TOOL_POLY = "polygon"
+TOOL_POINT = "point"
 TOOL_PAN = "pan"
 TOOL_ZOOM_IN = "zoom in"
 TOOL_ZOOM_OUT = "zoom out"
-MAP_TOOLS = (TOOL_SELECT, TOOL_RECT, TOOL_POLY, TOOL_PAN, TOOL_ZOOM_IN,
-             TOOL_ZOOM_OUT)
+MAP_TOOLS = (TOOL_SELECT, TOOL_RECT, TOOL_POLY, TOOL_POINT, TOOL_PAN,
+             TOOL_ZOOM_IN, TOOL_ZOOM_OUT)
+# The three that make an ROI. The rest move the view.
+DRAWING_TOOLS = (TOOL_RECT, TOOL_POLY, TOOL_POINT)
+
+# Point buffer: one click becomes a square of this many metres on a side. A
+# default that is a round number of 30 m NISAR GCOV pixels, and a floor that
+# stops a stray click producing an ROI of one pixel and a half.
+POINT_SIDE_DEFAULT_M = 300.0
+POINT_SIDE_MIN_M = 1.0
+POINT_SIDE_MAX_M = 100000.0
 
 # ROI outlines. Cyan reads over the red/magenta a two-band SAR composite tends
 # toward, and over grey; the selected ROI goes yellow so the table and the
@@ -241,7 +253,7 @@ INCIDENCE_NAME = "incidenceAngle"
 #
 # The picker is editable, so this list is the common cases rather than the
 # permitted ones: anything typed becomes a class, here or in the table.
-ROI_CLASSES = ("vegetation", "water", "snow")
+ROI_CLASSES = ("vegetation", "water", "snow", "old ice", "new ice", "sand")
 ROI_CLASS_DEFAULT = ROI_CLASSES[0]
 ROI_CLASS_UNSET = "unclassified"
 ROI_CLASS_ALL = "all"
@@ -842,6 +854,29 @@ def rect_ring(x0, y0, x1, y1):
     return [(xmin, ymin), (xmax, ymin), (xmax, ymax), (xmin, ymax)]
 
 
+def square_ring(cx, cy, side):
+    """A square of `side` metres centred on a point, or None.
+
+    The point buffer's whole geometry. Square rather than round because an ROI
+    is rasterized by whether a pixel centre falls inside it, and a circle's
+    edge pixels are a staircase whose step count depends on where the centre
+    landed within its pixel -- two clicks a metre apart give different pixel
+    counts for the same radius. A square aligned to the axes does not do that,
+    and over a target small enough to click on, the difference between a square
+    and a circle is not a radiometric difference.
+
+    Centred on the click, not cornered at it: the point is the target, and the
+    ROI is what surrounds it.
+    """
+    try:
+        half = float(side) / 2.0
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(half) or half <= 0.0:
+        return None
+    return rect_ring(cx - half, cy - half, cx + half, cy + half)
+
+
 def dedupe_ring(ring, tol):
     """Drop vertices within `tol` of the one before, and of the first.
 
@@ -1341,15 +1376,18 @@ class RoiSelectTool(QgsMapTool):
 
 # ── ROI DRAWING TOOL ──────────────────────────────────────────────────────────
 class RoiMapTool(QgsMapTool):
-    """Draw one ROI: a dragged rectangle, or a polygon clicked corner by corner.
+    """Draw one ROI: a dragged rectangle, a clicked polygon, or a point buffer.
 
-    One class for both because they differ only in how the ring is collected --
-    the preview, the cancel, and the handoff to the table are the same, and two
-    classes would be two places to fix the next thing found wrong with either.
+    One class for all three because they differ only in how the ring is
+    collected -- the preview, the cancel, and the handoff to the table are the
+    same, and three classes would be three places to fix the next thing found
+    wrong with any of them.
 
     A rectangle finishes on the mouse release. A polygon finishes on a
     right-click or a double-click, needs three corners, and takes Backspace to
-    undo the last one; Escape abandons whatever is in progress.
+    undo the last one. A point buffer finishes on the click: the square of the
+    side length in the toolbar, centred on where the click landed. Escape
+    abandons whatever is in progress.
     """
 
     def __init__(self, canvas, dashboard, mode):
@@ -1395,6 +1433,10 @@ class RoiMapTool(QgsMapTool):
             if e.button() == Qt.LeftButton:
                 self.anchor = (point.x(), point.y())
             return
+        if self.mode == TOOL_POINT:
+            if e.button() == Qt.LeftButton:
+                self.place_point(point.x(), point.y())
+            return
         if e.button() == Qt.RightButton:
             self.finish()
             return
@@ -1407,6 +1449,12 @@ class RoiMapTool(QgsMapTool):
             if self.anchor is not None:
                 self._preview(rect_ring(self.anchor[0], self.anchor[1],
                                         point.x(), point.y()))
+        elif self.mode == TOOL_POINT:
+            # The square follows the cursor, so its size on this scene is
+            # visible before the click rather than after it.
+            ring = square_ring(point.x(), point.y(), self.dashboard.point_side())
+            if ring:
+                self._preview(ring)
         elif self.vertices:
             self._preview(self.vertices + [(point.x(), point.y())])
 
@@ -1436,6 +1484,16 @@ class RoiMapTool(QgsMapTool):
             self._preview(self.vertices)
 
     # ── lifecycle ──
+    def place_point(self, x, y):
+        """One click becomes a square ROI of the toolbar's side length."""
+        side = self.dashboard.point_side()
+        ring = square_ring(x, y, side)
+        self.cancel()
+        if ring is None:
+            print(f"[ROI] {side!r} is not a usable side length; discarded")
+            return
+        self.dashboard.add_roi(ring, TOOL_POINT)
+
     def finish(self):
         """Close the polygon being drawn and hand it to the table."""
         ring = dedupe_ring(self.vertices, self._merge_tolerance())
@@ -1606,12 +1664,20 @@ class RadiometricDashboard(QMainWindow):
             TOOL_RECT: "Drag a rectangle over the target  (Ctrl+2)",
             TOOL_POLY: "Click the corners; right-click or double-click to "
                        "close, Backspace undoes one  (Ctrl+3)",
-            TOOL_PAN: "Drag to move the view  (Ctrl+4)",
-            TOOL_ZOOM_IN: "Drag a box, or click, to zoom in  (Ctrl+5)",
-            TOOL_ZOOM_OUT: "Drag a box, or click, to zoom out  (Ctrl+6)",
+            TOOL_POINT: "Click a target; the ROI is a square of the side\n"
+                        "length in the box beside these buttons, centred on\n"
+                        "the click  (Ctrl+4).\n\n"
+                        "For a target you can point at but not outline: a\n"
+                        "corner reflector, a buoy, a small clearing. Every\n"
+                        "ROI is then the same size, which is what makes a\n"
+                        "set of them comparable.",
+            TOOL_PAN: "Drag to move the view  (Ctrl+5)",
+            TOOL_ZOOM_IN: "Drag a box, or click, to zoom in  (Ctrl+6)",
+            TOOL_ZOOM_OUT: "Drag a box, or click, to zoom out  (Ctrl+7)",
         }
         labels = {TOOL_SELECT: "Select", TOOL_RECT: "Rect",
-                  TOOL_POLY: "Polygon", TOOL_PAN: "Pan",
+                  TOOL_POLY: "Polygon", TOOL_POINT: "Point Buffer",
+                  TOOL_PAN: "Pan",
                   TOOL_ZOOM_IN: "Zoom In", TOOL_ZOOM_OUT: "Zoom Out"}
         for index, mode in enumerate(MAP_TOOLS):
             button = QPushButton(labels[mode])
@@ -1678,6 +1744,26 @@ class RadiometricDashboard(QMainWindow):
             "ROI already drawn is editable in its table row.")
         self.class_combo.currentTextChanged.connect(self.on_class_filter)
 
+        # Shown only while the point buffer is the selected tool: a control
+        # that does nothing under the other tools, sitting there looking as
+        # though it might, is a question the user has to answer every time they
+        # read the row.
+        self.point_side_label = QLabel("Side (m):")
+        self.point_side_spin = QDoubleSpinBox()
+        self.point_side_spin.setDecimals(1)
+        self.point_side_spin.setRange(POINT_SIDE_MIN_M, POINT_SIDE_MAX_M)
+        self.point_side_spin.setSingleStep(10.0)
+        self.point_side_spin.setValue(POINT_SIDE_DEFAULT_M)
+        self.point_side_spin.setToolTip(
+            "The side of the square a point-buffer click makes, in metres of\n"
+            "the working CRS -- so it is a real size on the ground, not a\n"
+            "number of pixels and not a size on screen.\n\n"
+            "The square is centred on the click. At 30 m pixels a 300 m side\n"
+            "is 10 x 10 pixels, which is about the smallest an ENL estimate\n"
+            "is worth quoting from.")
+        for widget in (self.point_side_label, self.point_side_spin):
+            widget.setVisible(False)
+
         self.cb_zero_data = QCheckBox("Zeros are data")
         self.cb_zero_data.setChecked(not ZERO_IS_NODATA)
         self.cb_zero_data.setToolTip(
@@ -1721,6 +1807,9 @@ class RadiometricDashboard(QMainWindow):
         tool_row = QHBoxLayout()
         for mode in MAP_TOOLS:
             tool_row.addWidget(self.tool_buttons[mode])
+        tool_row.addSpacing(8)
+        tool_row.addWidget(self.point_side_label)
+        tool_row.addWidget(self.point_side_spin)
         tool_row.addSpacing(20)
         tool_row.addWidget(QLabel("Stats band:"))
         tool_row.addWidget(self.stats_band_combo)
@@ -1894,7 +1983,7 @@ class RadiometricDashboard(QMainWindow):
         """
         drawing = class_key(self.class_filter()) != class_key(ROI_CLASS_ALL)
         buttons = getattr(self, "tool_buttons", None) or {}
-        for mode in (TOOL_RECT, TOOL_POLY):
+        for mode in DRAWING_TOOLS:
             button = buttons.get(mode)
             if button is None:
                 continue
@@ -3677,6 +3766,7 @@ class RadiometricDashboard(QMainWindow):
             TOOL_SELECT: RoiSelectTool(self.canvas, self),
             TOOL_RECT: RoiMapTool(self.canvas, self, TOOL_RECT),
             TOOL_POLY: RoiMapTool(self.canvas, self, TOOL_POLY),
+            TOOL_POINT: RoiMapTool(self.canvas, self, TOOL_POINT),
             TOOL_PAN: QgsMapToolPan(self.canvas),
             TOOL_ZOOM_IN: QgsMapToolZoom(self.canvas, False),
             TOOL_ZOOM_OUT: QgsMapToolZoom(self.canvas, True),
@@ -3707,13 +3797,34 @@ class RadiometricDashboard(QMainWindow):
             return              # called before init_map_tools
         mode = self.current_map_tool()
         self.canvas.setMapTool(tools[mode])
+        self.show_point_side(mode == TOOL_POINT)
         cursor = {TOOL_PAN: Qt.OpenHandCursor,
                   TOOL_SELECT: Qt.ArrowCursor}.get(mode, Qt.CrossCursor)
         try:
             self.canvas.setCursor(cursor)
         except Exception:
             pass
-        print(f"[TOOL] {mode}")
+        print(f"[TOOL] {mode}"
+              + (f", {self.point_side():g} m square" if mode == TOOL_POINT
+                 else ""))
+
+    def show_point_side(self, visible):
+        """The side-length box belongs to the point buffer and to nothing else."""
+        for name in ("point_side_label", "point_side_spin"):
+            widget = getattr(self, name, None)
+            if widget is not None:
+                widget.setVisible(bool(visible))
+
+    def point_side(self):
+        """The side of the square a point-buffer click makes, in metres.
+
+        Read at the moment of the click rather than held, so changing the box
+        changes the next ROI and never one already drawn.
+        """
+        try:
+            return float(self.point_side_spin.value())
+        except Exception:
+            return POINT_SIDE_DEFAULT_M
 
 
 # ── ENTRY POINT ───────────────────────────────────────────────────────────────

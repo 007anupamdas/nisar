@@ -268,6 +268,24 @@ class _Check:
         self._on = bool(v)
 
 
+class _Spin:
+    """A spin box that holds a value and remembers whether it is on screen."""
+    def __init__(self, value=0.0):
+        self._value, self._visible = float(value), False
+
+    def value(self):
+        return self._value
+
+    def setValue(self, v):
+        self._value = float(v)
+
+    def setVisible(self, v):
+        self._visible = bool(v)
+
+    def isVisible(self):
+        return self._visible
+
+
 class _Button:
     """A real checkable button: the mock reports every button as checked."""
     def __init__(self, group):
@@ -698,15 +716,60 @@ for mode in R.MAP_TOOLS:
     ok(f"{mode} is applied to the canvas", applied is win.map_tools[mode])
     checked = [m for m, b in win.tool_buttons.items() if b.isChecked()]
     ok(f"{mode} is the only tool selected", checked == [mode], str(checked))
-check("six distinct tools",
-      len({id(win.map_tools[m]) for m in R.MAP_TOOLS}), 6)
+check("a distinct tool object per button",
+      len({id(win.map_tools[m]) for m in R.MAP_TOOLS}), len(R.MAP_TOOLS))
 check("pan is the pan tool", win.map_tools[R.TOOL_PAN]._tool, "pan")
 check("zoom out is the out variant",
       (win.map_tools[R.TOOL_ZOOM_IN]._args[1],
        win.map_tools[R.TOOL_ZOOM_OUT]._args[1]), (False, True))
-ok("both ROI tools draw, in their own mode",
-   isinstance(win.map_tools[R.TOOL_RECT], R.RoiMapTool)
-   and win.map_tools[R.TOOL_POLY].mode == R.TOOL_POLY)
+ok("every ROI tool draws, in its own mode",
+   all(isinstance(win.map_tools[m], R.RoiMapTool)
+       and win.map_tools[m].mode == m for m in R.DRAWING_TOOLS),
+   str(R.DRAWING_TOOLS))
+
+# ── the point buffer ─────────────────────────────────────────────────────────
+# One click, one square of a stated size on the ground. The size is read at the
+# click, so the box is a setting for the next ROI and never for one drawn.
+print("\n── point buffer ──")
+check("a square is centred on the click, not cornered at it",
+      R.square_ring(100.0, 200.0, 20.0),
+      [(90.0, 190.0), (110.0, 190.0), (110.0, 210.0), (90.0, 210.0)])
+check("its area is the side squared",
+      R.ring_area(R.square_ring(0.0, 0.0, 30.0)), 900.0)
+for bad in (0.0, -10.0, None, float("nan"), "wide"):
+    check(f"{bad!r} is not a side length", R.square_ring(0.0, 0.0, bad), None)
+
+win.point_side_spin = _Spin(R.POINT_SIDE_DEFAULT_M)
+check("the box starts on the default", win.point_side(),
+      R.POINT_SIDE_DEFAULT_M)
+win.set_map_tool(R.TOOL_POINT)
+ok("picking the tool shows the side-length box",
+   win.point_side_spin.isVisible())
+win.set_map_tool(R.TOOL_RECT)
+ok("and leaving it takes the box away",
+   not win.point_side_spin.isVisible())
+
+win.set_map_tool(R.TOOL_POINT)
+win.point_side_spin.setValue(120.0)
+before = len(win.rois)
+win.map_tools[R.TOOL_POINT].place_point(500400.0, 3999800.0)
+check("a click makes one ROI", len(win.rois) - before, 1)
+placed = win.rois[-1]
+check("of the kind that says how it was made", placed["kind"], R.TOOL_POINT)
+check("with the side the box was showing at the click",
+      round(R.ring_area(placed["ring"])), 120 * 120)
+centre = R.ring_centroid(placed["ring"])
+ok("centred on the click",
+   abs(centre[0] - 500400.0) < 1e-6 and abs(centre[1] - 3999800.0) < 1e-6,
+   str(centre))
+check("and it carries the picker's class, like any other ROI",
+      placed["class"], win.roi_class())
+
+win.point_side_spin.setValue(240.0)
+check("changing the box does not touch the ROI already drawn",
+      round(R.ring_area(placed["ring"])), 120 * 120)
+win.map_tools[R.TOOL_POINT].place_point(500400.0, 3999800.0)
+check("only the next one", round(R.ring_area(win.rois[-1]["ring"])), 240 * 240)
 
 # ── 9b. selecting an ROI on the canvas, and its number beside it ─────────────
 print("\n── select, and the numbers on the canvas ──")
