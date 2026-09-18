@@ -673,6 +673,76 @@ check("georeferenced",
 check("fill is NaN, not a number in the data's range",
       root.findtext("VRTRasterBand/NoDataValue"), "nan")
 
+# ── 13. THE NOISE FLOOR, FROM WATER ───────────────────────────────────────────
+# NESZ is not measured here and the code must not claim it is. What it reports
+# is mean sigma0 over water: scene plus noise over the least-returning ground
+# the scene offers, which is an upper bound. These checks pin the arithmetic
+# behind that bound -- pooled by pixel, in linear power, in sigma0 only.
+print("\n── the noise floor ──")
+
+
+def water(roi_id, sigma0, n, gamma0=None, klass="water", nonpos=0):
+    """An ROI carrying known statistics, without going near a raster."""
+    stats = {}
+    if gamma0 is not None:
+        stats[H["BACKSCATTER_GAMMA0"]] = {
+            "HH": {"n": n, "mean": gamma0, "mean_db": H["to_db"](gamma0),
+                   "nonpos": nonpos}}
+    if sigma0 is not None:
+        stats[H["BACKSCATTER_SIGMA0"]] = {
+            "HH": {"n": n, "mean": sigma0, "mean_db": H["to_db"](sigma0),
+                   "nonpos": nonpos}}
+    return {"roi": roi_id, "class": klass, "stats": stats,
+            "backscat": H["BACKSCATTER_SIGMA0"]}
+
+
+# Two lakes an order of magnitude apart in size. Pooled by pixel the answer is
+# the big one's; averaging the two ROI means would land halfway, which is the
+# mistake this is here to catch.
+rois = [water(1, 1.0e-3, 4000), water(2, 3.0e-3, 40),
+        water(3, 0.1, 500, klass="vegetation")]
+estimate = H["nesz_estimate"](rois, "HH")
+check("only the water ROIs count", estimate["rois"], 2)
+check("and all their pixels", estimate["n"], 4040)
+close("pooled by pixel, in linear power", estimate["nesz_db"],
+      H["to_db"]((4000 * 1.0e-3 + 40 * 3.0e-3) / 4040), 1e-9)
+check("which is not the mean of the two ROI means",
+      abs(estimate["nesz_db"] - H["to_db"](2.0e-3)) > 0.5, True)
+close("the darkest single ROI is reported beside it", estimate["floor_db"],
+      H["to_db"](1.0e-3), 1e-9)
+check("and it is named as sigma0", estimate["backscat"],
+      H["BACKSCATTER_SIGMA0"])
+
+# A gamma0 figure carrying the name NESZ would be wrong by the RTC factor.
+gamma_only = [water(1, None, 4000, gamma0=1.0e-3)]
+gamma_estimate = H["nesz_estimate"](gamma_only, "HH")
+check("no RTC factor, no estimate", gamma_estimate["rois"], 0)
+is_nan("and no number to quote", gamma_estimate["nesz_db"])
+
+# The margin is what says whether an ROI was measured or sampled the floor.
+close("a bright ROI stands well above it",
+      H["nesz_margin_db"](rois[2], "HH", estimate["nesz_db"]),
+      H["to_db"](0.1) - estimate["nesz_db"], 1e-9)
+check("and the water ROIs barely do",
+      abs(H["nesz_margin_db"](rois[0], "HH", estimate["nesz_db"])) < 1.0,
+      True)
+is_nan("an ROI with nothing measured has no margin",
+       H["nesz_margin_db"]({"stats": {}}, "HH", estimate["nesz_db"]))
+is_nan("and neither has anything, without a floor to stand on",
+       H["nesz_margin_db"](rois[2], "HH", float("nan")))
+
+# Noise-subtracted pixels are counted, because they are the sign that the
+# bound is measuring the subtraction rather than the instrument.
+subtracted = [water(1, 1.0e-3, 4000, nonpos=1200)]
+check("non-positive pixels are carried through",
+      H["nesz_estimate"](subtracted, "HH")["nonpos"], 1200)
+
+rows = H["nesz_rows"](rois, ["HH", "HV"])
+check("a header and a row per band", len(rows), 3)
+check("naming the bound for what it is", "upper bound" in rows[1][-1], True)
+check("and the class it came from", rows[1][1], H["NESZ_CLASS"])
+check("a band with no water at all still gets a row", rows[2][0], "HV")
+
 print("\n" + "=" * 70)
 if failures:
     print(f"{len(failures)} FAILURE(S):")

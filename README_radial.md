@@ -154,6 +154,49 @@ writes the summary itself beside them as `<stem>_by_class.csv`, one row per
 class and band. That is the table a report quotes, and no per-ROI listing states
 it outright.
 
+## Noise floor (NESZ), from water
+
+Draw ROIs over calm water, class them `water`, and the tool reports the noise
+floor the scene shows — in the context line, in the detail panel beside each
+band, and as `<stem>_nesz.csv` next to the shapefile:
+
+```
+band   class   rois    n   nonpos   nesz_db   floor_db   note
+HH     water      3  9412        0    -24.31     -25.02   upper bound: …
+HV     water      3  9412      140    -26.88     -27.40   upper bound: …
+```
+
+**It is a bound, not a measurement, and the CSV says so in every row.** NESZ is
+a property of the instrument and the geometry; nothing in an ROI separates
+scene from noise, so what a water ROI measures is scene *plus* noise. That
+makes the figure an upper bound on NESZ — the tightest one imagery can give,
+and the one worth quoting when a noise budget has to come from the product
+itself rather than from a calibration report.
+
+Three things the number is sensitive to, all of them visible in the row:
+
+* **Calm water is not zero-backscatter.** Wind roughening puts a real signal in
+  it, so a windy lake raises the bound. `floor_db` — the darkest single ROI —
+  is the tighter, noisier version of the same estimate; a large gap between it
+  and `nesz_db` means the water ROIs disagree, which usually means wind.
+* **`nonpos`.** A noise-subtracted product has already had its floor removed,
+  so pixels come out at or below zero. Many of them and the bound is measuring
+  the subtraction rather than the instrument.
+* **`rois` and `n`.** Pooled by pixel count, in linear power, so a 4000-pixel
+  lake and a 40-pixel pond are not equal evidence. Three ROIs is a figure; one
+  is an anecdote.
+
+Always in **sigma0**, whatever the Backscatter dropdown is showing. NESZ is
+defined against sigma0, and a gamma0 figure carrying the name would be wrong
+by the RTC factor — which varies across the scene, so the error would not even
+be a constant. A product with no RTC factor therefore gets no estimate at all,
+rather than a gamma0 one relabelled.
+
+The detail panel puts the selected ROI's **margin** beside it — its sigma0 mean
+minus the floor. That is the number that says whether an ROI was measured or
+merely sampled the floor: a few dB of margin and its backscatter is mostly
+noise, whatever its mean says.
+
 ## Incidence angle
 
 Each ROI reports the incidence angle at its **centre**, in degrees, in the

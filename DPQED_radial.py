@@ -245,6 +245,11 @@ ROI_CLASSES = ("vegetation", "water", "snow")
 ROI_CLASS_DEFAULT = ROI_CLASSES[0]
 ROI_CLASS_UNSET = "unclassified"
 ROI_CLASS_ALL = "all"
+# The class the noise-floor estimate is taken over. Water, because calm water
+# is the nearest thing to radiometrically empty ground a scene reliably has --
+# not because it returns nothing, which it does not: wind roughening puts a
+# real signal in it, and that is one reason the estimate is a bound.
+NESZ_CLASS = "water"
 
 # Zero is how a SAR product says 'no data' when it declares no nodata value --
 # outside the swath, beyond the frame, masked in processing. Counted as data it
@@ -611,6 +616,103 @@ def class_summary(rois, band, backscatter=None):
         summaries.append((ROI_CLASS_ALL, summarise(
             [roi_stats(roi, band, backscatter) for roi in rois])))
     return summaries
+
+
+def nesz_estimate(rois, band, nesz_class=NESZ_CLASS, backscatter=None):
+    """The noise floor this scene shows, from the ROIs of one class.
+
+    NESZ is a property of the instrument and the geometry, not of the pixels,
+    and nothing in an ROI separates scene from noise: what a dark ROI measures
+    is scene PLUS noise. So this is not a measurement of NESZ. It is the
+    tightest **upper bound** the imagery can give -- mean sigma0 over ground
+    that returns as close to nothing as this scene offers -- and it is reported
+    under that name, with the count of ROIs it rests on, so it is never quoted
+    as though the instrument had been characterised.
+
+    In sigma0 always, whatever the window is showing: NESZ is defined against
+    sigma0, and a gamma0 figure carrying the name would be wrong by the RTC
+    factor -- which varies across the scene, so the error would not even be a
+    constant. A product with no RTC factor gets no estimate at all rather than
+    a gamma0 one relabelled.
+
+    Pooled by pixel count, not by averaging the ROI means: a 4000-pixel lake
+    and a 40-pixel pond are not equal evidence about the floor. The pooling is
+    in linear power, because that is what averages.
+
+    Three numbers come back rather than one:
+
+      nesz_db    the pooled mean. The bound.
+      floor_db   the darkest single ROI's mean. Tighter, and noisier -- the
+                 same bound taken from the least-returning water found.
+      nonpos     pixels at or below zero across those ROIs. A noise-subtracted
+                 product has already had its floor removed, so these are the
+                 sign that the bound is measuring the subtraction and not the
+                 instrument. Many of them and the number means little.
+    """
+    if backscatter is None:
+        backscatter = BACKSCATTER_SIGMA0
+    key = class_key(nesz_class)
+    weights, powers, means_db, pixels, nonpos, used = [], [], [], 0, 0, 0
+    for roi in rois or ():
+        if class_key(roi.get("class")) != key:
+            continue
+        stats = roi_stats(roi, band, backscatter)
+        if not stats:
+            continue
+        used += 1
+        count = stats.get("n") or 0
+        mean = stats.get("mean")
+        nonpos += int(stats.get("nonpos") or 0)
+        pixels += int(count)
+        if count and mean is not None and np.isfinite(mean) and mean > 0:
+            weights.append(float(count))
+            powers.append(float(mean))
+        value = stats.get("mean_db")
+        if value is not None and np.isfinite(value):
+            means_db.append(float(value))
+    nan = float("nan")
+    pooled = (float(np.average(powers, weights=weights))
+              if powers else nan)
+    return {
+        "class": nesz_class,
+        "backscat": backscatter,
+        "rois": used,
+        "n": pixels,
+        "nonpos": nonpos,
+        "nesz_db": to_db(pooled) if powers else nan,
+        "floor_db": min(means_db) if means_db else nan,
+    }
+
+
+def nesz_margin_db(roi, band, nesz_db, backscatter=None):
+    """How far one ROI stands above the noise floor, in dB, or NaN.
+
+    The figure that says whether an ROI was measured or merely sampled the
+    floor. A few dB of margin and the backscatter reported for it is mostly
+    noise, whatever the mean says.
+    """
+    if nesz_db is None or not np.isfinite(nesz_db):
+        return float("nan")
+    stats = roi_stats(roi, band, backscatter or BACKSCATTER_SIGMA0)
+    value = (stats or {}).get("mean_db")
+    if value is None or not np.isfinite(value):
+        return float("nan")
+    return float(value) - float(nesz_db)
+
+
+def nesz_rows(rois, bands, nesz_class=NESZ_CLASS):
+    """The noise-floor estimate in long form: a header and a row per band."""
+    header = ["band", "class", "rois", "n", "nonpos", "nesz_db", "floor_db",
+              "note"]
+    note = ("upper bound: mean sigma0 over %s, scene+noise, "
+            "not a measured NESZ" % nesz_class)
+    rows = [header]
+    for band in bands or ():
+        estimate = nesz_estimate(rois, band, nesz_class)
+        rows.append([band, estimate["class"], estimate["rois"], estimate["n"],
+                     estimate["nonpos"], estimate["nesz_db"],
+                     estimate["floor_db"], note])
+    return rows
 
 
 def class_summary_rows(rois, bands):
@@ -3044,9 +3146,14 @@ class RadiometricDashboard(QMainWindow):
                     self.class_table.setItem(row, column, item)
         except Exception as e:
             print(f"[SUMMARY] {e}")
+        estimate = nesz_estimate(self.rois, band)
         self.lbl_context.setText(
             f"{band or '(no band)'}   \u00b7   {self.backscatter()}   \u00b7   "
-            f"{len(self.rois)} ROI in {len(group_by_class(self.rois))} class(es)")
+            f"{len(self.rois)} ROI in {len(group_by_class(self.rois))} class(es)"
+            + (f"   \u00b7   noise floor \u2264 "
+               f"{format_stat(estimate['nesz_db'], '{:.2f}')} dB "
+               f"({estimate['rois']} {NESZ_CLASS})"
+               if estimate["rois"] else ""))
 
     def update_detail(self):
         """The selected ROI, every band, in a block that pastes into a report."""
@@ -3089,6 +3196,24 @@ class RadiometricDashboard(QMainWindow):
             lines.append(f"  {label[:10]:<10}"
                          f"{format_stat(stats.get('mean'), '{:.6g}'):>14}"
                          f"{format_stat(stats.get('std'), '{:.6g}'):>14}")
+
+        # How far this ROI stands above the floor the water ROIs show. A few dB
+        # and its backscatter is mostly noise, whatever its mean says -- which
+        # is not visible in any other number on the panel.
+        margins = []
+        for _, label in self.measure_bands:
+            estimate = nesz_estimate(self.rois, label)
+            if not estimate["rois"]:
+                continue
+            margin = nesz_margin_db(roi, label, estimate["nesz_db"])
+            margins.append(
+                f"  {label[:10]:<10}"
+                f"{format_stat(estimate['nesz_db'], '{:.2f}'):>14}"
+                f"{format_stat(margin, '{:.2f}'):>14}")
+        if margins:
+            lines += ["", f"  noise floor and margin, sigma0 dB "
+                          f"(bound from {NESZ_CLASS} ROIs):",
+                      f"  {'band':<10}{'<= NESZ':>14}{'margin':>14}"] + margins
         self.detail.setPlainText("\n".join(lines))
 
     # ── EXPORT ───────────────────────────────────────────────────────────────
@@ -3173,10 +3298,13 @@ class RadiometricDashboard(QMainWindow):
         stem = os.path.splitext(path)[0]
         csv_path = stem + "_stats.csv"
         class_path = stem + "_by_class.csv"
+        nesz_path = stem + "_nesz.csv"
+        bands = [label for _, label in self.measure_bands]
         written = self._write_csv(csv_path)
         written_classes = self._write_rows(
-            class_path, class_summary_rows(
-                self.rois, [label for _, label in self.measure_bands]))
+            class_path, class_summary_rows(self.rois, bands))
+        written_nesz = self._write_rows(nesz_path,
+                                        nesz_rows(self.rois, bands))
         crs = self.proj_crs.authid() or self.proj_crs.description()
         print(f"[EXPORT] {count} ROI(s) -> {path} [{crs}] via {how}")
         QMessageBox.information(
@@ -3188,7 +3316,8 @@ class RadiometricDashboard(QMainWindow):
             f"Writer: {how}\n"
             + (f"\nFull-length statistics beside it:\n{csv_path}"
                if written else "")
-            + (f"\nBy class:\n{class_path}" if written_classes else ""))
+            + (f"\nBy class:\n{class_path}" if written_classes else "")
+            + (f"\nNoise floor:\n{nesz_path}" if written_nesz else ""))
 
     def _write_shapefile(self, path, fields, plan):
         """Write the ROIs, by whichever route actually produces features.

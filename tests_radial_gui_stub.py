@@ -1056,6 +1056,58 @@ with tempfile.TemporaryDirectory() as tmp2:
           ["class", "band", "backscat", "rois", "mean_db", "spread_db",
            "enl"])
 
+# The noise floor rides out beside them, from the window's own measured ROIs.
+print("\n── the noise floor, end to end ──")
+bands = [label for _, label in win.measure_bands]
+water = [roi for roi in win.rois if R.class_key(roi.get("class")) == "water"]
+check("the fixture has no water left after the re-classing", water, [])
+estimate = R.nesz_estimate(win.rois, bands[0])
+check("so there is no floor to report", estimate["rois"], 0)
+
+# Classing one water is not enough on this fixture, and that is the point: its
+# raster carries no RTC factor, so nothing here was measured in sigma0 and
+# there is no sigma0 to take a floor from. A gamma0 number under the name NESZ
+# would be wrong by the RTC factor, so none is offered.
+win.rois[1]["class"] = "water"
+estimate = R.nesz_estimate(win.rois, bands[0])
+check("a water ROI on a gamma0-only product still yields nothing",
+      estimate["rois"], 0)
+ok("and no number to quote", not np.isfinite(estimate["nesz_db"]), "NaN")
+check("the ROI really is water, so it is the sigma0 that is missing",
+      R.roi_stats(win.rois[1], bands[0], R.BACKSCATTER_SIGMA0), None)
+
+# Give the same ROI a sigma0 and the bound appears, with the margin beside it.
+win.rois[1]["stats"][R.BACKSCATTER_SIGMA0] = {
+    bands[0]: {"n": 36, "mean": 1.0e-3, "mean_db": R.to_db(1.0e-3),
+               "nonpos": 0}}
+estimate = R.nesz_estimate(win.rois, bands[0])
+check("with a sigma0 to read, the water ROI is the evidence",
+      estimate["rois"], 1)
+ok("and the bound is that ROI's own mean",
+   abs(estimate["nesz_db"] - R.to_db(1.0e-3)) < 1e-9,
+   f"{estimate['nesz_db']:.2f} dB")
+win.rois[0]["stats"][R.BACKSCATTER_SIGMA0] = {
+    bands[0]: {"n": 36, "mean": 0.1, "mean_db": R.to_db(0.1), "nonpos": 0}}
+margin = R.nesz_margin_db(win.rois[0], bands[0], estimate["nesz_db"])
+ok("and the vegetation ROI stands 20 dB above it",
+   abs(margin - 20.0) < 1e-9, f"{margin:.2f} dB")
+with tempfile.TemporaryDirectory() as tmp3:
+    path = os.path.join(tmp3, "nesz.csv")
+    ok("the noise-floor CSV writes",
+       win._write_rows(path, R.nesz_rows(win.rois, bands)))
+    import csv as _csv3
+    with open(path, encoding="utf-8-sig") as handle:
+        nrows = list(_csv3.reader(handle))
+    check("a header and a row per band", len(nrows), 1 + len(bands))
+    check("under names that say what they are", nrows[0],
+          ["band", "class", "rois", "n", "nonpos", "nesz_db", "floor_db",
+           "note"])
+    ok("and every row says it is a bound, not a measurement",
+       all("upper bound" in row[-1] for row in nrows[1:]), nrows[1][-1])
+win.rois[1]["class"] = "vegetation"
+for roi in win.rois[:2]:
+    roi["stats"].pop(R.BACKSCATTER_SIGMA0, None)
+
 # ── 11. a NISAR GCOV '.h5' becomes a georeferenced VRT ───────────────────────
 print("\n── GCOV HDF5 ──")
 
