@@ -348,6 +348,9 @@ class _StubBand:
         return 0x01 if list(self.src.mask_flag_enums[0]) == [MaskFlags.all_valid] \
             else 0x02
 
+    def GetOverviewCount(self):
+        return len(self.src.overviews(1))
+
     def GetMaskBand(self):
         return _StubMaskBand(self.src)
 
@@ -432,6 +435,55 @@ del sys.modules["osgeo.gdal"]
 rec = read_footprint(os.path.join(TMP, "swath.tif"), backend="auto")
 check("auto falls back to rasterio when osgeo is absent", rec["backend"],
       "rasterio")
+
+# ── 10. the mask probe has a budget ───────────────────────────────────────────
+# Reported from the field: QGIS stopped responding for minutes on a reference
+# folder. RIVAL's scan reads a few kB of sidecar per tile; this tool's scan
+# reads the imagery, because a nodata mask is computed from the pixels. On a
+# network share a folder of large scenes is minutes of I/O on the GUI thread.
+# So a large raster is only probed when there is an overview pyramid to probe
+# through, and otherwise falls back with a reason rather than stalling.
+from rasterio.enums import Resampling as _Res                # noqa: E402
+
+big = np.full((900, 900), np.nan, dtype="float32")
+for r in range(900):
+    big[r, max(0, r - 150):min(900, r + 150)] = 1.0
+pbig = write_tif("big.tif", big, nodata=float("nan"))
+
+# 0.81 Mpix: under a 0.5 Mpix budget it is "large", over it is not
+rec = read_footprint(pbig, max_mpix=0.5)
+check("over budget with no overviews falls back to the grid", rec["derived"],
+      "extent")
+check("  and the note says why", "no overviews" in (rec["note"] or ""), True)
+check("  and names the cost", "Mpix" in (rec["note"] or ""), True)
+rec = read_footprint(pbig, max_mpix=10.0)
+check("under budget it still probes the mask", rec["derived"], "mask")
+
+# with overviews the size stops mattering -- that is the point of the budget
+with rasterio.open(pbig, "r+") as dst:
+    dst.build_overviews([2, 4, 8], _Res.nearest)
+rec = read_footprint(pbig, max_mpix=0.5)
+check("overviews make even an over-budget raster affordable", rec["derived"],
+      "mask")
+check("  the backend reports the pyramid",
+      read_footprint(pbig, max_mpix=0.5, backend="rasterio")["derived"], "mask")
+
+# and the budget decision must not depend on which library is looking
+sys.modules["osgeo"] = osgeo
+sys.modules["osgeo.gdal"] = _StubGdal
+a = read_footprint(pbig, max_mpix=0.5, backend="gdal")
+b = read_footprint(pbig, max_mpix=0.5, backend="rasterio")
+check("backends agree that overviews are present", a["derived"], b["derived"])
+check("backends still agree on the ring", a["ring_map"], b["ring_map"])
+del sys.modules["osgeo"]
+del sys.modules["osgeo.gdal"]
+
+# a fully valid raster short-circuits before the budget is even consulted, so a
+# huge ordinary ortho is never a cost
+rec = read_footprint(os.path.join(TMP, "full.tif"), max_mpix=0.000001)
+check("an all-valid raster never reaches the budget", rec["derived"], "extent")
+check("  for the no-nodata reason, not the cost one",
+      rec["note"], "every pixel valid (no nodata declared)")
 
 print()
 if failures:

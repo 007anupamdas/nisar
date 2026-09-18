@@ -89,6 +89,21 @@ TREAT_ZERO_AS_NODATA = False
 # print loudly -- usually a raster whose mask is mostly empty.
 HULL_COVERAGE_WARN = 0.05
 
+# Budget for probing a mask at full resolution, in megapixels.
+#
+# This is the difference between this tool's folder scan and RIVAL's. RIVAL
+# reads a few kB of sidecar per tile; reading the mask instead means touching
+# the imagery, and a nodata mask is computed FROM the pixels, so there is no
+# cheap corner to read. A folder of large scenes on a network share is then
+# minutes of I/O on the GUI thread, which presents as QGIS not responding.
+#
+# So the mask is only probed when it is cheap: through an overview pyramid at
+# any size, or at full resolution below this budget. Above it, with no
+# overviews, the pixel grid is used and the reason is printed -- a reference
+# ortho is north-up and full anyway, so the two agree; it is slanted swaths
+# that need the mask, and those are worth building overviews for.
+MASK_PROBE_MAX_MPIX = 64.0
+
 # Which library opens the rasters. QGIS ships GDAL's Python bindings and does
 # NOT ship rasterio, so "auto" tries osgeo first and only falls back to rasterio
 # for a plain Python environment (which is where the tests run). Force one with
@@ -264,13 +279,14 @@ class RasterSource:
     """
 
     def __init__(self, backend, width, height, transform, crs_wkt,
-                 all_valid, read_mask, read_band):
+                 all_valid, has_overviews, read_mask, read_band):
         self.backend = backend
         self.width = width
         self.height = height
         self.transform = transform
         self.crs_wkt = crs_wkt
         self.all_valid = all_valid        # no nodata declared: every pixel data
+        self.has_overviews = has_overviews  # a pyramid to read the mask through
         self.read_mask = read_mask        # (out_w, out_h) -> 2-D truthy
         self.read_band = read_band        # (out_w, out_h) -> 2-D values
 
@@ -297,9 +313,13 @@ def open_gdal(path):
         return band.ReadAsArray(0, 0, ds.RasterXSize, ds.RasterYSize,
                                 buf_xsize=out_w, buf_ysize=out_h)
 
+    # GDAL serves a decimated read out of the overview pyramid when there is
+    # one, which is what makes probing a large scene affordable at all.
+    has_ov = band.GetOverviewCount() > 0
+
     return RasterSource("gdal", ds.RasterXSize, ds.RasterYSize,
                         affine_from_gdal(ds.GetGeoTransform()),
-                        wkt or None, all_valid, read_mask, read_band)
+                        wkt or None, all_valid, has_ov, read_mask, read_band)
 
 
 def open_rasterio(path):
@@ -321,7 +341,7 @@ def open_rasterio(path):
     return RasterSource("rasterio", src.width, src.height,
                         (t.a, t.b, t.c, t.d, t.e, t.f),
                         src.crs.to_wkt() if src.crs else None,
-                        all_valid, read_mask, read_band)
+                        all_valid, bool(src.overviews(1)), read_mask, read_band)
 
 
 def open_raster(path, backend=None):
@@ -348,6 +368,7 @@ def open_raster(path, backend=None):
 def read_raster_footprint(path, probe_px=MASK_PROBE_PX,
                           from_mask=FOOTPRINT_FROM_MASK,
                           zero_is_nodata=TREAT_ZERO_AS_NODATA,
+                          max_mpix=MASK_PROBE_MAX_MPIX,
                           backend=None):
     """The raster's own footprint, in its own CRS.
 
@@ -377,6 +398,13 @@ def read_raster_footprint(path, probe_px=MASK_PROBE_PX,
         # No nodata declared, so the mask is solid and reading it would only
         # confirm the box. Saying 'extent' here is the truth, not a fallback.
         rec["note"] = "every pixel valid (no nodata declared)"
+        return rec
+
+    mpix = src.width * src.height / 1e6
+    if not src.has_overviews and mpix > max_mpix:
+        rec["note"] = (f"{mpix:.0f} Mpix and no overviews: too costly to probe "
+                       f"the mask, so the pixel grid is used. Build overviews "
+                       f"to get the data footprint")
         return rec
 
     out_w, out_h = probe_decimation(src.width, src.height, probe_px)
@@ -510,7 +538,12 @@ class AutoFootprintDashboard(QCDashboard):
     def _scan_rasters(self, rasters):
         """Read each raster's footprint and file it in RIVAL's own record shape."""
         errors, from_mask, boxed = [], 0, 0
-        for name, path in sorted(rasters.items()):
+        total = len(rasters)
+        # Printed as it goes: this scan touches imagery rather than sidecars, so
+        # on a network share it is the slowest thing the tool does and a silent
+        # window looks like a hang.
+        print(f"[AUTO] reading {total} footprint(s)...")
+        for i, (name, path) in enumerate(sorted(rasters.items()), start=1):
             try:
                 rec = read_raster_footprint(path)
             except ValueError as e:
@@ -520,7 +553,7 @@ class AutoFootprintDashboard(QCDashboard):
                 errors.append(f"{name}: unreadable ({e})")
                 continue
 
-            print(describe_footprint(name, rec))
+            print(f"[AUTO] {i}/{total} " + describe_footprint(name, rec)[7:])
             if rec["derived"] == "mask":
                 from_mask += 1
             else:
