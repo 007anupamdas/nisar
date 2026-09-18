@@ -109,11 +109,25 @@ conventions can report slightly different pixel counts for the same ROI.
 
 ## ROI classes
 
-Each ROI carries a **class** — what it is over. The **Drawing:** picker sets the
-class of the next ROI you draw, so you mark ten vegetation patches, switch, and
-mark eight water ones; the **Class** cell in each row is editable afterwards.
-The picker is editable too, so `vegetation`, `water` and `snow` are the common
-cases rather than the permitted ones — type anything and it becomes a class.
+Each ROI carries a **class** — what it is over. The **Drawing:** picker says
+which class you are working on, and it does both halves of that:
+
+* a new ROI is drawn into it, so you mark ten vegetation patches, switch, and
+  mark eight water ones;
+* the canvas and the ROI table show **that class alone** — pick `water` and the
+  vegetation ROIs come off the screen and out of the table.
+
+The **Class** cell in each row is editable afterwards, and re-classing an ROI
+while a filter is on moves it out of view, because the filter is what it says.
+`(all)` at the top of the picker shows every ROI; nothing can be drawn there,
+so the Rect and Polygon tools switch off while it is selected — an ROI drawn
+under `all` would land in a class nobody chose. The picker is editable too, so
+`vegetation`, `water` and `snow` are the common cases rather than the permitted
+ones — type anything and it becomes a class.
+
+**Filtering changes what you see, never what you have.** Every export —
+`Export SHP`, `Export CSV` and the two CSVs written beside the shapefile —
+writes all the ROIs, whatever the picker is set to.
 
 Statistics are then summarised **per class**, in the table beside the ROI list:
 
@@ -228,7 +242,8 @@ means the dB columns describe only part of the ROI.
 
 ## What gets exported
 
-`Export SHP` writes one polygon per ROI in the working CRS:
+`Export SHP` writes one polygon per ROI in the working CRS — every ROI, not
+just the class on view:
 
 ```
 roi  name  kind  npix  area_m2  cx  cy  lon  lat  domain  class  backscat  inc_deg  src
@@ -254,6 +269,14 @@ table alone.
 
 `npix` is the ROI's geometry — pixels whose centre falls inside the ring. A
 band's `n` may be lower where that band has nodata.
+
+The shapefile's attribute columns are the CSV's columns, built from one plan so
+they cannot drift apart, and the write is checked at every step: a field the
+driver will not take, a feature it refuses, an error on the writer. If QGIS's
+writer produces no features anyway, the same records go out again through OGR
+directly, and the message box names which writer wrote the file. A `.shp` with
+no rows and no complaint — which is what this replaced — is no longer one of
+the things that can happen.
 
 ## Getting a GCOV in: `.h5`, or a TIF
 

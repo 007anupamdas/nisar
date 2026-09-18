@@ -577,6 +577,24 @@ def group_by_class(rois):
     return list(groups.values())
 
 
+def visible_rois(rois, class_filter):
+    """The ROIs a class filter leaves on view.
+
+    ROI_CLASS_ALL means every one. Any other value keeps the ROIs of that class
+    alone, matched the way the by-class summary groups them, so what the filter
+    shows and what the summary counts can never disagree.
+
+    Only the display is filtered. Every export writes `rois` whole: a filter is
+    a way of reading a measured set, not a decision about what was measured,
+    and a shapefile that quietly held a third of the ROIs because a dropdown
+    was left on 'water' would be the worst kind of wrong -- plausible.
+    """
+    key = class_key(class_filter)
+    if key == class_key(ROI_CLASS_ALL):
+        return list(rois or ())
+    return [roi for roi in rois or () if class_key(roi.get("class")) == key]
+
+
 def class_summary(rois, band, backscatter=None):
     """[(label, summary)] per class for one band, then all of them together.
 
@@ -870,6 +888,80 @@ def dbf_field_names(prefixes, keys=STAT_KEYS, reserved=(),
     return out
 
 
+def polygon_wkt(ring):
+    """A ring as WKT, closed, or None if it is not a polygon.
+
+    Text rather than a geometry object because the writers that take it differ
+    between QGIS versions and OGR builds, and every one of them parses WKT.
+    """
+    points = [(float(x), float(y)) for x, y in ring or []]
+    if len(points) < 3:
+        return None
+    if points[0] != points[-1]:
+        points.append(points[0])
+    inner = ", ".join(f"{x:.10g} {y:.10g}" for x, y in points)
+    return f"POLYGON(({inner}))"
+
+
+def shapefile_schema(plan):
+    """[(column name, kind)] for the attribute table, from the export plan."""
+    stat_kinds = {key: kind for key, _, kind, _ in STAT_FIELDS}
+    roi_kinds = dict(ROI_FIELDS)
+    return [(name, roi_kinds[roi_key] if roi_key is not None
+             else stat_kinds[stat_key])
+            for name, roi_key, _, stat_key in plan]
+
+
+def dbf_safe(value, kind):
+    """A value a DBF column can actually hold: plain int, float, str or None.
+
+    A numpy scalar, a NaN and an infinity all reach a writer that will either
+    refuse the feature or store something that is not a number -- and none of
+    them says so. A shapefile that quietly lost its attributes looks exactly
+    like one that was never written, which is the failure this guards.
+    """
+    if value is None:
+        return None
+    if kind == "string":
+        return str(value)
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    return int(number) if kind == "int" else number
+
+
+def roi_attributes(roi, plan):
+    """One ROI's attributes, in the order the plan declared the fields.
+
+    The order is the plan's and not a second traversal that happens to match:
+    a shapefile's attributes are positional, so a field list and an attribute
+    list built separately drift into each other's columns and the writer
+    reports nothing wrong.
+    """
+    schema = shapefile_schema(plan)
+    attributes = []
+    for (_, kind), (_, roi_key, label, stat_key) in zip(schema, plan):
+        if roi_key is not None:
+            attributes.append(dbf_safe(roi.get(roi_key), kind))
+        else:
+            stats = roi_stats(roi, label) or {}
+            attributes.append(dbf_safe(stats.get(stat_key), kind))
+    return attributes
+
+
+def shapefile_records(rois, plan):
+    """[(wkt, attributes)] ready for any writer. ROIs with no ring are left out."""
+    records = []
+    for roi in rois or ():
+        wkt = polygon_wkt(roi.get("ring"))
+        if wkt is not None:
+            records.append((wkt, roi_attributes(roi, plan)))
+    return records
+
+
 def stat_rows(rois, bands):
     """The ROI table in long form: one row per ROI and band, full names.
 
@@ -1050,6 +1142,10 @@ class RoiLabelItem(QgsMapCanvasItem):
         self.prepareGeometryChange()
         self.point, self.text, self.colour = point, str(text), colour
         self.updatePosition()
+        try:
+            self.show()     # it may have been hidden by the class filter
+        except Exception:
+            pass            # a build whose canvas item cannot hide never did
         self.update()
 
     def boundingRect(self):
@@ -1422,18 +1518,29 @@ class RadiometricDashboard(QMainWindow):
             "from its '.h5' does, and a GeoTIFF does when it was written by\n"
             "DPQED_gcov2tif.py. Every export records which one it is.")
 
+        # One dropdown doing two jobs, which is deliberate: it says which
+        # class you are working on, and working on a class means both drawing
+        # into it and looking at it alone. Two controls for that would let them
+        # disagree -- drawing water while reading vegetation -- and nothing on
+        # screen would say which one the numbers below belonged to.
         self.class_combo = QComboBox()
         self.class_combo.setEditable(True)
-        self.class_combo.addItems(list(ROI_CLASSES))
+        self.class_combo.addItems([ROI_CLASS_ALL] + list(ROI_CLASSES))
         self.class_combo.setCurrentIndex(
-            list(ROI_CLASSES).index(ROI_CLASS_DEFAULT))
+            1 + list(ROI_CLASSES).index(ROI_CLASS_DEFAULT))
         self.class_combo.setToolTip(
-            "What the next ROI you draw is over.\n\n"
+            "The class you are working on: the canvas and the table show its\n"
+            "ROIs alone, and a new ROI is drawn into it.\n\n"
+            f"'{ROI_CLASS_ALL}' shows every ROI. Nothing can be drawn there,\n"
+            "because there would be no saying what class it landed in.\n\n"
+            "Filtering changes what you see, never what you have: every\n"
+            "export writes all the ROIs, whatever the filter is set to.\n\n"
             "Statistics are reported per class, because a spread taken across\n"
             "water and vegetation together is not the product's uniformity --\n"
             "it is the difference between two land covers.\n\n"
             "Editable: type anything and it becomes a class. The class of an\n"
             "ROI already drawn is editable in its table row.")
+        self.class_combo.currentTextChanged.connect(self.on_class_filter)
 
         self.cb_zero_data = QCheckBox("Zeros are data")
         self.cb_zero_data.setChecked(not ZERO_IS_NODATA)
@@ -1614,15 +1721,53 @@ class RadiometricDashboard(QMainWindow):
             pass
         return DOMAIN_DEFAULT
 
-    def roi_class(self):
-        """The class the next ROI drawn will carry."""
+    def class_filter(self):
+        """The class on show, which is ROI_CLASS_ALL when that is all of them."""
         try:
             text = str(self.class_combo.currentText()).strip()
             if text:
                 return text
         except Exception:
             pass
-        return ROI_CLASS_DEFAULT
+        return ROI_CLASS_ALL
+
+    def roi_class(self):
+        """The class the next ROI drawn will carry."""
+        text = self.class_filter()
+        if class_key(text) == class_key(ROI_CLASS_ALL):
+            return ROI_CLASS_DEFAULT        # the drawing tools are off anyway
+        return text
+
+    def shown_rois(self):
+        """The ROIs the filter leaves on view, in the table's row order."""
+        return visible_rois(self.rois, self.class_filter())
+
+    def on_class_filter(self, _text=None):
+        """The filter changed: redraw the table, the canvas and the tools."""
+        self.clear_selection()
+        self.refresh_table()
+        self.apply_class_tools()
+
+    def apply_class_tools(self):
+        """With every class on show there is no class to draw into.
+
+        Disabling the two drawing tools is the honest version of this. The
+        alternative -- letting an ROI be drawn and picking a class for it --
+        puts an ROI in a class the user never chose, and the table would show
+        it as though they had.
+        """
+        drawing = class_key(self.class_filter()) != class_key(ROI_CLASS_ALL)
+        buttons = getattr(self, "tool_buttons", None) or {}
+        for mode in (TOOL_RECT, TOOL_POLY):
+            button = buttons.get(mode)
+            if button is None:
+                continue
+            button.setEnabled(drawing)
+            if not drawing and button.isChecked():
+                select = buttons.get(TOOL_SELECT)
+                if select is not None:
+                    select.setChecked(True)
+        self.apply_map_tool()
 
     def backscatter(self):
         """gamma0 as stored, or sigma0 through the RTC factor."""
@@ -2436,11 +2581,31 @@ class RadiometricDashboard(QMainWindow):
             self.roi_labels.pop(roi["roi"], None)
 
     def redraw_rois(self):
-        """Re-outline every ROI, so the selected one is the one in yellow."""
+        """Re-outline the ROIs on show, the selected one in yellow.
+
+        The ones the class filter excludes are hidden rather than dropped:
+        their rubber bands and numbers stay built, so switching the filter back
+        costs nothing and the ROI is exactly the one that was there before.
+        """
         selected = self.selected_roi()
         selected_id = selected["roi"] if selected else None
+        shown = {id(roi) for roi in self.shown_rois()}
         for roi in self.rois:
-            self.draw_roi(roi, selected=(roi["roi"] == selected_id))
+            if id(roi) in shown:
+                self.draw_roi(roi, selected=(roi["roi"] == selected_id))
+            else:
+                self._hide_roi(roi)
+
+    def _hide_roi(self, roi):
+        """Take one ROI off the canvas without forgetting it."""
+        for store in (self.roi_bands, self.roi_labels):
+            item = store.get(roi["roi"])
+            if item is None:
+                continue
+            try:
+                item.hide()
+            except Exception as e:
+                print(f"[ROI] hide: {e}")
 
     def _drop_roi_band(self, roi_id):
         band = self.roi_bands.pop(roi_id, None)
@@ -2470,12 +2635,13 @@ class RadiometricDashboard(QMainWindow):
             row = self.table.currentRow()
         except Exception:
             return None
-        if row is None or row < 0 or row >= len(self.rois):
+        shown = getattr(self, "_table_rois", None) or []
+        if row is None or row < 0 or row >= len(shown):
             return None
-        return self.rois[row]
+        return shown[row]
 
     def select_roi(self, roi_id):
-        for row, roi in enumerate(self.rois):
+        for row, roi in enumerate(getattr(self, "_table_rois", None) or []):
             if roi["roi"] == roi_id:
                 self.table.setCurrentCell(row, 0)
                 return
@@ -2796,11 +2962,16 @@ class RadiometricDashboard(QMainWindow):
         formats = {key: fmt for key, _, _, fmt in STAT_FIELDS}
         editable = {ROI_TABLE_COLUMNS.index("name"),
                     ROI_TABLE_COLUMNS.index("class")}
+        # The table's rows are the filtered ROIs, and every lookup from a row
+        # goes through this list rather than indexing self.rois: with a filter
+        # on, row 0 is not ROI 0, and an index that assumed it would rename and
+        # delete the wrong ROI without a word.
+        self._table_rois = self.shown_rois()
         self._filling_table = True
         try:
             self.table.setRowCount(0)
-            self.table.setRowCount(len(self.rois))
-            for row, roi in enumerate(self.rois):
+            self.table.setRowCount(len(self._table_rois))
+            for row, roi in enumerate(self._table_rois):
                 stats = roi_stats(roi, band) or {}
                 values = [str(roi["roi"]), roi["name"],
                           roi.get("class") or ROI_CLASS_UNSET, roi["kind"],
@@ -2835,18 +3006,20 @@ class RadiometricDashboard(QMainWindow):
             row, column = item.row(), item.column()
         except Exception:
             return
-        if not 0 <= row < len(self.rois):
+        shown = getattr(self, "_table_rois", None) or []
+        if not 0 <= row < len(shown):
             return
+        roi = shown[row]
         if column == ROI_TABLE_COLUMNS.index("name"):
-            self.rois[row]["name"] = (item.text().strip()
-                                      or self.rois[row]["name"])
+            roi["name"] = item.text().strip() or roi["name"]
             self.update_detail()
         elif column == ROI_TABLE_COLUMNS.index("class"):
             # Re-classing an ROI moves it between groups, so the summary has
-            # to be redrawn -- the figures it was in are no longer its.
-            self.rois[row]["class"] = item.text().strip() or ROI_CLASS_UNSET
-            self.update_summary()
-            self.update_detail()
+            # to be redrawn -- the figures it was in are no longer its. With a
+            # filter on it can also move the ROI out of view, which is why the
+            # whole table is rebuilt rather than the one row repainted.
+            roi["class"] = item.text().strip() or ROI_CLASS_UNSET
+            self.refresh_table()
 
     def update_summary(self):
         """One row per class: how bright, how alike, how many looks.
@@ -2930,10 +3103,24 @@ class RadiometricDashboard(QMainWindow):
         types = {"int": QVariant.Int, "double": QVariant.Double,
                  "string": QVariant.String}
         plan = []
-        for name, kind in ROI_FIELDS:
+
+        def add(name, kind):
+            """Append one field, and refuse to carry on if it did not take.
+
+            QgsFields.append() returns False on a name it will not accept --
+            a duplicate, or one the driver rejects -- and the caller is free
+            to ignore it. Ignoring it is how a shapefile ends up one column
+            short of its attribute lists, which then land in the wrong
+            columns or are dropped whole with nothing reported.
+            """
             field = (QgsField(name, types[kind], "", 64)
                      if kind == "string" else QgsField(name, types[kind]))
-            fields.append(field)
+            if fields.append(field) is False:
+                raise RuntimeError(f"the writer would not take a field "
+                                   f"named {name!r}")
+
+        for name, kind in ROI_FIELDS:
+            add(name, kind)
             plan.append((name, name, None, None))
         names = dbf_field_names(self.band_prefixes, STAT_KEYS,
                                 reserved=[name for name, _ in ROI_FIELDS])
@@ -2941,7 +3128,7 @@ class RadiometricDashboard(QMainWindow):
         for prefix, (_, label) in zip(self.band_prefixes, self.measure_bands):
             for key in STAT_KEYS:
                 name = names[(prefix, key)]
-                fields.append(QgsField(name, types[kinds[key]]))
+                add(name, kinds[key])
                 plan.append((name, None, label, key))
         return fields, plan
 
@@ -2952,6 +3139,9 @@ class RadiometricDashboard(QMainWindow):
         and a point in the middle of it would throw away the only record of
         which pixels produced the numbers. The same file reloads through 'Load
         ROIs', so an ROI set can be drawn once and run over every product.
+
+        Every ROI goes out, whatever the class filter is showing: the filter is
+        a way of reading the table, not a decision about what was measured.
         """
         if not self.rois:
             QMessageBox.warning(self, "Export SHP", "No ROIs to export.")
@@ -2965,19 +3155,15 @@ class RadiometricDashboard(QMainWindow):
 
         fields, plan = self.export_fields()
         try:
-            writer = self._make_writer(path, fields)
-            if writer is None:
-                return
-            for roi in self.rois:
-                feature = QgsFeature(fields)
-                ring = [QgsPointXY(x, y) for x, y in roi["ring"]]
-                ring.append(ring[0])         # a shapefile ring is closed
-                feature.setGeometry(QgsGeometry.fromPolygonXY([ring]))
-                feature.setAttributes(self.feature_attributes(roi, plan))
-                writer.addFeature(feature)
-            del writer          # flushes and closes the .shp/.dbf/.shx/.prj
+            count, how = self._write_shapefile(path, fields, plan)
         except Exception as e:
             QMessageBox.critical(self, "Export SHP", f"Could not write:\n{e}")
+            return
+        if not count:
+            QMessageBox.critical(
+                self, "Export SHP",
+                f"Nothing was written to\n{path}\n\n"
+                "The ROIs carry no usable rings.")
             return
 
         # DBF caps a field name at 10 characters, so the same numbers go out
@@ -2992,16 +3178,129 @@ class RadiometricDashboard(QMainWindow):
             class_path, class_summary_rows(
                 self.rois, [label for _, label in self.measure_bands]))
         crs = self.proj_crs.authid() or self.proj_crs.description()
-        print(f"[EXPORT] {len(self.rois)} ROI(s) -> {path} [{crs}]")
+        print(f"[EXPORT] {count} ROI(s) -> {path} [{crs}] via {how}")
         QMessageBox.information(
             self, "Export SHP",
-            f"{len(self.rois)} ROI(s) written to\n{path}\n\n"
+            f"{count} ROI(s) written to\n{path}\n\n"
             f"CRS: {crs}\n"
             f"Bands: {', '.join(l for _, l in self.measure_bands) or '(none)'}\n"
             f"As: {self.backscatter()}\n"
+            f"Writer: {how}\n"
             + (f"\nFull-length statistics beside it:\n{csv_path}"
                if written else "")
             + (f"\nBy class:\n{class_path}" if written_classes else ""))
+
+    def _write_shapefile(self, path, fields, plan):
+        """Write the ROIs, by whichever route actually produces features.
+
+        QGIS's writer is tried first, because it is the one that knows the
+        project's transform context. It is not trusted, though: a
+        QgsVectorFileWriter that cannot take a field or a feature says so in a
+        return value nobody is obliged to read, and the result is a .shp with
+        no rows and no error at all -- exactly the blank file this replaced. So
+        the features are counted, and if the count is zero the same records go
+        out again through OGR directly, which fails loudly or not at all.
+        """
+        errors = []
+        for name, write in (("QGIS", self._write_shapefile_qgis),
+                            ("OGR", self._write_shapefile_ogr)):
+            try:
+                count = write(path, fields, plan)
+            except Exception as e:                        # try the next route
+                errors.append(f"{name}: {e}")
+                continue
+            if count:
+                return count, name
+            errors.append(f"{name}: wrote no features")
+        print("[EXPORT] no writer produced features -- " + "; ".join(errors))
+        return 0, "; ".join(errors)
+
+    def _write_shapefile_qgis(self, path, fields, plan):
+        """Write through QgsVectorFileWriter, checking everything it returns."""
+        writer = self._make_writer(path, fields)
+        if writer is None:
+            raise RuntimeError("no usable QgsVectorFileWriter")
+        error = getattr(writer, "hasError", lambda: 0)()
+        if error:
+            message = getattr(writer, "errorMessage", lambda: "")()
+            del writer
+            raise RuntimeError(f"{message or error}")
+        count = 0
+        try:
+            for roi in self.rois:
+                ring = [QgsPointXY(x, y) for x, y in roi.get("ring") or ()]
+                if len(ring) < 3:
+                    continue
+                ring.append(ring[0])         # a shapefile ring is closed
+                feature = QgsFeature(fields)
+                feature.setGeometry(QgsGeometry.fromPolygonXY([ring]))
+                feature.setAttributes(self.feature_attributes(roi, plan))
+                if writer.addFeature(feature) is False:
+                    message = getattr(writer, "errorMessage", lambda: "")()
+                    raise RuntimeError(
+                        f"ROI {roi.get('roi')} refused: {message or 'no reason given'}")
+                count += 1
+        finally:
+            del writer      # flushes and closes the .shp/.dbf/.shx/.prj
+        return count
+
+    def _write_shapefile_ogr(self, path, fields, plan):
+        """Write the same records through OGR, with no Qt layer in between.
+
+        The fallback exists because the QGIS writer's failures are silent and
+        this one's are not: every call here returns a code that is checked, so
+        a file that comes out of this function either holds the features or
+        never existed.
+        """
+        from osgeo import ogr, osr
+
+        records = shapefile_records(self.rois, plan)
+        if not records:
+            return 0
+        driver = ogr.GetDriverByName("ESRI Shapefile")
+        if driver is None:
+            raise RuntimeError("GDAL has no ESRI Shapefile driver")
+        if os.path.exists(path):
+            driver.DeleteDataSource(path)
+        source = driver.CreateDataSource(path)
+        if source is None:
+            raise RuntimeError(f"could not create {path}")
+        reference = osr.SpatialReference()
+        wkt = self.proj_crs.toWkt() if self.proj_crs is not None else ""
+        if wkt:
+            reference.ImportFromWkt(wkt)
+        else:
+            reference = None
+        layer = source.CreateLayer(os.path.splitext(os.path.basename(path))[0],
+                                   reference, ogr.wkbPolygon)
+        if layer is None:
+            raise RuntimeError("could not create the shapefile layer")
+        ogr_types = {"int": ogr.OFTInteger, "double": ogr.OFTReal,
+                     "string": ogr.OFTString}
+        for name, kind in shapefile_schema(plan):
+            definition = ogr.FieldDefn(name, ogr_types[kind])
+            if kind == "string":
+                definition.SetWidth(64)
+            if layer.CreateField(definition) != 0:
+                raise RuntimeError(f"field {name} refused")
+        count = 0
+        for wkt_geometry, attributes in records:
+            feature = ogr.Feature(layer.GetLayerDefn())
+            geometry = ogr.CreateGeometryFromWkt(wkt_geometry)
+            if geometry is None:
+                raise RuntimeError(f"unreadable ring: {wkt_geometry[:60]}")
+            feature.SetGeometry(geometry)
+            for index, value in enumerate(attributes):
+                if value is None:
+                    feature.SetFieldNull(index)
+                else:
+                    feature.SetField(index, value)
+            if layer.CreateFeature(feature) != 0:
+                raise RuntimeError("OGR refused a feature")
+            count += 1
+        layer = None
+        source = None       # closes the file set
+        return count
 
     def feature_attributes(self, roi, plan):
         """One ROI's attributes, in the order `plan` declared the fields.
@@ -3011,25 +3310,7 @@ class RadiometricDashboard(QMainWindow):
         attribute list built separately drift into each other's columns and the
         writer reports nothing wrong.
         """
-        attributes = []
-        for _, roi_key, label, stat_key in plan:
-            if roi_key is not None:
-                attributes.append(roi.get(roi_key))
-            else:
-                stats = roi_stats(roi, label) or {}
-                attributes.append(self._dbf_value(stats.get(stat_key)))
-        return attributes
-
-    @staticmethod
-    def _dbf_value(value):
-        """NaN as NULL. A DBF holding 'nan' is a column no reader can total."""
-        try:
-            if value is None:
-                return None
-            number = float(value)
-            return None if not math.isfinite(number) else value
-        except (TypeError, ValueError):
-            return value
+        return roi_attributes(roi, plan)
 
     def _make_writer(self, path, fields):
         """QgsVectorFileWriter across the versions that changed its API."""
@@ -3050,14 +3331,8 @@ class RadiometricDashboard(QMainWindow):
                                 options)
                 except Exception:
                     continue
-        try:
-            return QgsVectorFileWriter(path, "UTF-8", fields,
-                                       QgsWkbTypes.Polygon, self.proj_crs,
-                                       "ESRI Shapefile")
-        except Exception as e:
-            QMessageBox.critical(self, "Export SHP",
-                                 f"No usable shapefile writer:\n{e}")
-            return None
+        return QgsVectorFileWriter(path, "UTF-8", fields,
+                                   QgsWkbTypes.Polygon, self.proj_crs, "ESRI Shapefile")
 
     def export_csv(self):
         if not self.rois:

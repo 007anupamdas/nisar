@@ -217,7 +217,28 @@ qgis_gui.QgsMapTool = _MapTool
 qgis_gui.QgsMapCanvasItem = _CanvasItem
 qgis_gui.QgsMapToolPan = _tool_factory("pan")
 qgis_gui.QgsMapToolZoom = _tool_factory("zoom")
-qgis_gui.QgsRubberBand = lambda *a, **k: MagicMock(_args=a)
+class _RubberBand(MagicMock):
+    """A mock that tells the truth about one thing: whether it is on screen.
+
+    show() and hide() on a plain MagicMock both succeed and isVisible() comes
+    back truthy either way, so a class filter that never hid anything would
+    have passed. This one records it.
+    """
+    def __init__(self, *a, **k):
+        super().__init__(_args=a)
+        self._visible = True
+
+    def show(self):
+        self._visible = True
+
+    def hide(self):
+        self._visible = False
+
+    def isVisible(self):
+        return self._visible
+
+
+qgis_gui.QgsRubberBand = lambda *a, **k: _RubberBand(*a, **k)
 
 for name in ("QgsProject", "QgsRasterLayer", "QgsVectorLayer", "QgsGeometry",
              "QgsCoordinateReferenceSystem", "QgsCoordinateTransform",
@@ -430,8 +451,9 @@ win.backscatter_combo.setCurrentIndex(0)
 
 # ── 4d. classes, through a real editable QComboBox and QTableWidget ──────────
 print("\n── by class ──")
-check("the picker offers the classes", win.class_combo.count(),
-      len(R.ROI_CLASSES))
+check("the picker offers the classes, and 'all' above them",
+      win.class_combo.count(), 1 + len(R.ROI_CLASSES))
+check("'all' first", win.class_combo.itemText(0), R.ROI_CLASS_ALL)
 ok("and is editable, so it is not a closed list", win.class_combo.isEditable())
 check("starting on the first", win.roi_class(), R.ROI_CLASS_DEFAULT)
 
@@ -442,6 +464,27 @@ check("a drawn ROI takes the picker's class", veg["class"], "vegetation")
 win.class_combo.setCurrentText("water")
 wet = win.add_roi(R.rect_ring(503000.0, 3994000.0, 503180.0, 3994180.0), "rect")
 check("typing into the picker classes the next one", wet["class"], "water")
+
+# The same dropdown is the filter, on a real QComboBox driving a real table.
+check("the canvas and table hold that class alone",
+      [roi["roi"] for roi in win.shown_rois()], [wet["roi"]])
+check("one row, not two", win.table.rowCount(), 1)
+check("and the row is that ROI", win.table.item(0, 0).text(), str(wet["roi"]))
+ok("the filtered-out ROI is hidden, not forgotten",
+   len(win.rois) == 2 and not win.roi_bands[veg["roi"]].isVisible(),
+   f"{len(win.rois)} ROI(s) held")
+check("an export still writes every one of them",
+      len(R.shapefile_records(win.rois, win.export_fields()[1])), 2)
+win.class_combo.setCurrentText(R.ROI_CLASS_ALL)
+check("'all' shows them both again", win.table.rowCount(), 2)
+ok("and the hidden one is back on the canvas",
+   win.roi_bands[veg["roi"]].isVisible())
+ok("with nothing drawable, since 'all' is no class to draw into",
+   not win.tool_buttons[R.TOOL_RECT].isEnabled()
+   and not win.tool_buttons[R.TOOL_POLY].isEnabled())
+win.class_combo.setCurrentText("water")
+ok("and drawing comes back with a class", win.tool_buttons[R.TOOL_RECT].isEnabled())
+win.class_combo.setCurrentText(R.ROI_CLASS_ALL)
 
 # The by-class table is a real QTableWidget, filled from the same helper.
 check("a row per class and one for all", win.class_table.rowCount(), 3)

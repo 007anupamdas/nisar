@@ -263,10 +263,16 @@ class _Check:
 class _Button:
     """A real checkable button: the mock reports every button as checked."""
     def __init__(self, group):
-        self._on, self._group = False, group
+        self._on, self._group, self._enabled = False, group, True
 
     def setCheckable(self, _):
         pass
+
+    def setEnabled(self, v):
+        self._enabled = bool(v)
+
+    def isEnabled(self):
+        return self._enabled
 
     def setToolTip(self, _):
         pass
@@ -295,7 +301,8 @@ win.table = _Table()
 win.domain_combo = _Combo([(label, value) for value, label in R.DOMAIN_CHOICES],
                           index=0)
 win.cb_zero_data = _Check(False)
-win.class_combo = _Combo([(name, None) for name in R.ROI_CLASSES], index=0)
+win.class_combo = _Combo(
+    [(name, None) for name in (R.ROI_CLASS_ALL,) + R.ROI_CLASSES], index=1)
 win.class_table = _Table()
 win.lbl_context = MagicMock()
 win.stats_band_combo = _Combo()
@@ -606,7 +613,7 @@ check("then the statistics, band by band",
       attributes[fields.index("HH_mean_db")],
       R.roi_stats(win.rois[0], "HHHH")["mean_db"])
 check("an undefined statistic is NULL, not the string 'nan'",
-      win._dbf_value(float("nan")), None)
+      R.dbf_safe(float("nan"), "double"), None)
 
 empty_roi = {"roi": 9, "name": "unmeasured", "kind": "rect", "stats": {}}
 check("an unmeasured ROI still fills its row",
@@ -956,12 +963,12 @@ win._next_roi_id = 1
 # vegetation, the -20 dB background as water.
 bright = R.rect_ring(500300.0, 3999700.0, 500480.0, 3999880.0)
 dark = R.rect_ring(503000.0, 3994000.0, 503180.0, 3994180.0)
-win.class_combo.setCurrentIndex(0)                 # vegetation
+win.class_combo.setCurrentIndex(1)                 # vegetation
 check("the picker sets the class of what is drawn next",
       win.roi_class(), "vegetation")
 veg = win.add_roi(bright, "rect")
 check("and the ROI carries it", veg["class"], "vegetation")
-win.class_combo.setCurrentIndex(1)                 # water
+win.class_combo.setCurrentIndex(2)                 # water
 wet = win.add_roi(dark, "rect")
 check("switching the picker switches what the next ROI is",
       wet["class"], "water")
@@ -981,6 +988,25 @@ ok("the spread within a class is not the gap between them",
    and not np.isfinite(summary["vegetation"]["spread_db"]),
    f"all {summary['all']['spread_db']:.2f} dB, "
    f"one ROI per class so no within-class spread")
+
+# The filter is the same dropdown, so what is on screen right now is the water
+# ROI alone. Everything measured is still there; only the view is narrowed.
+win.on_class_filter()
+check("the filter shows its class alone",
+      [roi["class"] for roi in win.shown_rois()], ["water"])
+check("and the table holds that one row", win.table.rowCount(), 1)
+check("naming the ROI that is in it", win.table.text(0, 0), "2")
+check("the other ROI is not gone, just not shown", len(win.rois), 2)
+check("so a shapefile still carries both",
+      len(R.shapefile_records(win.rois, win.export_fields()[1])), 2)
+check("and so does the CSV: a header and a row per ROI and band",
+      len(R.stat_rows(win.rois,
+                      [label for _, label in win.measure_bands])), 5)
+win.class_combo.setCurrentIndex(0)                 # (all)
+win.on_class_filter()
+check("switching to 'all' brings them back", win.table.rowCount(), 2)
+check("and nothing may be drawn into 'all'",
+      win.roi_class(), R.ROI_CLASS_DEFAULT)
 
 # The GUI table shows the same thing.
 win.refresh_table()
@@ -1139,6 +1165,74 @@ with tempfile.TemporaryDirectory() as tmp:
           win.gcov_vrt_for(h5_path), None)
     ok("and it says so", any("h5py" in str(w) for w in warned), str(warned))
     sys.modules["h5py"] = saved
+
+
+# ── A REAL SHAPEFILE, NOT A STUB ──────────────────────────────────────────────
+# The blank-shapefile bug was invisible to every stub: the writer was asked for
+# features, said nothing, and produced a file with no rows. So this section
+# takes the records the tool would hand a writer and puts them through a real
+# OGR round trip -- field names, types, values and rings -- and reads back what
+# landed. If OGR will not take these records, it fails here rather than in a
+# .shp the user opens a week later.
+try:
+    import numpy as _np
+    from pyogrio.raw import write as _ogr_write, read as _ogr_read
+    from shapely import wkt as _wkt
+except ImportError:                     # the suite still runs without them
+    print("\n-- real shapefile round trip: skipped (no pyogrio/shapely)")
+else:
+    print("\n-- real shapefile round trip")
+    shp_fields, shp_plan = win.export_fields()
+    records = R.shapefile_records(win.rois, shp_plan)
+    schema = R.shapefile_schema(shp_plan)
+    check("a record per ROI that has a ring", len(records), len(win.rois))
+    check("the schema and the field list agree",
+          [name for name, _ in schema], list(shp_fields))
+
+    fillers = {"int": 0, "double": float("nan"), "string": ""}
+    dtypes = {"int": "int64", "double": "float64", "string": "object"}
+    columns = []
+    for index, (_, kind) in enumerate(schema):
+        values = [record[1][index] for record in records]
+        values = [fillers[kind] if value is None else value
+                  for value in values]
+        columns.append(_np.array(values, dtype=dtypes[kind]))
+    geometries = _np.array(
+        [_wkt.loads(record[0]).wkb for record in records], dtype=object)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        shp_path = os.path.join(tmp, "rois.shp")
+        _ogr_write(shp_path, geometries, columns,
+                   _np.array([name for name, _ in schema], dtype=object),
+                   driver="ESRI Shapefile", geometry_type="Polygon",
+                   crs="EPSG:32645")
+        meta, _, back_geoms, back_fields = _ogr_read(shp_path)
+
+    check("every ROI came back", len(back_geoms), len(records))
+    ok("and every one carries a ring",
+       all(geometry is not None and len(geometry) for geometry in back_geoms),
+       str([geometry is None for geometry in back_geoms]))
+    areas = [_wkt.loads(record[0]).area for record in records]
+    ok("with an area, so the ring is a polygon and not a line",
+       all(area > 0 for area in areas), str(areas))
+    check("a column per field survived the DBF",
+          len(meta["fields"]), len(schema))
+    names_back = [str(name) for name in meta["fields"]]
+    check("under the names the schema declared, truncated as DBF truncates",
+          names_back, [name[:10] for name, _ in schema])
+    check("the ROI serial numbers came back",
+          [int(value) for value in back_fields[0]],
+          [roi["roi"] for roi in win.rois])
+    class_at = [n for n, _ in R.ROI_FIELDS].index("class")
+    check("and the classes, as text",
+          [str(value) for value in back_fields[class_at]],
+          [roi.get("class") for roi in win.rois])
+    label = win.measure_bands[0][1]
+    mean_at = [index for index, (_, _, band, key) in enumerate(shp_plan)
+               if band == label and key == "mean_db"][0]
+    wanted = (R.roi_stats(win.rois[0], label) or {}).get("mean_db")
+    check("and a statistic, as a number in its own column",
+          round(float(back_fields[mean_at][0]), 6), round(float(wanted), 6))
 
 print("\n" + "=" * 70)
 if failures:
