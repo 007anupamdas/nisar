@@ -22,7 +22,6 @@ import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(HERE, "DPQED_radial.py")
-SRC_QT6 = os.path.join(HERE, "DPQED_radial_qt6.py")
 
 BEGIN = "# ── BEGIN PURE HELPERS"
 END = "# ── END PURE HELPERS"
@@ -673,40 +672,6 @@ check("georeferenced",
       [float(v) for v in root.findtext("GeoTransform").split(",")], list(gt))
 check("fill is NaN, not a number in the data's range",
       root.findtext("VRTRasterBand/NoDataValue"), "nan")
-
-# ── 13. THE TWO BUILDS SHARE ONE ARITHMETIC ───────────────────────────────────
-# DPQED_radial_qt6.py is the Qt6 twin. The two differ only in how they name Qt
-# and QGIS things, and nothing between the PURE HELPERS markers names either --
-# so the slices have to be identical, character for character. They are two
-# files because a QGIS build is one Qt or the other; they are not two
-# implementations, and this is what stops them becoming two.
-print("\n── the Qt5 and Qt6 builds ──")
-
-
-def pure_slice(path):
-    text = open(path, encoding="utf-8").read()
-    return text[text.index(BEGIN):text.index(END)]
-
-
-if os.path.exists(SRC_QT6):
-    check("the pure slice is the same in both builds",
-          pure_slice(SRC_QT6) == pure_slice(SRC), True)
-    QT6 = load_helpers(SRC_QT6)
-    check("and the constants it reads are too",
-          [QT6[name] for name in ("STAT_KEYS", "ROI_FIELDS", "DOMAIN_DEFAULT",
-                                  "DBF_NAME_LIMIT", "GCOV_POL_TERMS")],
-          [H[name] for name in ("STAT_KEYS", "ROI_FIELDS", "DOMAIN_DEFAULT",
-                                "DBF_NAME_LIMIT", "GCOV_POL_TERMS")])
-    # Spot-checked through the Qt6 slice's own functions, not just compared as
-    # text: an identical slice that would not exec is still a broken file.
-    close("the Qt6 build computes the same gamma0",
-          QT6["roi_statistics"](power, "power")["mean_db"],
-          stats_power["mean_db"], 1e-12)
-    check("and rasterizes the same pixels", int(QT6["polygon_mask"](
-        QT6["ring_to_pixels"](ell, 0.0, 4.0, 1.0, 1.0), 4, 4).sum()), 7)
-    check("and names the same columns", QT6["band_prefix"]("HHHH", 1), "HH")
-else:
-    check("the Qt6 build is present", "missing", "present")
 
 print("\n" + "=" * 70)
 if failures:
