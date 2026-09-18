@@ -201,7 +201,8 @@ def write_tif(name, data, nodata=None, crs="EPSG:32643",
 p = write_tif("full.tif", np.ones((50, 60), dtype="float32"))
 rec = read_footprint(p)
 check("a fully valid raster uses the pixel grid", rec["derived"], "extent")
-check("  and reports why", rec["note"], "every pixel valid")
+check("  and reports why", rec["note"],
+      "every pixel valid (no nodata declared)")
 check("  area is width*height*pixel area",
       H["ring_area"](rec["ring_map"]), 50 * 60 * 25.0)
 
@@ -317,6 +318,120 @@ print(f"{'PASS' if ok else 'FAIL'}  the pixel grid would over-claim materially "
       f"({box_area / truth_area:.2f}x)")
 if not ok:
     failures.append(f"box/truth = {box_area / truth_area}")
+
+# ── 9. the two backends must agree ────────────────────────────────────────────
+# QGIS has GDAL and no rasterio; this container has rasterio and no GDAL. The
+# GDAL path would therefore ship completely unexercised, and its one real trap
+# is silent: GDAL and rasterio order the geotransform differently, so getting
+# affine_from_gdal wrong misplaces every footprint without raising anything.
+#
+# So: stub osgeo.gdal over a *real* rasterio read of the same file. The stub
+# takes its geotransform from rasterio's own to_gdal(), so what is being tested
+# is this file's conversion back, against real data, rather than my arithmetic
+# checked against my arithmetic.
+check("GDAL order -> Affine order",
+      H["affine_from_gdal"]((100000.0, 5.0, 0.0, 2000000.0, 0.0, -5.0)),
+      (5.0, 0.0, 100000.0, 0.0, -5.0, 2000000.0))
+check("a rotated geotransform keeps both rotation terms",
+      H["affine_from_gdal"]((10.0, 1.0, 0.5, 20.0, 0.25, -1.0)),
+      (1.0, 0.5, 10.0, 0.25, -1.0, 20.0))
+
+
+class _StubBand:
+    """A GDAL band whose reads are served by rasterio, over the same file."""
+
+    def __init__(self, src):
+        self.src = src
+
+    def GetMaskFlags(self):
+        from rasterio.enums import MaskFlags
+        return 0x01 if list(self.src.mask_flag_enums[0]) == [MaskFlags.all_valid] \
+            else 0x02
+
+    def GetMaskBand(self):
+        return _StubMaskBand(self.src)
+
+    def ReadAsArray(self, x=0, y=0, w=None, h=None, buf_xsize=None,
+                    buf_ysize=None):
+        from rasterio.enums import Resampling
+        return self.src.read(1, out_shape=(buf_ysize, buf_xsize),
+                             resampling=Resampling.nearest)
+
+
+class _StubMaskBand(_StubBand):
+    def ReadAsArray(self, x=0, y=0, w=None, h=None, buf_xsize=None,
+                    buf_ysize=None):
+        from rasterio.enums import Resampling
+        return self.src.read_masks(1, out_shape=(buf_ysize, buf_xsize),
+                                   resampling=Resampling.nearest)
+
+
+class _StubDataset:
+    def __init__(self, path):
+        self.src = rasterio.open(path)
+        self.RasterXSize = self.src.width
+        self.RasterYSize = self.src.height
+
+    def GetProjection(self):
+        return self.src.crs.to_wkt() if self.src.crs else ""
+
+    def GetGeoTransform(self):
+        return self.src.transform.to_gdal()     # rasterio's own conversion
+
+    def GetRasterBand(self, i):
+        return _StubBand(self.src)
+
+
+class _StubGdal:
+    GA_ReadOnly = 0
+    GMF_ALL_VALID = 0x01
+
+    @staticmethod
+    def UseExceptions():
+        pass
+
+    @staticmethod
+    def Open(path, mode=0):
+        return _StubDataset(path)
+
+
+import types                                            # noqa: E402
+osgeo = types.ModuleType("osgeo")
+osgeo.gdal = _StubGdal
+sys.modules["osgeo"] = osgeo
+sys.modules["osgeo.gdal"] = _StubGdal
+
+for fixture in ("swath.tif", "full.tif", "ssar_swath.tif"):
+    fp = os.path.join(TMP, fixture)
+    a = read_footprint(fp, backend="gdal")
+    b = read_footprint(fp, backend="rasterio")
+    check(f"{fixture}: backends agree on the backend used",
+          (a["backend"], b["backend"]), ("gdal", "rasterio"))
+    check(f"{fixture}: backends agree on how the footprint was derived",
+          a["derived"], b["derived"])
+    check(f"{fixture}: backends agree on the ring", a["ring_map"], b["ring_map"])
+    check(f"{fixture}: backends agree on the pixel grid",
+          a["box_ring"], b["box_ring"])
+    close(f"{fixture}: backends agree on over-coverage",
+          a["over"], b["over"], 1e-12)
+
+# zero-as-nodata goes through the band read rather than the mask, so it is a
+# second GDAL entry point and needs its own agreement check
+zp = os.path.join(TMP, "zerofill.tif")
+za = read_footprint(zp, zero_is_nodata=True, backend="gdal")
+zb = read_footprint(zp, zero_is_nodata=True, backend="rasterio")
+check("zero-as-nodata: backends agree on the ring", za["ring_map"], zb["ring_map"])
+check("zero-as-nodata: backends agree it came from the mask",
+      (za["derived"], zb["derived"]), ("mask", "mask"))
+close("zero-as-nodata: backends agree on the valid fraction",
+      za["valid_fraction"], zb["valid_fraction"], 1e-12)
+
+# auto falls through to rasterio when osgeo will not import
+del sys.modules["osgeo"]
+del sys.modules["osgeo.gdal"]
+rec = read_footprint(os.path.join(TMP, "swath.tif"), backend="auto")
+check("auto falls back to rasterio when osgeo is absent", rec["backend"],
+      "rasterio")
 
 print()
 if failures:

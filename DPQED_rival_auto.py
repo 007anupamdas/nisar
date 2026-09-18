@@ -50,15 +50,22 @@ A straight edge in UTM is a curve in lon/lat, so a four-corner ring transformed
 vertex by vertex cuts the corner -- hundreds of metres on a full frame. Every
 ring is densified to EDGE_DENSIFY points per edge before transforming.
 
-Requires rasterio for the raster read; the GUI half needs QGIS, as RIVAL does.
-tests_rival_auto.py covers the geometry without either.
+## Which library opens the rasters
+
+QGIS ships GDAL's Python bindings and does **not** ship rasterio, so importing
+rasterio in the QGIS console fails outright. Both are wrapped to the same few
+questions: GDAL is tried first, rasterio second, and the answers are identical
+either way. The one real trap is that the two order their geotransform
+differently -- see affine_from_gdal -- which misplaces a footprint silently
+rather than raising, so it is pinned by a test against the same fixture read
+both ways.
+
+The GUI half needs QGIS, as RIVAL does. tests_rival_auto.py covers the geometry
+and both backends without QGIS.
 """
 
 import os
 import sys
-
-import rasterio
-from rasterio.enums import Resampling
 
 # ── CONSTANTS ─────────────────────────────────────────────────────────────────
 # Long side of the decimated mask read. The hull of a swath is set by its
@@ -82,6 +89,12 @@ TREAT_ZERO_AS_NODATA = False
 # print loudly -- usually a raster whose mask is mostly empty.
 HULL_COVERAGE_WARN = 0.05
 
+# Which library opens the rasters. QGIS ships GDAL's Python bindings and does
+# NOT ship rasterio, so "auto" tries osgeo first and only falls back to rasterio
+# for a plain Python environment (which is where the tests run). Force one with
+# "gdal" or "rasterio" to find out which is in play.
+RASTER_BACKEND = "auto"
+
 RIVAL_FILE = "DPQED_rival.py"
 RIVAL_ENTRY_MARKER = "# ── ENTRY POINT"
 
@@ -96,6 +109,20 @@ def apply_affine(t, col, row):
     """
     a, b, c, d, e, f = t
     return (a * col + b * row + c, d * col + e * row + f)
+
+
+def affine_from_gdal(gt):
+    """GDAL's GetGeoTransform tuple in rasterio's Affine order.
+
+    The two libraries agree on the arithmetic and disagree on the order, which
+    is the sort of difference that produces a footprint in the wrong place with
+    no error anywhere. GDAL gives (originX, pixelW, rowRot, originY, colRot,
+    pixelH) and computes x = gt[0] + col*gt[1] + row*gt[2]; Affine iterates
+    (a, b, c, d, e, f) and computes x = a*col + b*row + c. So the origins move
+    from the front of each triple to the back.
+    """
+    ox, px, rx, oy, ry, py = gt
+    return (px, rx, ox, ry, py, oy)
 
 
 def grid_corner_ring(width, height, t):
@@ -226,10 +253,102 @@ def over_coverage(box_ring, data_ring):
 # ── END PURE HELPERS ──────────────────────────────────────────────────────────
 
 
+# ── OPENING A RASTER: GDAL IN QGIS, RASTERIO OUTSIDE IT ───────────────────────
+class RasterSource:
+    """The little a footprint needs from a raster, from either backend.
+
+    QGIS ships GDAL's Python bindings and does not ship rasterio; a plain
+    Python environment usually has it the other way round. Rather than pick one
+    and be unusable in half the places this runs, both are wrapped to the same
+    handful of questions and the answers are identical either way.
+    """
+
+    def __init__(self, backend, width, height, transform, crs_wkt,
+                 all_valid, read_mask, read_band):
+        self.backend = backend
+        self.width = width
+        self.height = height
+        self.transform = transform
+        self.crs_wkt = crs_wkt
+        self.all_valid = all_valid        # no nodata declared: every pixel data
+        self.read_mask = read_mask        # (out_w, out_h) -> 2-D truthy
+        self.read_band = read_band        # (out_w, out_h) -> 2-D values
+
+
+def open_gdal(path):
+    from osgeo import gdal
+
+    gdal.UseExceptions()
+    ds = gdal.Open(path, gdal.GA_ReadOnly)
+    if ds is None:
+        raise ValueError("GDAL could not open it")
+    wkt = ds.GetProjection()
+    band = ds.GetRasterBand(1)
+    # GMF_ALL_VALID is GDAL saying there is no nodata and no mask band, so the
+    # mask would come back solid -- worth knowing before reading it.
+    all_valid = bool(band.GetMaskFlags() & gdal.GMF_ALL_VALID)
+
+    def read_mask(out_w, out_h):
+        return band.GetMaskBand().ReadAsArray(
+            0, 0, ds.RasterXSize, ds.RasterYSize,
+            buf_xsize=out_w, buf_ysize=out_h)
+
+    def read_band(out_w, out_h):
+        return band.ReadAsArray(0, 0, ds.RasterXSize, ds.RasterYSize,
+                                buf_xsize=out_w, buf_ysize=out_h)
+
+    return RasterSource("gdal", ds.RasterXSize, ds.RasterYSize,
+                        affine_from_gdal(ds.GetGeoTransform()),
+                        wkt or None, all_valid, read_mask, read_band)
+
+
+def open_rasterio(path):
+    import rasterio
+    from rasterio.enums import Resampling, MaskFlags
+
+    src = rasterio.open(path)
+    t = src.transform
+    all_valid = list(src.mask_flag_enums[0]) == [MaskFlags.all_valid]
+
+    def read_mask(out_w, out_h):
+        return src.read_masks(1, out_shape=(out_h, out_w),
+                              resampling=Resampling.nearest)
+
+    def read_band(out_w, out_h):
+        return src.read(1, out_shape=(out_h, out_w),
+                        resampling=Resampling.nearest)
+
+    return RasterSource("rasterio", src.width, src.height,
+                        (t.a, t.b, t.c, t.d, t.e, t.f),
+                        src.crs.to_wkt() if src.crs else None,
+                        all_valid, read_mask, read_band)
+
+
+def open_raster(path, backend=None):
+    """Open with GDAL if it is there, rasterio if it is not."""
+    backend = backend or RASTER_BACKEND
+    if backend == "gdal":
+        return open_gdal(path)
+    if backend == "rasterio":
+        return open_rasterio(path)
+    try:
+        return open_gdal(path)
+    except ImportError:
+        pass
+    try:
+        return open_rasterio(path)
+    except ImportError:
+        raise ValueError(
+            "neither osgeo.gdal nor rasterio is importable. Inside QGIS the "
+            "GDAL bindings ship with it, so this usually means the script is "
+            "being run by a different Python than QGIS's own.")
+
+
 # ── READING A RASTER'S FOOTPRINT ──────────────────────────────────────────────
 def read_raster_footprint(path, probe_px=MASK_PROBE_PX,
                           from_mask=FOOTPRINT_FROM_MASK,
-                          zero_is_nodata=TREAT_ZERO_AS_NODATA):
+                          zero_is_nodata=TREAT_ZERO_AS_NODATA,
+                          backend=None):
     """The raster's own footprint, in its own CRS.
 
     Returns a dict, or raises ValueError with a reason a user can act on. The
@@ -237,62 +356,59 @@ def read_raster_footprint(path, probe_px=MASK_PROBE_PX,
     pixel grid otherwise; 'derived' says which, and is not guesswork -- it is
     what was actually used.
     """
-    with rasterio.open(path) as src:
-        if src.crs is None:
-            raise ValueError("no CRS: the raster does not say where it is")
-        if not src.width or not src.height:
-            raise ValueError("zero-sized raster")
+    src = open_raster(path, backend)
+    if not src.crs_wkt:
+        raise ValueError("no CRS: the raster does not say where it is")
+    if not src.width or not src.height:
+        raise ValueError("zero-sized raster")
+    if src.transform[0] == 0 or src.transform[4] == 0:
+        raise ValueError("degenerate transform (zero pixel size)")
 
-        t = (src.transform.a, src.transform.b, src.transform.c,
-             src.transform.d, src.transform.e, src.transform.f)
-        if src.transform.a == 0 or src.transform.e == 0:
-            raise ValueError("degenerate transform (zero pixel size)")
+    box = grid_corner_ring(src.width, src.height, src.transform)
+    rec = {"ring_map": box, "box_ring": box, "derived": "extent",
+           "crs_wkt": src.crs_wkt, "width": src.width, "height": src.height,
+           "over": 1.0, "valid_fraction": 1.0, "note": None,
+           "backend": src.backend}
 
-        box = grid_corner_ring(src.width, src.height, t)
-        rec = {"ring_map": box, "box_ring": box, "derived": "extent",
-               "crs": src.crs, "width": src.width, "height": src.height,
-               "over": 1.0, "valid_fraction": 1.0, "note": None}
+    if not from_mask:
+        rec["note"] = "mask reading disabled"
+        return rec
+    if src.all_valid and not zero_is_nodata:
+        # No nodata declared, so the mask is solid and reading it would only
+        # confirm the box. Saying 'extent' here is the truth, not a fallback.
+        rec["note"] = "every pixel valid (no nodata declared)"
+        return rec
 
-        if not from_mask:
-            rec["note"] = "mask reading disabled"
-            return rec
-
-        out_w, out_h = probe_decimation(src.width, src.height, probe_px)
-        try:
-            mask = src.read_masks(1, out_shape=(out_h, out_w),
-                                  resampling=Resampling.nearest)
-        except Exception as e:                       # driver without mask support
-            rec["note"] = f"mask unreadable ({e})"
-            return rec
-
+    out_w, out_h = probe_decimation(src.width, src.height, probe_px)
+    try:
+        mask = src.read_mask(out_w, out_h)
         valid = mask != 0
         if zero_is_nodata:
-            band = src.read(1, out_shape=(out_h, out_w),
-                            resampling=Resampling.nearest)
-            valid = valid & (band != 0)
-
-        n_valid = int(valid.sum())
-        rec["valid_fraction"] = n_valid / float(out_w * out_h)
-        if n_valid == 0:
-            rec["note"] = "no valid pixels in the mask; using the pixel grid"
-            return rec
-        if n_valid == out_w * out_h:
-            # Everything is valid, so the hull is the box. Saying 'extent' here
-            # is the truth: no mask narrowed anything.
-            rec["note"] = "every pixel valid"
-            return rec
-
-        sx = src.width / float(out_w)
-        sy = src.height / float(out_h)
-        hull = mask_hull_ring(valid.tolist(), t, sx, sy)
-        if hull is None:
-            rec["note"] = "mask gave no usable hull; using the pixel grid"
-            return rec
-
-        rec["ring_map"] = hull
-        rec["derived"] = "mask"
-        rec["over"] = over_coverage(box, hull) or 1.0
+            valid = valid & (src.read_band(out_w, out_h) != 0)
+    except Exception as e:                       # driver without mask support
+        rec["note"] = f"mask unreadable ({e})"
         return rec
+
+    n_valid = int(valid.sum())
+    rec["valid_fraction"] = n_valid / float(out_w * out_h)
+    if n_valid == 0:
+        rec["note"] = "no valid pixels in the mask; using the pixel grid"
+        return rec
+    if n_valid == out_w * out_h:
+        rec["note"] = "every pixel valid"
+        return rec
+
+    sx = src.width / float(out_w)
+    sy = src.height / float(out_h)
+    hull = mask_hull_ring(valid.tolist(), src.transform, sx, sy)
+    if hull is None:
+        rec["note"] = "mask gave no usable hull; using the pixel grid"
+        return rec
+
+    rec["ring_map"] = hull
+    rec["derived"] = "mask"
+    rec["over"] = over_coverage(box, hull) or 1.0
+    return rec
 
 
 def describe_footprint(name, rec):
@@ -413,7 +529,7 @@ class AutoFootprintDashboard(QCDashboard):
                 print(f"[AUTO] {name}: only {rec['valid_fraction']:.1%} of the "
                       f"grid is valid -- check the nodata value is right")
 
-            ring = self._ring_to_wgs84(rec["ring_map"], rec["crs"])
+            ring = self._ring_to_wgs84(rec["ring_map"], rec["crs_wkt"])
             if not ring:
                 errors.append(f"{name}: footprint would not transform to WGS84")
                 continue
@@ -424,7 +540,7 @@ class AutoFootprintDashboard(QCDashboard):
                 # file rather than metadata beside it. Unknown is honest for a
                 # reference tile that is not a NISAR product at all.
                 "band": band_from_name(name) or BAND_UNKNOWN,
-                "crs": rec["crs"].to_string() if rec["crs"] else None,
+                "crs": rec["crs_wkt"],
                 "granule": None,
                 "source": f"raster ({rec['derived']})",
                 "meta": None,
@@ -434,10 +550,10 @@ class AutoFootprintDashboard(QCDashboard):
               f"{boxed} from the pixel grid")
         return errors
 
-    def _ring_to_wgs84(self, ring_map, crs):
+    def _ring_to_wgs84(self, ring_map, crs_wkt):
         """Densify, then transform to lon/lat, so the edges keep their shape."""
         try:
-            src = QgsCoordinateReferenceSystem(crs.to_string())
+            src = QgsCoordinateReferenceSystem.fromWkt(crs_wkt)
             if not src.isValid():
                 return None
             tf = QgsCoordinateTransform(src, self.wgs84_crs, QgsProject.instance())
@@ -485,7 +601,7 @@ class AutoFootprintDashboard(QCDashboard):
         except Exception as e:
             print(f"[INPUT] {os.path.basename(raster_path)}: {e}")
             return None
-        ring = self._ring_to_wgs84(rec["ring_map"], rec["crs"])
+        ring = self._ring_to_wgs84(rec["ring_map"], rec["crs_wkt"])
         if not ring:
             return None
         print(f"[INPUT] footprint from the raster's {rec['derived']}: "
