@@ -131,9 +131,44 @@ does not do that, and over a target small enough to click on, a square and a
 circle are not a radiometric difference.
 
 The point of the tool is that every ROI is then **the same size**, which is
-what makes a set of them comparable. At 30 m pixels the 300 m default is
-10 × 10 pixels, which is about the smallest an ENL estimate is worth quoting
-from; the `n` column says what each one actually got.
+what makes a set of them comparable.
+
+### How big, for ENL
+
+**Suggest** sets the side to what an ENL estimate needs on the raster you have
+loaded. Backscatter is a mean and converges fast; ENL is a ratio of moments and
+does not, so the two want very different amounts of ground:
+
+| Target on ENL | Independent samples | Pixels | 10 m | 20 m | 30 m |
+|---|---|---|---|---|---|
+| ±20% | 60 | 121 | 110 m | 220 m | 330 m |
+| **±10%** (default) | 242 | 484 | **220 m** | **440 m** | **660 m** |
+| ±5% | 968 | 1936 | 440 m | 880 m | 1400 m |
+
+The chain behind those numbers, each link arguable and none of it hidden:
+
+1. **ENL's relative standard error is ≈ √(2/N)** in the number of *independent*
+   samples. Simulated here over gamma-distributed intensities at 1, 4 and 12
+   looks, the realised spread runs 5–10% above that asymptote past N ≈ 200 and
+   further below it, so N is inflated by 1.1 rather than taken from the limit.
+2. **The estimator is biased high at small N** — 11% at N = 25, 2% at N = 100.
+   That is the direction that matters: a small ROI reports *more* looks than
+   the product has, so an under-sized ROI flatters the product rather than
+   obviously breaking.
+3. **Pixels are not independent samples.** Multilooking and the impulse
+   response correlate neighbours, so the pixel count is divided by 2 before it
+   becomes a sample count. Two is conservative for a product posted at about
+   its resolution and **optimistic for a heavily oversampled one** — it is the
+   one number here that is a rule of thumb rather than arithmetic, and it is a
+   constant (`ENL_PIXELS_PER_SAMPLE`) so it can be argued with.
+
+The default stays at 300 m because most ROIs are drawn to read backscatter,
+where it is ample, and 660 m is a lot of uniform ground to demand. Press
+Suggest when ENL is the point.
+
+The detail panel reports what each ROI's ENL is actually worth — `±10%`,
+`±22%`, or *too few pixels* — from its own pixel count, so an ROI that was
+drawn too small says so instead of quietly reporting an optimistic number.
 
 Point ROIs carry `point` in the `kind` column, so an export says which ROIs
 were placed this way and which were outlined.

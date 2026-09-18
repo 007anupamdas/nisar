@@ -385,6 +385,10 @@ def fake_layer(source="/data/gcov.vrt", crs="EPSG:32644", bands=2):
     layer.source.return_value = source
     layer.crs.return_value = _CRS(crs)
     layer.extent.return_value = _Rect(0, 0, 1, 1)
+    # Real numbers again: a MagicMock posting floats to nothing, and the ENL
+    # side suggestion would come back None with the failure printed, not raised.
+    layer.rasterUnitsPerPixelX.return_value = 30.0
+    layer.rasterUnitsPerPixelY.return_value = 30.0
     provider = MagicMock()
     provider.bandCount.return_value = bands
     # Real numbers, not a mock: `lo, hi = provider.cumulativeCut(...)` unpacks
@@ -764,6 +768,25 @@ ok("centred on the click",
    str(centre))
 check("and it carries the picker's class, like any other ROI",
       placed["class"], win.roi_class())
+
+# Suggest sizes the square from the raster's own posting.
+win.btn_point_suggest = _Spin(0.0)
+win.raster_layer = fake_layer()
+del warned[:]
+win.suggest_point_side()
+pixel = win.raster_pixel_m()
+ok("the posting comes from the raster", pixel and pixel > 0, str(pixel))
+check("and Suggest sets the side that posting needs",
+      win.point_side(), R.enl_side_for_precision(pixel))
+ok("which is a real ENL sample size, not a round number",
+   R.enl_precision((win.point_side() / pixel) ** 2) <= R.ENL_TARGET_ERROR,
+   f"+/-{R.enl_precision((win.point_side() / pixel) ** 2):.1%}")
+saved_layer, win.raster_layer = win.raster_layer, None
+del warned[:]
+win.suggest_point_side()
+ok("with no raster it says so rather than guessing",
+   any("Load a raster" in str(w) for w in warned), str(warned))
+win.raster_layer = saved_layer
 
 win.point_side_spin.setValue(240.0)
 check("changing the box does not touch the ROI already drawn",

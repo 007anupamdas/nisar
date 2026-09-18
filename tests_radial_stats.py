@@ -774,6 +774,42 @@ check("each keeping its own ROIs",
 check("and its label as typed", [label for label, _, _ in exports],
       ["open water", "open-water", "open/water"])
 
+# ── 15. HOW BIG AN ROI HAS TO BE FOR ENL TO MEAN ANYTHING ─────────────────────
+# ENL's relative error goes as sqrt(2/N) in INDEPENDENT samples. These pin the
+# chain that turns a target precision into a side length, and the reverse
+# reading for an ROI already drawn. The constants are argued for at their
+# definitions; what is checked here is that the arithmetic matches them and
+# that the degenerate inputs refuse rather than return a plausible number.
+print("\n── ENL sample size ──")
+close("10 per cent needs a couple of hundred samples",
+      H["enl_samples_needed"](0.10), 2.0 * (1.1 / 0.10) ** 2, 1e-9)
+close("halving the error quadruples them",
+      H["enl_samples_needed"](0.05) / H["enl_samples_needed"](0.10), 4.0, 1e-9)
+check("an impossible precision is refused", H["enl_samples_needed"](0.0), None)
+check("and so is a negative one", H["enl_samples_needed"](-0.1), None)
+
+# The default target on the postings a NISAR GCOV actually comes at.
+for pixel, want in ((10.0, 220.0), (20.0, 440.0), (30.0, 660.0)):
+    check(f"{pixel:g} m pixels need a {want:g} m square",
+          H["enl_side_for_precision"](pixel), want)
+check("a looser target needs less ground",
+      H["enl_side_for_precision"](30.0, 0.20), 330.0)
+check("and a tighter one more",
+      H["enl_side_for_precision"](30.0, 0.05), 1400.0)
+check("a product whose pixels are less independent needs more still",
+      H["enl_side_for_precision"](30.0, 0.10, 4.0), 940.0)
+check("no posting, no suggestion", H["enl_side_for_precision"](0.0), None)
+check("nor from nonsense", H["enl_side_for_precision"]("30 m"), None)
+
+# Read backwards: what an ROI already drawn is worth.
+close("the suggestion lands on the precision it was asked for",
+      H["enl_precision"](round((660.0 / 30.0) ** 2)), 0.10, 0.005)
+check("a bigger ROI is worth more",
+      H["enl_precision"](2000) < H["enl_precision"](500), True)
+is_nan("and a handful of pixels is worth nothing", H["enl_precision"](2))
+is_nan("as is none at all", H["enl_precision"](0))
+is_nan("or a pixel count that is not one", H["enl_precision"](None))
+
 print("\n" + "=" * 70)
 if failures:
     print(f"{len(failures)} FAILURE(S):")

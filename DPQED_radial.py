@@ -157,9 +157,15 @@ MAP_TOOLS = (TOOL_SELECT, TOOL_RECT, TOOL_POLY, TOOL_POINT, TOOL_PAN,
 # The three that make an ROI. The rest move the view.
 DRAWING_TOOLS = (TOOL_RECT, TOOL_POLY, TOOL_POINT)
 
-# Point buffer: one click becomes a square of this many metres on a side. A
-# default that is a round number of 30 m NISAR GCOV pixels, and a floor that
-# stops a stray click producing an ROI of one pixel and a half.
+# Point buffer: one click becomes a square of this many metres on a side.
+#
+# 300 m is 10 x 10 pixels at a 30 m posting. That is plenty for backscatter,
+# which is a mean and converges quickly, and NOT enough for ENL, which needs
+# hundreds of independent samples and would come back at about +/-22% here.
+# The default stays at the smaller figure because most ROIs are drawn to read
+# backscatter and a 660 m square is a lot of ground to demand for that; the
+# Suggest button sizes it for ENL from the raster actually loaded, which is the
+# honest way to offer a number that depends on the posting.
 POINT_SIDE_DEFAULT_M = 300.0
 POINT_SIDE_MIN_M = 1.0
 POINT_SIDE_MAX_M = 100000.0
@@ -254,6 +260,25 @@ INCIDENCE_NAME = "incidenceAngle"
 # The picker is editable, so this list is the common cases rather than the
 # permitted ones: anything typed becomes a class, here or in the table.
 ROI_CLASSES = ("vegetation", "water", "snow", "old ice", "new ice", "sand")
+# How precisely an ENL estimate is wanted, as a relative standard error. 10%
+# is the figure at which ENL stops being an impression and starts being a
+# number worth putting in a table: two products whose ENL differs by 15% are
+# then distinguishable, and at 20% they are not.
+ENL_TARGET_ERROR = 0.10
+# The ENL estimator's relative standard error is asymptotically sqrt(2/N) in
+# the number of INDEPENDENT samples. Simulated over gamma-distributed
+# intensities at 1, 4 and 12 looks, the realised spread runs 5-10% above that
+# asymptote once N is past ~200, and further above it below that, so the
+# sample count is inflated by this factor rather than taken from the limit.
+# The estimator is also biased HIGH at small N -- 11% at N=25, 2% at N=100 --
+# which is the direction that matters: a small ROI flatters the product.
+ENL_SAFETY = 1.1
+# Pixels in a GCOV are not independent samples of the speckle: multilooking and
+# the impulse response correlate neighbours, so a correlation cell covers more
+# than one posted pixel. Two is the conservative default for a product posted
+# at about its resolution; a heavily oversampled product needs more, and the
+# figure belongs in the open where it can be argued with.
+ENL_PIXELS_PER_SAMPLE = 2.0
 ROI_CLASS_DEFAULT = ROI_CLASSES[0]
 ROI_CLASS_UNSET = "unclassified"
 ROI_CLASS_ALL = "all"
@@ -628,6 +653,76 @@ def class_summary(rois, band, backscatter=None):
         summaries.append((ROI_CLASS_ALL, summarise(
             [roi_stats(roi, band, backscatter) for roi in rois])))
     return summaries
+
+
+def enl_samples_needed(rel_error=ENL_TARGET_ERROR, safety=ENL_SAFETY):
+    """Independent samples for an ENL estimate of this relative precision.
+
+    From CV(ENL) ~ sqrt(2/N), inflated by `safety` because that is the large-N
+    limit and the realised spread sits above it. Inverted: N = 2 (safety /
+    rel_error)^2.
+
+    'Independent' is doing real work in that sentence -- see
+    enl_side_for_precision, which turns it into pixels.
+    """
+    try:
+        error = float(rel_error)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(error) or error <= 0.0:
+        return None
+    return 2.0 * (float(safety) / error) ** 2
+
+
+def enl_side_for_precision(pixel_m, rel_error=ENL_TARGET_ERROR,
+                           pixels_per_sample=ENL_PIXELS_PER_SAMPLE,
+                           safety=ENL_SAFETY):
+    """The side of a square ROI, in metres, that supports that precision.
+
+    The whole chain in one place: a target precision becomes a number of
+    independent samples, the samples become pixels through the correlation
+    cell, and the pixels become a side length through the posting.
+
+    Rounded up to a whole number of pixels and then to something a person
+    would type, because the input is a rule of thumb about correlation and
+    presenting its output to the metre would claim a precision it has not got.
+    """
+    samples = enl_samples_needed(rel_error, safety)
+    try:
+        posting = float(pixel_m)
+        per_sample = float(pixels_per_sample)
+    except (TypeError, ValueError):
+        return None
+    if (samples is None or not math.isfinite(posting) or posting <= 0.0
+            or not math.isfinite(per_sample) or per_sample <= 0.0):
+        return None
+    pixels = samples * per_sample                   # pixels the ROI must hold
+    side = posting * math.sqrt(pixels)
+    step = 10.0 if side < 1000.0 else 100.0
+    return math.ceil(side / step) * step
+
+
+def enl_precision(npix, pixels_per_sample=ENL_PIXELS_PER_SAMPLE,
+                  safety=ENL_SAFETY):
+    """The relative standard error an ROI of `npix` pixels actually supports.
+
+    The other direction, for an ROI already drawn: what its ENL is worth. An
+    ROI too small to say anything says so here rather than by being quietly
+    wrong -- and wrong upward, since the estimator's small-sample bias is
+    toward more looks than the product has.
+    """
+    try:
+        pixels = float(npix)
+        per_sample = float(pixels_per_sample)
+    except (TypeError, ValueError):
+        return float("nan")
+    if (not math.isfinite(pixels) or pixels <= 0.0
+            or not math.isfinite(per_sample) or per_sample <= 0.0):
+        return float("nan")
+    samples = pixels / per_sample
+    if samples < 2.0:
+        return float("nan")
+    return float(safety) * math.sqrt(2.0 / samples)
 
 
 def class_slug(label, fallback="class"):
@@ -1758,10 +1853,25 @@ class RadiometricDashboard(QMainWindow):
             "The side of the square a point-buffer click makes, in metres of\n"
             "the working CRS -- so it is a real size on the ground, not a\n"
             "number of pixels and not a size on screen.\n\n"
-            "The square is centred on the click. At 30 m pixels a 300 m side\n"
-            "is 10 x 10 pixels, which is about the smallest an ENL estimate\n"
-            "is worth quoting from.")
-        for widget in (self.point_side_label, self.point_side_spin):
+            "The square is centred on the click.\n\n"
+            "The default suits backscatter, which needs few samples. ENL needs\n"
+            "many more -- at 30 m pixels the default's 100 pixels give it to\n"
+            "about +/-22% -- so press Suggest when ENL is the point.")
+        self.btn_point_suggest = QPushButton("Suggest")
+        self.btn_point_suggest.setToolTip(
+            f"Set the side to what a {ENL_TARGET_ERROR:.0%} ENL estimate needs\n"
+            "on the loaded raster.\n\n"
+            "ENL's relative error is about sqrt(2/N) in the number of\n"
+            "INDEPENDENT samples, so the precision is set by how many the ROI\n"
+            "holds, not by how many metres it spans. The suggestion divides\n"
+            f"the pixel count by {ENL_PIXELS_PER_SAMPLE:g} first, because\n"
+            "neighbouring GCOV pixels are not independent samples of the\n"
+            "speckle.\n\n"
+            "A rule of thumb about correlation, not a measurement: over a\n"
+            "heavily oversampled product it is optimistic.")
+        self.btn_point_suggest.clicked.connect(self.suggest_point_side)
+        for widget in (self.point_side_label, self.point_side_spin,
+                       self.btn_point_suggest):
             widget.setVisible(False)
 
         self.cb_zero_data = QCheckBox("Zeros are data")
@@ -1810,6 +1920,7 @@ class RadiometricDashboard(QMainWindow):
         tool_row.addSpacing(8)
         tool_row.addWidget(self.point_side_label)
         tool_row.addWidget(self.point_side_spin)
+        tool_row.addWidget(self.btn_point_suggest)
         tool_row.addSpacing(20)
         tool_row.addWidget(QLabel("Stats band:"))
         tool_row.addWidget(self.stats_band_combo)
@@ -3297,6 +3408,12 @@ class RadiometricDashboard(QMainWindow):
             + f", read as {roi.get('domain')}, "
             + f"from {roi.get('src') or '(no raster)'}",
             f"  incidence {format_stat(roi.get('inc_deg'), '{:.2f}')} deg",
+            f"  ENL here is worth about "
+            + (f"+/-{enl_precision(roi.get('npix')):.0%}"
+               if np.isfinite(enl_precision(roi.get("npix")))
+               else "nothing: too few pixels")
+            + f" ({roi['npix']} px, one sample per "
+              f"{ENL_PIXELS_PER_SAMPLE:g})",
             "",
             f"  {'band':<10}{'n':>8}{'mean dB':>10}{'std dB':>9}{'cv':>8}"
             f"{'ENL':>8}{'p5 dB':>9}{'p95 dB':>9}{'nonpos':>8}",
@@ -3810,10 +3927,57 @@ class RadiometricDashboard(QMainWindow):
 
     def show_point_side(self, visible):
         """The side-length box belongs to the point buffer and to nothing else."""
-        for name in ("point_side_label", "point_side_spin"):
+        for name in ("point_side_label", "point_side_spin",
+                     "btn_point_suggest"):
             widget = getattr(self, name, None)
             if widget is not None:
                 widget.setVisible(bool(visible))
+
+    def raster_pixel_m(self):
+        """The loaded raster's posting in metres, or None.
+
+        The larger of the two axes, so a product posted unequally is sized by
+        the axis that runs out of samples first.
+        """
+        layer = self.raster_layer
+        if layer is None:
+            return None
+        try:
+            px = abs(float(layer.rasterUnitsPerPixelX()))
+            py = abs(float(layer.rasterUnitsPerPixelY()))
+        except Exception as e:
+            print(f"[ROI] pixel size: {e}")
+            return None
+        size = max(px, py)
+        return size if math.isfinite(size) and size > 0.0 else None
+
+    def suggest_point_side(self):
+        """Size the buffer from what an ENL estimate needs on this raster."""
+        pixel = self.raster_pixel_m()
+        if pixel is None:
+            QMessageBox.warning(
+                self, "Suggest side",
+                "Load a raster first: the suggestion is a pixel count turned "
+                "into metres, so it needs the posting.")
+            return
+        side = enl_side_for_precision(pixel, ENL_TARGET_ERROR)
+        samples = enl_samples_needed(ENL_TARGET_ERROR)
+        if side is None:
+            return
+        pixels = round((side / pixel) ** 2)
+        self.point_side_spin.setValue(side)
+        print(f"[ROI] {side:g} m square for {ENL_TARGET_ERROR:.0%} ENL: "
+              f"{pixels} px of {pixel:g} m, ~{samples:.0f} independent")
+        QMessageBox.information(
+            self, "Suggest side",
+            f"{side:g} m on a side, at {pixel:g} m pixels.\n\n"
+            f"That is {pixels} pixels, about "
+            f"{pixels / ENL_PIXELS_PER_SAMPLE:.0f} independent samples "
+            f"(one per {ENL_PIXELS_PER_SAMPLE:g} pixels), which supports an "
+            f"ENL estimate to about {ENL_TARGET_ERROR:.0%}.\n\n"
+            "Smaller ROIs still measure backscatter perfectly well. It is ENL "
+            "that needs the samples -- and it fails upward when it has too "
+            "few, reporting more looks than the product has.")
 
     def point_side(self):
         """The side of the square a point-buffer click makes, in metres.
