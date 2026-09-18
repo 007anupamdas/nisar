@@ -618,6 +618,40 @@ def class_summary(rois, band, backscatter=None):
     return summaries
 
 
+def class_slug(label, fallback="class"):
+    """A class name as a filename fragment: lowercase, no surprises.
+
+    Everything outside a-z, 0-9 and '-' becomes '_', because a class is typed
+    freely and 'open water / lake' is a legal class and an illegal filename on
+    at least one of the systems this runs on. Trimmed to something a person can
+    still read at a glance in a directory listing.
+    """
+    text = str(label or "").strip().lower()
+    cleaned = "".join(char if char.isalnum() or char in "-_" else "_"
+                      for char in text).strip("_")
+    return (cleaned[:40].strip("_") or fallback)
+
+
+def class_exports(rois, fallback="class"):
+    """[(label, slug, [roi])] per class, with the slugs made unique.
+
+    Two classes can slug to one name -- 'open water' and 'open-water' both
+    become 'open_water' -- and the second would overwrite the first's files
+    with no error at all, which is how a class silently vanishes from an export
+    directory. So a collision gets a numbered suffix rather than a coin toss.
+    """
+    exports, taken = [], set()
+    for label, members in group_by_class(rois):
+        slug = base = class_slug(label, fallback)
+        index = 2
+        while slug in taken:
+            slug = f"{base}_{index}"
+            index += 1
+        taken.add(slug)
+        exports.append((label, slug, members))
+    return exports
+
+
 def nesz_estimate(rois, band, nesz_class=NESZ_CLASS, backscatter=None):
     """The noise floor this scene shows, from the ROIs of one class.
 
@@ -3305,6 +3339,7 @@ class RadiometricDashboard(QMainWindow):
             class_path, class_summary_rows(self.rois, bands))
         written_nesz = self._write_rows(nesz_path,
                                         nesz_rows(self.rois, bands))
+        per_class = self._export_by_class(stem, fields, plan)
         crs = self.proj_crs.authid() or self.proj_crs.description()
         print(f"[EXPORT] {count} ROI(s) -> {path} [{crs}] via {how}")
         QMessageBox.information(
@@ -3317,9 +3352,52 @@ class RadiometricDashboard(QMainWindow):
             + (f"\nFull-length statistics beside it:\n{csv_path}"
                if written else "")
             + (f"\nBy class:\n{class_path}" if written_classes else "")
-            + (f"\nNoise floor:\n{nesz_path}" if written_nesz else ""))
+            + (f"\nNoise floor:\n{nesz_path}" if written_nesz else "")
+            + (("\n\nPer class, beside them:\n"
+                + "\n".join(f"  {label}: {os.path.basename(stem)}_{slug}"
+                             f".shp ({n} ROI)"
+                             for label, slug, n in per_class))
+               if per_class else ""))
 
-    def _write_shapefile(self, path, fields, plan):
+    def _export_by_class(self, stem, fields, plan):
+        """A shapefile and a statistics CSV per class, beside the whole set.
+
+        The whole-set files stay exactly as they were -- this adds to them
+        rather than replacing them, because the two are read by different
+        people: one report covers the product, and one analyst covers water.
+
+        Written whatever the class filter is showing, and written for every
+        class rather than the selected one, for the same reason the whole-set
+        export ignores the filter: what was measured is not a function of what
+        happens to be on screen.
+
+        A single-class set gets none of these. The whole-set file already is
+        that class, and a second copy of it under a longer name is not a
+        by-class export -- it is a duplicate that someone eventually diffs.
+        """
+        exports = class_exports(self.rois)
+        if len(exports) < 2:
+            return []
+        written = []
+        for label, slug, members in exports:
+            shp_path = f"{stem}_{slug}.shp"
+            try:
+                count, _ = self._write_shapefile(shp_path, fields, plan,
+                                                 members)
+            except Exception as e:
+                print(f"[EXPORT] {label}: {e}")
+                continue
+            if not count:
+                print(f"[EXPORT] {label}: nothing written to {shp_path}")
+                continue
+            # No per-class summary CSV: the whole-set '_by_class.csv' already
+            # holds this class's row, and a one-row file beside it is another
+            # thing to keep in step for no new information.
+            self._write_csv(f"{stem}_{slug}_stats.csv", members)
+            written.append((label, slug, count))
+        return written
+
+    def _write_shapefile(self, path, fields, plan, rois=None):
         """Write the ROIs, by whichever route actually produces features.
 
         QGIS's writer is tried first, because it is the one that knows the
@@ -3330,11 +3408,13 @@ class RadiometricDashboard(QMainWindow):
         the features are counted, and if the count is zero the same records go
         out again through OGR directly, which fails loudly or not at all.
         """
+        if rois is None:
+            rois = self.rois
         errors = []
         for name, write in (("QGIS", self._write_shapefile_qgis),
                             ("OGR", self._write_shapefile_ogr)):
             try:
-                count = write(path, fields, plan)
+                count = write(path, fields, plan, rois)
             except Exception as e:                        # try the next route
                 errors.append(f"{name}: {e}")
                 continue
@@ -3344,7 +3424,7 @@ class RadiometricDashboard(QMainWindow):
         print("[EXPORT] no writer produced features -- " + "; ".join(errors))
         return 0, "; ".join(errors)
 
-    def _write_shapefile_qgis(self, path, fields, plan):
+    def _write_shapefile_qgis(self, path, fields, plan, rois):
         """Write through QgsVectorFileWriter, checking everything it returns."""
         writer = self._make_writer(path, fields)
         if writer is None:
@@ -3356,7 +3436,7 @@ class RadiometricDashboard(QMainWindow):
             raise RuntimeError(f"{message or error}")
         count = 0
         try:
-            for roi in self.rois:
+            for roi in rois:
                 ring = [QgsPointXY(x, y) for x, y in roi.get("ring") or ()]
                 if len(ring) < 3:
                     continue
@@ -3373,7 +3453,7 @@ class RadiometricDashboard(QMainWindow):
             del writer      # flushes and closes the .shp/.dbf/.shx/.prj
         return count
 
-    def _write_shapefile_ogr(self, path, fields, plan):
+    def _write_shapefile_ogr(self, path, fields, plan, rois):
         """Write the same records through OGR, with no Qt layer in between.
 
         The fallback exists because the QGIS writer's failures are silent and
@@ -3383,7 +3463,7 @@ class RadiometricDashboard(QMainWindow):
         """
         from osgeo import ogr, osr
 
-        records = shapefile_records(self.rois, plan)
+        records = shapefile_records(rois, plan)
         if not records:
             return 0
         driver = ogr.GetDriverByName("ESRI Shapefile")
@@ -3479,10 +3559,10 @@ class RadiometricDashboard(QMainWindow):
                 f"{len(self.rois)} ROI(s) x {len(self.measure_bands)} band(s) "
                 f"written to\n{path}")
 
-    def _write_csv(self, path):
+    def _write_csv(self, path, rois=None):
         """The statistics in long form: one row per ROI and band."""
         return self._write_rows(
-            path, stat_rows(self.rois,
+            path, stat_rows(self.rois if rois is None else rois,
                             [label for _, label in self.measure_bands]))
 
     def _write_rows(self, path, rows):

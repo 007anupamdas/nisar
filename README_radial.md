@@ -311,6 +311,37 @@ the same numbers are written again beside the shapefile as `<stem>_stats.csv`,
 one row per ROI and band, under untruncated names. `Export CSV` writes that
 table alone.
 
+### The file set
+
+One `Export SHP` writes the whole set, and beside it one file set per class:
+
+```
+rois.shp                    every ROI
+rois_stats.csv              every ROI x band, under untruncated names
+rois_by_class.csv           the summary a report quotes
+rois_nesz.csv               the noise floor, from the water ROIs
+
+rois_vegetation.shp         that class alone
+rois_vegetation_stats.csv
+rois_water.shp
+rois_water_stats.csv
+```
+
+The per-class files are written from the same records as the whole-set file, so
+they cannot disagree with it about an ROI. They are written for **every** class
+and regardless of the class filter, for the same reason the whole-set export
+ignores it: what was measured is not a function of what happens to be on screen.
+
+A class name becomes a filename fragment — lowercased, with anything outside
+`a-z0-9-_` replaced, so `open water / lake` is a legal class and a legal
+filename. Two classes that would land on one name get a numbered suffix rather
+than one silently overwriting the other.
+
+A **single-class** ROI set gets none of these. The whole-set file already is
+that class, and a second copy under a longer name is a duplicate, not a
+by-class export. There is no per-class `_by_class.csv` either — the whole-set
+one already holds every class's row.
+
 `npix` is the ROI's geometry — pixels whose centre falls inside the ring. A
 band's `n` may be lower where that band has nodata.
 

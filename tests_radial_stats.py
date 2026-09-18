@@ -743,6 +743,37 @@ check("naming the bound for what it is", "upper bound" in rows[1][-1], True)
 check("and the class it came from", rows[1][1], H["NESZ_CLASS"])
 check("a band with no water at all still gets a row", rows[2][0], "HV")
 
+# ── 14. ONE FILE SET PER CLASS ────────────────────────────────────────────────
+# A class is typed freely, and the export turns it into a filename. Both halves
+# of that can go wrong quietly: an illegal character, and two classes landing on
+# one name -- where the second silently overwrites the first and a whole class
+# leaves the directory without an error.
+print("\n── class filenames ──")
+check("a plain class is its own name", H["class_slug"]("water"), "water")
+check("case is folded", H["class_slug"]("Vegetation"), "vegetation")
+check("spaces and punctuation cannot reach the filesystem",
+      H["class_slug"]("open water / lake"), "open_water___lake")
+check("a path separator least of all, and no leading dots survive",
+      H["class_slug"]("../../etc/passwd"), "etc_passwd")
+check("a class of nothing but punctuation still names a file",
+      H["class_slug"]("///"), "class")
+check("and so does an empty one", H["class_slug"](""), "class")
+check("a very long class is trimmed to something readable",
+      len(H["class_slug"]("x" * 200)), 40)
+
+collide = [{"roi": 1, "class": "open water", "stats": {}},
+           {"roi": 2, "class": "open-water", "stats": {}},
+           {"roi": 3, "class": "open/water", "stats": {}}]
+exports = H["class_exports"](collide)
+check("three classes that slug alike stay three files",
+      [slug for _, slug, _ in exports],
+      ["open_water", "open-water", "open_water_2"])
+check("each keeping its own ROIs",
+      [[roi["roi"] for roi in members] for _, _, members in exports],
+      [[1], [2], [3]])
+check("and its label as typed", [label for label, _, _ in exports],
+      ["open water", "open-water", "open/water"])
+
 print("\n" + "=" * 70)
 if failures:
     print(f"{len(failures)} FAILURE(S):")

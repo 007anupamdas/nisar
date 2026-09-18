@@ -236,6 +236,14 @@ class _Combo:
     def setCurrentIndex(self, i):
         self._idx = i
 
+    def setCurrentText(self, text):
+        for index, (label, _) in enumerate(self._items):
+            if label == text:
+                self._idx = index
+                return
+        self._items.append((text, None))    # editable, as the real one is
+        self._idx = len(self._items) - 1
+
     def setVisible(self, _):
         pass
 
@@ -1285,6 +1293,106 @@ else:
     wanted = (R.roi_stats(win.rois[0], label) or {}).get("mean_db")
     check("and a statistic, as a number in its own column",
           round(float(back_fields[mean_at][0]), 6), round(float(wanted), 6))
+
+
+# ── A FILE SET PER CLASS ──────────────────────────────────────────────────────
+# Exporting writes the whole set, and beside it one shapefile and one
+# statistics CSV per class. What is tested here is the grouping, the file
+# naming and which ROIs land in which file; the writer itself is covered by the
+# round trip above, and is stood in for by pyogrio so that this runs without
+# QGIS. That substitution is the point of _write_shapefile taking its ROIs as
+# an argument rather than reaching for self.rois.
+try:
+    import numpy as _np2
+    from pyogrio.raw import write as _ogr_write2, read as _ogr_read2
+    from shapely import wkt as _wkt2
+except ImportError:
+    print("\n-- a file set per class: skipped (no pyogrio/shapely)")
+else:
+    print("\n-- a file set per class")
+
+    def _write_via_ogr(path, fields, plan, rois=None):
+        rois = win.rois if rois is None else rois
+        records = R.shapefile_records(rois, plan)
+        if not records:
+            return 0, "none"
+        schema = R.shapefile_schema(plan)
+        fillers = {"int": 0, "double": float("nan"), "string": ""}
+        dtypes = {"int": "int64", "double": "float64", "string": "object"}
+        columns = []
+        for index, (_, kind) in enumerate(schema):
+            values = [fillers[kind] if record[1][index] is None
+                      else record[1][index] for record in records]
+            columns.append(_np2.array(values, dtype=dtypes[kind]))
+        _ogr_write2(path,
+                    _np2.array([_wkt2.loads(r[0]).wkb for r in records],
+                               dtype=object),
+                    columns,
+                    _np2.array([name for name, _ in schema], dtype=object),
+                    driver="ESRI Shapefile", geometry_type="Polygon",
+                    crs="EPSG:32645")
+        return len(records), "OGR"
+
+    win.rois[0]["class"] = "vegetation"
+    win.rois[1]["class"] = "water"
+    fields, plan = win.export_fields()
+    real_writer = win._write_shapefile
+    win._write_shapefile = _write_via_ogr
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            stem = os.path.join(tmp, "rois")
+            written = win._export_by_class(stem, fields, plan)
+            check("a file set per class",
+                  [(label, count) for label, _, count in written],
+                  [("vegetation", 1), ("water", 1)])
+            for label, slug, _ in written:
+                ok(f"{label}: a shapefile that is not empty",
+                   os.path.getsize(f"{stem}_{slug}.shp") > 100,
+                   f"{os.path.getsize(f'{stem}_{slug}.shp')} bytes")
+                ok(f"{label}: the statistics CSV beside it",
+                   os.path.exists(f"{stem}_{slug}_stats.csv"))
+
+            # The class file holds that class, and says so when read back.
+            _, _, geoms, back = _ogr_read2(f"{stem}_water.shp")
+            class_at = [n for n, _ in R.ROI_FIELDS].index("class")
+            check("the water shapefile holds the water ROI alone",
+                  [str(v) for v in back[class_at]], ["water"])
+            check("with its geometry", len(geoms), 1)
+
+            import csv as _csv4
+            with open(f"{stem}_water_stats.csv",
+                      encoding="utf-8-sig") as handle:
+                rows = list(_csv4.reader(handle))
+            check("and its CSV is a header and a row per band",
+                  len(rows), 1 + len(win.measure_bands))
+            check("holding that ROI and no other",
+                  {row[0] for row in rows[1:]}, {str(win.rois[1]["roi"])})
+            ok("no per-class summary CSV: the whole-set one has the row",
+               not os.path.exists(f"{stem}_water_by_class.csv"))
+
+            # Written from every ROI, not from what the filter is showing.
+            win.class_combo.setCurrentText("vegetation")
+            win.on_class_filter()
+            check("the filter is showing one class", len(win.shown_rois()), 1)
+            written = win._export_by_class(os.path.join(tmp, "filtered"),
+                                           fields, plan)
+            check("and the export still writes both",
+                  [label for label, _, _ in written], ["vegetation", "water"])
+            win.class_combo.setCurrentText(R.ROI_CLASS_ALL)
+            win.on_class_filter()
+
+            # One class is not a by-class export; it is the whole set under a
+            # longer name, and writing it makes a duplicate someone diffs.
+            win.rois[1]["class"] = "vegetation"
+            check("a single-class set gets no per-class files",
+                  win._export_by_class(os.path.join(tmp, "single"),
+                                       fields, plan), [])
+            ok("and none were written",
+               not any(name.startswith("single") for name in os.listdir(tmp)),
+               str(sorted(n for n in os.listdir(tmp)
+                          if n.startswith("single"))))
+    finally:
+        win._write_shapefile = real_writer
 
 print("\n" + "=" * 70)
 if failures:
