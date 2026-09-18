@@ -1606,13 +1606,40 @@ class QCDashboard(QMainWindow):
         return True
 
     def _reproject_footprints(self):
-        """Re-derive every footprint's projected ring in the current working CRS."""
-        for rec in self.ref_footprints.values():
-            rec["ring_proj"] = [
-                (lambda q: (q.x(), q.y()))(
-                    self.transform_wgs_to_proj.transform(QgsPointXY(lon, lat)))
-                for lon, lat in rec["ring"]
-            ]
+        """Re-derive every footprint's projected ring in the current working CRS.
+
+        Not every footprint can be expressed in it, and that is normal rather
+        than exceptional. A tile index is often global -- a WRS-2 index carries
+        entries on the far side of the world -- and UTM 44N refuses a point in
+        the Pacific outright, raising QgsCsException. A tile that cannot be put
+        on the same grid as the scene is simply not comparable with it, so it is
+        dropped and counted; aborting the whole folder load over one of them
+        loses the dozen tiles that do overlap.
+
+        The drop is all-or-nothing per footprint on purpose. Keeping whichever
+        vertices happened to transform would leave a polygon of a different
+        shape to the tile, which is worse than having none: the consumers treat
+        an empty ring_proj as 'not placed' and skip it, which is the truth.
+        """
+        dropped = []
+        for path, rec in self.ref_footprints.items():
+            try:
+                rec["ring_proj"] = [
+                    (lambda q: (q.x(), q.y()))(
+                        self.transform_wgs_to_proj.transform(QgsPointXY(lon, lat)))
+                    for lon, lat in rec["ring"]
+                ]
+            except Exception as e:
+                rec["ring_proj"] = []
+                dropped.append((os.path.basename(path), e))
+
+        if dropped:
+            where = self.proj_crs.authid() or self.proj_crs.description()
+            eg = ", ".join(n for n, _ in dropped[:3])
+            print(f"[CRS] {len(dropped)} of {len(self.ref_footprints)} "
+                  f"footprint(s) lie outside {where} and were dropped "
+                  f"(e.g. {eg})")
+            print(f"[CRS]   first reason: {dropped[0][1]}")
 
     # ── REFERENCE FOLDER ─────────────────────────────────────────────────────
     def _folder_entries(self, folder_path):

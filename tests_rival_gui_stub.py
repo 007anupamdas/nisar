@@ -323,6 +323,55 @@ assert win._extent_in_ref_canvas(same) is same.extent.return_value, \
     "same-CRS extent should not be transformed"
 print("same-CRS extent passed through untouched")
 
+# ── 7b. a footprint outside the working CRS is dropped, not fatal ────────────
+# Reported from the field on QGIS 3.44: a global L8 index carried a tile at
+# 167.37E, UTM 44N refused it with "Point outside of projection domain", and
+# the QgsCsException aborted the whole folder load -- taking the dozen tiles
+# that DID overlap with it. A tile that cannot be put on the scene's grid is
+# not comparable with the scene; that is a tile to skip, not a folder to fail.
+class _DomainLimitedTransform:
+    """Refuses points far from a central meridian, as PROJ does for UTM."""
+
+    def __init__(self, central_lon, span=40.0):
+        self.central_lon, self.span = central_lon, span
+
+    def transform(self, pt):
+        lon = pt.x()
+        if abs(lon - self.central_lon) > self.span:
+            raise RuntimeError(
+                f"Forward transform of ({lon:.6f}, {pt.y():.6f}) "
+                f"Error: Point outside of projection domain")
+        return R.QgsPointXY((lon - self.central_lon) * 100000.0, pt.y() * 100.0)
+
+
+near = [(78.0, 17.0), (79.0, 17.0), (79.0, 18.0), (78.0, 18.0)]
+far  = [(167.370334, 6.828540), (168.0, 6.8), (168.0, 7.4), (167.4, 7.4)]
+win.ref_footprints = {
+    "/ref/near_a.tif": {"ring": near, "band": "UNK"},
+    "/ref/far_pacific.tif": {"ring": far, "band": "UNK"},
+    "/ref/near_b.tif": {"ring": near, "band": "UNK"},
+}
+win.transform_wgs_to_proj = _DomainLimitedTransform(81.0)
+win.proj_crs = _CRS("EPSG:32644")
+
+win._reproject_footprints()          # must not raise
+
+assert len(win.ref_footprints["/ref/near_a.tif"]["ring_proj"]) == 4, \
+    "an in-domain footprint should still be projected"
+assert win.ref_footprints["/ref/far_pacific.tif"]["ring_proj"] == [], \
+    "an out-of-domain footprint should be dropped to an empty ring"
+assert len(win.ref_footprints["/ref/near_b.tif"]["ring_proj"]) == 4, \
+    "a footprint after the failing one must still be projected"
+print("out-of-domain footprint dropped; the usable ones survive the same pass")
+
+# and the consumers already treat an empty ring_proj as 'not placed'
+win.ref_tif_list = list(win.ref_footprints)
+R.ring_wkt = lambda ring: None if not ring else "POLYGON((0 0,1 0,1 1,0 0))"
+R.QgsGeometry = MagicMock()
+R.QgsGeometry.fromWkt.return_value.contains.return_value = False
+win.reference_for_point(R.QgsPointXY(0.0, 0.0))   # must not raise on the empty
+print("an empty ring_proj is skipped by the point lookup rather than crashing")
+
 # ── 8. the wgs84 fallback converts picks instead of pixels ───────────────────
 R.REF_CANVAS_CRS = "wgs84"
 win.transform_proj_to_wgs = MagicMock(
