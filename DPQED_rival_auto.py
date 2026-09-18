@@ -110,6 +110,15 @@ MASK_PROBE_MAX_MPIX = 64.0
 # "gdal" or "rasterio" to find out which is in play.
 RASTER_BACKEND = "auto"
 
+# An index shapefile states the footprint of every tile in one small file, so
+# where a folder has one it is both authoritative and far cheaper than opening
+# each scene -- an L8 collection is one .shp read instead of forty image reads.
+# Reading it is not a dependency on metadata in the sense this tool exists to
+# remove: nothing is REQUIRED, the rasters still answer for themselves when
+# there is no index. Set this False to place every tile from its own pixels
+# even where an index exists (useful for checking one against the other).
+PREFER_INDEX = True
+
 RIVAL_FILE = "DPQED_rival.py"
 RIVAL_ENTRY_MARKER = "# ── ENTRY POINT"
 
@@ -484,6 +493,7 @@ QgsCoordinateReferenceSystem = _RIVAL["QgsCoordinateReferenceSystem"]
 QgsCoordinateTransform       = _RIVAL["QgsCoordinateTransform"]
 QgsProject    = _RIVAL["QgsProject"]
 band_from_name = _RIVAL["band_from_name"]
+pick_index_shapefile = _RIVAL["pick_index_shapefile"]
 rings_bounds   = _RIVAL["rings_bounds"]
 format_bounds  = _RIVAL["format_bounds"]
 BAND_UNKNOWN   = _RIVAL["BAND_UNKNOWN"]
@@ -516,7 +526,7 @@ class AutoFootprintDashboard(QCDashboard):
         self.ref_mode        = None
         self._refresh_band_choices()
 
-        rasters, _metas, _others = self._folder_entries(folder_path)
+        rasters, metas, others = self._folder_entries(folder_path)
         if not rasters:
             QMessageBox.critical(
                 self, "Error",
@@ -525,11 +535,24 @@ class AutoFootprintDashboard(QCDashboard):
             self.filter_reference_tifs()
             return
 
-        print(f"[AUTO] {os.path.basename(folder_path)}: {len(rasters)} raster(s), "
-              f"footprints from the rasters themselves")
-        errors = self._scan_rasters(rasters)
+        # One small file placing every tile beats opening every tile, so an
+        # index is used where the folder has one. RIVAL's scanner is inherited
+        # rather than reimplemented -- it is the tested one.
+        candidates = {**metas, **others}
+        index = pick_index_shapefile(list(candidates)) if PREFER_INDEX else None
+        if index:
+            print(f"[AUTO] {os.path.basename(folder_path)}: {len(rasters)} "
+                  f"raster(s), footprints from {index} (one read for the set; "
+                  f"set PREFER_INDEX=False to use the pixels instead)")
+            errors = self._scan_index(rasters, candidates)
+            mode = "index-shp"
+        else:
+            print(f"[AUTO] {os.path.basename(folder_path)}: {len(rasters)} "
+                  f"raster(s), footprints from the rasters themselves")
+            errors = self._scan_rasters(rasters)
+            mode = REF_MODE_RASTER
 
-        self.ref_mode = REF_MODE_RASTER
+        self.ref_mode = mode
         self._reproject_footprints()
         self._refresh_band_choices()
         self._report_scan(errors)
