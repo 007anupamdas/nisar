@@ -184,7 +184,11 @@ META_DIR_NAMES = ("meta", "metadata")
 # imagery above with a Meta/ beside it. The whole tree is walked to this depth,
 # stopping at the file cap so pointing the picker at a huge drive cannot hang.
 REF_SCAN_DEPTH    = 4
-REF_SCAN_MAX_FILES = 50000
+# A full Landsat or Sentinel archive is hundreds of thousands of files once the
+# sidecars are counted, and the cap is on files walked rather than rasters kept,
+# so a low one silently truncates a real collection. High enough to hold one,
+# still low enough that a drive root reports instead of hanging.
+REF_SCAN_MAX_FILES = 250000
 
 # Which CRS the reference canvas draws in. "working" matches the input canvas,
 # so In and Ref are directly comparable and a pick needs no conversion, at the
@@ -1679,8 +1683,10 @@ class QCDashboard(QMainWindow):
                 break
 
         if truncated:
-            print(f"[META] stopped after {REF_SCAN_MAX_FILES} files -- point the "
-                  f"picker at a narrower folder if tiles are missing")
+            print(f"[META] STOPPED after {REF_SCAN_MAX_FILES} files with "
+                  f"{len(rasters)} raster(s) kept -- the rest of the folder was "
+                  f"NOT read, so reference tiles are almost certainly missing. "
+                  f"Point the picker at a narrower folder.")
         if dupes:
             print(f"[META] {len(dupes)} duplicate filename(s) across subfolders, "
                   f"first kept (e.g. {', '.join(sorted(set(dupes))[:3])})")
@@ -1948,6 +1954,25 @@ class QCDashboard(QMainWindow):
         name = os.path.basename(tif_path)
         return f"[{band}] {name}" if band != BAND_UNKNOWN else name
 
+    def _describe_input_extent(self):
+        """The input layer's own CRS and extent, in its own units.
+
+        When the lon/lat box above comes out somewhere the scene plainly is not,
+        this is the line that says whether the extent is wrong or the CRS on it
+        is, which the reprojected box alone cannot distinguish.
+        """
+        try:
+            crs = self.input_tif_layer.crs()
+            ext = self.input_tif_layer.extent()
+            name = crs.authid() or crs.description() or "unknown"
+            if not crs.isValid():
+                name += " (INVALID)"
+            return (f"{name}, native extent "
+                    f"{ext.xMinimum():.1f}..{ext.xMaximum():.1f} x, "
+                    f"{ext.yMinimum():.1f}..{ext.yMaximum():.1f} y")
+        except Exception as e:
+            return f"unreadable: {e}"
+
     def filter_reference_tifs(self):
         self.ref_tif_list = []
         self.dropdown_ref.blockSignals(True)
@@ -1966,8 +1991,10 @@ class QCDashboard(QMainWindow):
         else:
             try:
                 if self.input_ring:
+                    origin = "footprint"
                     input_geom = QgsGeometry.fromWkt(ring_wkt(self.input_ring))
                 else:
+                    origin = "full extent"
                     tf = QgsCoordinateTransform(
                         self.input_tif_layer.crs(), self.wgs84_crs,
                         QgsProject.instance()
@@ -1991,7 +2018,9 @@ class QCDashboard(QMainWindow):
                     print(f"[FILTER] none of {len(candidates)} reference "
                           f"footprint(s) overlap the input.")
                     print(f"[FILTER]   input     : "
-                          f"{format_bounds((box.xMinimum(), box.yMinimum(), box.xMaximum(), box.yMaximum()))}")
+                          f"{format_bounds((box.xMinimum(), box.yMinimum(), box.xMaximum(), box.yMaximum()))}"
+                          f"  (from its {origin})")
+                    print(f"[FILTER]   input CRS : {self._describe_input_extent()}")
                     print(f"[FILTER]   reference : {format_bounds(ref_b)}")
             except Exception as e:
                 print(f"[FILTER] Error: {e}")
@@ -2469,35 +2498,39 @@ class QCDashboard(QMainWindow):
                 QgsProject.instance().removeMapLayer(self.input_tif_layer.id())
             self.input_tif_layer = None
             QgsProject.instance().addMapLayer(lyr, False)
-            self.input_tif_layer = lyr
-            self.ensure_overviews(path)
-            self.input_ring = self._input_footprint_ring(path)
-            if self.input_ring is None:
-                print("[INPUT] no sidecar beside the raster; "
-                      "selecting references against its full extent")
-            self.adopt_working_crs(lyr.crs())
-            self.canvas_left.setLayers([lyr])
-            self.canvas_left.setExtent(lyr.extent())
-            self.populate_band_picker(lyr)
-            self.canvas_left.refresh()
+            self.adopt_input_layer(lyr, path)
             if self.ref_folder_path:
                 self.filter_reference_tifs()
         else:
             self.cleanup_reference_layer()
             self._load_ref_layer(path)
 
+    def adopt_input_layer(self, layer, path):
+        """Everything that has to happen once, however the input scene arrives.
+
+        The Load Input TIF button and the auto-connect of a layer already open
+        in QGIS both end here, so the footprint cannot be read on one path and
+        skipped on the other -- which is what made a scene loaded through the
+        project fall back to its full extent, with no sign of it in the log.
+        """
+        self.input_tif_layer = layer
+        self.ensure_overviews(path)
+        self.input_ring = self._input_footprint_ring(path)
+        if self.input_ring is None:
+            print(f"[INPUT] no footprint for {os.path.basename(path)}; "
+                  f"selecting references against its full extent")
+        self.adopt_working_crs(layer.crs())
+        self.canvas_left.setLayers([layer])
+        self.canvas_left.setExtent(layer.extent())
+        self.populate_band_picker(layer)
+        self.canvas_left.refresh()
+
     def auto_connect_layers(self):
         layers = QgsProject.instance().mapLayers().values()
         in_l  = [l for l in layers if "input" in l.name().lower()]
         ref_l = [l for l in layers if "ref"   in l.name().lower()]
         if in_l:
-            self.input_tif_layer = in_l[0]
-            self.ensure_overviews(in_l[0].source())
-            self.adopt_working_crs(in_l[0].crs())
-            self.canvas_left.setLayers([in_l[0]])
-            self.canvas_left.setExtent(in_l[0].extent())
-            self.populate_band_picker(in_l[0])
-            self.canvas_left.refresh()
+            self.adopt_input_layer(in_l[0], in_l[0].source())
         if ref_l:
             self.ensure_overviews(ref_l[0].source())
             self.current_ref_layer = ref_l[0]

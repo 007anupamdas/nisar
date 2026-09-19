@@ -611,6 +611,8 @@ class AutoFootprintDashboard(QCDashboard):
         try:
             src = QgsCoordinateReferenceSystem.fromWkt(crs_wkt)
             if not src.isValid():
+                print("[AUTO] the raster names a CRS QGIS will not accept: "
+                      + (crs_wkt[:120] if crs_wkt else "none at all"))
                 return None
             tf = QgsCoordinateTransform(src, self.wgs84_crs, QgsProject.instance())
             out = []
@@ -659,6 +661,9 @@ class AutoFootprintDashboard(QCDashboard):
             return None
         ring = self._ring_to_wgs84(rec["ring_map"], rec["crs_wkt"])
         if not ring:
+            print(f"[INPUT] {os.path.basename(raster_path)}: the raster's own "
+                  f"CRS could not be read, so its corners cannot be placed on "
+                  f"the map")
             return None
         print(f"[INPUT] footprint from the raster's {rec['derived']}: "
               f"{len(ring)} vertices, {format_bounds(rings_bounds([ring]))}"

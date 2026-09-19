@@ -965,6 +965,46 @@ assert not qw.QFileDialog.getSaveFileName.called, "asked for a path with no rows
 assert warned and "marked" in warned[0], warned
 print("no marked rows -> warned, no file dialog, nothing written")
 
-for d in (d1, d2, d3, d4):
+# ── 12. every way the input scene arrives reads its footprint ────────────────
+# A scene loaded through the button and one already open in the QGIS project
+# took different paths: only the button read the footprint, so a project-loaded
+# scene was filtered against its full product grid -- with nothing in the log to
+# say which box the filter had used. Both now go through adopt_input_layer.
+d5 = tempfile.mkdtemp()
+shutil.copy(os.path.join(HERE, met0), d5)
+tif5 = os.path.join(d5, met0[:-len(".met")] + ".tif")
+open(tif5, "w").close()
+
+scene = fake_layer(3)
+scene.name.return_value = "Input_scene"
+scene.source.return_value = tif5
+scene.crs.return_value = _CRS("EPSG:32644")
+index = fake_layer(1)
+index.name.return_value = "L8Ref_index"
+index.source.return_value = os.path.join(d5, "L8_2D_PAN_index.shp")
+
+win.input_ring, win.input_tif_layer = None, None
+R.QgsProject.instance.return_value.mapLayers.return_value = {
+    "1": index, "2": scene}
+win.auto_connect_layers()
+
+assert win.input_tif_layer is scene, win.input_tif_layer
+assert win.input_ring == [(76.534748, 17.614687), (78.827076, 18.171194),
+                          (79.385351, 15.993327), (77.112174, 15.446038)], \
+    win.input_ring
+assert win.proj_crs.authid() == "EPSG:32644", win.proj_crs.authid()
+print("\na scene adopted from the QGIS project reads the same footprint as one "
+      "loaded through the button")
+
+# and when there is no footprint to read, the log says so rather than falling
+# back silently -- the symptom that made this invisible in the field
+win.input_ring = None
+scene.source.return_value = os.path.join(d5, "no_sidecar.tif")
+open(scene.source.return_value, "w").close()
+win.auto_connect_layers()
+assert win.input_ring is None
+print("no sidecar -> the fallback to the full extent is announced, not silent")
+
+for d in (d1, d2, d3, d4, d5):
     shutil.rmtree(d, ignore_errors=True)
 print("\nstubbed integration OK")
