@@ -15,6 +15,7 @@ and the second product enters by being loaded in turn over the same ROIs.
 
 WORKFLOW
     Load GCOV        a GeoTIFF or VRT, or a NISAR GCOV '.h5' (see below)
+    Select           click an ROI to select it; drag a selected one to move
     Rect / Polygon   draw ROIs; the table fills as each one closes
     Point Buffer     click a target; the ROI is a square of a chosen side
     Pan / Zoom       the view tools; Ctrl+1..7 selects any of the seven
@@ -176,6 +177,10 @@ POINT_SIDE_MAX_M = 100000.0
 ROI_COLOR = (0, 255, 255)
 ROI_COLOR_SELECTED = (255, 255, 0)
 ROI_COLOR_DRAWING = (255, 0, 255)
+# How far the mouse must travel, in screen pixels, before a press on the
+# selected ROI is a move rather than a click. Screen pixels and not map units:
+# the hand that slips during a click is the same size at every zoom.
+DRAG_START_PX = 4
 ROI_WIDTH = 2
 ROI_WIDTH_SELECTED = 3
 ROI_FILL_ALPHA = 40             # a hint of fill, so a small ROI is findable
@@ -901,6 +906,27 @@ def point_in_ring(ring, x, y):
     return inside
 
 
+def move_ring(ring, dx, dy):
+    """A ring translated by (dx, dy), or None if there was nothing to move.
+
+    A translation and nothing else: an ROI that could be reshaped by dragging
+    would change what it measures without changing what it is called, and the
+    statistics already exported for it would silently stop describing it. A
+    move keeps the shape, so the only thing that changes is which ground it
+    is over -- which is the whole reason to move one.
+    """
+    points = [(float(x), float(y)) for x, y in ring or []]
+    if len(points) < 3:
+        return None
+    try:
+        ox, oy = float(dx), float(dy)
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(ox) and math.isfinite(oy)):
+        return None
+    return [(x + ox, y + oy) for x, y in points]
+
+
 def roi_at(rois, x, y):
     """The ROI under a point, or None.
 
@@ -1448,25 +1474,130 @@ class RoiLabelItem(QgsMapCanvasItem):
 
 # ── ROI SELECTION TOOL ────────────────────────────────────────────────────────
 class RoiSelectTool(QgsMapTool):
-    """Click an ROI to select it, on the canvas and in the table at once.
+    """Click an ROI to select it; drag it to move it.
 
     Drawing tools make ROIs and the table edits them, which left the canvas
     unable to answer 'that one' -- the thing you are looking at when you decide
     an ROI is wrong. Selecting here selects the row, so Delete and the editable
     cells apply to what was clicked.
+
+    Dragging moves it. An ROI is drawn by eye over a target, and by eye it
+    lands slightly off as often as not; without this the only remedy was to
+    delete it and draw it again, which changes its number and loses its name
+    and class. The move keeps all three, and re-measures against the ground it
+    ended up on.
+
+    A click and a drag are the same gesture until the mouse travels, so the
+    two are told apart by distance: under a few screen pixels it is a click
+    and the ROI is only selected. That threshold is in screen pixels, not map
+    units, because the hand that slips is the same size at every zoom.
     """
 
     def __init__(self, canvas, dashboard):
         super().__init__(canvas)
         self.canvas = canvas
         self.dashboard = dashboard
+        self.grab = None            # where the drag started, in map units
+        self.moving = None          # the ROI being dragged
+        self.origin = None          # its ring when the drag started
+        self.band = None
         self.setCursor(Qt.ArrowCursor)
+
+    # ── preview ──
+    def _rubber(self):
+        if self.band is None:
+            self.band = QgsRubberBand(self.canvas, QgsWkbTypes.PolygonGeometry)
+            colour = QColor(*ROI_COLOR_DRAWING)
+            fill = QColor(*ROI_COLOR_DRAWING)
+            fill.setAlpha(ROI_FILL_ALPHA)
+            self.band.setColor(colour)
+            self.band.setFillColor(fill)
+            self.band.setWidth(ROI_WIDTH_SELECTED)
+        return self.band
+
+    def _preview(self, ring):
+        band = self._rubber()
+        band.reset(QgsWkbTypes.PolygonGeometry)
+        for index, (x, y) in enumerate(ring):
+            band.addPoint(QgsPointXY(x, y), index == len(ring) - 1)
+        band.show()
+
+    def travelled(self, grab, x, y):
+        """Has the mouse gone far enough for this to be a drag, not a click?"""
+        if grab is None:
+            return False
+        try:
+            per_pixel = float(self.canvas.mapUnitsPerPixel())
+        except Exception:
+            per_pixel = 0.0
+        slack = per_pixel * DRAG_START_PX
+        return abs(x - grab[0]) > slack or abs(y - grab[1]) > slack
+
+    # ── mouse ──
+    def canvasPressEvent(self, e):
+        if e.button() != Qt.LeftButton:
+            return
+        point = self.toMapCoordinates(e.pos())
+        self.grab = (point.x(), point.y())
+        # Only an ROI already selected can be dragged. Picking one up on the
+        # same click that selects it would make every slightly-unsteady click
+        # a move, and the ROI would shift before its row had even appeared.
+        selected = self.dashboard.selected_roi()
+        under = roi_at(self.dashboard.shown_rois(), point.x(), point.y())
+        if selected is not None and under is selected:
+            self.moving = selected
+            self.origin = list(selected.get("ring") or [])
+        else:
+            self.moving = None
+            self.origin = None
+
+    def canvasMoveEvent(self, e):
+        if self.moving is None or self.grab is None:
+            return
+        point = self.toMapCoordinates(e.pos())
+        if not self.travelled(self.grab, point.x(), point.y()):
+            return
+        ring = move_ring(self.origin, point.x() - self.grab[0],
+                         point.y() - self.grab[1])
+        if ring:
+            self._preview(ring)
 
     def canvasReleaseEvent(self, e):
         if e.button() != Qt.LeftButton:
             return
         point = self.toMapCoordinates(e.pos())
-        self.dashboard.select_roi_at(point.x(), point.y())
+        roi, origin, grab = self.moving, self.origin, self.grab
+        self.cancel()
+        if roi is None or not self.travelled(grab, point.x(), point.y()):
+            self.dashboard.select_roi_at(point.x(), point.y())
+            return
+        self.dashboard.move_roi(roi, origin, point.x() - grab[0],
+                                point.y() - grab[1])
+
+    def keyPressEvent(self, e):
+        try:
+            key = e.key()
+        except Exception:
+            return
+        if key == Qt.Key_Escape:
+            # The ROI has not been touched yet -- the drag is a preview until
+            # the release -- so abandoning it needs nothing put back.
+            self.cancel()
+
+    # ── lifecycle ──
+    def cancel(self):
+        self.grab = None
+        self.moving = None
+        self.origin = None
+        if self.band is not None:
+            self.band.reset(QgsWkbTypes.PolygonGeometry)
+
+    def deactivate(self):
+        self.cancel()
+        try:
+            super().deactivate()
+        except Exception:
+            pass
 
 
 # ── ROI DRAWING TOOL ──────────────────────────────────────────────────────────
@@ -1752,10 +1883,13 @@ class RadiometricDashboard(QMainWindow):
         self.tool_group = QButtonGroup(self)
         self.tool_group.setExclusive(True)
         tips = {
-            TOOL_SELECT: "Click an ROI to select it, here and in the table "
-                         "below  (Ctrl+1).\nThe smallest ROI under the click "
-                         "wins, so one drawn inside\nanother is still "
-                         "reachable. Click empty ground to deselect.",
+            TOOL_SELECT: "Click an ROI to select it, here and in the table\n"
+                         "below  (Ctrl+1). The smallest ROI under the click\n"
+                         "wins, so one drawn inside another is still\n"
+                         "reachable. Click empty ground to deselect.\n\n"
+                         "Drag an ROI that is ALREADY selected to move it --\n"
+                         "same number, same name, same class, re-measured\n"
+                         "where it lands. Escape abandons the drag.",
             TOOL_RECT: "Drag a rectangle over the target  (Ctrl+2)",
             TOOL_POLY: "Click the corners; right-click or double-click to "
                        "close, Backspace undoes one  (Ctrl+3)",
@@ -3011,6 +3145,51 @@ class RadiometricDashboard(QMainWindow):
             return None
         self.select_roi(roi["roi"])
         print(f"[ROI] selected {roi['roi']}: {roi['name']}")
+        return roi
+
+    def move_roi(self, roi, origin, dx, dy):
+        """Slide an ROI to new ground and re-measure it there.
+
+        Same ROI: the number, the name and the class are what make a set of
+        them a set, and a move that changed any of them would be a delete and
+        a redraw wearing the wrong label. Only the ring moves, and everything
+        derived from the ring -- centre, lon/lat, area, every statistic -- is
+        computed again, because after a move the old figures describe ground
+        this ROI is no longer over.
+
+        The move is refused rather than half-applied if it lands somewhere
+        with nothing to measure: an ROI dragged off the edge of the scene
+        would otherwise sit there reading as empty, looking like a bad
+        measurement instead of a bad position.
+        """
+        ring = move_ring(origin if origin else roi.get("ring"), dx, dy)
+        if ring is None:
+            return None
+        before = list(roi.get("ring") or [])
+        roi["ring"] = ring
+        self._geometry_fields(roi)
+        self.measure_roi(roi)
+        if self.raster_layer is not None and roi["npix"] < MIN_ROI_PIXELS:
+            # Read the count BEFORE putting the ring back: after the restore
+            # it is the count here, not the count there, and a message
+            # reporting the wrong one of those is worse than no message.
+            landed = roi["npix"]
+            roi["ring"] = before
+            self._geometry_fields(roi)
+            self.measure_roi(roi)
+            self.redraw_rois()
+            self.canvas.refresh()
+            QMessageBox.warning(
+                self, "Move ROI",
+                f"ROI {roi['roi']} would have {landed} measurable pixel(s) "
+                "there, so it has been put back.\n\n"
+                "It was dragged outside the scene, or onto nodata.")
+            return None
+        self.refresh_table()
+        self.select_roi(roi["roi"])
+        self.canvas.refresh()
+        print(f"[ROI] moved {roi['roi']} by ({dx:.1f}, {dy:.1f}) m -> "
+              f"{roi['npix']} px, {roi['area_m2']:.0f} m²")
         return roi
 
     def delete_roi(self):

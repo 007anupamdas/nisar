@@ -29,7 +29,7 @@ instead of two, ROIs instead of point picks, and statistics instead of offsets.
 |---|---|
 | **Load GCOV** | a GeoTIFF or VRT, or a NISAR `.h5` (wrapped in a VRT, below) |
 | **Normalize** | stretch the view so the target is legible before you draw on it |
-| **Select** | click an ROI to select it, on the canvas and in the table at once |
+| **Select** | click an ROI to select it; drag a selected one to move it |
 | **Rect** / **Polygon** | draw ROIs; each one fills a row as it closes |
 | **Point Buffer** | click a target; the ROI is a square of a chosen side |
 | **Export SHP** | polygons plus every statistic, and a full-named CSV beside it |
@@ -42,6 +42,25 @@ place that number exists.
 and its table row is selected, so `Ctrl+Delete` and the editable Name and Class
 cells apply to what you clicked. The **smallest** ROI under the click wins, so
 one drawn inside another is still reachable; clicking open ground deselects.
+
+**Moving an ROI.** Drag one that is *already selected* and it slides to new
+ground, keeping its number, name and class, and re-measuring where it lands.
+An ROI drawn by eye lands slightly off as often as not, and the only remedy
+before this was to delete it and draw it again — which changes its number and
+loses its label.
+
+Only a *selected* ROI can be dragged: picking one up on the same click that
+selects it would turn every unsteady click into a move, shifting the ROI before
+its row had even appeared. A press only counts as a drag once the mouse has
+travelled a few **screen** pixels, not map units — the hand that slips is the
+same size at every zoom. `Escape` abandons a drag in progress; nothing has been
+touched until the mouse is released.
+
+The move is a **translation only** — the shape never changes. A drag that could
+also reshape would change what an ROI measures without changing what it is
+called, and figures already exported for it would quietly stop describing it.
+If a move would land the ROI off the scene or on nodata, it is put back where
+it was and says so, rather than sitting there reading as an empty measurement.
 
 `Ctrl+1..7` selects the tool, `F5` zooms to the selected ROI, `Ctrl+Delete`
 removes it, `Escape` abandons a polygon in progress. A polygon closes on a

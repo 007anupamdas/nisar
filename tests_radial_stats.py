@@ -810,6 +810,36 @@ is_nan("and a handful of pixels is worth nothing", H["enl_precision"](2))
 is_nan("as is none at all", H["enl_precision"](0))
 is_nan("or a pixel count that is not one", H["enl_precision"](None))
 
+# ── 16. MOVING AN ROI ─────────────────────────────────────────────────────────
+# A move is a translation and nothing else. The shape is the ROI's identity as
+# far as the numbers are concerned: a drag that reshaped would change what is
+# measured without changing what it is called.
+print("\n── moving a ring ──")
+square = H["rect_ring"](0.0, 0.0, 10.0, 10.0)
+moved = H["move_ring"](square, 5.0, -3.0)
+check("every vertex shifts by the same offset", moved,
+      [(5.0, -3.0), (15.0, -3.0), (15.0, 7.0), (5.0, 7.0)])
+close("so the area is untouched", H["ring_area"](moved),
+      H["ring_area"](square), 1e-9)
+check("and the shape with it",
+      [(x - 5.0, y + 3.0) for x, y in moved], square)
+check("the original is not modified in place", square,
+      H["rect_ring"](0.0, 0.0, 10.0, 10.0))
+check("a zero move is a copy, not a no-op on the same list",
+      H["move_ring"](square, 0.0, 0.0) is square, False)
+
+triangle = [(0.0, 0.0), (4.0, 0.0), (0.0, 3.0)]
+check("a polygon moves like anything else", H["move_ring"](triangle, 1.0, 1.0),
+      [(1.0, 1.0), (5.0, 1.0), (1.0, 4.0)])
+
+check("two points are not a ring to move", H["move_ring"]([(0, 0), (1, 1)],
+                                                          1.0, 1.0), None)
+check("nor is nothing", H["move_ring"](None, 1.0, 1.0), None)
+check("an offset that is not a number moves nothing",
+      H["move_ring"](square, "east", 1.0), None)
+check("and neither does one that is not finite",
+      H["move_ring"](square, float("inf"), 1.0), None)
+
 print("\n" + "=" * 70)
 if failures:
     print(f"{len(failures)} FAILURE(S):")

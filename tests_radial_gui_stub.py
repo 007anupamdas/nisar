@@ -838,6 +838,66 @@ check("the selected ROI's number is the selected colour",
       win.roi_labels[2].colour, R.ROI_COLOR_SELECTED)
 check("and the others are not", win.roi_labels[1].colour, R.ROI_COLOR)
 
+# ── moving a selected ROI ────────────────────────────────────────────────────
+# Dragging a selected ROI slides it to new ground. What must survive is its
+# identity -- number, name, class -- and what must be redone is everything the
+# ring implies.
+print("\n── moving an ROI ──")
+win.select_roi_at(500900.0, 3994900.0)
+target = win.selected_roi()
+check("the inner ROI is selected", target["roi"], 2)
+target["name"] = "calibration site"
+# The class filter is still on its default, so give the ROI a class that is on
+# view -- re-classing it to something hidden would take its row away, which is
+# the filter working and not the move failing.
+check("the filter is showing one class", win.class_filter(),
+      R.ROI_CLASS_DEFAULT)
+target["class"] = R.ROI_CLASS_DEFAULT
+before_ring = list(target["ring"])
+before_area = target["area_m2"]
+
+moved = win.move_roi(target, before_ring, 300.0, -200.0)
+ok("the move is accepted", moved is target)
+check("the ring went where it was pushed", target["ring"],
+      [(x + 300.0, y - 200.0) for x, y in before_ring])
+check("the ROI is the same ROI", target["roi"], 2)
+check("keeping its name", target["name"], "calibration site")
+check("and its class", target["class"], R.ROI_CLASS_DEFAULT)
+ok("the shape is unchanged, so the area is too",
+   abs(target["area_m2"] - before_area) < 1e-6,
+   f"{before_area:.0f} -> {target['area_m2']:.0f} m2")
+ok("and it was re-measured where it landed", target["npix"] > 0,
+   f"{target['npix']} px")
+check("the centre followed the ring",
+      (round(target["cx"]), round(target["cy"])), (501200, 3994700))
+check("it is still the selected row", win.selected_roi()["roi"], 2)
+check("and its number moved with it",
+      (round(win.roi_labels[2].point.x()),
+       round(win.roi_labels[2].point.y())), (501200, 3994700))
+
+# A move onto nothing measurable is refused outright rather than applied and
+# left reading as an empty measurement.
+del warned[:]
+here = list(target["ring"])
+refused = win.move_roi(target, here, 5.0e5, 5.0e5)
+check("a move off the scene is refused", refused, None)
+check("and the ROI is exactly where it was", target["ring"], here)
+ok("with the reason given",
+   any("put back" in str(w) for w in warned), str(warned))
+ok("quoting what it would have measured there, not what it measures here",
+   any("0 measurable pixel" in str(w) for w in warned), str(warned))
+ok("and it still measures what it did", target["npix"] > 0,
+   f"{target['npix']} px")
+
+# The select tool tells a click from a drag by how far the mouse travelled.
+tool = win.map_tools[R.TOOL_SELECT]
+win.canvas.mapUnitsPerPixel = MagicMock(return_value=30.0)
+ok("a press that barely moves is a click",
+   not tool.travelled((500000.0, 3994000.0), 500030.0, 3994030.0))
+ok("and one that travels is a drag",
+   tool.travelled((500000.0, 3994000.0), 500500.0, 3994000.0))
+ok("no press, no drag", not tool.travelled(None, 1.0, 1.0))
+
 # Deleting takes the number with it: a label left behind would name whichever
 # ROI was renumbered into its place.
 win.table.setCurrentCell(1, 0)
