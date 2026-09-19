@@ -463,6 +463,71 @@ assert rect.xMaximum() - rect.xMinimum() == R.REF_VIEW_WIDTH_M, rect
 print("degenerate input extent -> falls back, not a zero-width view")
 win.cb_sync.isChecked = MagicMock(return_value=False)
 
+# ── 9c. panning the input swaps the reference TILE, not just the view ────────
+# Reported from use: "syncing happens only when I mark point". The centre did
+# follow every pan -- but the tile under it never changed, so panning off the
+# loaded tile showed empty ground and the reference only caught up at the one
+# moment it was already right.
+# section 7b replaced the footprint set, so re-establish the one tile
+R.REF_CANVAS_CRS = "working"
+win.proj_crs = _CRS("EPSG:32644")
+win._rebuild_transforms()
+win.ref_footprints = {tile: {
+    "ring": [(78.0, 18.0), (79.0, 18.0), (79.0, 17.0), (78.0, 17.0)],
+    "ring_proj": [(324000.0, 1901000.0), (326000.0, 1901000.0),
+                  (326000.0, 1899000.0), (324000.0, 1899000.0)],
+    "band": "UNK", "crs": None, "granule": None, "source": "tile-name (1 deg)"}}
+win.ref_tif_list = [tile]
+R.QgsGeometry.fromWkt = _fake_geom
+R.QgsGeometry.fromPointXY = lambda pt: type("G", (), {"_inside": pt is inside})()
+
+win.cb_sync.isChecked = MagicMock(return_value=True)
+win.canvas_left.extent = MagicMock(return_value=_Rect(324000, 1899000,
+                                                      326000, 1901000))
+win.canvas_left.center = MagicMock(return_value=inside)
+win.current_ref_layer = None
+win._load_ref_layer = MagicMock(return_value=MagicMock())
+win.canvas_right.setExtent.reset_mock()
+win._sync_tile_timer = MagicMock()
+
+win.sync_canvas_extents()
+# the view moves at once -- that is cheap
+assert win.canvas_right.setExtent.called, "reference view did not follow the pan"
+# the tile swap waits for the view to settle: walking the footprint list on
+# every mouse-move of a drag is what froze this tool once already
+assert win._sync_tile_timer.start.called, "tile swap not scheduled"
+assert win._sync_tile_timer.start.call_args[0][0] == R.SYNC_TILE_DEBOUNCE_MS
+
+win.canvas_right.setExtent.reset_mock()
+win._sync_reference_tile()
+assert win._load_ref_layer.called, "panned onto a new tile and it was not loaded"
+assert win._load_ref_layer.call_args[0][0] == tile
+rect = win.canvas_right.setExtent.call_args[0][0]
+cx = (rect.xMinimum() + rect.xMaximum()) / 2.0
+assert cx == 325000.0, cx
+print("\npanning the input loads the tile under the new centre and re-centres "
+      "the reference on it")
+
+# a settle that lands on the tile already showing must not reload it
+shown = MagicMock()
+shown.isValid.return_value = True
+shown.source.return_value = tile
+win.current_ref_layer = shown
+win._load_ref_layer.reset_mock()
+win._sync_reference_tile()
+assert not win._load_ref_layer.called, "reloaded the tile already on screen"
+print("a pan within the same tile re-centres without reloading it")
+
+# with sync off, panning does neither
+win.cb_sync.isChecked = MagicMock(return_value=False)
+win.canvas_right.setExtent.reset_mock()
+win._sync_tile_timer.start.reset_mock()
+win.sync_canvas_extents()
+win._sync_reference_tile()
+assert not win.canvas_right.setExtent.called and not win._sync_tile_timer.start.called
+print("sync off -> panning the input leaves the reference alone")
+win.current_ref_layer = None
+
 # ── 10. the input R/G/B picker ───────────────────────────────────────────────
 class _Provider:
     def __init__(self, n): self._n = n

@@ -34,7 +34,9 @@ Mark / Pan / Zoom In / Zoom Out (Ctrl+1..4) is one exclusive row applied to both
 canvases at once -- leaving one marking while the other is being zoomed only
 produces stray picks. Mark is the only tool that fills the table; the rest move
 the view. With 'Sync Maps' on the reference follows the input's centre and
-scale, so zooming either side keeps both at the same ground width.
+scale, so zooming either side keeps both at the same ground width, and the tile
+under the new centre is brought up once the view settles -- panning the input
+moves the reference onto the right tile rather than off the loaded one.
 
 'Export SHP' writes the marked rows as a point shapefile in the working CRS:
 a point per pick at its input position, carrying in/ref coordinates in both map
@@ -110,7 +112,7 @@ from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QFileDialog, QHeaderView, QCheckBox, QComboBox,
                              QMessageBox, QApplication, QShortcut, QLabel,
                              QFrame, QButtonGroup)
-from PyQt5.QtCore import Qt, QObject, QEvent
+from PyQt5.QtCore import Qt, QObject, QEvent, QTimer
 from PyQt5.QtGui import QKeySequence, QFont, QColor
 from qgis.gui import (QgsMapCanvas, QgsMapTool, QgsMapToolPan, QgsMapToolZoom,
                       QgsVertexMarker)
@@ -203,6 +205,12 @@ REF_SCAN_MAX_FILES = 250000
 # if that reprojection is slow on a given machine -- picks are then converted
 # instead, and every other behaviour is identical.
 REF_CANVAS_CRS = "working"      # "working" | "wgs84"
+
+# How long the input view must sit still before the reference TILE is swapped.
+# With Sync Maps on the reference centre follows every extentsChanged, which is
+# cheap; choosing which tile sits under a new centre walks the filtered
+# footprint list, which is not something to do on every mouse-move of a drag.
+SYNC_TILE_DEBOUNCE_MS = 150
 
 # Ground width of the reference view, in metres. The extent is set from an
 # explicit rectangle rather than setCenter + zoomScale: a scale depends on the
@@ -918,6 +926,11 @@ class QCDashboard(QMainWindow):
         self.input_tif_layer   = None
         self.current_ref_layer = None
         self._syncing          = False
+        # Panning moves the reference centre at once and swaps the tile under it
+        # once the view settles; see _sync_reference_tile.
+        self._sync_tile_timer = QTimer(self)
+        self._sync_tile_timer.setSingleShot(True)
+        self._sync_tile_timer.timeout.connect(self._sync_reference_tile)
 
         self.wgs84_crs = QgsCoordinateReferenceSystem("EPSG:4326")
         self.proj_crs  = QgsCoordinateReferenceSystem(WORKING_CRS_DEFAULT)
@@ -2288,10 +2301,12 @@ class QCDashboard(QMainWindow):
                 self.cb_sync.setChecked(True)
 
     def sync_canvas_extents(self):
-        """Follow the input canvas: same centre and, now, the same scale.
+        """Follow the input canvas: same centre, same scale, same tile.
 
         Fired by extentsChanged, so it covers panning and zooming alike -- the
-        reference tracks whatever the input view does.
+        reference tracks whatever the input view does. The centre and scale move
+        immediately; which tile sits under that centre is settled afterwards, on
+        a timer, because working it out costs a walk of the footprint list.
         """
         if not self.cb_sync.isChecked() or self._syncing:
             return
@@ -2302,6 +2317,33 @@ class QCDashboard(QMainWindow):
             self.canvas_right.refresh()
         except Exception as e:
             print(f"[SYNC EXTENTS] {e}")
+        finally:
+            self._syncing = False
+        try:
+            self._sync_tile_timer.start(SYNC_TILE_DEBOUNCE_MS)
+        except Exception:
+            self._sync_reference_tile()
+
+    def _sync_reference_tile(self):
+        """Bring up the reference tile under the input canvas's centre.
+
+        Panning moved the reference view but never changed which tile was under
+        it, so panning off the current tile showed empty ground and the
+        reference only caught up when a point was marked -- which is the one
+        moment it was already right. show_reference_for returns straight away
+        when the tile has not changed, so the common case costs one walk of the
+        filtered list per settled view rather than a reload.
+        """
+        if not self.cb_sync.isChecked() or self._syncing:
+            return
+        self._syncing = True
+        try:
+            centre = self.canvas_left.center()
+            if self.show_reference_for(centre):
+                self.canvas_right.setExtent(self._ref_view_rect(centre))
+                self.canvas_right.refresh()
+        except Exception as e:
+            print(f"[SYNC TILE] {e}")
         finally:
             self._syncing = False
 
