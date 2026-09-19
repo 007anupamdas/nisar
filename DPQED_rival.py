@@ -150,6 +150,13 @@ NORM_MAX    = 1500        # measured, or with NORM_USE_DATA_RANGE off
 # Working (projected) CRS the table's In/Ref columns and the error metres live in.
 # Adopted from the input TIF when that carries a projected CRS; this is the fallback.
 WORKING_CRS_DEFAULT = "EPSG:32644"     # UTM 44N
+# A geographic input carries no metric CRS to adopt, so one is derived from the
+# scene's own centre rather than leaving the default standing over a scene that
+# may be anywhere on Earth. Standard 6 deg zones: the Norway/Svalbard exceptions
+# move a boundary, which changes which zone a scene near it lands in but not
+# whether the measurement is sound.
+UTM_ZONE_WIDTH_DEG = 6.0
+UTM_LAT_LIMITS     = (-80.0, 84.0)
 
 # Sidecar metadata sitting beside '<product>.h5': SSAR ships '<product>.met',
 # a plain text file; LSAR ships '<product>.h5.iso.xml', ISO 19115-2. Both are
@@ -312,6 +319,21 @@ def ring_wkt(ring):
     closed = close_ring(ring)
     pts = ",".join(f"{x} {y}" for x, y in closed)
     return f"POLYGON(({pts}))"
+
+
+def utm_epsg_for(lon, lat):
+    """The EPSG code of the UTM zone covering a lon/lat, or None outside them.
+
+    UTM is undefined beyond 84 N / 80 S, and a scene there needs a polar
+    stereographic CRS rather than a silently wrong zone.
+    """
+    if not (-180.0 <= lon <= 180.0):
+        return None
+    if not (UTM_LAT_LIMITS[0] <= lat <= UTM_LAT_LIMITS[1]):
+        return None
+    zone = int((lon + 180.0) // UTM_ZONE_WIDTH_DEG) + 1
+    zone = min(max(zone, 1), 60)
+    return (32600 if lat >= 0 else 32700) + zone
 
 
 def rings_bounds(rings):
@@ -1491,14 +1513,24 @@ class QCDashboard(QMainWindow):
         return pt
 
     def _extent_in_ref_canvas(self, lyr):
-        """A layer's extent expressed in the reference canvas's CRS.
+        """A layer's extent expressed in the reference canvas's CRS."""
+        return self._extent_in_canvas(lyr, self._ref_canvas_crs())
+
+    def _extent_in_input_canvas(self, lyr):
+        """A layer's extent expressed in the input canvas's CRS."""
+        return self._extent_in_canvas(lyr, self.proj_crs)
+
+    def _extent_in_canvas(self, lyr, dest):
+        """A layer's extent expressed in a canvas's CRS.
 
         The extent comes back in the LAYER's CRS. Handing a WGS84 rectangle to a
         canvas drawing in UTM puts the view at (73, 16) metres -- off the coast
-        of Africa, with the raster nowhere in sight and no error raised.
+        of Africa, with the raster nowhere in sight and no error raised. The
+        reference canvas was converted and the input canvas was not, so a
+        geographic input scene loaded into a UTM working CRS drew nothing at
+        all, on either side.
         """
-        dest = self._ref_canvas_crs()
-        src  = lyr.crs()
+        src = lyr.crs()
         try:
             if src.authid() and dest.authid() and src.authid() == dest.authid():
                 return lyr.extent()
@@ -2519,11 +2551,52 @@ class QCDashboard(QMainWindow):
         if self.input_ring is None:
             print(f"[INPUT] no footprint for {os.path.basename(path)}; "
                   f"selecting references against its full extent")
-        self.adopt_working_crs(layer.crs())
+        self.adopt_working_crs(self._working_crs_for(layer))
         self.canvas_left.setLayers([layer])
-        self.canvas_left.setExtent(layer.extent())
+        self.canvas_left.setExtent(self._extent_in_input_canvas(layer))
         self.populate_band_picker(layer)
         self.canvas_left.refresh()
+
+    def _working_crs_for(self, layer):
+        """A metric CRS to measure this scene in.
+
+        A projected input CRS is simply adopted. A geographic one cannot be --
+        the error columns are metres -- and the old behaviour was to leave the
+        working CRS at whatever it already was, which for a first load is the
+        hard-coded WORKING_CRS_DEFAULT. A WGS84 scene over the Gulf was
+        therefore measured, and both canvases drawn, in UTM 44N over India: the
+        rasters were placed thousands of kilometres outside the zone and neither
+        canvas rendered anything, with no error raised anywhere. The UTM zone
+        over the scene's own centre is used instead.
+        """
+        crs = layer.crs()
+        if crs is not None and crs.isValid() and not crs.isGeographic():
+            return crs
+        name = crs.authid() if crs is not None else "no CRS"
+        try:
+            ext = layer.extent()
+            lon = (ext.xMinimum() + ext.xMaximum()) / 2.0
+            lat = (ext.yMinimum() + ext.yMaximum()) / 2.0
+            code = utm_epsg_for(lon, lat)
+            if code is None:
+                print(f"[CRS] input is geographic ({name}) and its centre "
+                      f"({lon:.3f}, {lat:.3f}) is outside the UTM band; keeping "
+                      f"{self.proj_crs.authid()}, which is unlikely to be right")
+                return None
+            picked = QgsCoordinateReferenceSystem(f"EPSG:{code}")
+            if not picked.isValid():
+                return None
+            print(f"[CRS] input is geographic ({name}); measuring in EPSG:{code}, "
+                  f"the UTM zone over its centre ({lon:.3f}, {lat:.3f})")
+            span = ext.xMaximum() - ext.xMinimum()
+            if span > UTM_ZONE_WIDTH_DEG:
+                print(f"[CRS]   note: the scene spans {span:.1f} deg of longitude, "
+                      f"wider than one {UTM_ZONE_WIDTH_DEG:.0f} deg zone, so its "
+                      f"edges sit outside EPSG:{code}")
+            return picked
+        except Exception as e:
+            print(f"[CRS] could not derive a working CRS from the input: {e}")
+            return None
 
     def auto_connect_layers(self):
         layers = QgsProject.instance().mapLayers().values()

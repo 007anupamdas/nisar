@@ -405,6 +405,31 @@ check("mismatched lengths", H["accuracy_stats"]([1.0, 2.0], [1.0])["n"], 0)
 check("all-zero errors do not divide by zero",
       H["accuracy_stats"]([0.0], [0.0])["ce90"], 0.0)
 
+# ── 12. the UTM zone a geographic scene is measured in ───────────────────────
+# A scene with no projected CRS used to leave the working CRS at the hard-coded
+# UTM 44N, wherever on Earth it was. The zone comes from the scene's centre now.
+print("\n-- working CRS for a geographic input --")
+check("Hyderabad, 78.5E -> UTM 44N", H["utm_epsg_for"](78.5, 17.4), 32644)
+check("the Gulf, 58.0E -> UTM 40N", H["utm_epsg_for"](58.0, 26.1), 32640)
+check("southern hemisphere takes the 327xx band",
+      H["utm_epsg_for"](58.0, -26.1), 32740)
+# zone boundaries are half-open on the west: 6E starts zone 32, 5.999 ends 31
+check("just west of a boundary", H["utm_epsg_for"](5.999, 50.0), 32631)
+check("on the boundary", H["utm_epsg_for"](6.0, 50.0), 32632)
+check("zone 1 at the antimeridian", H["utm_epsg_for"](-180.0, 0.0), 32601)
+check("zone 60 at the far edge", H["utm_epsg_for"](179.999, 0.0), 32660)
+check("+180 exactly clamps to 60 rather than overflowing to 61",
+      H["utm_epsg_for"](180.0, 0.0), 32660)
+# the equator belongs to the northern band, by the >= in the helper
+check("the equator reads north", H["utm_epsg_for"](78.5, 0.0), 32644)
+
+# UTM is undefined at the poles: a wrong zone there would be silent, so refuse
+check("above 84 N there is no zone", H["utm_epsg_for"](78.5, 85.0), None)
+check("below 80 S there is no zone", H["utm_epsg_for"](78.5, -80.1), None)
+check("84 N itself is still in", H["utm_epsg_for"](78.5, 84.0), 32644)
+check("an out-of-range longitude is refused",
+      H["utm_epsg_for"](181.0, 17.4), None)
+
 print()
 if failures:
     print(f"{len(failures)} FAILURE(S)")

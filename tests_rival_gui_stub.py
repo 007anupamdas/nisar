@@ -1005,6 +1005,43 @@ win.auto_connect_layers()
 assert win.input_ring is None
 print("no sidecar -> the fallback to the full extent is announced, not silent")
 
-for d in (d1, d2, d3, d4, d5):
+# ── 13. a geographic input is measured in a zone over the scene ──────────────
+# Reported from the field: a WGS84 scene over the Gulf. adopt_working_crs
+# refuses a geographic CRS -- the error columns are metres -- and the working
+# CRS was therefore left at the hard-coded UTM 44N over India. Both canvases
+# then drew in a zone the scene was 2,300 km outside, and rendered nothing at
+# all, with no error raised anywhere.
+d6 = tempfile.mkdtemp()
+tif6 = os.path.join(d6, "gulf_scene.tif")
+open(tif6, "w").close()
+
+R.QgsCoordinateReferenceSystem = MagicMock(side_effect=lambda code: _CRS(code))
+
+gulf = fake_layer(6)
+gulf.name.return_value = "Input_TIF"
+gulf.source.return_value = tif6
+gulf.crs.return_value = _Geo("EPSG:4326")
+gulf.extent.return_value = _Rect(53.984143, 23.475142, 61.949699, 28.789957)
+
+# a projected input is still taken as it is -- this path must not change
+utm = fake_layer(2)
+utm.crs.return_value = _CRS("EPSG:32643")
+utm.extent.return_value = _Rect(300000.0, 1880000.0, 400000.0, 1990000.0)
+assert win._working_crs_for(utm) is utm.crs.return_value
+
+win.proj_crs = _CRS("EPSG:32644")        # the default, as on a first load
+converted = _Rect(300000.0, 2600000.0, 800000.0, 3190000.0)
+R.QgsCoordinateTransform = MagicMock(
+    return_value=MagicMock(transformBoundingBox=MagicMock(return_value=converted)))
+win.adopt_input_layer(gulf, tif6)
+
+# 54..62 E centres on 58 E, which is zone 40 -- not the 44 it was measuring in
+assert win.proj_crs.authid() == "EPSG:32640", win.proj_crs.authid()
+handed = win.canvas_left.setExtent.call_args[0][0]
+assert handed is converted, "input canvas handed the layer's own degrees"
+print("\na geographic input picks the UTM zone over its centre,",
+      win.proj_crs.authid(), "- and the input canvas gets metres, not degrees")
+
+for d in (d1, d2, d3, d4, d5, d6):
     shutil.rmtree(d, ignore_errors=True)
 print("\nstubbed integration OK")
