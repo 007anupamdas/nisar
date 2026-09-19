@@ -369,6 +369,7 @@ print("out-of-domain footprint dropped; the usable ones survive the same pass")
 
 # and the consumers already treat an empty ring_proj as 'not placed'
 win.ref_tif_list = list(win.ref_footprints)
+_real_ring_wkt = R.ring_wkt      # section 16 needs the real one back
 R.ring_wkt = lambda ring: None if not ring else "POLYGON((0 0,1 0,1 1,0 0))"
 R.QgsGeometry = MagicMock()
 R.QgsGeometry.fromWkt.return_value.contains.return_value = False
@@ -1241,6 +1242,101 @@ assert mark.dragging is True
 assert win.table.written == [(2, 0), (2, 1)], win.table.written
 assert win.table.selected == []
 print("a press on open ground marks the current row, as before")
+
+# ── 16. a point in one reference's nodata is offered the one that has data ───
+# Reported from use: the L8 index states one BOX per image, nodata corners
+# included, so a point sits inside two or three boxes and is in the fill wedge
+# of one of them -- and the smallest box is as likely to be the empty one as
+# any other. Real GeoTIFFs, read through the shipped probe.
+import re
+import numpy as _np
+import rasterio as _rio
+from rasterio.transform import from_origin as _from_origin
+
+d7 = tempfile.mkdtemp()
+
+def _write(name, arr, ox, oy, px=10.0, nodata=0):
+    path = os.path.join(d7, name)
+    with _rio.open(path, "w", driver="GTiff", height=arr.shape[0],
+                   width=arr.shape[1], count=1, dtype=arr.dtype,
+                   crs="EPSG:32644", transform=_from_origin(ox, oy, px, px),
+                   nodata=nodata) as dst:
+        dst.write(arr, 1)
+    return path
+
+# A: 200x200 at 10 m from (300000, 1900000). Its western half is fill.
+a = _np.full((200, 200), 100, dtype="int16")
+a[:, :100] = 0
+tile_a = _write("small_with_wedge.tif", a, 300000.0, 1900000.0)
+# B: 210x210 over the same ground -- a LARGER box, so the old smallest-box
+# rule picked A, and A is empty exactly where the point is
+tile_b = _write("larger_all_data.tif",
+                _np.full((210, 210), 50, dtype="int16"), 300000.0, 1900000.0)
+
+def _ring(ox, oy, n, px=10.0):
+    return [(ox, oy), (ox + n * px, oy), (ox + n * px, oy - n * px), (ox, oy - n * px)]
+
+win.proj_crs = _CRS("EPSG:32644")
+R.QgsCoordinateReferenceSystem.fromWkt = lambda wkt: _CRS("EPSG:32644")
+win.ref_footprints = {
+    tile_a: {"ring": [], "ring_proj": _ring(300000.0, 1900000.0, 200),
+             "band": "UNK", "crs": None, "granule": None, "source": "index-shp"},
+    tile_b: {"ring": [], "ring_proj": _ring(300000.0, 1900000.0, 210),
+             "band": "UNK", "crs": None, "granule": None, "source": "index-shp"},
+}
+win.ref_tif_list = [tile_a, tile_b]
+
+def _boxgeom(wkt):
+    nums = [float(v) for v in re.findall(r"-?\d+\.?\d*", wkt or "")]
+    xs, ys = nums[0::2], nums[1::2]
+    g = MagicMock()
+    g.contains = lambda pt: (min(xs) <= pt._px <= max(xs)
+                             and min(ys) <= pt._py <= max(ys))
+    g.area = lambda: (max(xs) - min(xs)) * (max(ys) - min(ys))
+    return g
+
+# section 7b replaced ring_wkt with a fixed string; this section needs the real
+# one, since the box a candidate is judged by comes out of it
+R.ring_wkt = _real_ring_wkt
+R.QgsGeometry.fromWkt = _boxgeom
+R.QgsGeometry.fromPointXY = lambda pt: type(
+    "P", (), {"_px": pt.x(), "_py": pt.y()})()
+
+# both boxes contain it; A is the smaller; A is fill there and B is not
+west = _PointXY(300500.0, 1899000.0)
+assert win._has_data_at(tile_a, west) is False
+assert win._has_data_at(tile_b, west) is True
+assert win.reference_for_point(west) == tile_b, \
+    "offered the smaller box even though it is nodata at the point"
+print("\na point in the smaller tile's nodata is offered the tile that has data")
+
+# where both carry data the smaller box still wins, as before
+east = _PointXY(301500.0, 1899000.0)
+assert win._has_data_at(tile_a, east) is True
+assert win.reference_for_point(east) == tile_a, "smallest-box order was lost"
+print("where both have data the smallest footprint still wins")
+
+# a point off A's grid entirely reads as fill rather than as unreadable
+assert win._has_data_at(tile_a, _PointXY(400000.0, 1899000.0)) is False
+
+# an unreadable file cannot be judged, and a tile is trusted rather than
+# refused -- refusing on a failed read empties the canvas over real ground
+missing = os.path.join(d7, "not_here.tif")
+assert win._has_data_at(missing, west) is None
+win.ref_tif_list = [missing]
+win.ref_footprints = {missing: dict(win.ref_footprints[tile_a])}
+assert win.reference_for_point(west) == missing
+print("a tile whose pixel cannot be read is trusted, not refused")
+
+# with every candidate fill at the point, one is still shown rather than none
+win.ref_tif_list = [tile_a]
+win.ref_footprints = {tile_a: {"ring": [], "ring_proj": _ring(300000.0, 1900000.0, 200),
+                               "band": "UNK", "crs": None, "granule": None,
+                               "source": "index-shp"}}
+assert win.reference_for_point(west) == tile_a
+print("all candidates fill -> the smallest is still shown rather than none")
+
+shutil.rmtree(d7, ignore_errors=True)
 
 for d in (d1, d2, d3, d4, d5, d6):
     shutil.rmtree(d, ignore_errors=True)

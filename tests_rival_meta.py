@@ -471,6 +471,47 @@ check("nothing marked yet", H["nearest_gcp"]([], 0.0, 0.0, 10.0), None)
 check("a zero radius still matches an exact hit",
       H["nearest_gcp"](pts, 100.0, 100.0, 0.0), (1, 100.0, 100.0))
 
+# ── 15. placing a point in a raster's own grid, and judging the pixel ────────
+print("\n-- the reference pixel probe --")
+# GDAL order: (originX, pixelW, rowRot, originY, colRot, pixelH), pixelH < 0
+gt = (300000.0, 10.0, 0.0, 1900000.0, 0.0, -10.0)
+check("the origin is pixel (0, 0)", H["pixel_for_point"](gt, 300000.0, 1900000.0),
+      (0, 0))
+check("half a pixel in is still (0, 0)",
+      H["pixel_for_point"](gt, 300005.0, 1899995.0), (0, 0))
+check("one pixel east and south",
+      H["pixel_for_point"](gt, 300010.0, 1899990.0), (1, 1))
+check("north of the origin floors negative rather than wrapping",
+      H["pixel_for_point"](gt, 300000.0, 1900010.0), (0, -1))
+# a rotated grid read as though it were north-up puts the point somewhere
+# plausible and wrong, which is worse than declining to place it
+check("a rotated grid is refused",
+      H["pixel_for_point"]((300000.0, 10.0, 2.0, 1900000.0, 0.0, -10.0),
+                           300000.0, 1900000.0), None)
+check("a zero pixel size is refused",
+      H["pixel_for_point"]((300000.0, 0.0, 0.0, 1900000.0, 0.0, -10.0),
+                           300000.0, 1900000.0), None)
+check("a malformed transform is refused", H["pixel_for_point"]((1, 2, 3), 0, 0),
+      None)
+
+FILL = (0, 3)
+check("an ordinary value is data", H["is_data_value"](127.0, None, FILL), True)
+check("the declared nodata is fill", H["is_data_value"](-9999.0, -9999.0, FILL),
+      False)
+check("0 is fill", H["is_data_value"](0, None, FILL), False)
+check("3 is fill too, per the corner_coord definition",
+      H["is_data_value"](3, None, FILL), False)
+# NaN != NaN, so testing it against a nodata value KEEPS it -- the same trap
+# that once rendered a whole scene black here
+check("NaN is fill however it was declared",
+      H["is_data_value"](float("nan"), -9999.0, FILL), False)
+check("an int band and a float band agree",
+      H["is_data_value"](0, 0.0, FILL), False)
+check("a value that cannot be read as a number is not data",
+      H["is_data_value"]("nodata", None, FILL), False)
+check("with no fill list, only nodata and NaN are fill",
+      H["is_data_value"](0.0, None, ()), True)
+
 print()
 if failures:
     print(f"{len(failures)} FAILURE(S)")

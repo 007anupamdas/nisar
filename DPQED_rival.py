@@ -30,6 +30,11 @@ ground is brought up, centred and marked, so the reference is always showing the
 place being measured. Clicking the same feature on the right then fills Ref X/Y
 and the row's error.
 
+An index states one box per image, nodata corners included, so a point can sit
+inside two or three boxes and be in the fill of one of them. The pixel under
+the point is read from each candidate before it is offered, smallest box
+first; a tile that cannot be read is trusted rather than refused.
+
 Mark / Pan / Zoom In / Zoom Out (Ctrl+1..4) is one exclusive row applied to both
 canvases at once -- leaving one marking while the other is being zoomed only
 produces stray picks. Mark is the only tool that fills the table; the rest move
@@ -269,6 +274,18 @@ GCP_LABEL_FONT_PT   = 9
 GCP_CLICK_SELECTS_ROW = True
 GCP_PICK_RADIUS_PX    = 10
 
+# An index states one box per image, nodata corners included, so a point can
+# sit inside two or three boxes and be in the fill of one of them -- and the
+# smallest box is as likely to be the empty one as any other. Before a tile is
+# offered, the pixel under the point is read from the tile itself: fill there
+# means it does not cover this ground, whatever its box says. One pixel per
+# candidate, and only at the moment a point is picked.
+REF_PROBE_PIXEL = True
+# What counts as "no data here" on top of the raster's own declared nodata and
+# NaN. 0 is the usual fill; 3 is what an earlier ADRIN pipeline wrote, and is
+# carried over from the corner_coord definition used there.
+REF_FILL_VALUES = (0, 3)
+
 # Shapefile export, for quiver.py and for comparing two scenes over one area in
 # QGIS. DBF caps a field name at 10 characters, so these are already at the
 # limit -- do not lengthen them.
@@ -378,6 +395,46 @@ def gcp_points(rows):
             continue
         out.append((i, x, y))
     return out
+
+
+def pixel_for_point(gt, x, y):
+    """(col, row) in a north-up raster for a map coordinate in its own CRS.
+
+    GDAL's geotransform is (originX, pixelW, rowRot, originY, colRot, pixelH),
+    with pixelH negative for a north-up raster -- an ordering that makes a
+    misread place the point somewhere plausible rather than fail. A rotated
+    grid (either rotation term non-zero) returns None rather than a position
+    computed as though it were north-up.
+    """
+    try:
+        ox, px, rx, oy, ry, py = gt
+    except (TypeError, ValueError):
+        return None
+    if not px or not py or rx or ry:
+        return None
+    return (int(math.floor((x - ox) / px)), int(math.floor((y - oy) / py)))
+
+
+def is_data_value(value, nodata, fill_values):
+    """Does a pixel carry data, or is it fill?
+
+    NaN is fill however it was declared: NaN != NaN, so comparing it against a
+    nodata value would keep it, which is the same trap that once rendered a
+    whole scene black here. Fill values are compared as floats so an integer
+    band and a float one behave alike.
+    """
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return False
+    if v != v:
+        return False
+    try:
+        if nodata is not None and v == float(nodata):
+            return False
+    except (TypeError, ValueError):
+        pass
+    return not any(v == float(f) for f in fill_values)
 
 
 def nearest_gcp(points, x, y, radius):
@@ -2239,10 +2296,98 @@ class QCDashboard(QMainWindow):
         self.current_ref_layer = None
 
     # ── STAGE 2 AUTO-SWITCH ───────────────────────────────────────────────────
+    def _probe_decide(self, wkt, gt, width, height, pt, read):
+        """Place a working-CRS point in a raster's own grid, read it, judge it.
+
+        The half both backends share. None means "cannot tell" at every step --
+        an unusable CRS, a rotated grid, a read that failed -- and the caller
+        then trusts the footprint rather than refusing the tile.
+        """
+        p = pt
+        if wkt:
+            crs = QgsCoordinateReferenceSystem.fromWkt(wkt)
+            if not crs.isValid():
+                return None
+            if crs.authid() != self.proj_crs.authid():
+                p = QgsCoordinateTransform(
+                    self.proj_crs, crs, QgsProject.instance()).transform(pt)
+        cell = pixel_for_point(gt, p.x(), p.y())
+        if cell is None:
+            return None
+        col, row = cell
+        if not (0 <= col < width and 0 <= row < height):
+            return False            # off the grid entirely: the box over-claimed
+        got = read(col, row)
+        if got is None:
+            return None
+        return is_data_value(got[0], got[1], REF_FILL_VALUES)
+
+    def _probe_gdal(self, tif_path, pt):
+        ds = None
+        try:
+            from osgeo import gdal
+            ds = gdal.Open(tif_path, gdal.GA_ReadOnly)
+            if ds is None:
+                return None
+            band = ds.GetRasterBand(1)
+
+            def read(col, row):
+                arr = band.ReadAsArray(col, row, 1, 1)
+                return None if arr is None else (arr[0][0], band.GetNoDataValue())
+
+            return self._probe_decide(ds.GetProjection(), ds.GetGeoTransform(),
+                                      ds.RasterXSize, ds.RasterYSize, pt, read)
+        except Exception:
+            return None
+        finally:
+            ds = None
+
+    def _probe_rasterio(self, tif_path, pt):
+        try:
+            import rasterio
+            from rasterio.windows import Window
+            with rasterio.open(tif_path) as src:
+
+                def read(col, row):
+                    arr = src.read(1, window=Window(col, row, 1, 1))
+                    if arr is None or not arr.size:
+                        return None
+                    return (arr[0][0], src.nodatavals[0])
+
+                return self._probe_decide(
+                    src.crs.to_wkt() if src.crs else "",
+                    src.transform.to_gdal(), src.width, src.height, pt, read)
+        except Exception:
+            return None
+
+    def _has_data_at(self, tif_path, pt):
+        """Is there data in this reference under a working-CRS point?
+
+        True yes, False only fill, None cannot be told. QGIS ships GDAL and not
+        rasterio, so GDAL is tried first; rasterio is what makes this testable
+        and usable outside QGIS, the same two-backend split the AUTO tool uses.
+        """
+        if not REF_PROBE_PIXEL:
+            return None
+        for backend in (self._probe_gdal, self._probe_rasterio):
+            verdict = backend(tif_path, pt)
+            if verdict is not None:
+                return verdict
+        return None
+
     def reference_for_point(self, pt):
-        """The smallest loaded reference footprint containing a working-CRS point."""
-        target      = QgsGeometry.fromPointXY(pt)
-        best, best_a = None, float("inf")
+        """The smallest reference actually carrying data at a working-CRS point.
+
+        Containment alone is not enough. An index states one box per image,
+        nodata corners included, so a point can sit inside two or three boxes
+        and be in the fill wedge of one of them -- and the smallest box is as
+        likely to be that one as any other, which is how a tile showing nothing
+        got offered over a tile that had the feature on it. Candidates are
+        ordered smallest first, as before, and the first one whose own pixel
+        under the point is data wins.
+        """
+        target = QgsGeometry.fromPointXY(pt)
+        inside = []
         for tif_path in self.ref_tif_list:
             rec = self.ref_footprints.get(tif_path)
             if not rec or not rec.get("ring_proj"):
@@ -2252,10 +2397,24 @@ class QCDashboard(QMainWindow):
                 continue
             geom = QgsGeometry.fromWkt(wkt)
             if geom.contains(target):
-                area = geom.area()
-                if area < best_a:
-                    best_a, best = area, tif_path
-        return best
+                inside.append((geom.area(), tif_path))
+        if not inside:
+            return None
+        inside.sort()
+
+        unreadable = None
+        for _, tif_path in inside:
+            has = self._has_data_at(tif_path, pt)
+            if has is True:
+                return tif_path
+            if has is None and unreadable is None:
+                unreadable = tif_path
+        if unreadable is not None:
+            return unreadable
+        if len(inside) > 1:
+            print(f"[PROBE] all {len(inside)} reference(s) covering this point "
+                  f"are fill there; showing the smallest")
+        return inside[0][1]
 
     def show_reference_for(self, pt):
         """Bring up the reference tile covering a point. True if one is showing."""
