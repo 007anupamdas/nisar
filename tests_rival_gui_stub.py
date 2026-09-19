@@ -1338,6 +1338,67 @@ print("all candidates fill -> the smallest is still shown rather than none")
 
 shutil.rmtree(d7, ignore_errors=True)
 
+# ── 17. the reference mark is put where the measured error says to look ─────
+# section 15 replaced follow_input_point with a mock; this needs the real one
+win.follow_input_point = R.QCDashboard.follow_input_point.__get__(win)
+win.show_reference_for = MagicMock(return_value=True)
+win.show_ref_at        = MagicMock()
+win._syncing           = False
+
+# row 0 complete: its reference sat 30 m west and 10 m north of its input
+done = ["1000.000", "1000.000", "970.000", "1010.000"]
+
+# the first pick has nothing to go on and must mirror the input exactly
+win.table = _SelTable([["2000.000", "2000.000", "0.000", "0.000"]], current=0)
+pt, off, n = win.predicted_reference_point(_PointXY(2000.0, 2000.0))
+assert off is None and n == 0, (off, n)
+assert (pt.x(), pt.y()) == (2000.0, 2000.0)
+print("\nthe first pick mirrors the input: nothing measured to go on yet")
+
+# with one error behind it, the next mark carries the same offset
+win.table = _SelTable([done, ["2000.000", "2000.000", "0.000", "0.000"]],
+                      current=1)
+pt, off, n = win.predicted_reference_point(_PointXY(2000.0, 2000.0))
+assert (pt.x(), pt.y()) == (1970.0, 2010.0), (pt.x(), pt.y())
+assert off == (30.0, -10.0) and n == 1, (off, n)
+print("with one error behind it the mark moves 30 m west, 10 m north:",
+      (pt.x(), pt.y()))
+
+# THE trap: a predicted position must never reach the table. Written as a
+# measurement it would feed back into the statistics it came from, and every
+# error after the first would read as exactly the mean.
+win.follow_input_point(_PointXY(2000.0, 2000.0))
+assert win.table.written == [], "the prediction was written to the table"
+marked = win.show_ref_at.call_args[0][0]
+assert (marked.x(), marked.y()) == (1970.0, 2010.0), (marked.x(), marked.y())
+assert win.show_reference_for.call_args[0][0] is marked or \
+    (win.show_reference_for.call_args[0][0].x(),
+     win.show_reference_for.call_args[0][0].y()) == (1970.0, 2010.0)
+print("the prediction moves the mark and the tile lookup, and writes NOTHING")
+
+# a row that already carries a reference does not predict its own position
+# from its own error
+win.table = _SelTable([done], current=0)
+pt, off, n = win.predicted_reference_point(_PointXY(1000.0, 1000.0))
+assert off is None and (pt.x(), pt.y()) == (1000.0, 1000.0), (off, pt)
+print("the row being marked is left out of its own prediction")
+
+# and the offset is the mean of what has been measured, not the last alone
+win.table = _SelTable([done,
+                       ["3000.000", "3000.000", "2990.000", "2970.000"],
+                       ["4000.000", "4000.000", "0.000", "0.000"]], current=2)
+pt, off, n = win.predicted_reference_point(_PointXY(4000.0, 4000.0))
+assert n == 2 and off == (20.0, 10.0), (n, off)
+assert (pt.x(), pt.y()) == (3980.0, 3990.0), (pt.x(), pt.y())
+print("two errors averaged:", off, "->", (pt.x(), pt.y()))
+
+# switched off, it mirrors the input again
+R.PREDICT_REF_MARK = False
+pt, off, n = win.predicted_reference_point(_PointXY(4000.0, 4000.0))
+assert off is None and (pt.x(), pt.y()) == (4000.0, 4000.0)
+R.PREDICT_REF_MARK = True
+print("PREDICT_REF_MARK=False restores the exact mirror")
+
 for d in (d1, d2, d3, d4, d5, d6):
     shutil.rmtree(d, ignore_errors=True)
 print("\nstubbed integration OK")

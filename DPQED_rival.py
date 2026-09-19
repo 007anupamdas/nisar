@@ -30,6 +30,12 @@ ground is brought up, centred and marked, so the reference is always showing the
 place being measured. Clicking the same feature on the right then fills Ref X/Y
 and the row's error.
 
+After the first pick that provisional mark is offset by the error already
+measured rather than mirroring the input exactly -- if the references so far sat
+30 m west and 10 m north of their inputs, the next mark sits 30 m west and 10 m
+north of this one, which is where the feature is expected to be. It is a guide
+only: nothing reaches the table until the reference is actually clicked.
+
 An index states one box per image, nodata corners included, so a point can sit
 inside two or three boxes and be in the fill of one of them. The pixel under
 the point is read from each candidate before it is offered, smallest box
@@ -280,6 +286,19 @@ GCP_PICK_RADIUS_PX    = 10
 # offered, the pixel under the point is read from the tile itself: fill there
 # means it does not cover this ground, whatever its box says. One pixel per
 # candidate, and only at the moment a point is picked.
+# Where the provisional reference mark goes when a point is marked on the input.
+# The first pick has nothing to go on and mirrors the input exactly; after that
+# the offset already measured is the best guess at where the same feature sits
+# on the reference, which is a far shorter distance for the eye to travel at the
+# zoom this work is done at.
+#
+# It is a GUIDE ONLY. Nothing is written to the table until the reference is
+# actually clicked: a predicted position written as a measurement would feed
+# back into the statistics it came from, and every error after the first would
+# read as exactly the mean, driving RMSE and CE90 towards zero.
+PREDICT_REF_MARK = True
+PREDICT_FROM     = "mean"      # "mean" | "median" | "last"
+
 REF_PROBE_PIXEL = True
 # What counts as "no data here" on top of the raster's own declared nodata and
 # NaN. 0 is the usual fill; 3 is what an earlier ADRIN pipeline wrote, and is
@@ -395,6 +414,36 @@ def gcp_points(rows):
             continue
         out.append((i, x, y))
     return out
+
+
+def predicted_offset(errors, mode="mean"):
+    """The (dx, dy) to expect on the next pick, from the errors already measured.
+
+    None when there is nothing to go on, which is the first pick of a session.
+
+    'mean' averages every completed row, 'median' resists one bad pick, 'last'
+    follows the most recent. The axes are taken independently, so a median pair
+    need not be an error that was actually measured -- which is fine, since this
+    is a guess at where to look rather than a measurement.
+    """
+    pts = []
+    for e in errors:
+        try:
+            pts.append((float(e[0]), float(e[1])))
+        except (TypeError, ValueError, IndexError, KeyError):
+            continue
+    if not pts:
+        return None
+    if mode == "last":
+        return pts[-1]
+    if mode == "median":
+        def med(v):
+            v = sorted(v)
+            mid = len(v) // 2
+            return v[mid] if len(v) % 2 else (v[mid - 1] + v[mid]) / 2.0
+        return (med([p[0] for p in pts]), med([p[1] for p in pts]))
+    n = len(pts)
+    return (sum(p[0] for p in pts) / n, sum(p[1] for p in pts) / n)
 
 
 def pixel_for_point(gt, x, y):
@@ -1790,6 +1839,52 @@ class QCDashboard(QMainWindow):
                 print(f"[VIEW] rect transform failed: {e}")
         return rect
 
+    def _measured_errors(self, skip_row=None):
+        """(dx, dy) for every fully marked row, in table order.
+
+        The row being marked is skipped, so a row that already carries a
+        reference does not predict its own position from its own error.
+        """
+        out = []
+        for r in range(self.table.rowCount()):
+            if skip_row is not None and r == skip_row:
+                continue
+            try:
+                ix, iy = float(self._cell_text(r, 0)), float(self._cell_text(r, 1))
+                rx, ry = float(self._cell_text(r, 2)), float(self._cell_text(r, 3))
+            except (TypeError, ValueError):
+                continue
+            if (ix == 0.0 and iy == 0.0) or (rx == 0.0 and ry == 0.0):
+                continue
+            out.append((ix - rx, iy - ry))
+        return out
+
+    def predicted_reference_point(self, pt):
+        """Where the same feature is expected on the reference.
+
+        (point, offset, n). The offset is None until something has been
+        measured, and the point is then the input position unchanged -- the
+        first pick has nothing to go on.
+
+        dx = In - Ref by the table's convention, so Ref = In - (dx, dy): if the
+        references measured so far sat 30 m west and 10 m north of their inputs,
+        the next provisional mark sits 30 m west and 10 m north of this one.
+
+        Nothing here writes to the table. The mark is where to LOOK; the row's
+        Ref X/Y stay empty until the reference canvas is actually clicked.
+        """
+        if not PREDICT_REF_MARK:
+            return pt, None, 0
+        try:
+            errs = self._measured_errors(skip_row=self.table.currentRow())
+            off = predicted_offset(errs, PREDICT_FROM)
+        except Exception as e:
+            print(f"[PREDICT] {e}")
+            return pt, None, 0
+        if off is None:
+            return pt, None, 0
+        return QgsPointXY(pt.x() - off[0], pt.y() - off[1]), off, len(errs)
+
     def show_ref_at(self, pt, colour):
         """Put the reference canvas over a working-CRS point and mark it."""
         rect = self._ref_view_rect(pt)
@@ -2450,9 +2545,14 @@ class QCDashboard(QMainWindow):
             return
         self._syncing = True
         try:
-            if not self.show_reference_for(pt):
+            guess, off, n = self.predicted_reference_point(pt)
+            if not self.show_reference_for(guess):
                 return
-            self.show_ref_at(pt, MARKER_COLOR_INPUT)
+            self.show_ref_at(guess, MARKER_COLOR_INPUT)
+            if off is not None:
+                print(f"[PREDICT] reference mark put {-off[0]:+.3f} E "
+                      f"{-off[1]:+.3f} N of the input, the {PREDICT_FROM} of "
+                      f"{n} measured error(s) -- click the feature to record it")
         except Exception as e:
             print(f"[FOLLOW] {e}")
         finally:
@@ -2582,8 +2682,10 @@ class QCDashboard(QMainWindow):
             if rx != 0.0 or ry != 0.0:
                 self.show_ref_at(QgsPointXY(rx, ry), MARKER_COLOR_REF)
             elif ix != 0.0 or iy != 0.0:
-                # no reference pick on this row yet: sit on the input position
-                self.show_ref_at(QgsPointXY(ix, iy), MARKER_COLOR_INPUT)
+                # no reference pick on this row yet: sit where the errors
+                # measured so far say the feature should be, not on the input
+                guess, _, _ = self.predicted_reference_point(QgsPointXY(ix, iy))
+                self.show_ref_at(guess, MARKER_COLOR_INPUT)
 
         except Exception as e:
             print(f"[SYNC ROW] {e}")

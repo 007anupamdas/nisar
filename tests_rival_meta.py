@@ -512,6 +512,39 @@ check("a value that cannot be read as a number is not data",
 check("with no fill list, only nodata and NaN are fill",
       H["is_data_value"](0.0, None, ()), True)
 
+# ── 16. where the next reference mark is expected to be ──────────────────────
+print("\n-- predicting the reference mark --")
+# the first pick has nothing to go on and must not be nudged anywhere
+check("no errors yet", H["predicted_offset"]([]), None)
+check("one error is its own prediction",
+      H["predicted_offset"]([(30.0, -10.0)]), (30.0, -10.0))
+check("the mean of several",
+      H["predicted_offset"]([(30.0, -10.0), (10.0, -30.0)]), (20.0, -20.0))
+check("last follows the most recent",
+      H["predicted_offset"]([(30.0, -10.0), (10.0, -30.0)], "last"),
+      (10.0, -30.0))
+# one bad pick drags the mean a long way; the median is why the option exists
+check("the median ignores an outlier",
+      H["predicted_offset"]([(10.0, 10.0), (11.0, 11.0), (900.0, 900.0)],
+                            "median"), (11.0, 11.0))
+check("an even count averages the middle pair",
+      H["predicted_offset"]([(10.0, 10.0), (20.0, 20.0)], "median"),
+      (15.0, 15.0))
+check("unreadable rows are skipped, not fatal",
+      H["predicted_offset"]([("x", "y"), (4.0, 6.0)]), (4.0, 6.0))
+check("every row unreadable is the same as none",
+      H["predicted_offset"]([(None, None)]), None)
+
+# the whole point, in the table's own convention: dx = In - Ref, so
+# Ref = In - (dx, dy). A reference 30 m west and 10 m north of its input
+# predicts the next one 30 m west and 10 m north of ITS input.
+in1, ref1 = (1000.0, 1000.0), (970.0, 1010.0)
+err = (in1[0] - ref1[0], in1[1] - ref1[1])
+off = H["predicted_offset"]([err])
+in2 = (2000.0, 2000.0)
+check("the next mark carries the same offset",
+      (in2[0] - off[0], in2[1] - off[1]), (1970.0, 2010.0))
+
 print()
 if failures:
     print(f"{len(failures)} FAILURE(S)")
