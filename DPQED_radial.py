@@ -1012,6 +1012,54 @@ def sort_rois(rois, column, descending, band, backscatter=None):
     return rows
 
 
+def bounds_inside(bounds, extent, margin=0.0):
+    """Is `bounds` wholly inside `extent`, with `margin` to spare?
+
+    Both are (xmin, ymin, xmax, ymax). The margin keeps an ROI touching the
+    edge of the window from counting as visible: it is on screen, but you
+    cannot see what it sits in, which is the reason for looking at it.
+    """
+    if not bounds or not extent:
+        return False
+    bx0, by0, bx1, by1 = bounds
+    ex0, ey0, ex1, ey1 = extent
+    return (bx0 >= ex0 + margin and bx1 <= ex1 - margin
+            and by0 >= ey0 + margin and by1 <= ey1 - margin)
+
+
+def centred_extent(bounds, extent):
+    """`extent` moved to sit on the centre of `bounds`, same span.
+
+    A pan and not a zoom: the scale a scene is being read at is a decision the
+    user made, and clicking down a table to compare ROIs should not keep
+    changing it. Zooming to fit is a separate act, on its own key.
+
+    None when the ROI is larger than the view, where a pan cannot show it and
+    the caller should fit it instead.
+    """
+    if not bounds or not extent:
+        return None
+    bx0, by0, bx1, by1 = bounds
+    ex0, ey0, ex1, ey1 = extent
+    width, height = ex1 - ex0, ey1 - ey0
+    if width <= 0 or height <= 0:
+        return None
+    if (bx1 - bx0) > width or (by1 - by0) > height:
+        return None
+    cx, cy = (bx0 + bx1) / 2.0, (by0 + by1) / 2.0
+    return (cx - width / 2.0, cy - height / 2.0,
+            cx + width / 2.0, cy + height / 2.0)
+
+
+def padded_extent(bounds, pad_fraction=0.5):
+    """`bounds` with room around it, for an ROI too big to pan to."""
+    if not bounds:
+        return None
+    xmin, ymin, xmax, ymax = bounds
+    pad = max(xmax - xmin, ymax - ymin, 1.0) * float(pad_fraction)
+    return (xmin - pad, ymin - pad, xmax + pad, ymax + pad)
+
+
 def move_ring(ring, dx, dy):
     """A ring translated by (dx, dy), or None if there was nothing to move.
 
@@ -3357,17 +3405,62 @@ class RadiometricDashboard(QMainWindow):
         roi = self.selected_roi()
         if roi is None:
             return
-        bounds = ring_bounds(roi["ring"])
+        extent = padded_extent(ring_bounds(roi["ring"]))
+        if extent is not None:
+            self._set_extent(extent)
+
+    def centre_on_roi(self, roi):
+        """Pan the canvas onto an ROI, if it is not already in front of you.
+
+        Selecting a row and having to hunt for the ROI it names defeats the
+        point of the row. So the view follows the selection.
+
+        Two things it deliberately does not do. It does not zoom: the scale a
+        scene is being read at is the user's decision, and clicking down a
+        table to compare ROIs should not keep changing it -- F5 fits an ROI
+        when fitting is what is wanted. And it does not move at all when the
+        ROI is already comfortably on screen, because a view that jumps when
+        nothing needed to happen is worse than one that never moves; clicking
+        an ROI on the canvas would otherwise shift the ground under the cursor.
+        """
+        if roi is None:
+            return False
+        bounds = ring_bounds(roi.get("ring") or [])
         if bounds is None:
-            return
-        xmin, ymin, xmax, ymax = bounds
-        pad = max(xmax - xmin, ymax - ymin, 1.0) * 0.5
+            return False
+        extent = self._extent_tuple()
+        if extent is None:
+            return False
+        # A tenth of the view: enough that the ROI is not hard against an edge.
+        margin = min(extent[2] - extent[0], extent[3] - extent[1]) * 0.1
+        if bounds_inside(bounds, extent, margin):
+            return False
+        wanted = centred_extent(bounds, extent)
+        if wanted is None:
+            # Bigger than the window, so panning cannot bring it into view.
+            wanted = padded_extent(bounds)
+        return self._set_extent(wanted)
+
+    def _extent_tuple(self):
+        """The canvas extent as (xmin, ymin, xmax, ymax), or None."""
         try:
-            self.canvas.setExtent(QgsRectangle(xmin - pad, ymin - pad,
-                                               xmax + pad, ymax + pad))
-            self.canvas.refresh()
+            extent = self.canvas.extent()
+            return (float(extent.xMinimum()), float(extent.yMinimum()),
+                    float(extent.xMaximum()), float(extent.yMaximum()))
         except Exception as e:
-            print(f"[ROI] zoom: {e}")
+            print(f"[ROI] extent: {e}")
+            return None
+
+    def _set_extent(self, extent):
+        if extent is None:
+            return False
+        try:
+            self.canvas.setExtent(QgsRectangle(*extent))
+            self.canvas.refresh()
+            return True
+        except Exception as e:
+            print(f"[ROI] view: {e}")
+            return False
 
     # ── MEASUREMENT ──────────────────────────────────────────────────────────
     def measure_roi(self, roi):
@@ -3683,6 +3776,7 @@ class RadiometricDashboard(QMainWindow):
             return
         self.update_detail()
         self.redraw_rois()
+        self.centre_on_roi(self.selected_roi())
 
     def on_item_changed(self, item):
         """A typed label belongs to the ROI, and goes out with the export."""

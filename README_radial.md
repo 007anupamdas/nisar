@@ -43,6 +43,15 @@ and its table row is selected, so `Ctrl+Delete` and the editable Name and Class
 cells apply to what you clicked. The **smallest** ROI under the click wins, so
 one drawn inside another is still reachable; clicking open ground deselects.
 
+**The view follows the selection.** Select a row and the canvas pans onto that
+ROI, so the row and the thing it names are never in different places. Two
+restraints: it does not **zoom** — the scale you are reading the scene at is
+your decision, and clicking down the table to compare ROIs should not keep
+changing it (`F5` fits an ROI when fitting is what you want) — and it does not
+move at all when the ROI is **already comfortably on screen**, so clicking an
+ROI on the canvas never shifts the ground under the cursor. An ROI larger than
+the window is fitted, since panning cannot bring it into view.
+
 **Moving an ROI.** Drag one that is *already selected* and it slides to new
 ground, keeping its number, name and class, and re-measuring where it lands.
 An ROI drawn by eye lands slightly off as often as not, and the only remedy

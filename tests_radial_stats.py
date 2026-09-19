@@ -945,6 +945,44 @@ check("and so is one that came out NaN",
       H["roi_sort_key"](sortable(9, "x", "y", 1, float("nan")),
                         "mean_db", "HH"), (True, 0.0))
 
+# ── 19. FOLLOWING THE SELECTION WITH THE VIEW ─────────────────────────────────
+# Selecting a row pans the canvas onto that ROI. The arithmetic is small; what
+# it has to get right is when NOT to move -- a view that jumps when the ROI was
+# already in front of you is worse than one that never moves.
+print("\n── centring on an ROI ──")
+view = (0.0, 0.0, 100.0, 100.0)
+check("an ROI well inside is inside",
+      H["bounds_inside"]((40.0, 40.0, 60.0, 60.0), view, 10.0), True)
+check("one hard against an edge is not, with a margin asked for",
+      H["bounds_inside"]((40.0, 40.0, 60.0, 98.0), view, 10.0), False)
+check("though it is without one",
+      H["bounds_inside"]((40.0, 40.0, 60.0, 98.0), view, 0.0), True)
+check("one half outside is not inside",
+      H["bounds_inside"]((90.0, 40.0, 110.0, 60.0), view), False)
+check("no bounds, nothing to be inside",
+      H["bounds_inside"](None, view), False)
+check("and no view either", H["bounds_inside"]((1, 1, 2, 2), None), False)
+
+centred = H["centred_extent"]((200.0, 300.0, 220.0, 340.0), view)
+check("the view moves onto the ROI's centre",
+      ((centred[0] + centred[2]) / 2, (centred[1] + centred[3]) / 2),
+      (210.0, 320.0))
+check("keeping its span exactly, so it is a pan and not a zoom",
+      (centred[2] - centred[0], centred[3] - centred[1]), (100.0, 100.0))
+check("an ROI wider than the view cannot be panned to",
+      H["centred_extent"]((0.0, 0.0, 500.0, 10.0), view), None)
+check("nor one taller", H["centred_extent"]((0.0, 0.0, 10.0, 500.0), view),
+      None)
+check("a view of no size is not a view",
+      H["centred_extent"]((1.0, 1.0, 2.0, 2.0), (5.0, 5.0, 5.0, 5.0)), None)
+
+padded = H["padded_extent"]((0.0, 0.0, 10.0, 20.0))
+check("fitting an ROI leaves room around it to see its setting",
+      padded, (-10.0, -10.0, 20.0, 30.0))
+check("and a degenerate ROI still gets a window",
+      H["padded_extent"]((5.0, 5.0, 5.0, 5.0)), (4.5, 4.5, 5.5, 5.5))
+check("nothing to fit", H["padded_extent"](None), None)
+
 print("\n" + "=" * 70)
 if failures:
     print(f"{len(failures)} FAILURE(S):")

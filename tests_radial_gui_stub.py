@@ -965,6 +965,100 @@ check("a line is not an ROI",
 check("no geometry at all",
       R.RadiometricDashboard._rings_from_geometry(None), [])
 
+# ── 9a. the view follows the selection ───────────────────────────────────────
+# Selecting a row pans the canvas onto that ROI, so the row and the thing it
+# names are never in different places. What needs proving is the restraint:
+# it must not zoom, and it must not move when the ROI is already in view.
+print("\n── the view follows the selection ──")
+
+
+class _Canvas:
+    """A canvas that remembers the extent it was given.
+
+    The MagicMock canvas reports a mock for extent() -- floats() of which
+    raise, so centre_on_roi would bail out through its own except and the
+    whole feature would test as 'did not move' while doing nothing at all.
+    """
+    def __init__(self, extent):
+        self.current = extent
+        self.refreshed = 0
+
+    def extent(self):
+        return _Rect(*self.current)
+
+    def setExtent(self, rect):
+        self.current = (rect.xMinimum(), rect.yMinimum(),
+                        rect.xMaximum(), rect.yMaximum())
+
+    def refresh(self):
+        self.refreshed += 1
+
+    def __getattr__(self, name):
+        return MagicMock()
+
+
+saved_canvas = win.canvas
+win.canvas = _Canvas((500000.0, 3994000.0, 501000.0, 3995000.0))
+win.clear_rois()
+win.class_combo.setCurrentText(R.ROI_CLASS_ALL)
+win.on_class_filter()
+near = win.add_roi(R.rect_ring(500400.0, 3994400.0, 500600.0, 3994600.0),
+                   "rect")
+far = win.add_roi(R.rect_ring(505000.0, 3999000.0, 505200.0, 3999200.0),
+                  "rect")
+
+win.canvas.current = (500000.0, 3994000.0, 501000.0, 3995000.0)
+ok("an ROI already in the middle of the view does not move it",
+   not win.centre_on_roi(near), str(win.canvas.current))
+check("so the view is untouched", win.canvas.current,
+      (500000.0, 3994000.0, 501000.0, 3995000.0))
+
+moved = win.centre_on_roi(far)
+ok("an ROI off screen brings the view to it", moved)
+check("centred on that ROI",
+      ((win.canvas.current[0] + win.canvas.current[2]) / 2,
+       (win.canvas.current[1] + win.canvas.current[3]) / 2),
+      (505100.0, 3999100.0))
+check("at the same scale it was already at",
+      (win.canvas.current[2] - win.canvas.current[0],
+       win.canvas.current[3] - win.canvas.current[1]), (1000.0, 1000.0))
+
+# An ROI touching the edge counts as needing the view, not as visible.
+win.canvas.current = (500390.0, 3994390.0, 501390.0, 3995390.0)
+ok("an ROI hard against the edge is brought in", win.centre_on_roi(near))
+
+# Bigger than the window: a pan cannot show it, so it is fitted instead.
+win.canvas.current = (500000.0, 3994000.0, 500100.0, 3994100.0)
+huge = win.add_roi(R.rect_ring(500000.0, 3994000.0, 500900.0, 3994900.0),
+                   "rect")
+ok("an ROI larger than the view is fitted, not panned to",
+   win.centre_on_roi(huge))
+ok("so the view grew to hold it",
+   win.canvas.current[2] - win.canvas.current[0] > 900.0,
+   f"{win.canvas.current[2] - win.canvas.current[0]:.0f} m across")
+
+check("nothing selected, nothing to centre on", win.centre_on_roi(None), False)
+
+# Selecting the row is what drives it, not calling centre_on_roi by hand.
+win.canvas.current = (500000.0, 3994000.0, 501000.0, 3995000.0)
+win.select_roi(far["roi"])
+win.on_selection_changed()
+check("selecting a row centres the canvas on that ROI",
+      ((win.canvas.current[0] + win.canvas.current[2]) / 2,
+       (win.canvas.current[1] + win.canvas.current[3]) / 2),
+      (505100.0, 3999100.0))
+
+# Refilling the table restores the selection, and must not move the view.
+win.canvas.current = (500000.0, 3994000.0, 501000.0, 3995000.0)
+win.refresh_table()
+check("a table refresh leaves the view where it was", win.canvas.current,
+      (500000.0, 3994000.0, 501000.0, 3995000.0))
+
+win.clear_rois()
+win.canvas = saved_canvas
+win.class_combo.setCurrentText(R.ROI_CLASS_DEFAULT)
+win.on_class_filter()
+
 # ── 9b. sorting the table by a heading ───────────────────────────────────────
 # Clicking a heading cycles descending -> ascending -> drawing order. The part
 # that matters beyond the order itself: every row lookup goes through
