@@ -1176,6 +1176,72 @@ assert sorted(offsets[:4]) == sorted(
      for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1))]), offsets
 print("the number is drawn with a four-way black halo, then in colour on top")
 
+# ── 15. clicking a recorded GCP selects its row instead of overwriting it ────
+class _SelTable(_Rows):
+    """_Rows plus the selection and writing the mark tool actually uses."""
+    def __init__(self, rows, current=-1):
+        super().__init__(rows)
+        self._cur, self.selected, self.written = current, [], []
+    def currentRow(self): return self._cur
+    def setCurrentCell(self, r, c):
+        self.selected.append((r, c))
+        self._cur = r
+    def blockSignals(self, _): pass
+    def setItem(self, r, c, item): self.written.append((r, c))
+
+gcp_rows = [
+    ["325010.000", "1900007.000", "325000.000", "1900000.000"],   # GCP 1
+    ["0.000", "0.000", "0.000", "0.000"],                         # not a GCP
+    ["325200.000", "1900000.000", "0.000", "0.000"],              # GCP 3
+]
+win.canvas_left.mapUnitsPerPixel = MagicMock(return_value=2.0)   # 10 px -> 20 m
+
+# sitting on row 3, a click on GCP 1 moves the selection there
+win.table = _SelTable(gcp_rows, current=2)
+assert win.select_gcp_at(_PointXY(325010.0, 1900007.0)) is True
+assert win.table.selected == [(0, 0)], win.table.selected
+print("\nclicking a recorded GCP selects its row:", win.table.selected)
+
+# 15 m away is inside the 20 m reach; 25 m is not
+win.table = _SelTable(gcp_rows, current=2)
+assert win.select_gcp_at(_PointXY(325025.0, 1900007.0)) is True
+win.table = _SelTable(gcp_rows, current=2)
+assert win.select_gcp_at(_PointXY(325035.0, 1900007.0)) is False
+assert win.table.selected == []
+print("the reach is GCP_PICK_RADIUS_PX screen pixels wide, not a map distance")
+
+# the current row's own mark is NOT a selection target -- clicking it has to
+# keep refining the point, which is what the measuring tool is for
+win.table = _SelTable(gcp_rows, current=0)
+assert win.select_gcp_at(_PointXY(325010.0, 1900007.0)) is False
+assert win.table.selected == []
+print("clicking your own mark still refines it rather than re-selecting it")
+
+# and the press must decide before anything is written: update_data runs on
+# press, move and release, so a later check would already have overwritten
+win.draw_marker      = MagicMock()
+win.calculate_error  = MagicMock()
+win.follow_input_point = MagicMock()
+mark = R.DragMapTool(win.canvas_left, win, True)
+
+win.table = _SelTable(gcp_rows, current=2)
+mark.toMapCoordinates = MagicMock(return_value=_PointXY(325010.0, 1900007.0))
+mark.canvasPressEvent(MagicMock())
+assert win.table.written == [], "the press overwrote the row it selected"
+assert mark.dragging is False
+mark.canvasReleaseEvent(MagicMock())
+assert win.table.written == [], "the release overwrote it instead"
+assert win.table.selected == [(0, 0)]
+print("a press on a GCP selects, and neither it nor the release writes a pick")
+
+win.table = _SelTable(gcp_rows, current=2)
+mark.toMapCoordinates = MagicMock(return_value=_PointXY(400000.0, 1950000.0))
+mark.canvasPressEvent(MagicMock())
+assert mark.dragging is True
+assert win.table.written == [(2, 0), (2, 1)], win.table.written
+assert win.table.selected == []
+print("a press on open ground marks the current row, as before")
+
 for d in (d1, d2, d3, d4, d5, d6):
     shutil.rmtree(d, ignore_errors=True)
 print("\nstubbed integration OK")

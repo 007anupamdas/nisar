@@ -55,7 +55,9 @@ Every GCP in the table also stays drawn on the input canvas, in orange, with its
 row number beside it -- so the set being measured is visible as a set: where the
 points are, where the gaps are, and which row a mark on the ground belongs to.
 The overlay is rebuilt from the table, so a deleted row takes its mark away and
-a loaded CSV brings its marks with it.
+a loaded CSV brings its marks with it. Clicking one of them selects its row --
+taking both canvases to it -- rather than writing a second pick on top of it;
+the current row is excluded, so clicking your own mark still refines it.
 
 The arrow keys over a canvas move that side's mark by one source pixel (Shift
 for ten), rather than panning the view: while measuring, the thing being
@@ -260,6 +262,13 @@ GCP_MARKER_PEN      = 2
 GCP_LABEL_OFFSET_PX = 9
 GCP_LABEL_FONT_PT   = 9
 
+# Clicking a GCP already on the canvas selects its row rather than writing a
+# second pick on top of it. In screen pixels, so the reach is the same however
+# far the view is zoomed in -- in map units it would be metres at one zoom and
+# kilometres at another.
+GCP_CLICK_SELECTS_ROW = True
+GCP_PICK_RADIUS_PX    = 10
+
 # Shapefile export, for quiver.py and for comparing two scenes over one area in
 # QGIS. DBF caps a field name at 10 characters, so these are already at the
 # limit -- do not lengthen them.
@@ -369,6 +378,24 @@ def gcp_points(rows):
             continue
         out.append((i, x, y))
     return out
+
+
+def nearest_gcp(points, x, y, radius):
+    """The nearest (number, x, y) within `radius` of a position, or None.
+
+    Ties go to the lower row number, so clicking where two picks coincide lands
+    on the same one every time rather than on whichever came first out of the
+    table.
+    """
+    best, best_d2 = None, None
+    r2 = radius * radius
+    for n, px, py in points:
+        d2 = (px - x) ** 2 + (py - y) ** 2
+        if d2 > r2:
+            continue
+        if best is None or d2 < best_d2 or (d2 == best_d2 and n < best[0]):
+            best, best_d2 = (n, px, py), d2
+    return best
 
 
 def utm_epsg_for(lon, lat):
@@ -847,6 +874,13 @@ class DragMapTool(QgsMapTool):
         self.setCursor(Qt.CrossCursor)
 
     def canvasPressEvent(self, e):
+        # A click on a GCP already recorded selects its row instead of writing
+        # over it. Decided on the press: update_data runs on press, move AND
+        # release, so anything later would already have overwritten the row.
+        if self.is_left_map and self.parent.select_gcp_at(
+                self.toMapCoordinates(e.pos())):
+            self.dragging = False
+            return
         self.dragging = True
         self.update_data(e.pos())
 
@@ -855,8 +889,9 @@ class DragMapTool(QgsMapTool):
             self.update_data(e.pos())
 
     def canvasReleaseEvent(self, e):
-        self.dragging = False
-        self.update_data(e.pos())
+        was_marking, self.dragging = self.dragging, False
+        if was_marking:
+            self.update_data(e.pos())
 
     def update_data(self, pos):
         row = self.parent.table.currentRow()
@@ -2493,6 +2528,38 @@ class QCDashboard(QMainWindow):
             except Exception as e:
                 print(f"[GCP] row {n}: {e}")
         self.canvas_left.refresh()
+
+    def select_gcp_at(self, point):
+        """Select the table row of a GCP clicked on the input canvas.
+
+        Clicking a point already recorded is far more often "take me to that
+        one" than "put a second pick on top of it": the measurement lives in the
+        row, and the rows are what the statistics are computed over. True means
+        a row was selected and the click must not also become a mark.
+
+        The current row is excluded on purpose, so clicking your own mark still
+        refines it -- which is what the measuring tool is for. It also gives the
+        way out: the first click moves to that GCP, and a second click in the
+        same place, now on the current row, marks there as normal.
+        """
+        if not GCP_CLICK_SELECTS_ROW or not GCP_SHOW_ALL_INPUT:
+            return False
+        try:
+            radius = self.canvas_left.mapUnitsPerPixel() * GCP_PICK_RADIUS_PX
+            rows = [(self._cell_text(r, 0), self._cell_text(r, 1))
+                    for r in range(self.table.rowCount())]
+            current = self.table.currentRow() + 1       # gcp_points is 1-based
+            hit = nearest_gcp([p for p in gcp_points(rows) if p[0] != current],
+                              point.x(), point.y(), radius)
+        except Exception as e:
+            print(f"[GCP] pick: {e}")
+            return False
+        if not hit:
+            return False
+        n, x, y = hit
+        print(f"[GCP] {n} selected at ({x:.3f}, {y:.3f})")
+        self.table.setCurrentCell(n - 1, 0)
+        return True
 
     def clear_markers(self):
         for key, canvas in [("left", self.canvas_left), ("right", self.canvas_right)]:

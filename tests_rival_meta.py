@@ -452,6 +452,25 @@ check("nothing marked yet", H["gcp_points"]([]), [])
 check("a short row is skipped, not an IndexError",
       H["gcp_points"]([("1.0",)]), [])
 
+# ── 14. clicking a GCP picks the nearest one inside the reach ────────────────
+print("\n-- which GCP a click lands on --")
+pts = [(1, 100.0, 100.0), (3, 110.0, 100.0), (6, 100.0, 140.0)]
+check("a click on one of them", H["nearest_gcp"](pts, 100.2, 99.8, 5.0),
+      (1, 100.0, 100.0))
+check("between two, the nearer wins", H["nearest_gcp"](pts, 106.0, 100.0, 8.0),
+      (3, 110.0, 100.0))
+check("nothing within reach", H["nearest_gcp"](pts, 100.0, 120.0, 5.0), None)
+check("exactly on the radius still counts",
+      H["nearest_gcp"](pts, 105.0, 100.0, 5.0), (1, 100.0, 100.0))
+# two picks on the same ground must resolve the same way every time, or a
+# click would land on whichever row happened to come first out of the table
+check("a tie goes to the lower row",
+      H["nearest_gcp"]([(7, 5.0, 5.0), (2, 5.0, 5.0)], 5.0, 5.0, 1.0),
+      (2, 5.0, 5.0))
+check("nothing marked yet", H["nearest_gcp"]([], 0.0, 0.0, 10.0), None)
+check("a zero radius still matches an exact hit",
+      H["nearest_gcp"](pts, 100.0, 100.0, 0.0), (1, 100.0, 100.0))
+
 print()
 if failures:
     print(f"{len(failures)} FAILURE(S)")
