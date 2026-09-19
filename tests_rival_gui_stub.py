@@ -38,8 +38,11 @@ class _Base:
         m = MagicMock()
         object.__setattr__(self, n, m)
         return m
+# QgsMapCanvasItem must be a real class too: subclassing a MagicMock silently
+# "succeeds" and hands back another MagicMock, so GcpLabel's body would never
+# run and every assertion about it would pass without testing anything.
 for mod, names in ((qw, ["QMainWindow", "QWidget"]),
-                   (qg, ["QgsMapTool"]),
+                   (qg, ["QgsMapTool", "QgsMapCanvasItem"]),
                    (qc, ["QObject"])):
     for n in names:
         setattr(mod, n, type(n, (_Base,), {}))
@@ -1106,6 +1109,72 @@ handed = win.canvas_left.setExtent.call_args[0][0]
 assert handed is converted, "input canvas handed the layer's own degrees"
 print("\na geographic input picks the UTM zone over its centre,",
       win.proj_crs.authid(), "- and the input canvas gets metres, not degrees")
+
+# ── 14. every recorded GCP stays on the input canvas, numbered ───────────────
+# Asked for from use: one pick at a time says nothing about coverage, and
+# coverage is what an accuracy figure rests on. The reference canvas keeps one
+# mark -- it only ever shows the tile the current row is measured against.
+made = []
+R.QgsVertexMarker = MagicMock(side_effect=lambda c: made.append(MagicMock()) or made[-1])
+
+win.table = _Rows([
+    ["325010.000", "1900007.000", "325000.000", "1900000.000"],
+    ["0.000", "0.000", "0.000", "0.000"],                      # a fresh row
+    ["325020.000", "1900000.000", "0.000", "0.000"],           # input only: still a GCP
+    [None, None, None, None],
+])
+scene = MagicMock()
+win.canvas_left.scene = MagicMock(return_value=scene)
+win.gcp_items = []
+win._bulk_table_edit = False
+win.markers["left"] = ["the live magenta cross"]
+
+win.refresh_gcp_overlay()
+crosses = [i for i in win.gcp_items if i in made]
+labels  = [i for i in win.gcp_items if isinstance(i, R.GcpLabel)]
+assert len(crosses) == 2, len(crosses)
+assert [l.text for l in labels] == ["1", "3"], [l.text for l in labels]
+assert [(l.map_point.x(), l.map_point.y()) for l in labels] == \
+    [(325010.0, 1900007.0), (325020.0, 1900000.0)]
+# a row marked on the input but not yet on the reference is still a GCP: it is
+# a point that has been measured, whatever the export makes of it
+assert labels[1].text == "3"
+# the live cross belongs to the other set and is not disturbed
+assert win.markers["left"] == ["the live magenta cross"]
+print("\nevery recorded GCP is drawn on the input canvas, numbered",
+      [l.text for l in labels], "- the live cross untouched")
+
+# a second pass replaces the set rather than stacking on it
+scene.removeItem.reset_mock()
+before = list(win.gcp_items)
+win.refresh_gcp_overlay()
+removed = [c[0][0] for c in scene.removeItem.call_args_list]
+assert removed == before, "the previous overlay was not taken off the scene"
+assert len(win.gcp_items) == len(before)
+print("re-marking replaces the overlay rather than stacking it")
+
+# loading a CSV rebuilds it once at the end, not once per row
+win._bulk_table_edit = True
+win.gcp_items = []
+win.refresh_gcp_overlay()
+assert win.gcp_items == [], "overlay rebuilt during a bulk load"
+win._bulk_table_edit = False
+print("a bulk table load defers the rebuild to the end")
+
+# the number is haloed: black four ways, then the colour on top
+lbl = labels[0]
+painter = MagicMock()
+lbl.paint(painter)
+drawn = [c[0][2] for c in painter.drawText.call_args_list]
+assert drawn == ["1"] * 5, drawn
+# one pen for the four halo passes, one for the number itself
+assert painter.setPen.call_count == 2, painter.setPen.call_count
+offsets = [(c[0][0], c[0][1]) for c in painter.drawText.call_args_list]
+assert offsets[-1] == (R.GCP_LABEL_OFFSET_PX, -R.GCP_LABEL_OFFSET_PX), offsets
+assert sorted(offsets[:4]) == sorted(
+    [(R.GCP_LABEL_OFFSET_PX + dx, -R.GCP_LABEL_OFFSET_PX + dy)
+     for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1))]), offsets
+print("the number is drawn with a four-way black halo, then in colour on top")
 
 for d in (d1, d2, d3, d4, d5, d6):
     shutil.rmtree(d, ignore_errors=True)

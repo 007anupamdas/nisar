@@ -430,6 +430,28 @@ check("84 N itself is still in", H["utm_epsg_for"](78.5, 84.0), 32644)
 check("an out-of-range longitude is refused",
       H["utm_epsg_for"](181.0, 17.4), None)
 
+# ── 13. which table rows become a numbered GCP on the input canvas ───────────
+print("\n-- GCPs drawn on the input canvas --")
+table = [("325010.000", "1900007.000"),   # 1: a pick
+         ("0.000", "0.000"),              # 2: a fresh row, not a point at (0,0)
+         ("325020.000", "1900000.000"),   # 3: a pick
+         (None, None),                    # 4: an empty row
+         ("325030.", ""),                 # 5: mid-typing
+         ("0.000", "1900050.000")]        # 6: on the false easting, still a pick
+got = H["gcp_points"](table)
+check("only the rows carrying a pick", [n for n, _, _ in got], [1, 3, 6])
+check("numbered by their table row, not by position in the result",
+      got[1], (3, 325020.0, 1900000.0))
+# (0, 0) is where a new row starts and, in UTM, several hundred km from the
+# scene -- a mark there would be a stray cross with a number on it
+check("a fresh row is not a point at the projection origin",
+      [n for n, _, _ in H["gcp_points"]([("0.000", "0.000")])], [])
+check("one zero axis is still a real position",
+      H["gcp_points"]([("0.000", "1900050.000")]), [(1, 0.0, 1900050.0)])
+check("nothing marked yet", H["gcp_points"]([]), [])
+check("a short row is skipped, not an IndexError",
+      H["gcp_points"]([("1.0",)]), [])
+
 print()
 if failures:
     print(f"{len(failures)} FAILURE(S)")

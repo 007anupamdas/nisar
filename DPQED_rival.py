@@ -51,6 +51,12 @@ The mark is a solid cross, magenta for the input and yellow for its reference.
 The input is commonly shown as a red/cyan composite and the reference as
 greyscale, so red, green and any grey each vanish into one of the two.
 
+Every GCP in the table also stays drawn on the input canvas, in orange, with its
+row number beside it -- so the set being measured is visible as a set: where the
+points are, where the gaps are, and which row a mark on the ground belongs to.
+The overlay is rebuilt from the table, so a deleted row takes its mark away and
+a loaded CSV brings its marks with it.
+
 The arrow keys over a canvas move that side's mark by one source pixel (Shift
 for ten), rather than panning the view: while measuring, the thing being
 refined is the point. The input's own pixel size is used on the left and the
@@ -112,10 +118,10 @@ from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QFileDialog, QHeaderView, QCheckBox, QComboBox,
                              QMessageBox, QApplication, QShortcut, QLabel,
                              QFrame, QButtonGroup)
-from PyQt5.QtCore import Qt, QObject, QEvent, QTimer
-from PyQt5.QtGui import QKeySequence, QFont, QColor
+from PyQt5.QtCore import Qt, QObject, QEvent, QTimer, QRectF
+from PyQt5.QtGui import QKeySequence, QFont, QColor, QPen
 from qgis.gui import (QgsMapCanvas, QgsMapTool, QgsMapToolPan, QgsMapToolZoom,
-                      QgsVertexMarker)
+                      QgsVertexMarker, QgsMapCanvasItem)
 from qgis.core import (QgsProject, QgsPointXY, QgsRasterLayer, QgsVectorLayer,
                        QgsGeometry, QgsCoordinateReferenceSystem,
                        QgsCoordinateTransform, QgsSingleBandGrayRenderer,
@@ -239,6 +245,21 @@ MARKER_PEN_WIDTH   = 2
 MARKER_COLOR_INPUT = (255, 0, 255)     # magenta: the pick being measured
 MARKER_COLOR_REF   = (255, 255, 0)     # yellow: its reference
 
+# Every GCP in the table stays drawn on the INPUT canvas, numbered by its row,
+# so the set being measured is visible as a set: where the points are, where
+# the gaps are, and which row a mark on the ground belongs to. One pick at a
+# time says nothing about coverage, and coverage is what an accuracy figure
+# rests on. The reference canvas is deliberately left alone -- it only ever
+# shows the one tile the current row is measured against, so a numbered set
+# there would be marks from other tiles drawn over this one's ground.
+GCP_SHOW_ALL_INPUT  = True
+GCP_LABEL_INPUT     = True     # set False if the numbers misbehave on a build
+MARKER_COLOR_GCP    = (255, 140, 0)    # orange: a GCP already recorded
+GCP_MARKER_SIZE     = 14       # smaller than the live cross, which stays magenta
+GCP_MARKER_PEN      = 2
+GCP_LABEL_OFFSET_PX = 9
+GCP_LABEL_FONT_PT   = 9
+
 # Shapefile export, for quiver.py and for comparing two scenes over one area in
 # QGIS. DBF caps a field name at 10 characters, so these are already at the
 # limit -- do not lengthen them.
@@ -327,6 +348,27 @@ def ring_wkt(ring):
     closed = close_ring(ring)
     pts = ",".join(f"{x} {y}" for x, y in closed)
     return f"POLYGON(({pts}))"
+
+
+def gcp_points(rows):
+    """(number, x, y) for every table row carrying an input pick.
+
+    The number is the table's own 1-based row, so a mark on the canvas, a line
+    in the table and a point in the exported shapefile all carry one identifier.
+    A row with no input pick yet -- blank, mid-typing, or the (0, 0) a new row
+    starts at -- contributes nothing rather than a mark at the projection
+    origin, which for a UTM scene is several hundred kilometres away.
+    """
+    out = []
+    for i, pair in enumerate(rows, start=1):
+        try:
+            x, y = float(pair[0]), float(pair[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if x == 0.0 and y == 0.0:
+            continue
+        out.append((i, x, y))
+    return out
 
 
 def utm_epsg_for(lon, lat):
@@ -844,6 +886,58 @@ class DragMapTool(QgsMapTool):
             self.parent.follow_input_point(QgsPointXY(sx, sy))
 
 
+# ── GCP NUMBER LABEL ──────────────────────────────────────────────────────────
+class GcpLabel(QgsMapCanvasItem):
+    """A GCP's row number, drawn beside its cross and pinned to the ground.
+
+    A QgsMapCanvasItem rather than a plain graphics item because the number has
+    to stay on its point through every pan and zoom: QGIS calls updatePosition()
+    on each extent change, and toCanvasCoordinates does the map-to-screen step.
+    Painting a plain item at screen coordinates would leave the numbers behind
+    the moment the view moved.
+    """
+
+    def __init__(self, canvas, point, text, colour):
+        super().__init__(canvas)
+        self.map_point = point
+        self.text      = str(text)
+        self.colour    = QColor(*colour) if isinstance(colour, tuple) else colour
+        self.font      = QFont()
+        self.font.setPointSize(GCP_LABEL_FONT_PT)
+        self.font.setBold(True)
+        self.updatePosition()
+
+    def updatePosition(self):
+        try:
+            self.setPos(self.toCanvasCoordinates(self.map_point))
+        except Exception:
+            pass
+        self.update()
+
+    def boundingRect(self):
+        w = GCP_LABEL_FONT_PT * (1.4 * len(self.text) + 2.0)
+        h = GCP_LABEL_FONT_PT * 2.6
+        return QRectF(GCP_LABEL_OFFSET_PX - 2, -h, w, h)
+
+    def paint(self, painter, option=None, widget=None):
+        """The number, haloed, so it reads over both bright and dark imagery.
+
+        The halo is the same text drawn in black one pixel out in each
+        direction. A QPainterPath stroke would be neater, but this needs no
+        extra class and cannot fail differently across QGIS builds.
+        """
+        try:
+            painter.setFont(self.font)
+            x, y = GCP_LABEL_OFFSET_PX, -GCP_LABEL_OFFSET_PX
+            painter.setPen(QPen(QColor(0, 0, 0)))
+            for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                painter.drawText(x + dx, y + dy, self.text)
+            painter.setPen(QPen(self.colour))
+            painter.drawText(x, y, self.text)
+        except Exception as e:
+            print(f"[GCP] label paint: {e}")
+
+
 # ── ARROW-KEY NUDGE ───────────────────────────────────────────────────────────
 class ArrowNudgeFilter(QObject):
     """Turn the arrow keys over a canvas into a one-pixel move of the mark.
@@ -912,6 +1006,9 @@ class QCDashboard(QMainWindow):
         self.resize(1500, 900)
 
         self.markers           = {"left": [], "right": []}
+        # Every recorded GCP, redrawn on the input canvas from the table.
+        self.gcp_items         = []
+        self._bulk_table_edit  = False
         self.ref_folder_path   = None
         self.ref_footprints    = {}
         self.ref_mode          = None
@@ -2347,6 +2444,56 @@ class QCDashboard(QMainWindow):
         finally:
             self._syncing = False
 
+    def _cell_text(self, row, col):
+        it = self.table.item(row, col)
+        return it.text() if it is not None else ""
+
+    def _clear_gcp_overlay(self):
+        scene = self.canvas_left.scene()
+        for item in self.gcp_items:
+            try:
+                if scene:
+                    scene.removeItem(item)
+            except Exception as e:
+                print(f"[GCP] {e}")
+        self.gcp_items = []
+
+    def refresh_gcp_overlay(self):
+        """Redraw every recorded GCP on the input canvas, numbered by its row.
+
+        Driven from the table rather than accumulated as picks happen, so it
+        cannot drift from it: a deleted row takes its mark away, a loaded CSV
+        brings its marks with it, and a corrected coordinate moves its mark. The
+        live magenta cross is untouched -- these are a separate set of items, so
+        the point being measured stays the one that stands out.
+        """
+        if not GCP_SHOW_ALL_INPUT or self._bulk_table_edit:
+            return
+        self._clear_gcp_overlay()
+        try:
+            rows = [(self._cell_text(r, 0), self._cell_text(r, 1))
+                    for r in range(self.table.rowCount())]
+        except Exception as e:
+            print(f"[GCP] reading the table: {e}")
+            return
+
+        for n, x, y in gcp_points(rows):
+            try:
+                pt    = QgsPointXY(x, y)
+                cross = QgsVertexMarker(self.canvas_left)
+                cross.setCenter(pt)
+                cross.setIconType(QgsVertexMarker.ICON_CROSS)
+                cross.setColor(QColor(*MARKER_COLOR_GCP))
+                cross.setPenWidth(GCP_MARKER_PEN)
+                cross.setIconSize(GCP_MARKER_SIZE)
+                self.gcp_items.append(cross)
+                if GCP_LABEL_INPUT:
+                    self.gcp_items.append(
+                        GcpLabel(self.canvas_left, pt, n, MARKER_COLOR_GCP))
+            except Exception as e:
+                print(f"[GCP] row {n}: {e}")
+        self.canvas_left.refresh()
+
     def clear_markers(self):
         for key, canvas in [("left", self.canvas_left), ("right", self.canvas_right)]:
             self._remove_markers(canvas, key)
@@ -2388,6 +2535,7 @@ class QCDashboard(QMainWindow):
         # the right order of magnitude -- but not worth showing unqualified.
         caveat = "" if stats["circular"] else "  (axes uneven)"
         self.lbl_ce90.setText(f"CE90:    {stats['ce90']:.3f} m{caveat}")
+        self.refresh_gcp_overlay()
 
     # ── CSV ───────────────────────────────────────────────────────────────────
     def load_csv_smart(self):
@@ -2395,26 +2543,36 @@ class QCDashboard(QMainWindow):
         if not path:
             return
         self.table.setRowCount(0)
+        self._clear_gcp_overlay()
+        # One row at a time would rebuild the whole overlay per row, on top of
+        # the per-row statistics pass; a long CSV is exactly where that bites.
+        self._bulk_table_edit = True
         mapping = {
             "ix": ["In X", "In_X", "x1-map"],
             "iy": ["In Y", "In_Y", "y1-map"],
             "rx": ["Ref X", "Ref_X", "x2-map"],
             "ry": ["Ref Y", "Ref_Y", "y2-map"],
         }
-        with open(path, "r", encoding="utf-8-sig") as f:
-            for row_data in csv.DictReader(f):
-                r = self.table.rowCount()
-                try:
-                    self.table.blockSignals(True)
-                    self.table.insertRow(r)
-                    for i, key in enumerate(["ix", "iy", "rx", "ry"]):
-                        val = next(
-                            (row_data[k] for k in mapping[key] if k in row_data), "0.000"
-                        )
-                        self.table.setItem(r, i, QTableWidgetItem(val))
-                finally:
-                    self.table.blockSignals(False)
-                self.calculate_error(r)
+        try:
+            with open(path, "r", encoding="utf-8-sig") as f:
+                for row_data in csv.DictReader(f):
+                    r = self.table.rowCount()
+                    try:
+                        self.table.blockSignals(True)
+                        self.table.insertRow(r)
+                        for i, key in enumerate(["ix", "iy", "rx", "ry"]):
+                            val = next(
+                                (row_data[k] for k in mapping[key] if k in row_data),
+                                "0.000"
+                            )
+                            self.table.setItem(r, i, QTableWidgetItem(val))
+                    finally:
+                        self.table.blockSignals(False)
+                    self.calculate_error(r)
+        finally:
+            # whatever the file turned out to be, the overlay comes back on:
+            # leaving this set would silently kill it for the rest of the session
+            self._bulk_table_edit = False
         self.update_stats()
 
     # ── SHAPEFILE EXPORT ──────────────────────────────────────────────────────
