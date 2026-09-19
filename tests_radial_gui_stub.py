@@ -171,10 +171,40 @@ class _Item:
         return self._column
 
 
+class _Header:
+    """A header that remembers which column carries the sort arrow.
+
+    A MagicMock would swallow setSortIndicator and report nothing, so a sort
+    that pointed the arrow at the wrong column -- or at a column index taken
+    from the wrong list -- would look identical to one that got it right.
+    """
+    def __init__(self):
+        self.shown, self.column, self.order = False, None, None
+
+    def setSectionResizeMode(self, *a):
+        pass
+
+    def setSectionsClickable(self, *a):
+        pass
+
+    def setSortIndicatorShown(self, on):
+        self.shown = bool(on)
+
+    def setSortIndicator(self, column, order):
+        self.column, self.order = column, order
+
+    def __getattr__(self, name):
+        return MagicMock()
+
+
 class _Table:
     """Enough QTableWidget to hold what refresh_table writes."""
     def __init__(self):
         self.cells, self.rows, self._current = {}, 0, -1
+        self.header = _Header()
+
+    def horizontalHeader(self):
+        return self.header
 
     def setRowCount(self, n):
         self.rows = n
@@ -934,6 +964,73 @@ check("a line is not an ROI",
           fake_geometry([[(0.0, 0.0), (1.0, 1.0)]])), [])
 check("no geometry at all",
       R.RadiometricDashboard._rings_from_geometry(None), [])
+
+# ── 9b. sorting the table by a heading ───────────────────────────────────────
+# Clicking a heading cycles descending -> ascending -> drawing order. The part
+# that matters beyond the order itself: every row lookup goes through
+# _table_rois, so a sort that reordered the widget without reordering that list
+# would rename, re-class and delete the wrong ROI.
+print("\n── sorting the table ──")
+win.clear_rois()
+win.class_combo.setCurrentText(R.ROI_CLASS_ALL)
+win.on_class_filter()
+big = win.add_roi(R.rect_ring(500000.0, 3994000.0, 500600.0, 3994600.0),
+                  "rect", name="zulu")
+small = win.add_roi(R.rect_ring(501000.0, 3995000.0, 501200.0, 3995200.0),
+                    "rect", name="alpha")
+check("two ROIs, drawn small-number-first",
+      [roi["roi"] for roi in win.rois], [1, 2])
+ok("the first is the larger", big["npix"] > small["npix"],
+   f"{big['npix']} vs {small['npix']} px")
+
+columns = win._table_columns()
+npix_at = columns.index("npix")
+name_at = columns.index("name")
+
+win.on_sort_column(npix_at)
+check("one click sorts biggest first",
+      [roi["roi"] for roi in win._table_rois], [1, 2])
+check("and the table shows that order", win.table.text(0, 0), "1")
+win.on_sort_column(npix_at)
+check("a second click reverses it",
+      [roi["roi"] for roi in win._table_rois], [2, 1])
+check("the table follows", win.table.text(0, 0), "2")
+win.on_sort_column(npix_at)
+check("a third click returns to the drawing order",
+      [roi["roi"] for roi in win._table_rois], [1, 2])
+check("with no column sorted", win._sort_column, None)
+
+win.on_sort_column(name_at)
+check("a different column starts descending again",
+      [roi["roi"] for roi in win._table_rois], [1, 2])
+check("which for text is z before a", win.table.text(0, 1), "zulu")
+win.on_sort_column(name_at)
+check("and reverses", win.table.text(0, 1), "alpha")
+
+# With the small ROI on row 0, everything that reads a row must reach IT.
+check("row 0 is the ROI the sort put there", win._table_rois[0]["roi"], 2)
+check("the arrow points at the column that was clicked",
+      win.table.header.column, name_at)
+ok("and it is shown", win.table.header.shown)
+win.table.setCurrentCell(0, 0)
+check("selecting row 0 selects that ROI", win.selected_roi()["roi"], 2)
+win.table.item(0, name_at)._text = "renamed"
+win.on_item_changed(win.table.item(0, name_at))
+check("and renaming row 0 renames it, not the ROI drawn first",
+      [roi["name"] for roi in win.rois], ["zulu", "renamed"])
+
+win.on_sort_column(999)
+check("a click outside the table changes nothing", win._sort_column, "name")
+win.on_sort_column(name_at)          # ascending -> off
+check("back to the drawing order", win._sort_column, None)
+ok("and the arrow is taken away", not win.table.header.shown)
+
+# Leave the table as this section found it. A sort left switched on would
+# reorder the rows every later section indexes by hand -- which is the very
+# bug this sort was written to avoid, arriving through the test file instead.
+win.clear_rois()
+win.class_combo.setCurrentText(R.ROI_CLASS_DEFAULT)
+win.on_class_filter()
 
 # ── 10a. an exported ROI set comes back as what it was ───────────────────────
 # The round trip that mattered and was never tested: export a set of several

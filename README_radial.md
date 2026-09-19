@@ -208,6 +208,25 @@ drawn too small says so instead of quietly reporting an optimistic number.
 Point ROIs carry `point` in the `kind` column, so an export says which ROIs
 were placed this way and which were outlined.
 
+## Sorting the table
+
+Click a column heading to sort by it — **descending first**, because the
+question a radiometric table gets opened with is which ROI is the brightest,
+the noisiest or the largest, not which is the least of them. Click the same
+heading again to reverse it, and a third time to return to the order the ROIs
+were drawn in, so there is always a way back to the sequence the ROI numbers
+mean.
+
+Numbers sort as numbers, so 10 comes after 9 rather than before it, and text
+sorts case-folded, so `Old ice` and `old ice` order together. An ROI with
+**nothing** in that column — an unmeasured statistic, a blank class — stays at
+the bottom in *both* directions: missing is the absence of a figure, not a low
+one, and reversing the order should not turn it into a high one. Ties keep ROI
+order, so the rows do not reshuffle between one redraw and the next.
+
+Sorting only reorders the view. It does not renumber the ROIs, and the exports
+are unaffected.
+
 ## ROI classes
 
 Each ROI carries a **class** — what it is over. The **Drawing:** picker says

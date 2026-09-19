@@ -879,6 +879,72 @@ check("an index past the end is not an error",
       H["attribute_text"](row, 99), None)
 check("nor are no attributes at all", H["attribute_text"](None, 0), None)
 
+# ── 18. SORTING THE TABLE ─────────────────────────────────────────────────────
+# Clicking a heading orders the rows. Two things have to hold: numbers sort as
+# numbers (10 after 9, not before it), and an ROI with nothing in the column
+# stays at the bottom in BOTH directions -- an unmeasured ROI at the top of a
+# descending sort by mean would read as the brightest thing in the scene.
+print("\n── sorting ──")
+
+
+def sortable(roi_id, name, klass, npix, mean_db=None):
+    stats = {}
+    if mean_db is not None:
+        stats = {H["BACKSCATTER_GAMMA0"]: {"HH": {"mean_db": mean_db}}}
+    return {"roi": roi_id, "name": name, "class": klass, "npix": npix,
+            "kind": "rect", "stats": stats,
+            "backscat": H["BACKSCATTER_GAMMA0"]}
+
+
+rows = [sortable(1, "delta", "water", 9, -20.0),
+        sortable(2, "alpha", "Old Ice", 10, -5.0),
+        sortable(3, "charlie", "new ice", 100, None),
+        sortable(4, "bravo", "water", 9, -12.5)]
+
+
+def order(column, descending):
+    return [roi["roi"] for roi in
+            H["sort_rois"](rows, column, descending, "HH")]
+
+
+check("descending by a number is biggest first", order("npix", True),
+      [3, 2, 1, 4])
+check("ascending is the other way", order("npix", False), [1, 4, 2, 3])
+check("10 sorts above 9, so it is not sorting the printed text",
+      order("npix", True)[1], 2)
+check("a tie keeps ROI order, descending", order("npix", True)[2:], [1, 4])
+check("and ascending too", order("npix", False)[:2], [1, 4])
+
+check("text sorts as text", order("name", False), [2, 4, 3, 1])
+check("and reverses", order("name", True), [1, 3, 4, 2])
+check("case does not decide the order", order("class", False),
+      [3, 2, 1, 4])
+
+# A statistic is a column too, and ROI 3 has none.
+check("descending by a statistic, with the unmeasured one last",
+      order("mean_db", True), [2, 4, 1, 3])
+check("ascending by it, and STILL last", order("mean_db", False),
+      [1, 4, 2, 3])
+
+check("no column is the drawing order", order(None, True), [1, 2, 3, 4])
+check("sorting does not modify the list it was given",
+      [roi["roi"] for roi in rows], [1, 2, 3, 4])
+check("and an empty set sorts to nothing", H["sort_rois"]([], "npix", True,
+                                                          "HH"), [])
+
+print("\n── one row's sort key ──")
+check("a number reads as a number",
+      H["roi_sort_key"](rows[1], "npix", "HH"), (False, 10.0))
+check("text reads case-folded",
+      H["roi_sort_key"](rows[1], "class", "HH"), (False, "old ice"))
+check("an empty class is missing, not the empty string first",
+      H["roi_sort_key"](sortable(9, "x", "", 1), "class", "HH")[0], True)
+check("a statistic that was never computed is missing",
+      H["roi_sort_key"](rows[2], "mean_db", "HH"), (True, 0.0))
+check("and so is one that came out NaN",
+      H["roi_sort_key"](sortable(9, "x", "y", 1, float("nan")),
+                        "mean_db", "HH"), (True, 0.0))
+
 print("\n" + "=" * 70)
 if failures:
     print(f"{len(failures)} FAILURE(S):")

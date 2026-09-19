@@ -956,6 +956,62 @@ def attribute_text(attributes, index):
     return text
 
 
+# Which table columns hold text. Everything else is read as a number, so 10
+# sorts after 9 rather than before it, as it would if the displayed strings
+# were compared.
+TEXT_COLUMNS = ("name", "class", "kind")
+
+
+def roi_sort_key(roi, column, band, backscatter=None):
+    """(missing, value) for one ROI in one column.
+
+    The leading flag puts ROIs with nothing in that column last, and last in
+    BOTH directions: an unmeasured ROI at the top of a descending sort by mean
+    would read as the brightest one in the scene. 'Missing' is the absence of a
+    figure, not a low one, and reversing the order should not turn it into a
+    high one.
+
+    Text sorts case-folded, so a typed class does not order by whether the
+    shift key was held.
+    """
+    if column in TEXT_COLUMNS:
+        text = str(roi.get(column) or "").strip()
+        return (not text, text.lower())
+    if column in ROI_TABLE_COLUMNS:
+        value = roi.get(column)
+    else:
+        value = (roi_stats(roi, band, backscatter) or {}).get(column)
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return (True, 0.0)
+    if not math.isfinite(number):
+        return (True, 0.0)
+    return (False, number)
+
+
+def sort_rois(rois, column, descending, band, backscatter=None):
+    """`rois` ordered by one column, ties broken by ROI number.
+
+    Stable on the ROI number rather than on whatever order the list happened
+    to be in, so two ROIs with the same value do not swap places between one
+    redraw and the next -- a table that reshuffles under the cursor is a table
+    nobody trusts.
+
+    The missing flag is deliberately not reversed with the rest: see
+    roi_sort_key.
+    """
+    rows = list(rois or ())
+    if not column:
+        return rows
+    rows.sort(key=lambda roi: roi.get("roi") or 0)
+    rows.sort(key=lambda roi: roi_sort_key(roi, column, band, backscatter)[1],
+              reverse=bool(descending))
+    rows.sort(key=lambda roi: roi_sort_key(roi, column, band,
+                                           backscatter)[0])
+    return rows
+
+
 def move_ring(ring, dx, dy):
     """A ring translated by (dx, dy), or None if there was nothing to move.
 
@@ -1891,7 +1947,21 @@ class RadiometricDashboard(QMainWindow):
             QHeaderView.ResizeToContents)
         self.table.setToolTip(
             "One row per ROI, for the band selected below.\n"
-            "Double-click a name to label it; the label is exported.")
+            "Double-click a name to label it; the label is exported.\n\n"
+            "Click a column heading to sort by it, biggest first; click the\n"
+            "same heading again to reverse it, and a third time to go back to\n"
+            "the order the ROIs were drawn in. ROIs with nothing in that\n"
+            "column stay at the bottom either way.")
+        # Sorted here rather than by QTableWidget's own setSortingEnabled: Qt
+        # reorders the rows and knows nothing of self._table_rois, which every
+        # row lookup goes through. The two would disagree the moment a column
+        # was clicked, and renaming row 0 would rename whichever ROI Qt had
+        # moved there -- the same class of bug as the unfiltered row indexing.
+        self._sort_column = None
+        self._sort_desc = True
+        header = self.table.horizontalHeader()
+        header.setSectionsClickable(True)
+        header.sectionClicked.connect(self.on_sort_column)
 
         self.detail = QPlainTextEdit()
         self.detail.setReadOnly(True)
@@ -3535,7 +3605,9 @@ class RadiometricDashboard(QMainWindow):
         # goes through this list rather than indexing self.rois: with a filter
         # on, row 0 is not ROI 0, and an index that assumed it would rename and
         # delete the wrong ROI without a word.
-        self._table_rois = self.shown_rois()
+        self._table_rois = sort_rois(self.shown_rois(), self._sort_column,
+                                    self._sort_desc, band,
+                                    self.backscatter())
         self._filling_table = True
         try:
             self.table.setRowCount(0)
@@ -3560,6 +3632,51 @@ class RadiometricDashboard(QMainWindow):
         self.update_summary()
         self.update_detail()
         self.redraw_rois()
+
+    def on_sort_column(self, index):
+        """Sort by the column clicked: biggest first, then reversed, then off.
+
+        Descending first because the question a radiometric table is opened
+        with is which ROI is the brightest, or the noisiest, or the largest --
+        not which is the least of them. A third click restores the drawing
+        order, so there is always a way back to the sequence the ROI numbers
+        mean, without hunting for the column that happened to be sorted.
+        """
+        columns = self._table_columns()
+        if not 0 <= index < len(columns):
+            return
+        column = columns[index]
+        if column != self._sort_column:
+            self._sort_column, self._sort_desc = column, True
+        elif self._sort_desc:
+            self._sort_desc = False
+        else:
+            self._sort_column, self._sort_desc = None, True
+        self._show_sort_indicator()
+        self.refresh_table()
+        print(f"[TABLE] sorted by {self._sort_column or 'ROI number'}"
+              + (" (descending)" if self._sort_column and self._sort_desc
+                 else " (ascending)" if self._sort_column else ""))
+
+    @staticmethod
+    def _table_columns():
+        """Every column of the ROI table, in order, by the key it reads."""
+        return tuple(ROI_TABLE_COLUMNS) + tuple(TABLE_STATS)
+
+    def _show_sort_indicator(self):
+        """Put Qt's own little arrow on the column being sorted."""
+        try:
+            header = self.table.horizontalHeader()
+            if self._sort_column is None:
+                header.setSortIndicatorShown(False)
+                return
+            index = self._table_columns().index(self._sort_column)
+            header.setSortIndicatorShown(True)
+            header.setSortIndicator(
+                index, Qt.DescendingOrder if self._sort_desc
+                else Qt.AscendingOrder)
+        except Exception as e:
+            print(f"[TABLE] sort indicator: {e}")
 
     def on_selection_changed(self):
         if self._filling_table:
