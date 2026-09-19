@@ -128,6 +128,22 @@ only those where the factor is also valid. A factor missing over part of an ROI
 is a gap in the conversion, not in what the product recorded, so the two
 conventions can report slightly different pixel counts for the same ROI.
 
+## Loading an ROI set back
+
+`Load ROIs` reads a polygon layer and re-measures every ROI against whatever
+raster is loaded. It reads what each ROI already knows about itself:
+
+| Column | Also accepted as |
+|---|---|
+| `name` | `roi_name`, `label`, `site`, `id` |
+| `class` | `roi_class`, `cover`, `landcover`, `type`, `category` |
+| `kind` | `shape`, `geom_kind` |
+
+matched case-insensitively, so a set exported here reloads as exactly what it
+was — the classes included. If the layer has **no** class column, every ROI
+takes the Drawing picker's class and the tool says so, because that is
+otherwise a silent re-labelling of the whole set.
+
 ## Point buffer
 
 Some targets you can point at but cannot outline: a corner reflector, a buoy, a

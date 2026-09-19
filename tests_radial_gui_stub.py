@@ -320,7 +320,8 @@ R.QTableWidgetItem = _Item
 warned = []
 qw.QMessageBox.warning = lambda *a, **k: warned.append(a[-1])
 qw.QMessageBox.critical = lambda *a, **k: warned.append("CRITICAL: " + a[-1])
-qw.QMessageBox.information = lambda *a, **k: None
+informed = []
+qw.QMessageBox.information = lambda *a, **k: informed.append(a[-1])
 qw.QMessageBox.question = lambda *a, **k: qw.QMessageBox.Yes
 
 win.table = _Table()
@@ -933,6 +934,160 @@ check("a line is not an ROI",
           fake_geometry([[(0.0, 0.0), (1.0, 1.0)]])), [])
 check("no geometry at all",
       R.RadiometricDashboard._rings_from_geometry(None), [])
+
+# ── 10a. an exported ROI set comes back as what it was ───────────────────────
+# The round trip that mattered and was never tested: export a set of several
+# classes, load it into a fresh session, and every ROI came back classed
+# 'vegetation' -- whatever the Drawing picker happened to show -- because the
+# importer read 'name' and nothing else. A scene of new ice, old ice and water
+# returned as one land cover, plausibly and silently.
+try:
+    import numpy as _np3
+    from pyogrio.raw import write as _ogr_write3, read as _ogr_read3
+    from shapely import wkt as _wkt3
+except ImportError:
+    print("\n-- the class round trip: skipped (no pyogrio/shapely)")
+else:
+    print("\n-- the class round trip")
+
+    class _ImportField:
+        def __init__(self, name):
+            self._name = name
+
+        def name(self):
+            return self._name
+
+    class _ImportFeature:
+        def __init__(self, attributes, ring):
+            self._attributes, self._ring = attributes, ring
+
+        def attributes(self):
+            return self._attributes
+
+        def geometry(self):
+            return fake_geometry([self._ring])
+
+    class _ImportLayer:
+        """A QgsVectorLayer standing over a real shapefile read by pyogrio."""
+        def __init__(self, path, *a, **k):
+            meta, _, geoms, columns = _ogr_read3(path)
+            self._names = [str(n) for n in meta["fields"]]
+            self._rows = [([column[index] for column in columns], geometry)
+                          for index, geometry in enumerate(geoms)]
+
+        def isValid(self):
+            return True
+
+        def crs(self):
+            return _CRS("EPSG:32644")
+
+        def fields(self):
+            return [_ImportField(name) for name in self._names]
+
+        def getFeatures(self):
+            import shapely.wkb as _wkb
+            for attributes, geometry in self._rows:
+                ring = list(_wkb.loads(geometry).exterior.coords)[:-1]
+                yield _ImportFeature(list(attributes), ring)
+
+    # Three ROIs, three classes, exported exactly as the tool exports them.
+    win.clear_rois()
+    win.class_combo.setCurrentText(R.ROI_CLASS_ALL)
+    win.on_class_filter()
+    made = []
+    for offset, klass in ((0, "new ice"), (400, "old ice"), (800, "water")):
+        win.class_combo.setCurrentText(klass)
+        roi = win.add_roi(R.rect_ring(500100.0 + offset, 3994100.0,
+                                      500300.0 + offset, 3994300.0), "rect")
+        made.append((roi["roi"], klass))
+    win.class_combo.setCurrentText(R.ROI_CLASS_ALL)
+    win.on_class_filter()
+    check("three ROIs, three classes",
+          [roi.get("class") for roi in win.rois],
+          ["new ice", "old ice", "water"])
+
+    exp_fields, exp_plan = win.export_fields()
+    records = R.shapefile_records(win.rois, exp_plan)
+    schema = R.shapefile_schema(exp_plan)
+    fillers = {"int": 0, "double": float("nan"), "string": ""}
+    dtypes = {"int": "int64", "double": "float64", "string": "object"}
+    columns = []
+    for index, (_, kind) in enumerate(schema):
+        values = [fillers[kind] if record[1][index] is None
+                  else record[1][index] for record in records]
+        columns.append(_np3.array(values, dtype=dtypes[kind]))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        shp = os.path.join(tmp, "L.shp")
+        _ogr_write3(shp,
+                    _np3.array([_wkt3.loads(r[0]).wkb for r in records],
+                               dtype=object),
+                    columns,
+                    _np3.array([n for n, _ in schema], dtype=object),
+                    driver="ESRI Shapefile", geometry_type="Polygon",
+                    crs="EPSG:32644")
+
+        # Load it as a fresh session would: nothing drawn, picker on its
+        # default, which is exactly the situation that mis-classed everything.
+        win.clear_rois()
+        win.class_combo.setCurrentText(R.ROI_CLASS_DEFAULT)
+        win.on_class_filter()
+        saved_layer_class, saved_dialog = R.QgsVectorLayer, qw.QFileDialog
+        R.QgsVectorLayer = _ImportLayer
+        qw.QFileDialog.getOpenFileName = staticmethod(
+            lambda *a, **k: (shp, ""))
+        del warned[:]
+        del informed[:]
+        try:
+            win.load_rois()
+        finally:
+            R.QgsVectorLayer = saved_layer_class
+            qw.QFileDialog = saved_dialog
+
+    check("every ROI came back", len(win.rois), 3)
+    check("each carrying the class it was exported with",
+          [roi.get("class") for roi in win.rois],
+          ["new ice", "old ice", "water"])
+    ok("not the picker's class, which is what the bug did",
+       not all(roi.get("class") == R.ROI_CLASS_DEFAULT for roi in win.rois),
+       str([roi.get("class") for roi in win.rois]))
+    check("and its name", [roi.get("name") for roi in win.rois],
+          ["ROI 1", "ROI 2", "ROI 3"])
+    check("and how it was drawn, not 'polygon' for everything",
+          [roi.get("kind") for roi in win.rois], ["rect", "rect", "rect"])
+    ok("a set that carries classes says nothing extra",
+       not warned and not informed, str(warned + informed))
+
+    # A layer with no class column: the ROIs take the picker's class, and this
+    # time the user is told, because otherwise it is the same silent mis-class.
+    with tempfile.TemporaryDirectory() as tmp:
+        bare = os.path.join(tmp, "bare.shp")
+        _ogr_write3(bare,
+                    _np3.array([_wkt3.loads(r[0]).wkb for r in records],
+                               dtype=object),
+                    [_np3.array([1, 2, 3], dtype="int64")],
+                    _np3.array(["roi"], dtype=object),
+                    driver="ESRI Shapefile", geometry_type="Polygon",
+                    crs="EPSG:32644")
+        win.clear_rois()
+        saved_layer_class, saved_dialog = R.QgsVectorLayer, qw.QFileDialog
+        R.QgsVectorLayer = _ImportLayer
+        qw.QFileDialog.getOpenFileName = staticmethod(
+            lambda *a, **k: (bare, ""))
+        del warned[:]
+        del informed[:]
+        try:
+            win.load_rois()
+        finally:
+            R.QgsVectorLayer = saved_layer_class
+            qw.QFileDialog = saved_dialog
+    check("with no class column they take the picker's",
+          [roi.get("class") for roi in win.rois],
+          [R.ROI_CLASS_DEFAULT] * 3)
+    ok("and the user is told that is what happened",
+       any("none of them carrying" in str(w) for w in informed),
+       str(informed))
+    win.clear_rois()
 
 # ── 10b. sigma0, through the product's own RTC factor ────────────────────────
 # A GCOV loaded from its '.h5' carries rtcGammaToSigmaFactor as a band. It is

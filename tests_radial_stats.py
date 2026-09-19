@@ -840,6 +840,45 @@ check("an offset that is not a number moves nothing",
 check("and neither does one that is not finite",
       H["move_ring"](square, float("inf"), 1.0), None)
 
+# ── 17. READING AN ROI'S OWN LABELS BACK ──────────────────────────────────────
+# An exported ROI set carries what each ROI is. Reading it back and ignoring
+# that is how a scene of new ice, old ice and water returned as vegetation
+# throughout -- every ROI stamped with whatever the picker happened to show,
+# silently and plausibly.
+print("\n── import field lookup ──")
+own = ["roi", "name", "kind", "npix", "area_m2", "class", "backscat"]
+found = H["import_indexes"](own)
+check("this tool's own export is read by its own names",
+      [found.get(k) for k in ("name", "class", "kind")], [1, 5, 2])
+
+check("case does not matter", H["import_indexes"](["ROI", "Class", "Name"]),
+      {"name": 2, "class": 1})
+check("nor does surrounding space",
+      H["import_indexes"]([" class "]), {"class": 0})
+check("a layer drawn elsewhere is read by a near-enough name",
+      H["import_indexes"](["site", "landcover"]), {"name": 0, "class": 1})
+check("the better name wins when a layer has both",
+      H["import_indexes"](["type", "class"])["class"], 1)
+check("a field that is not there is absent, not empty",
+      "class" in H["import_indexes"](["name", "npix"]), False)
+check("and a layer of nothing recognisable yields nothing",
+      H["import_indexes"](["fid", "geom"]), {})
+
+print("\n── reading one attribute ──")
+row = ["1", "calibration site", None, "  ", "old ice", "NULL"]
+check("a value comes back as text", H["attribute_text"](row, 1),
+      "calibration site")
+check("trimmed", H["attribute_text"](["  old ice  "], 0), "old ice")
+check("a NULL is nothing", H["attribute_text"](row, 2), None)
+check("so is blank space", H["attribute_text"](row, 3), None)
+check("and so is the word NULL, which a DBF reader hands back as text",
+      H["attribute_text"](row, 5), None)
+check("a class reads as itself", H["attribute_text"](row, 4), "old ice")
+check("no index, no value", H["attribute_text"](row, None), None)
+check("an index past the end is not an error",
+      H["attribute_text"](row, 99), None)
+check("nor are no attributes at all", H["attribute_text"](None, 0), None)
+
 print("\n" + "=" * 70)
 if failures:
     print(f"{len(failures)} FAILURE(S):")

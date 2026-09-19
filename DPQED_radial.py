@@ -906,6 +906,56 @@ def point_in_ring(ring, x, y):
     return inside
 
 
+# What an imported layer might call the three things an ROI knows about
+# itself, best name first. This tool's own export writes the first of each.
+IMPORT_ALIASES = {
+    "name": ("name", "roi_name", "label", "site", "id"),
+    "class": ("class", "roi_class", "cover", "landcover", "type", "category"),
+    "kind": ("kind", "shape", "geom_kind"),
+}
+
+
+def import_indexes(field_names, aliases=None):
+    """{what it is: column index} for a layer's field names.
+
+    Matched case-insensitively and in the alias order, so a layer that has both
+    'class' and 'type' is read by the one that means what it says. A field this
+    tool does not recognise is left alone; a field it cannot find is absent
+    from the result rather than present and empty, so the caller can tell
+    'the layer said vegetation' from 'the layer did not say'.
+    """
+    lowered = [str(name or "").strip().lower() for name in field_names or ()]
+    found = {}
+    for what, candidates in (aliases or IMPORT_ALIASES).items():
+        for candidate in candidates:
+            if candidate in lowered:
+                found[what] = lowered.index(candidate)
+                break
+    return found
+
+
+def attribute_text(attributes, index):
+    """One attribute as text, or None if there is nothing there.
+
+    NULL, an empty string and whitespace all come back as None, because a
+    column that exists and is blank tells the caller no more than a column
+    that does not exist, and both should fall back rather than produce an ROI
+    named '' or classed 'NULL'.
+    """
+    if index is None or attributes is None:
+        return None
+    try:
+        value = attributes[index]
+    except (IndexError, TypeError, KeyError):
+        return None
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.upper() in ("NULL", "NONE"):
+        return None
+    return text
+
+
 def move_ring(ring, dx, dy):
     """A ring translated by (dx, dy), or None if there was nothing to move.
 
@@ -2955,7 +3005,7 @@ class RadiometricDashboard(QMainWindow):
             print(f"[BANDS] {e}")
 
     # ── ROIs ─────────────────────────────────────────────────────────────────
-    def add_roi(self, ring, kind, name=None, select=True):
+    def add_roi(self, ring, kind, name=None, select=True, roi_class=None):
         """Record a drawn ROI, measure it, and put it in the table.
 
         An ROI is plain data -- ring, name, and one statistics dict per band --
@@ -2971,7 +3021,11 @@ class RadiometricDashboard(QMainWindow):
             "roi": roi_id,
             "name": name or f"ROI {roi_id}",
             "kind": kind,
-            "class": self.roi_class(),
+            # An imported ROI brings its own class; only a drawn one takes the
+            # picker's. Stamping the picker on an import re-labelled a whole
+            # set as whatever happened to be selected, silently and
+            # plausibly -- every ROI came back 'vegetation'.
+            "class": roi_class or self.roi_class(),
             "ring": ring,
             "npix": 0,
             "area_m2": 0.0,
@@ -3804,10 +3858,45 @@ class RadiometricDashboard(QMainWindow):
                 errors.append(f"{name}: {e}")
                 continue
             if count:
-                return count, name
+                problem = self._verify_shapefile(path, plan, count)
+                if problem is None:
+                    return count, name
+                # It reported success and produced something else. Say so and
+                # let the next writer try, rather than handing back a file
+                # whose columns do not match the table it came from.
+                errors.append(f"{name}: {problem}")
+                continue
             errors.append(f"{name}: wrote no features")
         print("[EXPORT] no writer produced features -- " + "; ".join(errors))
         return 0, "; ".join(errors)
+
+    @staticmethod
+    def _verify_shapefile(path, plan, count):
+        """Re-open what was just written and check it. None if it is right.
+
+        A writer that reports success is not evidence that the file holds what
+        was asked for: the blank export this replaced returned success for
+        every feature it silently dropped. So the file is read back and its
+        columns and row count compared with the plan they were built from --
+        the cheapest possible check, and the one that would have caught that
+        bug on the day it appeared.
+        """
+        wanted = [name for name, _ in shapefile_schema(plan)]
+        try:
+            layer = QgsVectorLayer(path, "verify", "ogr")
+            if not layer.isValid():
+                return "the file it wrote will not open"
+            got = [str(field.name()) for field in layer.fields()]
+            rows = int(layer.featureCount())
+        except Exception as e:
+            return f"could not be read back: {e}"
+        missing = [name for name in wanted if name not in got]
+        if missing:
+            return ("wrote it without " + ", ".join(missing[:6])
+                    + (" and others" if len(missing) > 6 else ""))
+        if rows != count:
+            return f"wrote {count} feature(s) but the file holds {rows}"
+        return None
 
     def _write_shapefile_qgis(self, path, fields, plan, rois):
         """Write through QgsVectorFileWriter, checking everything it returns."""
@@ -3987,43 +4076,66 @@ class RadiometricDashboard(QMainWindow):
                                                    QgsProject.instance())
         except Exception as e:
             print(f"[ROI] import transform: {e}")
-        name_index = -1
-        try:
-            lowered = [f.name().lower() for f in layer.fields()]
-            for candidate in ("name", "roi_name", "label", "site"):
-                if candidate in lowered:
-                    name_index = lowered.index(candidate)
-                    break
-        except Exception:
-            pass
+        # What the ROI already knows about itself, from whatever the layer
+        # happens to call it. An export of this tool's own writes 'name',
+        # 'class' and 'kind'; a layer drawn elsewhere may call them something
+        # near enough, and anything not found is simply absent rather than
+        # invented.
+        indexes = self._import_indexes(layer)
 
         added = skipped = 0
+        classed = 0
         for feature in layer.getFeatures():
-            label = None
-            if name_index >= 0:
-                try:
-                    value = feature.attributes()[name_index]
-                    label = str(value) if value not in (None, "") else None
-                except Exception:
-                    label = None
+            attributes = []
+            try:
+                attributes = feature.attributes()
+            except Exception:
+                pass
+            label = attribute_text(attributes, indexes.get("name"))
+            klass = attribute_text(attributes, indexes.get("class"))
+            kind = attribute_text(attributes, indexes.get("kind"))
+            if klass:
+                classed += 1
             for ring in self._rings_from_geometry(feature.geometry()):
                 if transform is not None:
                     ring = [(lambda p: (p.x(), p.y()))(
                         transform.transform(QgsPointXY(x, y)))
                         for x, y in ring]
-                if self.add_roi(ring, "polygon", name=label, select=False):
+                if self.add_roi(ring, kind or "polygon", name=label,
+                                select=False, roi_class=klass):
                     added += 1
                 else:
                     skipped += 1
         self.refresh_table()
         self.canvas.refresh()
         print(f"[ROI] imported {added} from {os.path.basename(path)}"
-              + (f", {skipped} skipped" if skipped else ""))
+              + (f", {skipped} skipped" if skipped else "")
+              + (f", {classed} carrying a class"
+                 if classed else ", none carrying a class"))
+        if added and not classed:
+            # Worth saying out loud: the ROIs are now all one class, and that
+            # class is whatever the picker was showing. Silence here is how a
+            # set of ice and water ROIs comes back as vegetation.
+            QMessageBox.information(
+                self, "Load ROIs",
+                f"{added} ROI(s) imported, none of them carrying a 'class' "
+                f"attribute.\n\nThey have all been classed "
+                f"'{self.roi_class()}', from the Drawing picker. Re-class them "
+                "in the table if that is not what they are.")
         if not added:
             QMessageBox.warning(
                 self, "Load ROIs",
                 "Nothing was imported. The layer needs polygons, and they "
                 "have to\nfall on the raster that is loaded.")
+
+    @staticmethod
+    def _import_indexes(layer):
+        """Which column holds the name, the class and the kind, if any."""
+        try:
+            return import_indexes([f.name() for f in layer.fields()])
+        except Exception as e:
+            print(f"[ROI] import fields: {e}")
+            return {}
 
     @staticmethod
     def _rings_from_geometry(geometry):
