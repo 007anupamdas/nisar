@@ -49,6 +49,12 @@ scale, so zooming either side keeps both at the same ground width, and the tile
 under the new centre is brought up once the view settles -- panning the input
 moves the reference onto the right tile rather than off the loaded one.
 
+'Export CSV' writes the table with both ends also in lon/lat, so the file means
+the same thing whichever grid the picks were measured on. The working CRS is
+whatever projected CRS the input raster carries -- UTM, Lambert Conformal Conic,
+anything -- and only an input with NO projected CRS falls back to a derived UTM
+zone.
+
 'Export SHP' writes the marked rows as a point shapefile in the working CRS:
 a point per pick at its input position, carrying in/ref coordinates in both map
 units and lon/lat, the error as dx/dy (In - Ref, as in the table and the CSV),
@@ -444,6 +450,29 @@ def predicted_offset(errors, mode="mean"):
         return (med([p[0] for p in pts]), med([p[1] for p in pts]))
     n = len(pts)
     return (sum(p[0] for p in pts) / n, sum(p[1] for p in pts) / n)
+
+
+def csv_record(index, cells, in_lonlat, ref_lonlat):
+    """One CSV row: the table's own six columns, then the row number and lon/lat.
+
+    The first six keep their order and meaning, so a file written before this
+    still reads and anything parsing by position is unaffected.
+
+    lon/lat is left BLANK rather than zero for an end that has not been marked.
+    A (0, 0) map coordinate transforms to a real place on Earth -- the Gulf of
+    Guinea for a geographic CRS, some point offshore for a projected one -- and
+    writing that would read as a measurement rather than an empty cell.
+    """
+    out = [("" if c is None else str(c)) for c in cells[:6]]
+    out += [""] * (6 - len(out))
+
+    def pair(ll):
+        try:
+            return [f"{float(ll[0]):.8f}", f"{float(ll[1]):.8f}"]
+        except (TypeError, ValueError, IndexError):
+            return ["", ""]
+
+    return out + [str(index)] + pair(in_lonlat) + pair(ref_lonlat)
 
 
 def pixel_for_point(gt, x, y):
@@ -2830,7 +2859,13 @@ class QCDashboard(QMainWindow):
 
     # ── ERROR & STATS ─────────────────────────────────────────────────────────
     def calculate_error(self, row):
-        """DX = In_X - Ref_X,  DY = In_Y - Ref_Y  (UTM metres)."""
+        """DX = In_X - Ref_X,  DY = In_Y - Ref_Y, in working-CRS metres.
+
+        Whatever projected CRS the input raster carries is the working CRS --
+        UTM, Lambert Conformal Conic, anything -- so these are metres on that
+        grid. Both ends are read on the same grid, so the difference is sound
+        wherever the scene is.
+        """
         try:
             self.table.blockSignals(True)
             ix = float(self.table.item(row, 0).text())
@@ -3011,18 +3046,42 @@ class QCDashboard(QMainWindow):
                                  f"No usable shapefile writer:\n{e}")
             return None
 
+    def _lonlat_for(self, sx, sy):
+        """lon/lat for a pair of table cells, or None if they are not a position."""
+        try:
+            x, y = float(sx), float(sy)
+        except (TypeError, ValueError):
+            return None
+        if x == 0.0 and y == 0.0:
+            return None
+        return self._to_lonlat(x, y)
+
     def save_csv(self):
+        """Export the table, with each end also in lon/lat.
+
+        The map coordinates are in the working CRS, which is whatever the input
+        raster carries: UTM for a NISAR scene, Lambert Conformal Conic for a
+        national grid, a derived zone for a geographic input. lon/lat is the one
+        pair of columns that means the same thing whichever it is, so the file
+        can be read, plotted or joined against a survey without first knowing
+        which grid the picks were measured on.
+        """
         path, _ = QFileDialog.getSaveFileName(self, "Export Results", "", "CSV Files (*.csv)")
         if not path:
             return
+        crs = self.proj_crs.authid() or self.proj_crs.description()
         with open(path, "w", newline="", encoding="utf-8-sig") as f:
             w = csv.writer(f)
-            w.writerow(["In_X", "In_Y", "Ref_X", "Ref_Y", "DX_Err", "DY_Err"])
+            w.writerow(["In_X", "In_Y", "Ref_X", "Ref_Y", "DX_Err", "DY_Err",
+                        "Row", "In_Lon", "In_Lat", "Ref_Lon", "Ref_Lat"])
             for r in range(self.table.rowCount()):
-                w.writerow([
-                    self.table.item(r, c).text() if self.table.item(r, c) else "0.000"
-                    for c in range(6)
-                ])
+                cells = [self._cell_text(r, c) or "0.000" for c in range(6)]
+                w.writerow(csv_record(
+                    r + 1, cells,
+                    self._lonlat_for(cells[0], cells[1]),
+                    self._lonlat_for(cells[2], cells[3])))
+        print(f"[CSV] {self.table.rowCount()} row(s) -> {os.path.basename(path)}; "
+              f"map coordinates in {crs}, lon/lat in EPSG:4326")
 
     def add_manual_row(self):
         r = self.table.rowCount()

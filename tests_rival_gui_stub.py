@@ -1399,6 +1399,74 @@ assert off is None and (pt.x(), pt.y()) == (4000.0, 4000.0)
 R.PREDICT_REF_MARK = True
 print("PREDICT_REF_MARK=False restores the exact mirror")
 
+# ── 18. a Lambert Conformal Conic input, and lon/lat in the CSV ─────────────
+# LCC is projected, so it is adopted as the working CRS exactly like UTM and
+# the error columns stay in metres. Nothing in the tool is UTM-specific; the
+# UTM arithmetic only runs for an input with NO projected CRS at all.
+lcc = fake_layer(1)
+lcc.crs.return_value = _CRS("ESRI:102024")
+lcc.extent.return_value = _Rect(-500000.0, 1000000.0, 500000.0, 2000000.0)
+assert win._working_crs_for(lcc) is lcc.crs.return_value, \
+    "a Lambert Conformal Conic input was not adopted as the working CRS"
+assert win.adopt_working_crs(lcc.crs.return_value) is True
+print("\na Lambert Conformal Conic input is adopted as the working CRS")
+
+# the CSV carries lon/lat for both ends, so the file means the same thing
+# whichever grid the picks were measured on
+d8 = tempfile.mkdtemp()
+out_csv = os.path.join(d8, "picks.csv")
+
+class _FakeTf:
+    """A transform with a position-dependent result, so the two ends differ."""
+    def transform(self, pt):
+        return _PointXY(70.0 + pt.x() / 100000.0, 10.0 + pt.y() / 100000.0)
+
+win.transform_proj_to_wgs = _FakeTf()
+win.table = _Rows([
+    ["325010.000", "1900007.000", "325000.000", "1900000.000", "10.000", "7.000"],
+    ["0.000", "0.000", "0.000", "0.000", "0.000", "0.000"],   # nothing marked
+])
+qw.QFileDialog.getSaveFileName = MagicMock(return_value=(out_csv, ""))
+win.save_csv()
+
+import csv as _csv
+with open(out_csv, encoding="utf-8-sig") as f:
+    got = list(_csv.reader(f))
+assert got[0] == ["In_X", "In_Y", "Ref_X", "Ref_Y", "DX_Err", "DY_Err",
+                  "Row", "In_Lon", "In_Lat", "Ref_Lon", "Ref_Lat"], got[0]
+# the six original columns are untouched, so a reader parsing by index is safe
+assert got[1][:6] == ["325010.000", "1900007.000", "325000.000",
+                      "1900000.000", "10.000", "7.000"], got[1]
+assert got[1][6] == "1"
+assert got[1][7:] == ["73.25010000", "29.00007000",
+                      "73.25000000", "29.00000000"], got[1][7:]
+# an unmarked row gets no lon/lat at all rather than a transformed (0, 0)
+assert got[2][7:] == ["", "", "", ""], got[2]
+print("CSV carries both ends in lon/lat; an unmarked row stays blank")
+
+# and it still loads back: load_csv_smart maps by header name, so the added
+# columns are ignored rather than shifting the ones it reads
+win.table = _SelTable([], current=-1)
+win.table._rows = []
+win.calculate_error = MagicMock()
+win.update_stats = MagicMock()
+class _Loadable(_SelTable):
+    def rowCount(self): return len(self._rows)
+    def setRowCount(self, n): del self._rows[n:]
+    def insertRow(self, r): self._rows.append([None] * 6)
+    def setItem(self, r, c, item):
+        self._rows[r][c] = item.text() if hasattr(item, "text") else item
+qw.QTableWidgetItem = lambda v="": type("I", (), {"text": lambda s, v=v: v})()
+R.QTableWidgetItem = qw.QTableWidgetItem
+win.table = _Loadable([])
+qw.QFileDialog.getOpenFileName = MagicMock(return_value=(out_csv, ""))
+win.load_csv_smart()
+assert win.table._rows[0][:4] == ["325010.000", "1900007.000",
+                                  "325000.000", "1900000.000"], win.table._rows[0]
+print("the wider file still loads: the extra columns are ignored, not misread")
+
+shutil.rmtree(d8, ignore_errors=True)
+
 for d in (d1, d2, d3, d4, d5, d6):
     shutil.rmtree(d, ignore_errors=True)
 print("\nstubbed integration OK")

@@ -545,6 +545,34 @@ in2 = (2000.0, 2000.0)
 check("the next mark carries the same offset",
       (in2[0] - off[0], in2[1] - off[1]), (1970.0, 2010.0))
 
+# ── 17. the CSV record: the six columns, then row and lon/lat ────────────────
+print("\n-- the exported CSV row --")
+cells = ["325010.000", "1900007.000", "325000.000", "1900000.000", "10.000", "7.000"]
+rec = H["csv_record"](3, cells, (78.5, 17.2), (78.4999, 17.1999))
+# the original six keep their position, so a file read by column index is safe
+check("the six table columns come first, unchanged", rec[:6], cells)
+check("then the row number, matching the canvas and the shapefile", rec[6], "3")
+check("then both ends in lon/lat",
+      rec[7:], ["78.50000000", "17.20000000", "78.49990000", "17.19990000"])
+
+# an unmarked end is blank, NOT a transformed (0, 0) -- that is a real place on
+# Earth and would read as a measurement
+half = H["csv_record"](1, cells, (78.5, 17.2), None)
+check("an unmarked reference leaves its lon/lat empty", half[9:], ["", ""])
+check("the marked end is still written", half[7:9],
+      ["78.50000000", "17.20000000"])
+check("neither end marked", H["csv_record"](1, cells, None, None)[7:],
+      ["", "", "", ""])
+
+# a short or ragged row pads rather than raising: the export must not fall over
+# on a half-built table
+check("a short row is padded to six", H["csv_record"](1, ["1", "2"], None, None)[:6],
+      ["1", "2", "", "", "", ""])
+check("a None cell becomes empty",
+      H["csv_record"](1, [None] * 6, None, None)[:6], [""] * 6)
+check("a non-numeric lon/lat is dropped rather than written",
+      H["csv_record"](1, cells, ("x", "y"), None)[7:9], ["", ""])
+
 print()
 if failures:
     print(f"{len(failures)} FAILURE(S)")
