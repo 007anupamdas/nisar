@@ -614,6 +614,26 @@ check("and the prefix fallback still works",
 check("an empty stem plus a granule name resolves",
       H["match_raster"](files, "", granule="alpha.h5"), "alpha.tif")
 
+# ── 19. which CRS the shapefile geometry goes out in ─────────────────────────
+print("\n-- the shapefile's export CRS --")
+f = H["export_crs_choice"]
+# a normal projected CRS with an EPSG code: written as it is
+check("an EPSG-coded CRS is written as it is",
+      f("working", True, True, True), (False, None))
+# an LCC QGIS can draw but cannot name still has a WKT, which a .prj can hold
+check("no authority code but a WKT is still writable",
+      f("working", True, False, True), (False, None))
+# neither: the .prj cannot be written, and a shapefile without one opens as
+# 'unknown' and lands nowhere -- this is the reported LCC case
+lonlat, why = f("working", True, False, False)
+check("neither code nor WKT falls back to lon/lat", lonlat, True)
+check("and says why", "no '.prj'" in why, True)
+check("an invalid working CRS also falls back", f("working", False, False, False)[0],
+      True)
+check("the override always writes lon/lat", f("wgs84", True, True, True)[0], True)
+check("and names itself as the reason", f("wgs84", True, True, True)[1],
+      "SHP_EXPORT_CRS='wgs84'")
+
 print()
 if failures:
     print(f"{len(failures)} FAILURE(S)")

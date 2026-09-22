@@ -59,7 +59,11 @@ whatever projected CRS the input raster carries -- UTM, Lambert Conformal Conic,
 anything -- and only an input with NO projected CRS falls back to a derived UTM
 zone.
 
-'Export SHP' writes the marked rows as a point shapefile in the working CRS:
+'Export SHP' writes the marked rows as a point shapefile in the working CRS --
+or in WGS84 lon/lat when that CRS cannot be written into a '.prj', since a
+shapefile without one opens as 'unknown' and lands nowhere. dx/dy/mag stay
+metres on the working grid either way, so size a quiver marker in millimetres
+rather than map units:
 a point per pick at its input position, carrying in/ref coordinates in both map
 units and lon/lat, the error as dx/dy (In - Ref, as in the table and the CSV),
 and its magnitude and compass bearing. Two scenes over one area export to two
@@ -324,6 +328,16 @@ REF_PROBE_PIXEL = True
 # carried over from the corner_coord definition used there.
 REF_FILL_VALUES = (0, 3)
 
+# Which CRS 'Export SHP' writes the GEOMETRY in.
+#   "working" -- the input raster's own CRS, so the points land on the scene and
+#                on a second export over the same area. Falls back to WGS84 when
+#                that CRS cannot be written into a '.prj'.
+#   "wgs84"   -- always lon/lat, which every GIS reads.
+# dx/dy/mag stay METRES on the working grid either way: they are the
+# measurement, not a length in the output CRS. Size a quiver marker in
+# millimetres rather than map units, or a lon/lat layer reads metres as degrees.
+SHP_EXPORT_CRS = "working"        # "working" | "wgs84"
+
 # Shapefile export, for quiver.py and for comparing two scenes over one area in
 # QGIS. DBF caps a field name at 10 characters, so these are already at the
 # limit -- do not lengthen them.
@@ -463,6 +477,28 @@ def predicted_offset(errors, mode="mean"):
         return (med([p[0] for p in pts]), med([p[1] for p in pts]))
     n = len(pts)
     return (sum(p[0] for p in pts) / n, sum(p[1] for p in pts) / n)
+
+
+def export_crs_choice(mode, is_valid, has_authid, has_wkt):
+    """Whether the shapefile geometry goes out in the working CRS or in lon/lat.
+
+    (use_lonlat, reason). A shapefile carries its CRS in a sidecar '.prj', and
+    QGIS can only write one from a CRS it can express -- an authority code or a
+    WKT. A CRS with neither, which a raster carrying a bare Lambert Conformal
+    Conic definition can be, draws perfectly well and still yields a shapefile
+    with NO '.prj': every GIS then opens it as 'unknown' and places it nowhere.
+
+    lon/lat is the fallback because EPSG:4326 always has both, and because the
+    same lon/lat already goes into the CSV, so the two exports agree.
+    """
+    if mode == "wgs84":
+        return True, "SHP_EXPORT_CRS='wgs84'"
+    if not is_valid:
+        return True, "the working CRS is not valid"
+    if has_authid or has_wkt:
+        return False, None
+    return True, ("the working CRS has no authority code and no WKT, so no "
+                  "'.prj' could be written for it")
 
 
 def csv_record(index, cells, in_lonlat, ref_lonlat):
@@ -3050,30 +3086,72 @@ class QCDashboard(QMainWindow):
         for name, kind in SHP_FIELDS:
             fields.append(QgsField(name, types[kind]))
 
+        out_crs, lonlat, why = self._export_crs()
+        if why:
+            print(f"[EXPORT] writing lon/lat in EPSG:4326 because {why}")
+
+        written, skipped = 0, 0
         try:
-            writer = self._make_writer(path, fields)
+            writer = self._make_writer(path, fields, out_crs)
             if writer is None:
                 return
             for row in rows:
+                if lonlat:
+                    lon, lat = row.get("in_lon"), row.get("in_lat")
+                    if lon is None or lat is None:
+                        skipped += 1
+                        continue
+                    pt = QgsPointXY(lon, lat)
+                else:
+                    pt = QgsPointXY(row["in_x"], row["in_y"])
                 feat = QgsFeature(fields)
-                feat.setGeometry(QgsGeometry.fromPointXY(
-                    QgsPointXY(row["in_x"], row["in_y"])))
+                feat.setGeometry(QgsGeometry.fromPointXY(pt))
                 feat.setAttributes([row[name] for name, _ in SHP_FIELDS])
                 writer.addFeature(feat)
+                written += 1
             del writer          # flushes and closes the .shp/.dbf/.shx/.prj
         except Exception as e:
             QMessageBox.critical(self, "Export SHP", f"Could not write:\n{e}")
             return
 
-        crs = self.proj_crs.authid() or self.proj_crs.description()
-        print(f"[EXPORT] {len(rows)} point(s) -> {path} [{crs}]")
+        crs = out_crs.authid() or out_crs.description()
+        note = ""
+        if skipped:
+            note = (f"\n{skipped} row(s) skipped: their position could not be "
+                    f"converted to lon/lat.")
+        print(f"[EXPORT] {written} point(s) -> {path} [{crs}]"
+              + (f"; {skipped} skipped" if skipped else ""))
         QMessageBox.information(
             self, "Export SHP",
-            f"{len(rows)} point(s) written to\n{path}\n\nCRS: {crs}\n"
-            f"Fields: {', '.join(n for n, _ in SHP_FIELDS)}")
+            f"{written} point(s) written to\n{path}\n\nCRS: {crs}\n"
+            f"Fields: {', '.join(n for n, _ in SHP_FIELDS)}\n\n"
+            f"dx/dy/mag are metres on the working grid, not lengths in this "
+            f"CRS -- size a quiver marker in millimetres, not map units."
+            + note)
 
-    def _make_writer(self, path, fields):
+    def _export_crs(self):
+        """(crs, write lon/lat?, why) for the shapefile geometry.
+
+        See export_crs_choice for why a CRS QGIS can draw is not always one it
+        can write a '.prj' from.
+        """
+        crs = self.proj_crs
+        try:
+            valid, authid = crs.isValid(), crs.authid()
+            try:
+                wkt = crs.toWkt()
+            except Exception:
+                wkt = ""
+        except Exception as e:
+            return self.wgs84_crs, True, f"the working CRS could not be read ({e})"
+        lonlat, why = export_crs_choice(
+            SHP_EXPORT_CRS, bool(valid), bool(authid), bool(wkt))
+        return (self.wgs84_crs if lonlat else crs), lonlat, why
+
+    def _make_writer(self, path, fields, crs=None):
         """QgsVectorFileWriter across the versions that changed its API."""
+        if crs is None:
+            crs = self.proj_crs
         options = None
         try:
             options = QgsVectorFileWriter.SaveVectorOptions()
@@ -3087,14 +3165,14 @@ class QCDashboard(QMainWindow):
                 if make is None:
                     continue
                 try:
-                    return make(path, fields, QgsWkbTypes.Point, self.proj_crs,
+                    return make(path, fields, QgsWkbTypes.Point, crs,
                                 QgsProject.instance().transformContext(),
                                 options)
                 except Exception:
                     continue
         try:
             return QgsVectorFileWriter(path, "UTF-8", fields, QgsWkbTypes.Point,
-                                       self.proj_crs, "ESRI Shapefile")
+                                       crs, "ESRI Shapefile")
         except Exception as e:
             QMessageBox.critical(self, "Export SHP",
                                  f"No usable shapefile writer:\n{e}")
