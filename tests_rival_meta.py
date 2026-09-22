@@ -573,6 +573,47 @@ check("a None cell becomes empty",
 check("a non-numeric lon/lat is dropped rather than written",
       H["csv_record"](1, cells, ("x", "y"), None)[7:9], ["", ""])
 
+# ── 18. a sidecar found by 'meta' in its NAME, not by a fixed suffix ─────────
+print("\n-- sidecars labelled META/meta --")
+check("the existing suffixes still win", H["is_meta_file"]("scene.met"), "text")
+check("and the ISO one", H["is_meta_file"]("scene.h5.iso.xml"), "iso-xml")
+check("_META.txt beside the tif", H["is_meta_file"]("G1A_ort_META.txt"), "text")
+check("lower case too", H["is_meta_file"]("G1A_ort_meta.txt"), "text")
+check("META in the middle", H["is_meta_file"]("G1A_META_v2.txt"), "text")
+check("an XML one parses as ISO", H["is_meta_file"]("G1A_META.xml"), "iso-xml")
+check("a bare METADATA.xml", H["is_meta_file"]("METADATA.xml"), "iso-xml")
+# the extension decides, so these keep being what they are
+check("a raster with meta in its name is still a raster",
+      H["is_meta_file"]("G1A_metadata_ort.tif"), None)
+check("an index with meta in its name is still an index",
+      H["is_meta_file"]("L8_meta_index.shp"), None)
+check("no extension, so not a file to parse (a 'meta' DIRECTORY)",
+      H["is_meta_file"]("meta"), None)
+check("no meta in the name at all", H["is_meta_file"]("readme_notes.rtf"), None)
+
+# the stem has to come back out, or the sidecar cannot be tied to its raster
+check("<scene>_META.txt -> <scene>",
+      H["meta_base_stem"]("G1A_ort_ADRIN_META.txt"), "G1A_ort_ADRIN")
+check("META_<scene>.txt -> <scene>",
+      H["meta_base_stem"]("META_G1A_ort_ADRIN.txt"), "G1A_ort_ADRIN")
+check("<scene>_METADATA.xml -> <scene>, the label taken whole",
+      H["meta_base_stem"]("G1A_ort_METADATA.xml"), "G1A_ort")
+check("a file named only for being metadata names no raster",
+      H["meta_base_stem"]("METADATA.xml"), "")
+check("the known suffixes are unchanged",
+      H["meta_base_stem"]("scene.h5.iso.xml"), "scene")
+
+# an empty stem is a prefix of EVERY name, so it must not reach the prefix pass
+files = ["alpha.tif", "beta.tif"]
+check("an empty stem matches no raster rather than the first",
+      H["match_raster"](files, ""), None)
+check("a real stem still matches", H["match_raster"](files, "beta"), "beta.tif")
+check("and the prefix fallback still works",
+      H["match_raster"](["beta1.tif"], "beta"), "beta1.tif")
+# with a granule name to go on, an empty stem can still resolve
+check("an empty stem plus a granule name resolves",
+      H["match_raster"](files, "", granule="alpha.h5"), "alpha.tif")
+
 print()
 if failures:
     print(f"{len(failures)} FAILURE(S)")

@@ -1467,6 +1467,47 @@ print("the wider file still loads: the extra columns are ignored, not misread")
 
 shutil.rmtree(d8, ignore_errors=True)
 
+# ── 19. a sidecar named *META*, in the same folder as the tif ───────────────
+WANT = [(76.534748, 17.614687), (78.827076, 18.171194),
+        (79.385351, 15.993327), (77.112174, 15.446038)]
+
+def _folder_with(meta_name, tif_name="G1A_ort_ADRIN.tif"):
+    """A folder holding one raster and one sidecar under the given name."""
+    d = tempfile.mkdtemp()
+    shutil.copy(os.path.join(HERE, met0), os.path.join(d, meta_name))
+    open(os.path.join(d, tif_name), "w").close()
+    return d, os.path.join(d, tif_name)
+
+# the reported shape: <scene>_META.txt beside <scene>.tif, no Meta/ subfolder
+d9, tif9 = _folder_with("G1A_ort_ADRIN_META.txt")
+assert win._input_footprint_ring(tif9) == WANT
+print("\n<scene>_META.txt beside the tif is read")
+
+# lower case, and the label leading rather than trailing
+d10, tif10 = _folder_with("meta_G1A_ort_ADRIN.txt")
+assert win._input_footprint_ring(tif10) == WANT
+print("meta_<scene>.txt is read too")
+
+# a file named only for being metadata names no raster -- beside the one scene
+# being loaded, in its own folder, it is that scene's
+d11, tif11 = _folder_with("METADATA.txt")
+assert win._input_footprint_ring(tif11) == WANT
+print("a bare METADATA.txt beside a single raster is read")
+
+# but a sidecar naming a DIFFERENT raster is still refused
+d12, tif12 = _folder_with("SOMEONE_ELSE_META.txt")
+assert win._input_footprint_ring(tif12) is None
+print("a sidecar naming another scene is still refused")
+
+# and a raster that merely has 'meta' in its name is not opened as one
+d13 = tempfile.mkdtemp()
+open(os.path.join(d13, "G1A_metadata_ort.tif"), "w").close()
+assert win._input_footprint_ring(os.path.join(d13, "G1A_metadata_ort.tif")) is None
+print("a raster with 'meta' in its name is not mistaken for a sidecar")
+
+for d in (d9, d10, d11, d12, d13):
+    shutil.rmtree(d, ignore_errors=True)
+
 for d in (d1, d2, d3, d4, d5, d6):
     shutil.rmtree(d, ignore_errors=True)
 print("\nstubbed integration OK")

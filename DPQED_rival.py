@@ -18,7 +18,11 @@ its footprints; the folder is inspected and the mode chosen automatically.
 An index or sidecar states the real footprint while a tile name only implies a
 nominal cell, so the name is the last resort rather than the first guess. Set
 REF_MODE_OVERRIDE to force one. Imagery at the top of the folder and metadata in
-a 'Meta' subfolder are matched across that split.
+a 'Meta' subfolder are matched across that split. A sidecar is recognised by a
+known suffix ('.met', '_meta.txt', '.h5.iso.xml') or by carrying 'meta' in its
+name with a text or XML extension -- '<scene>_META.txt' beside the tif is read
+as readily as a Meta/ subfolder, while a raster called '..._metadata.tif' stays
+a raster, because the extension decides.
 
 NISAR footprints are tagged LSAR or SSAR -- from the '.met' Sensor field, else
 the tag in the granule name, else the centre frequency (L ~1.24 GHz, S ~3.2 GHz).
@@ -191,6 +195,15 @@ UTM_LAT_LIMITS     = (-80.0, 84.0)
 # '_meta.txt' is kept for folders written before the '.met' convention.
 META_SUFFIXES_TEXT = (".met", "_meta.txt")
 META_SUFFIX_XML    = ".iso.xml"
+
+# A sidecar is also recognised by carrying 'meta' anywhere in its NAME, which is
+# how some processors label one -- '<scene>_META.txt', 'METADATA.xml' -- rather
+# than by a fixed suffix. The EXTENSION still decides which parser runs, and
+# only these are considered: a raster called '..._metadata.tif' and an index
+# called '..._meta.shp' both have 'meta' in the name and are not sidecars.
+META_NAME_TOKEN     = "meta"
+META_NAME_EXTS_XML  = (".xml",)
+META_NAME_EXTS_TEXT = (".txt", ".met", ".json", ".hdr", ".ini", ".dat")
 
 # NISAR L-band is centred near 1.24 GHz, S-band near 3.2 GHz. Anything below this
 # split is LSAR, anything above is SSAR.
@@ -768,6 +781,15 @@ def meta_base_stem(meta_name):
     """Strip the sidecar suffix, leaving the stem its raster shares.
 
     '<product>.h5.iso.xml' and '<product>.met' both reduce to '<product>'.
+
+    A name-token sidecar loses its extension and then the 'meta' label, with
+    the separator beside it: '<scene>_META.txt' and 'META_<scene>.txt' both
+    reduce to '<scene>'. The label is only taken as a label when a separator
+    marks it off, so '<scene>_METADATA.xml' still reduces to '<scene>' while a
+    file named only for being metadata -- 'METADATA.xml' -- reduces to '',
+    naming no raster at all. The caller decides what an empty stem is worth:
+    beside a single input raster it is that raster's, and in a reference folder
+    of many it names none of them.
     """
     for suffix in (META_SUFFIX_XML,) + META_SUFFIXES_TEXT:
         if meta_name.lower().endswith(suffix.lower()):
@@ -775,6 +797,12 @@ def meta_base_stem(meta_name):
             break
     else:
         stem = os.path.splitext(meta_name)[0]
+        idx = stem.lower().rfind(META_NAME_TOKEN)
+        if idx != -1:
+            before = stem[:idx].rstrip("_-. ")
+            rest   = stem[idx + len(META_NAME_TOKEN):]
+            after  = rest.lstrip("_-. ") if rest[:1] in ("_", "-", ".", " ") else ""
+            stem = before or after
     if stem.lower().endswith(".h5"):
         stem = stem[:-3]
     return stem
@@ -794,7 +822,7 @@ def match_raster(files, stem, granule=None):
     exts = (".tif", ".tiff", ".vrt")
     lower = {f.lower(): f for f in files}
 
-    stems = [stem]
+    stems = [stem] if stem else []
     if granule:
         g = os.path.basename(granule)
         if g.lower().endswith(".h5"):
@@ -807,6 +835,10 @@ def match_raster(files, stem, granule=None):
             if hit:
                 return hit
 
+    if not stem:
+        # '' is a prefix of every name, so the fallback below would hand back
+        # whichever raster sorted first -- a silent misattribution.
+        return None
     prefixed = sorted(
         f for f in files
         if f.lower().startswith(stem.lower()) and f.lower().endswith(exts)
@@ -933,11 +965,30 @@ def detect_reference_mode(names):
 
 
 def is_meta_file(name):
-    """Which sidecar parser a filename belongs to, or None."""
+    """Which sidecar parser a filename belongs to, or None.
+
+    Two ways in. A known suffix -- '.met', '_meta.txt', '.h5.iso.xml' -- or
+    'meta' anywhere in the name together with an extension a sidecar is
+    actually written with. The extension, never the name, decides which parser
+    runs; a name-token match with an extension outside the two lists is refused
+    rather than guessed at, which is what keeps '..._metadata.tif' a raster and
+    '..._meta.shp' an index.
+
+    An extension is required on the token path, so a directory called 'meta'
+    beside the imagery is not mistaken for a file to parse -- META_DIR_NAMES
+    handles those.
+    """
     low = name.lower()
     if low.endswith(META_SUFFIX_XML.lower()):
         return "iso-xml"
     if any(low.endswith(suffix.lower()) for suffix in META_SUFFIXES_TEXT):
+        return "text"
+    if META_NAME_TOKEN not in low:
+        return None
+    ext = os.path.splitext(low)[1]
+    if ext in META_NAME_EXTS_XML:
+        return "iso-xml"
+    if ext in META_NAME_EXTS_TEXT:
         return "text"
     return None
 
@@ -2147,8 +2198,11 @@ class QCDashboard(QMainWindow):
                 kind = is_meta_file(name)
                 if not kind:
                     continue
-                if match_raster([base], meta_base_stem(name)) != base:
-                    continue
+                stem = meta_base_stem(name)
+                if stem and match_raster([base], stem) != base:
+                    continue       # it names a different raster, not this one
+                # an empty stem names no raster: beside the scene being loaded,
+                # in its own folder, it is that scene's
                 try:
                     with open(os.path.join(d, name), "r",
                               encoding="utf-8", errors="replace") as f:
