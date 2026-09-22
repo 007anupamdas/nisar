@@ -330,8 +330,10 @@ REF_FILL_VALUES = (0, 3)
 
 # Which CRS 'Export SHP' writes the GEOMETRY in.
 #   "working" -- the input raster's own CRS, so the points land on the scene and
-#                on a second export over the same area. Falls back to WGS84 when
-#                that CRS cannot be written into a '.prj'.
+#                on a second export over the same area. Falls back to lon/lat
+#                unless that CRS carries a PUBLIC authority code, and again
+#                afterwards if the '.prj' did not get written -- see
+#                export_crs_choice and prj_is_usable.
 #   "wgs84"   -- always lon/lat, which every GIS reads.
 # dx/dy/mag stay METRES on the working grid either way: they are the
 # measurement, not a length in the output CRS. Size a quiver marker in
@@ -479,26 +481,69 @@ def predicted_offset(errors, mode="mean"):
     return (sum(p[0] for p in pts) / n, sum(p[1] for p in pts) / n)
 
 
-def export_crs_choice(mode, is_valid, has_authid, has_wkt):
+# Authority prefixes that look like a code and are not one: QGIS mints
+# 'USER:100001' for a CRS it stored in the local profile, so nothing outside
+# that one QGIS installation can resolve it.
+LOCAL_AUTHORITIES = ("USER", "CUSTOM")
+
+# What the root of a '.prj' looks like, WKT1 and WKT2 alike.
+PRJ_ROOTS = ("PROJCS", "GEOGCS", "GEOCCS", "PROJCRS", "GEOGCRS",
+             "BOUNDCRS", "COMPD_CS", "COMPOUNDCRS")
+
+
+def portable_authid(authid):
+    """True when the code names a CRS another GIS can look up.
+
+    'EPSG:32644' and 'ESRI:102024' travel; 'USER:100001' is an authority code
+    in shape only, and an empty one is none at all.
+    """
+    if not authid or ":" not in authid:
+        return False
+    authority, _, code = authid.partition(":")
+    if not code.strip():
+        return False
+    return authority.strip().upper() not in LOCAL_AUTHORITIES
+
+
+def prj_is_usable(text):
+    """True when '.prj' text actually names a CRS.
+
+    A missing or empty '.prj' is the failure this guards. The layer then opens
+    as 'unknown' and QGIS draws it in the PROJECT CRS -- which reads Lambert
+    metres as degrees and scatters the points far off the scene they were
+    measured on, while the raster beside them sits exactly where it should.
+    """
+    if not text:
+        return False
+    head = text.replace("\ufeff", "").strip().upper()
+    return any(head.startswith(root + "[") for root in PRJ_ROOTS)
+
+
+def export_crs_choice(mode, is_valid, authid):
     """Whether the shapefile geometry goes out in the working CRS or in lon/lat.
 
     (use_lonlat, reason). A shapefile carries its CRS in a sidecar '.prj', and
-    QGIS can only write one from a CRS it can express -- an authority code or a
-    WKT. A CRS with neither, which a raster carrying a bare Lambert Conformal
-    Conic definition can be, draws perfectly well and still yields a shapefile
-    with NO '.prj': every GIS then opens it as 'unknown' and places it nowhere.
+    whether one gets written -- and whether what lands in it resolves anywhere
+    else -- is the writer's decision, not ours. Two things looked like evidence
+    and were not: a CRS QGIS draws perfectly well can still yield no '.prj', and
+    a WKT it will print for you is not a WKT it will write. A Lambert Conformal
+    Conic read off a raster is exactly that case.
 
-    lon/lat is the fallback because EPSG:4326 always has both, and because the
-    same lon/lat already goes into the CSV, so the two exports agree.
+    So the test is the one property that does travel: a public authority code.
+    Without one the geometry goes out in lon/lat, because EPSG:4326 is resolved
+    by every GIS there is, and because the same lon/lat already goes into the
+    CSV, so the two exports agree. save_shapefile then reads the '.prj' back and
+    falls back a second time if the writer still produced nothing.
     """
     if mode == "wgs84":
         return True, "SHP_EXPORT_CRS='wgs84'"
     if not is_valid:
         return True, "the working CRS is not valid"
-    if has_authid or has_wkt:
+    if portable_authid(authid):
         return False, None
-    return True, ("the working CRS has no authority code and no WKT, so no "
-                  "'.prj' could be written for it")
+    return True, ("the working CRS ({}) is not one another GIS can look up, so "
+                  "a '.prj' naming it would not travel with the file".format(
+                      authid or "no authority code"))
 
 
 def csv_record(index, cells, in_lonlat, ref_lonlat):
@@ -3090,11 +3135,70 @@ class QCDashboard(QMainWindow):
         if why:
             print(f"[EXPORT] writing lon/lat in EPSG:4326 because {why}")
 
+        try:
+            written, skipped = self._write_points(path, fields, rows,
+                                                  out_crs, lonlat)
+        except Exception as e:
+            QMessageBox.critical(self, "Export SHP", f"Could not write:\n{e}")
+            return
+        if written is None:
+            return
+
+        # Reading the '.prj' back is the only way to know one was written: the
+        # writer decides that, and a shapefile without it opens as 'unknown',
+        # drawn in the project CRS -- metres read as degrees, points nowhere
+        # near the scene. Cheaper to re-export than to hand that out.
+        if not lonlat and not self._prj_ok(path):
+            why = ("the writer produced no usable '.prj' for "
+                   f"{out_crs.authid() or out_crs.description() or 'it'}, so "
+                   "the file would have opened as 'unknown'")
+            print(f"[EXPORT] re-exporting in lon/lat because {why}")
+            out_crs, lonlat = self.wgs84_crs, True
+            try:
+                written, skipped = self._write_points(path, fields, rows,
+                                                      out_crs, lonlat)
+            except Exception as e:
+                QMessageBox.critical(self, "Export SHP",
+                                     f"Could not write:\n{e}")
+                return
+            if written is None:
+                return
+
+        crs = out_crs.authid() or out_crs.description()
+        note = ""
+        if why:
+            note += f"\nGeometry is lon/lat because {why}."
+        if skipped:
+            note += (f"\n{skipped} row(s) skipped: their position could not be "
+                     f"converted to lon/lat.")
+        print(f"[EXPORT] {written} point(s) -> {path} [{crs}]"
+              + (f"; {skipped} skipped" if skipped else ""))
+        QMessageBox.information(
+            self, "Export SHP",
+            f"{written} point(s) written to\n{path}\n\nCRS: {crs}\n"
+            f"Fields: {', '.join(n for n, _ in SHP_FIELDS)}\n\n"
+            f"dx/dy/mag are metres on the working grid, not lengths in this "
+            f"CRS -- size a quiver marker in millimetres, not map units."
+            + note)
+
+    def _write_points(self, path, fields, rows, crs, lonlat):
+        """Every row as a point; (written, skipped), or (None, 0) with no writer.
+
+        lonlat picks which pair of columns the geometry comes from: the same
+        picks either way, one pair on the working grid and one in degrees.
+        """
+        # A '.prj' left over from an earlier export would answer for this one,
+        # so it goes before the write rather than after it. Everything else
+        # under this stem is about to be overwritten anyway.
+        try:
+            os.remove(os.path.splitext(path)[0] + ".prj")
+        except OSError:
+            pass
+        writer = self._make_writer(path, fields, crs)
+        if writer is None:
+            return None, 0
         written, skipped = 0, 0
         try:
-            writer = self._make_writer(path, fields, out_crs)
-            if writer is None:
-                return
             for row in rows:
                 if lonlat:
                     lon, lat = row.get("in_lon"), row.get("in_lat")
@@ -3109,25 +3213,18 @@ class QCDashboard(QMainWindow):
                 feat.setAttributes([row[name] for name, _ in SHP_FIELDS])
                 writer.addFeature(feat)
                 written += 1
+        finally:
             del writer          # flushes and closes the .shp/.dbf/.shx/.prj
-        except Exception as e:
-            QMessageBox.critical(self, "Export SHP", f"Could not write:\n{e}")
-            return
+        return written, skipped
 
-        crs = out_crs.authid() or out_crs.description()
-        note = ""
-        if skipped:
-            note = (f"\n{skipped} row(s) skipped: their position could not be "
-                    f"converted to lon/lat.")
-        print(f"[EXPORT] {written} point(s) -> {path} [{crs}]"
-              + (f"; {skipped} skipped" if skipped else ""))
-        QMessageBox.information(
-            self, "Export SHP",
-            f"{written} point(s) written to\n{path}\n\nCRS: {crs}\n"
-            f"Fields: {', '.join(n for n, _ in SHP_FIELDS)}\n\n"
-            f"dx/dy/mag are metres on the working grid, not lengths in this "
-            f"CRS -- size a quiver marker in millimetres, not map units."
-            + note)
+    def _prj_ok(self, path):
+        """True when the '.prj' beside the shapefile just written names a CRS."""
+        prj = os.path.splitext(path)[0] + ".prj"
+        try:
+            with open(prj, "r", encoding="utf-8", errors="replace") as f:
+                return prj_is_usable(f.read())
+        except OSError:
+            return False
 
     def _export_crs(self):
         """(crs, write lon/lat?, why) for the shapefile geometry.
@@ -3138,14 +3235,9 @@ class QCDashboard(QMainWindow):
         crs = self.proj_crs
         try:
             valid, authid = crs.isValid(), crs.authid()
-            try:
-                wkt = crs.toWkt()
-            except Exception:
-                wkt = ""
         except Exception as e:
             return self.wgs84_crs, True, f"the working CRS could not be read ({e})"
-        lonlat, why = export_crs_choice(
-            SHP_EXPORT_CRS, bool(valid), bool(authid), bool(wkt))
+        lonlat, why = export_crs_choice(SHP_EXPORT_CRS, bool(valid), authid)
         return (self.wgs84_crs if lonlat else crs), lonlat, why
 
     def _make_writer(self, path, fields, crs=None):

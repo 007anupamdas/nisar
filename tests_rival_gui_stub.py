@@ -1508,50 +1508,86 @@ print("a raster with 'meta' in its name is not mistaken for a sidecar")
 for d in (d9, d10, d11, d12, d13):
     shutil.rmtree(d, ignore_errors=True)
 
-# ── 20. an LCC with no .prj to write falls back to lon/lat geometry ─────────
-# Reported from use: an LCC input exported a shapefile with NO .prj, which
-# every GIS then opens as 'unknown' and places nowhere. QGIS can only write a
-# .prj from a CRS it can express -- an authority code or a WKT.
+# ── 20. an LCC whose '.prj' cannot travel falls back to lon/lat geometry ────
+# Reported from use twice: an LCC input exported a shapefile with no usable
+# .prj, which every GIS opens as 'unknown' and draws in the PROJECT CRS -- so
+# Lambert metres get read as degrees and the points land nowhere near the scene
+# the raster beside them draws perfectly. What QGIS will write into a '.prj' is
+# the writer's decision, so the code asks for a public authority code first and
+# reads the file back afterwards.
 class _Unnameable(_CRS):
     def authid(self): return ""
-    def toWkt(self): return ""
+    def toWkt(self): return 'PROJCS["Lambert Conformal Conic"]'   # not evidence
+    def description(self): return "Lambert Conformal Conic"
+
+class _LocalOnly(_CRS):
+    """What QGIS mints for a CRS it stored in the local profile."""
+    def authid(self): return "USER:100001"
     def description(self): return "Lambert Conformal Conic"
 
 win.wgs84_crs = _CRS("EPSG:4326")
 win.proj_crs = _Unnameable("")
 out_crs, lonlat, why = win._export_crs()
 assert lonlat is True and out_crs is win.wgs84_crs, (lonlat, out_crs)
-assert "no '.prj'" in why, why
+assert "no authority code" in why, why
 print("\nan unnameable LCC exports as lon/lat:", why)
 
-captured = {"crs": None, "pts": []}
+win.proj_crs = _LocalOnly("")
+out_crs, lonlat, why = win._export_crs()
+assert lonlat is True and out_crs is win.wgs84_crs, (lonlat, out_crs)
+assert "USER:100001" in why, why
+print("a USER: code is not a code anyone else can resolve:", why)
+
+captured = {"crs": None, "pts": [], "writers": 0, "prj": True}
 
 class _Writer:
-    def addFeature(self, feat): captured["pts"].append(feat._pt)
+    """Stands in for QgsVectorFileWriter, including what it leaves on disk.
+
+    The real one writes a '.prj' only for a CRS it can express, and flushes on
+    delete. 'prj' switches that off, which is the failure being guarded.
+    """
+    def __init__(self, path, crs):
+        self._path, self._crs = path, crs
+
+    def addFeature(self, feat):
+        captured["pts"].append(feat._pt)
+
+    def __del__(self):
+        if captured["prj"] and self._crs.authid():
+            with open(os.path.splitext(self._path)[0] + ".prj", "w") as f:
+                f.write('PROJCS["%s",GEOGCS["WGS 84"]]' % self._crs.authid())
 
 class _Feat:
     def __init__(self, fields): self._pt = None
     def setGeometry(self, g): self._pt = g
     def setAttributes(self, a): pass
 
+def _writer_for(path, fields, crs=None):
+    captured["crs"] = crs
+    captured["writers"] += 1
+    captured["pts"] = []        # each pass rewrites the file from scratch
+    return _Writer(path, crs)
+
 R.QgsFeature = _Feat
 R.QgsGeometry.fromPointXY = lambda pt: (pt.x(), pt.y())
 R.QgsFields = lambda: MagicMock()
 R.QgsField = lambda n, t: (n, t)
 R.QVariant = MagicMock(Int=1, Double=2)
-win._make_writer = lambda path, fields, crs=None: (
-    captured.__setitem__("crs", crs) or _Writer())
+win._make_writer = _writer_for
 base_row = {n: 0.0 for n, _ in R.SHP_FIELDS}
+shp_dir = tempfile.mkdtemp()
+shp_path = os.path.join(shp_dir, "picks.shp")
+prj_path = os.path.join(shp_dir, "picks.prj")
 win.export_rows = MagicMock(return_value=[
     {**base_row, "in_x": 325010.0, "in_y": 1900007.0,
      "in_lon": 78.5, "in_lat": 17.2},
     {**base_row, "in_x": 325020.0, "in_y": 1900000.0,
      "in_lon": None, "in_lat": None},        # could not be converted
 ])
-qw.QFileDialog.getSaveFileName = MagicMock(
-    return_value=(os.path.join(tempfile.mkdtemp(), "picks.shp"), ""))
+qw.QFileDialog.getSaveFileName = MagicMock(return_value=(shp_path, ""))
 win.save_shapefile()
 assert captured["crs"] is win.wgs84_crs, "the writer was still given the LCC"
+assert captured["writers"] == 1, "lon/lat was decided up front, not on retry"
 # geometry is the lon/lat, and the row that could not be converted is skipped
 # rather than written at its LCC metres as though they were degrees
 assert captured["pts"] == [(78.5, 17.2)], captured["pts"]
@@ -1560,14 +1596,30 @@ print("geometry written as lon/lat; the unconvertible row was skipped, not "
 
 # a CRS that CAN be named still exports in the working CRS, as before
 win.proj_crs = _CRS("EPSG:32644")
-captured["crs"], captured["pts"] = None, []
+captured["writers"] = 0
 win.export_rows = MagicMock(return_value=[
     {**base_row, "in_x": 325010.0, "in_y": 1900007.0,
      "in_lon": 78.5, "in_lat": 17.2}])
 win.save_shapefile()
 assert captured["crs"] is win.proj_crs
+assert captured["writers"] == 1, "an EPSG-coded CRS should not need a retry"
 assert captured["pts"] == [(325010.0, 1900007.0)], captured["pts"]
+assert R.prj_is_usable(open(prj_path).read()), "no .prj was written"
 print("an EPSG-coded working CRS still exports in map coordinates")
+
+# the second guard: the code was named, the writer still left no '.prj'. A
+# stale one from the export just above sits next to it, and must not answer
+# for this write -- that is what made the first fix look like it worked.
+captured["prj"], captured["writers"] = False, 0
+assert os.path.exists(prj_path), "the stale .prj under test is missing"
+win.save_shapefile()
+assert captured["writers"] == 2, "the missing .prj did not trigger a re-export"
+assert captured["crs"] is win.wgs84_crs, captured["crs"]
+assert captured["pts"] == [(78.5, 17.2)], captured["pts"]
+assert not os.path.exists(prj_path), "the stale .prj was left in place"
+print("a writer that leaves no '.prj' gets one re-export in lon/lat, and the "
+      "stale sidecar does not vouch for it")
+shutil.rmtree(shp_dir, ignore_errors=True)
 
 for d in (d1, d2, d3, d4, d5, d6):
     shutil.rmtree(d, ignore_errors=True)

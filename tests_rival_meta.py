@@ -616,22 +616,44 @@ check("an empty stem plus a granule name resolves",
 
 # ── 19. which CRS the shapefile geometry goes out in ─────────────────────────
 print("\n-- the shapefile's export CRS --")
+f = H["portable_authid"]
+check("an EPSG code travels", f("EPSG:32644"), True)
+check("an ESRI code travels", f("ESRI:102024"), True)
+check("so does IGNF", f("IGNF:LAMB93"), True)
+# what QGIS mints for a CRS it stored locally: a code in shape only
+check("a QGIS user CRS does not", f("USER:100001"), False)
+check("nor a custom one", f("CUSTOM:1"), False)
+check("no code at all does not", f(""), False)
+check("nor does None", f(None), False)
+check("nor an authority with nothing after the colon", f("EPSG:"), False)
+check("nor a bare word", f("EPSG"), False)
+
+g = H["prj_is_usable"]
+check("a WKT1 projected CRS is usable", g('PROJCS["Lambert",GEOGCS["x"]]'), True)
+check("a WKT2 one too", g('PROJCRS["Lambert",BASEGEOGCRS["x"]]'), True)
+check("leading whitespace and a BOM do not hide it",
+      g('\ufeff  \n geogcs["WGS 84"]'), True)
+# the reported failure: no '.prj' at all, or one holding nothing
+check("an empty file is not usable", g(""), False)
+check("whitespace is not usable", g("   \n "), False)
+check("and neither is prose", g("unknown"), False)
+
 f = H["export_crs_choice"]
 # a normal projected CRS with an EPSG code: written as it is
 check("an EPSG-coded CRS is written as it is",
-      f("working", True, True, True), (False, None))
-# an LCC QGIS can draw but cannot name still has a WKT, which a .prj can hold
-check("no authority code but a WKT is still writable",
-      f("working", True, False, True), (False, None))
-# neither: the .prj cannot be written, and a shapefile without one opens as
-# 'unknown' and lands nowhere -- this is the reported LCC case
-lonlat, why = f("working", True, False, False)
-check("neither code nor WKT falls back to lon/lat", lonlat, True)
-check("and says why", "no '.prj'" in why, True)
-check("an invalid working CRS also falls back", f("working", False, False, False)[0],
+      f("working", True, "EPSG:32644"), (False, None))
+# the reported LCC case: QGIS draws it, prints a WKT for it, and still leaves
+# the shapefile with no '.prj' -- so a WKT is not evidence and is not asked for
+lonlat, why = f("working", True, "USER:100001")
+check("a locally-stored CRS falls back to lon/lat", lonlat, True)
+check("and names the code it will not trust", "USER:100001" in why, True)
+check("a CRS with no code at all falls back too",
+      f("working", True, "")[0], True)
+check("and says so", "no authority code" in f("working", True, "")[1], True)
+check("an invalid working CRS also falls back", f("working", False, "EPSG:32644")[0],
       True)
-check("the override always writes lon/lat", f("wgs84", True, True, True)[0], True)
-check("and names itself as the reason", f("wgs84", True, True, True)[1],
+check("the override always writes lon/lat", f("wgs84", True, "EPSG:32644")[0], True)
+check("and names itself as the reason", f("wgs84", True, "EPSG:32644")[1],
       "SHP_EXPORT_CRS='wgs84'")
 
 print()
