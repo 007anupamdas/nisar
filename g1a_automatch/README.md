@@ -95,12 +95,55 @@ is set), so the defaults suit any pixel size.
 
 ## Detectors
 
-kornia first: `sift`, `disk_depth`, `disk_epipolar`, `dedode`, `aliked`,
-`xfeat`, `xfeatstar` (XFeat* semi-dense), `keynet`, `loftr`. Matchers:
-`smnn`, `lgm` (LightGlue: DISK, ALIKED), `ada` (AdaLAM). imcui adds only what
-kornia lacks: SuperPoint+LightGlue, SuperPoint+SuperGlue, eLoFTR, ASpanFormer,
-RoMa, DKM. imcui's DISK/ALIKED/SIFT/XFeat/LoFTR variants are refused in
-favour of kornia's. `python automatch_job.py detectors` lists what is available.
+kornia first: `sift`, `disk`, `dedode`, `aliked`, `xfeat`, `xfeatstar`
+(XFeat* semi-dense), `keynet`, `loftr`. Matchers: `smnn`, `lgm` (LightGlue:
+DISK, ALIKED), `ada` (AdaLAM). imcui adds only what kornia lacks:
+SuperPoint+LightGlue, SuperPoint+SuperGlue, eLoFTR, ASpanFormer, RoMa, DKM.
+imcui's DISK/ALIKED/SIFT/XFeat/LoFTR variants are refused in favour of
+kornia's. `python automatch_job.py detectors` lists what is available.
+
+### Detector and matcher parameters
+
+In the GUI, **Configure…** on a detector's row opens its parameters. Tick
+several choices, or type a comma-separated list, to try each value:
+
+| Detector | Parameters |
+|---|---|
+| `sift` | RootSIFT on/off, upright on/off, response threshold |
+| `disk` | weights: depth / epipolar |
+| `dedode` | detector weights L-upright / L-C4 / L-SO2 / L-C4-v2 × descriptor weights B- or G- × upright / C4 / SO2 (G-* load a 1.2 GB DINOv2-L) |
+| `aliked` | model t16 / n16 / n16rot / n32, detection threshold, NMS radius |
+| `xfeat` | detection threshold |
+| `keynet` | upright on/off, response threshold |
+| `loftr` | weights: outdoor / indoor / indoor_new |
+| LightGlue (`lgm`) | filter threshold, depth confidence, width confidence |
+| AdaLAM (`ada`) | search expansion, RANSAC iterations, min confidence, min inliers, refit |
+| imcui models | detection / match threshold, plus each model's own settings read from the installed imcui |
+
+- Every combination of **detector** values runs as its own variant, named
+  after the values that differ from the default (`sift-rs0` = RootSIFT off,
+  `dedode_L-C4-v2_B-upright`, `aliked_aliked-n16-dt0p3`). Variants compete
+  with each other and with the other detectors for `RIVAL_BEST_*`.
+- **Matcher** values (LightGlue, AdaLAM) add matching passes inside one
+  variant (`lgm`, `lgm_lf0p2`, …) and compete in that variant's consensus,
+  like the SMNN thresholds.
+- Preflight shows how many matching passes the job will make. Only one model
+  is loaded at a time, whatever the number of variants.
+
+The same thing in a job file:
+```json
+"detector_params": {
+  "sift":   {"rootsift": [true, false]},
+  "dedode": {"detector_weights": ["L-C4-v2"], "descriptor_weights": ["B-upright", "G-upright"]},
+  "disk":   {"checkpoint": ["depth", "epipolar"], "lgm.filter_threshold": [0.1, 0.2]}
+}
+```
+
+**What "best" means.** Without a manual GCP CSV the consensus score is the
+number of matches that agree with each other, which favours dense matchers
+and high keypoint counts. With `manual_gcp_csv` the score uses each chip's
+distance from the GCP-fitted error surface, which is the better basis for
+choosing between variants.
 
 ## 16 GB GPU
 
@@ -110,7 +153,9 @@ is free. Dense imcui models (RoMa, DKM) are the heaviest; keep them at 1024 px.
 
 ## Offline weights
 
-On a connected machine: `python prefetch_weights.py /path/cache`. Copy the
+On a connected machine: `python prefetch_weights.py /path/cache` (fetches every
+selectable weight: both DISK checkpoints, all DeDoDe, ALIKED and LoFTR weights;
+`--defaults-only` for just the defaults). Copy the
 folder, then on the workstation set `TORCH_HOME=/path/cache/torch` and the
 GUI's *imcui weights cache* (or `AUTOMATCH_WEIGHTS_CACHE`) to `/path/cache`.
 

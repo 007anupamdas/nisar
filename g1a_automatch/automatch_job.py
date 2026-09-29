@@ -24,6 +24,7 @@ Progress is printed as lines starting with '@@AUTOMATCH ' followed by JSON.
 
 import argparse
 import copy
+import hashlib
 import json
 import math
 import os
@@ -55,11 +56,19 @@ DEFAULT_JOB: Dict = {
     'reference_scale': 1.0,      # DN scale on the reference (0.003162 for S1 GRD)
     'output_dir': '',
     'temp_dir': '',              # default <output_dir>/_cache
-    'resume': True,              # reuse finished sweep points (POL_RUN_SUMMARY.csv)
+    'resume': True,              # reuse sweep points finished with identical settings
 
     # algorithms (kornia first; imcui only for algorithms kornia lacks)
-    'detectors': ['sift', 'disk_depth'],
-    'matchers': {},              # per detector, e.g. {"disk_depth": ["lgm"]}; {} = all
+    'detectors': ['sift', 'disk'],
+    'matchers': {},              # per detector, e.g. {"disk": ["lgm"]}; {} = all
+    # Per-detector parameters, each a list of values to try, e.g.
+    #   {"sift": {"rootsift": [true, false]},
+    #    "dedode": {"detector_weights": ["L-C4-v2"], "descriptor_weights": ["B-upright", "G-upright"]},
+    #    "disk": {"checkpoint": ["depth", "epipolar"], "lgm.filter_threshold": [0.1, 0.2]}}
+    # Detector parameters: every combination runs as its own named variant and
+    # competes for RIVAL_BEST. 'lgm.*' / 'ada.*' matcher parameters: every
+    # combination is an extra matching pass. `detectors` lists what is settable.
+    'detector_params': {},
     'smnn_thresholds': [0.9, 0.95],
     'weights_cache_dir': '',     # offline imcui weights (see prefetch_imw_weights.py)
 
@@ -128,6 +137,11 @@ def normalize(job: Dict) -> Dict:
         if not isinstance(out[k], list):
             out[k] = [out[k]]
     out['num_features'] = [None if v in (None, '', 'auto', 0) else int(v) for v in out['num_features']] or [None]
+    dp = out.get('detector_params') or {}
+    if not isinstance(dp, dict) or not all(isinstance(v, dict) for v in dp.values()):
+        raise ValueError('detector_params must map detector -> {parameter: [values]}')
+    out['detector_params'] = {d: {k: (list(v) if isinstance(v, (list, tuple)) else [v])
+                                  for k, v in p.items()} for d, p in dp.items()}
     if out['initial_offset_m'] in ([], '', None):
         out['initial_offset_m'] = None
     return out
@@ -252,23 +266,44 @@ def preflight(job: Dict) -> Dict:
     try:
         cat = detector_catalog(job['weights_cache_dir'])
         names = {d['name'] for d in cat['detectors']}
-        wanted = []
-        for d in job['detectors']:
-            wanted += E.DETECTOR_ALIASES.get(d, [d])
-        unknown = [d for d in wanted if d not in names]
+        wanted = list(dict.fromkeys(job['detectors']))
+        unknown = [d for d in wanted if E.resolve_detector_name(d)[0] not in names]
         if unknown:
             skipped = dict(cat['imcui'].get('skipped') or [])
             for d in unknown:
                 tag = d[len('imw-'):] if d.startswith('imw-') else d
                 why = skipped.get(tag) or cat['imcui'].get('error') or 'not available'
                 errors.append(f'detector {d!r}: {why}')
+        supported = {x['name']: x['matchers'] for x in cat['detectors']}
         for det, ms in (job['matchers'] or {}).items():
-            sup = next((x['matchers'] for x in cat['detectors'] if x['name'] == det), None)
+            sup = supported.get(E.resolve_detector_name(det)[0])
             if sup is None:
                 errors.append(f'matchers given for unknown detector {det!r}')
             elif set(ms) - set(sup):
                 errors.append(f'{det}: unsupported matcher(s) {sorted(set(ms) - set(sup))}; supported {sup}')
+        # parameters: validate, and count what the job will actually run
+        runs, total = [], 0
+        n_channels = len(job['channels']) or len((info.get('input') or {}).get('channels') or [1])
+        n_sweep = len(job['window_sizes']) * len(job['num_features'])
+        for d in wanted:
+            base = E.resolve_detector_name(d)[0]
+            if base not in supported:
+                continue
+            try:
+                ms = (job['matchers'] or {}).get(d) or (job['matchers'] or {}).get(base) or supported[base]
+                nv, npass = E.count_runs(d, job['detector_params'].get(d), ms, len(job['smnn_thresholds']))
+                runs.append({'detector': d, 'variants': nv, 'passes_per_variant': npass})
+                total += nv * npass
+            except ValueError as e:
+                errors.append(str(e))
+        for d in job['detector_params']:
+            if d not in wanted:
+                warnings.append(f'parameters given for {d!r}, which is not selected (ignored)')
         info['detectors'] = wanted
+        info['runs'] = runs
+        info['matching_passes'] = total * n_channels * n_sweep
+        info['ransac_sets_per_pass'] = (len(job['ransac_methods']) * len(job['ransac_confidences'])
+                                        * len(job['ransac_thresholds_m'] or job['ransac_thresholds_px']))
     except Exception as e:
         errors.append(f'detector catalog: {type(e).__name__}: {e}')
 
@@ -315,6 +350,7 @@ def _config_for(job: Dict, win: int, nf: Optional[int], res: float, out_dir: str
         min_inliers_per_chip=job['min_inliers_per_chip'],
         min_surviving_chips=job['min_surviving_chips'], manual_gcp_csv=job['manual_gcp_csv'],
         pols=job['channels'] or None, detector_matchers=job['matchers'] or None,
+        detector_params=job['detector_params'] or None,
         max_expected_error_m=job['max_expected_error_m'], coarse_method=job['coarse_method'],
         coarse_resolution_m=job['coarse_resolution_m'],
         initial_offset_m=tuple(job['initial_offset_m']) if job['initial_offset_m'] else None,
@@ -324,6 +360,24 @@ def _config_for(job: Dict, win: int, nf: Optional[int], res: float, out_dir: str
     )
     cfg.num_features = nf if nf else cfg.compute_num_features(win)
     return cfg
+
+
+# Job keys that cannot change what the matcher computes for a sweep point.
+_RESULT_NEUTRAL_KEYS = {'output_dir', 'temp_dir', 'resume', 'debug', 'rival_max_points_per_chip',
+                        'save_match_images', 'weights_cache_dir'}
+
+
+def _sweep_key(job: Dict, win: int, nf: Optional[int]) -> str:
+    """Fingerprint of everything that shapes one sweep point's results, so
+    'resume' only reuses results produced with the same settings and input."""
+    blob = {k: v for k, v in job.items() if k not in _RESULT_NEUTRAL_KEYS}
+    blob.update({'_window': win, '_num_features': nf, '_v': 1})
+    try:
+        st = os.stat(job['input_path'])
+        blob['_input'] = [st.st_size, int(st.st_mtime)]
+    except OSError:
+        pass
+    return hashlib.sha1(json.dumps(blob, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
 
 def _best_score(record: Dict) -> Optional[float]:
@@ -377,15 +431,27 @@ def run_job(job: Dict) -> Dict:
         out_dir = os.path.join(out_root, tag)
         emit({'event': 'sweep', 'done': k, 'total': len(sweep), 'point': tag})
         summary_csv = os.path.join(out_dir, 'POL_RUN_SUMMARY.csv')
+        key_path = os.path.join(out_dir, 'SWEEP_KEY.txt')
+        key = _sweep_key(job, win, nf)
+        prev = None
+        if os.path.exists(key_path):
+            with open(key_path) as fh:
+                prev = fh.read().strip()
         t0 = time.time()
-        if job['resume'] and os.path.exists(summary_csv):
+        if job['resume'] and os.path.exists(summary_csv) and prev == key:
             print(f'[Job] {tag}: reusing finished results ({summary_csv})')
             records = pd.read_csv(summary_csv).to_dict('records')
         else:
+            if job['resume'] and os.path.exists(summary_csv):
+                print(f'[Job] {tag}: settings or input changed since the finished run -- running again')
+            if os.path.exists(key_path):
+                os.remove(key_path)
             cfg = _config_for(job, win, nf, res, out_dir)
             print(f'[Job] >>> {tag}: window {win} px, {cfg.num_features} features')
             try:
                 records = E.AutoMatchPipeline(cfg).run(job['input_path'], detectors)
+                with open(key_path, 'w') as fh:
+                    fh.write(key)
             except Exception as e:
                 print(f'[Job] {tag} FAILED: {type(e).__name__}: {e}')
                 traceback.print_exc()
@@ -466,7 +532,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     if a.cmd == 'detectors':
         cat = detector_catalog(a.weights_cache)
         for det in cat['detectors']:
-            print(f"{det['name']:<18} {det['source']:<7} matchers: {', '.join(det['matchers'])}")
+            ps = ', '.join(p['name'] for p in det.get('params', [])) or '-'
+            print(f"{det['name']:<18} {det['source']:<7} matchers: {', '.join(det['matchers']):<16} params: {ps}")
         if cat['imcui'].get('error'):
             print(f"(imcui: {cat['imcui']['error']})")
         for tag, why in cat['imcui'].get('skipped', []):

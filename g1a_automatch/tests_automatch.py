@@ -136,7 +136,7 @@ def test_engine_helpers():
 
 
 # ── end to end ───────────────────────────────────────────────────────────────
-def _run_job(job, tmp):
+def _run_job(job, tmp, want_output=False):
     path = os.path.join(tmp, 'job.json')
     with open(path, 'w') as f:
         json.dump(job, f)
@@ -144,7 +144,68 @@ def _run_job(job, tmp):
                          capture_output=True, text=True)
     if out.returncode != 0:
         print(out.stdout[-3000:], out.stderr[-3000:])
-    return out.returncode
+    return (out.returncode, out.stdout) if want_output else out.returncode
+
+
+def test_e2e_rerun(tmp):
+    """Rerun in the same output folder: identical settings reuse the results;
+    changed settings run again on the cached preprocessing, and the previous
+    run's files do not leak into the new consensus."""
+    import glob
+    import synthetic_data as S
+    data = os.path.join(tmp, 'synth')
+    if not os.path.exists(os.path.join(data, 'G1A_SYNTH_L1.tif')):
+        S.make_all(data, 4013.0, -2487.0)
+    out = os.path.join(tmp, 'out_rerun')
+    job = {'input_path': os.path.join(data, 'G1A_SYNTH_L1.tif'), 'reference_dir': os.path.join(data, 'C1'),
+           'output_dir': out, 'channels': ['band1'], 'detectors': ['sift'], 'window_sizes': [1024],
+           'max_expected_error_m': 10000, 'smnn_thresholds': [0.95], 'use_amp': False}
+    rc, log1 = _run_job(job, tmp, True)
+    check('rerun: first run', rc, 0)
+    rc, log2 = _run_job(job, tmp, True)
+    check('rerun: same settings -> results reused', rc == 0 and 'reusing finished results' in log2)
+    rc, log3 = _run_job({**job, 'smnn_thresholds': [0.9]}, tmp, True)
+    check('rerun: changed settings -> run again', rc == 0 and 'running again' in log3)
+    check('rerun: preprocessing reused from the cache', '[Cache] All 1 pairs loaded' in log3)
+    files = glob.glob(os.path.join(out, 'win1024_nfauto', 'band1_toC1', 'filtered_same-res_sift', '*.csv'))
+    check('rerun: only the new run\'s files remain', bool(files) and all('_smnn_0.9_' in f for f in files))
+
+
+def test_e2e_variants(tmp):
+    """SIFT rootsift on/off + DISK LightGlue filter sweep: every variant and
+    matcher pass is run and named, and RIVAL_BEST picks one of them."""
+    import csv as _csv
+    import glob
+    import synthetic_data as S
+    data = os.path.join(tmp, 'synth')
+    if not os.path.exists(os.path.join(data, 'G1A_SYNTH_L1.tif')):
+        S.make_all(data, 4013.0, -2487.0)
+    out = os.path.join(tmp, 'out_variants')
+    rc = _run_job({'input_path': os.path.join(data, 'G1A_SYNTH_L1.tif'),
+                   'reference_dir': os.path.join(data, 'C1'), 'output_dir': out,
+                   'channels': ['band1'], 'detectors': ['sift', 'disk'],
+                   'matchers': {'disk': ['lgm']},
+                   'detector_params': {'sift': {'rootsift': [True, False]},
+                                       'disk': {'lgm.filter_threshold': [0.1, 0.2]}},
+                   'window_sizes': [1024], 'max_expected_error_m': 10000,
+                   'smnn_thresholds': [0.95], 'use_amp': False}, tmp)
+    check('variants: job exit code', rc, 0)
+    man = os.path.join(out, 'RUN_MANIFEST.csv')
+    rows = list(_csv.DictReader(open(man, encoding='utf-8'))) if os.path.exists(man) else []
+    check('variants: one manifest row per variant', sorted(r['detector'] for r in rows),
+          ['disk_depth', 'sift', 'sift-rs0'])
+    check('variants: all ran', {r['status'] for r in rows}, {'ok'})
+    lgm = {os.path.basename(p).split('_pix0_')[1].split('_aff')[0]
+           for p in glob.glob(os.path.join(out, '*', 'band1_toC1', 'filtered_*disk_depth', '*.csv'))}
+    check('variants: both LightGlue passes filtered', lgm >= {'lgm', 'lgm_lf0p2'})
+    best = os.path.join(out, 'RIVAL_BEST_G1A_SYNTH_L1_band1.csv')
+    check('variants: RIVAL_BEST chosen among them', os.path.exists(best))
+    for r in rows:
+        if r.get('mean_dx_m'):
+            ok = abs(float(r['mean_dx_m']) - 4013.0) < 10 and abs(float(r['mean_dy_m']) + 2487.0) < 10
+            print(f"      {r['detector']:<10} dE {float(r['mean_dx_m']):.1f}  dN {float(r['mean_dy_m']):.1f}  "
+                  f"CE90 {float(r['ce90_m']):.1f}")
+            check(f"variants: {r['detector']} recovers the offset", ok)
 
 
 def test_e2e(tmp):
@@ -198,12 +259,96 @@ def test_nisar_h5(tmp):
     check('NISAR: footprint from boundingPolygon (no .met)', src, 'h5-boundingPolygon')
 
 
+def test_detector_params():
+    import automatch_engine as E
+    cfg = E.PipelineConfig(smnn_thresholds=[0.9, 0.95])
+    names = lambda d, p=None: [m.get_filename_prefix() for m in E.build_variants(d, cfg, p)]
+    check('params: sift rootsift on/off -> 2 named variants', names('sift', {'rootsift': [True, False]}),
+          ['sift', 'sift-rs0'])
+    check('params: dedode weights in the prefix',
+          names('dedode', {'detector_weights': ['L-C4-v2', 'L-C4'], 'descriptor_weights': ['B-upright']}),
+          ['dedode_L-C4-v2_B-upright', 'dedode_L-C4_B-upright'])
+    check('params: non-default single value is named', names('aliked', {'detection_threshold': 0.3}),
+          ['aliked_aliked-n16-dt0p3'])
+    check('params: legacy disk_epipolar name', names('disk_epipolar'), ['disk_epipolar'])
+    m = E.build_detector('disk', cfg, {'lgm.filter_threshold': [0.1, 0.2], 'ada.search_expansion': [1, 2]})
+    runs = [(n, m._matcher_param_str(n, p)) for n, p in m.matcher_runs()]
+    check('params: matcher values add passes, not variants', runs,
+          [('smnn', '0.9'), ('smnn', '0.95'), ('lgm', ''), ('lgm', 'lf0p2'), ('ada', ''), ('ada', 'as2')])
+    check('params: run count', E.count_runs('disk', {'checkpoint': ['depth', 'epipolar'],
+                                                     'lgm.filter_threshold': [0.1, 0.2]},
+                                            ['smnn', 'lgm'], 2), (2, 4))
+    for bad, why in ((('sift', {'rootsift': ['maybe']}), 'bad bool'),
+                     (('dedode', {'detector_weights': ['L-X']}), 'bad choice'),
+                     (('sift', {'nope': [1]}), 'unknown name'),
+                     (('aliked', {'nms_radius': [2.5]}), 'non-integer')):
+        try:
+            E.expand_variants(*bad)
+            check(f'params: {why} rejected', False)
+        except ValueError:
+            check(f'params: {why} rejected', True)
+    P = E.MatchStatistics._parse_filename
+    check('params: variant name parses', P('sift-rs0_band1_toC1_pair001_scan0_pix0_smnn_0.95_aff_magsac_20_0.99_.csv')
+          ['detector'], 'sift-rs0')
+    r = P('disk_depth_band1_toC1_pair001_scan0_pix0_lgm_lf0p2_aff_magsac_20_0.99_.csv')
+    check('params: matcher variant parses', (r['detector'], r['disk_mode'], r['match_method']),
+          ('disk', 'depth', 'lgm_lf0p2'))
+
+
+def test_gui_dialog():
+    """Configure… dialog, headless: values stored, summary, job round trip."""
+    try:
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+        import DPQED_automatch as G
+    except Exception as e:
+        print(f'SKIP  GUI dialog ({type(e).__name__}: {e})')
+        return
+    import automatch_engine as E
+    app = G.QtWidgets.QApplication.instance() or G.QtWidgets.QApplication([])
+    w = G.AutoMatchWindow()
+    try:
+        w._fill_detector_table(E.available_detectors())
+        dlg = w.open_param_dialog('sift', run=False)
+        box = dlg.widgets['rootsift']
+        for cb, opt in box._items:
+            cb.setChecked(True)                       # rootsift: on AND off
+        dlg._accept()
+        check('gui: dialog stores the ticked values', w.detector_params.get('sift'), {'rootsift': [True, False]})
+        r = w._row_of('sift')
+        text = w.det_table.cellWidget(r, 3).findChild(G.QtWidgets.QLabel, 'summary').text()
+        check('gui: summary shows the variants', '2 variants' in text)
+        w.det_table.item(r, 0).setCheckState(G.CHECKED)
+        job = w.get_job()
+        check('gui: job carries detector_params', job['detector_params'].get('sift'), {'rootsift': [True, False]})
+        dlg = w.open_param_dialog('aliked', run=False)
+        dlg.widgets['nms_radius'].setText('2, x')
+        try:
+            dlg.values()
+            check('gui: bad number rejected', False)
+        except ValueError:
+            check('gui: bad number rejected', True)
+        dlg = w.open_param_dialog('disk', run=False)
+        dlg.reset_defaults()
+        dlg._accept()
+        check('gui: all defaults -> nothing stored', 'disk' in w.detector_params, False)
+        w.set_job({**G.DEFAULT_JOB, 'detectors': ['disk_depth', 'disk_epipolar']})
+        check('gui: legacy disk names -> disk with both checkpoints',
+              (w.detector_params.get('disk'), w.det_table.item(w._row_of('disk'), 0).checkState() == G.CHECKED),
+              ({'checkpoint': ['depth', 'epipolar']}, True))
+    finally:
+        if w.proc is not None:
+            w.proc.kill()
+            w.proc.waitForFinished(5000)
+        w.close()
+
+
 def test_imcui_mock():
     """imcui bridge against a mock imcui (real registry shapes): kornia-covered
     models refused, the rest registered and runnable through DenseWindowMatcher."""
     import types
     import numpy as np
-    sp = {'output': 'f-sp', 'model': {'name': 'superpoint', 'max_keypoints': 4096}, 'preprocessing': {'grayscale': True}}
+    sp = {'output': 'f-sp', 'model': {'name': 'superpoint', 'max_keypoints': 4096, 'nms_radius': 4},
+          'preprocessing': {'grayscale': True}}
     feat = {'superpoint_max': sp, 'aliked-n16': {'output': 'f-a', 'model': {'name': 'aliked'}, 'preprocessing': {}},
             'disk': {'output': 'f-d', 'model': {'name': 'disk'}, 'preprocessing': {}},
             'xfeat': {'output': 'f-x', 'model': {'name': 'xfeat'}, 'preprocessing': {}},
@@ -258,6 +403,21 @@ def test_imcui_mock():
             check('imcui: map offset from pixel shift', (round(dx, 3), round(dy, 3)), (930.0, -40.0))
             check('imcui: file id parses', E.MatchStatistics._parse_filename(
                 rec['file_id'] + '_aff_magsac_2_0.99_.csv')['detector'], 'imw-sp-lg')
+        # per-model parameters come from the registry conf; overridden keys hidden
+        names = [p.name for p in E.detector_param_specs('imw-sp-lg')]
+        check('imcui params: thresholds + registry keys, API-owned keys hidden',
+              (names[:2], 'feature.nms_radius' in names, 'feature.max_keypoints' in names),
+              (['api.detect_threshold', 'api.match_threshold'], True, False))
+        vs = E.build_variants('imw-sp-lg', E.PipelineConfig(num_features=100),
+                              {'feature.nms_radius': [3, 4], 'api.match_threshold': [0.3]})
+        check('imcui variants: one per combination, distinct names',
+              len({v.get_filename_prefix() for v in vs}), 2)
+        v0 = vs[0]
+        check('imcui override reaches the conf',
+              (v0.imw_conf['feature']['model']['nms_radius'], v0.match_threshold,
+               v0.imw_conf['matcher']['model']['match_threshold']), (3, 0.3, 0.3))
+        check("imcui conf carries both 'dense' and 'standalone'",
+              (v0.imw_conf['dense'], v0.imw_conf['standalone']), (False, False))
     finally:
         for k, v in saved.items():
             if v is None:
@@ -275,6 +435,7 @@ def test_imcui_mock():
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--e2e', action='store_true')
+    ap.add_argument('--gui', action='store_true', help='also test the Configure… dialog (needs Qt)')
     ap.add_argument('--rival', default='')
     ap.add_argument('--keep', action='store_true')
     a = ap.parse_args()
@@ -284,9 +445,14 @@ def main():
         test_rival_parity(a.rival)
         test_engine_helpers()
         test_nisar_h5(tmp)
+        test_detector_params()
         test_imcui_mock()
+        if a.gui:
+            test_gui_dialog()
         if a.e2e:
             test_e2e(tmp)
+            test_e2e_variants(tmp)
+            test_e2e_rerun(tmp)
     finally:
         if not a.keep:
             shutil.rmtree(tmp, ignore_errors=True)

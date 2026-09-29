@@ -56,6 +56,10 @@ MERGED = (QtCore.QProcess.ProcessChannelMode.MergedChannels if QT_API != 'PyQt5'
           else QtCore.QProcess.MergedChannels)
 MSG_YES = (QtWidgets.QMessageBox.StandardButton.Yes if QT_API != 'PyQt5'
            else QtWidgets.QMessageBox.Yes)
+_DBB = QtWidgets.QDialogButtonBox
+BTN_OK = _DBB.StandardButton.Ok if QT_API != 'PyQt5' else _DBB.Ok
+BTN_CANCEL = _DBB.StandardButton.Cancel if QT_API != 'PyQt5' else _DBB.Cancel
+BTN_DEFAULTS = _DBB.StandardButton.RestoreDefaults if QT_API != 'PyQt5' else _DBB.RestoreDefaults
 
 RANSAC_CHOICES = ['magsac', 'ransac', 'lmeds', 'accurate']
 COARSE_CHOICES = ['auto', 'matcher', 'phasecorr', 'manual', 'none']
@@ -141,6 +145,180 @@ class PathRow(QtWidgets.QWidget):
         self.edit.setText(t or '')
 
 
+GROUP_TITLES = {
+    'detector': 'Detector',
+    'lgm': "LightGlue matcher — used when 'lgm' is ticked",
+    'ada': "AdaLAM matcher — used when 'ada' is ticked",
+    'api': 'imcui thresholds',
+    'feature': 'imcui detector model',
+    'matcher': 'imcui matcher model',
+}
+
+
+def _group_of(spec):
+    if spec.get('scope', 'detector') != 'detector':
+        return spec['scope']
+    head = spec['name'].split('.', 1)[0]
+    return head if '.' in spec['name'] and head in GROUP_TITLES else 'detector'
+
+
+def fmt_value(v):
+    if isinstance(v, bool):
+        return 'on' if v else 'off'
+    if isinstance(v, float):
+        return f'{v:g}'
+    return str(v)
+
+
+def prune_params(specs, values):
+    """Drop parameters left at [default]; what remains goes into the job."""
+    defaults = {sp['name']: sp['default'] for sp in specs}
+    return {k: v for k, v in values.items() if k in defaults and list(v) != [defaults[k]]}
+
+
+def count_variants(specs, values):
+    """(detector variants, {matcher scope: passes}) for the dialog/summary."""
+    n, passes = 1, {}
+    for sp in specs:
+        k = len(values.get(sp['name']) or [sp['default']])
+        if sp.get('scope', 'detector') == 'detector':
+            n *= k
+        else:
+            passes[sp['scope']] = passes.get(sp['scope'], 1) * k
+    return n, passes
+
+
+class ParamDialog(QtWidgets.QDialog):
+    """Parameters of one detector (and of the matchers it uses).
+
+    Choices and on/off settings are ticked, numbers and text are typed as a
+    comma-separated list. Several values = try each one: every combination of
+    detector values runs as its own variant and competes for RIVAL_BEST;
+    matcher values add matching passes to each variant."""
+
+    def __init__(self, name, specs, values=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f'{name} — parameters')
+        self.name = name
+        self.specs = list(specs)
+        self.widgets = {}
+        values = dict(values or {})
+        lay = QtWidgets.QVBoxLayout(self)
+        intro = QtWidgets.QLabel(
+            'Tick, or list comma-separated, every value to try. Each combination of '
+            'detector values runs as its own variant and competes for the best result; '
+            'matcher values add matching passes.')
+        intro.setWordWrap(True)
+        lay.addWidget(intro)
+        forms = {}
+        for sp in self.specs:
+            g = _group_of(sp)
+            if g not in forms:
+                box = QtWidgets.QGroupBox(GROUP_TITLES.get(g, g))
+                forms[g] = QtWidgets.QFormLayout(box)
+                lay.addWidget(box)
+            w = self._make_widget(sp, values.get(sp['name']) or [sp['default']])
+            label = QtWidgets.QLabel(sp.get('label') or sp['name'])
+            tip = sp.get('help') or ''
+            tip = (tip + '  ' if tip else '') + f"default: {fmt_value(sp['default'])}"
+            label.setToolTip(tip)
+            w.setToolTip(tip)
+            forms[g].addRow(label, w)
+        if not self.specs:
+            lay.addWidget(QtWidgets.QLabel('This detector has no settable parameters.'))
+        self.lbl_count = QtWidgets.QLabel('')
+        lay.addWidget(self.lbl_count)
+        btns = QtWidgets.QDialogButtonBox(BTN_OK | BTN_CANCEL | BTN_DEFAULTS)
+        btns.accepted.connect(self._accept)
+        btns.rejected.connect(self.reject)
+        btns.button(BTN_DEFAULTS).clicked.connect(self.reset_defaults)
+        lay.addWidget(btns)
+        self._update_count()
+
+    def _make_widget(self, sp, current):
+        kind = sp['kind']
+        if kind in ('choice', 'bool'):
+            options = sp['choices'] if kind == 'choice' else [True, False]
+            box = QtWidgets.QWidget()
+            grid = QtWidgets.QGridLayout(box)
+            grid.setContentsMargins(0, 0, 0, 0)
+            box._items = []
+            for i, opt in enumerate(options):
+                cb = QtWidgets.QCheckBox(fmt_value(opt))
+                cb.setChecked(opt in current)
+                cb.toggled.connect(self._update_count)
+                grid.addWidget(cb, i // 3, i % 3)
+                box._items.append((cb, opt))
+            self.widgets[sp['name']] = box
+            return box
+        edit = QtWidgets.QLineEdit(', '.join(fmt_value(v) for v in current))
+        edit.setPlaceholderText(fmt_value(sp['default']))
+        edit.textChanged.connect(self._update_count)
+        self.widgets[sp['name']] = edit
+        return edit
+
+    def _parse(self, sp, text):
+        toks = [t.strip() for t in text.split(',') if t.strip()]
+        if not toks:
+            return [sp['default']]
+        out = []
+        for t in toks:
+            try:
+                if sp['kind'] == 'int':
+                    f = float(t)
+                    if f != int(f):
+                        raise ValueError
+                    out.append(int(f))
+                elif sp['kind'] == 'float':
+                    out.append(float(t))
+                else:
+                    out.append(t)
+            except ValueError:
+                raise ValueError(f"{sp.get('label') or sp['name']}: {t!r} is not a valid "
+                                 f"{'whole number' if sp['kind'] == 'int' else 'number'}")
+        return list(dict.fromkeys(out))
+
+    def values(self):
+        """{param: [values]} for every parameter; raises ValueError if invalid."""
+        out = {}
+        for sp in self.specs:
+            w = self.widgets[sp['name']]
+            if sp['kind'] in ('choice', 'bool'):
+                vals = [opt for cb, opt in w._items if cb.isChecked()]
+                if not vals:
+                    raise ValueError(f"{sp.get('label') or sp['name']}: tick at least one value")
+            else:
+                vals = self._parse(sp, w.text())
+            out[sp['name']] = vals
+        return out
+
+    def reset_defaults(self):
+        for sp in self.specs:
+            w = self.widgets[sp['name']]
+            if sp['kind'] in ('choice', 'bool'):
+                for cb, opt in w._items:
+                    cb.setChecked(opt == sp['default'])
+            else:
+                w.setText(fmt_value(sp['default']))
+
+    def _update_count(self, *_):
+        try:
+            n, passes = count_variants(self.specs, self.values())
+        except ValueError as e:
+            self.lbl_count.setText(f'⚠ {e}')
+            return
+        extra = ''.join(f' · {GROUP_TITLES[k].split(" ")[0]}: {v} pass(es)' for k, v in passes.items())
+        self.lbl_count.setText(f'{n} variant(s) of {self.name}{extra}')
+
+    def _accept(self):
+        try:
+            self.values()
+        except ValueError as e:
+            QtWidgets.QMessageBox.warning(self, 'Parameters', str(e))
+            return
+        self.accept()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # main window
 # ─────────────────────────────────────────────────────────────────────────────
@@ -153,7 +331,9 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.proc_kind = None
         self.proc_buffer = ''
         self._queue = []              # quick commands waiting for the process
-        self.detector_info = []       # [{'name','source','matchers'}]
+        self.detector_info = []       # [{'name','source','matchers','params'}]
+        self.detector_specs = {}      # name -> [param spec dicts]
+        self.detector_params = {}     # name -> {param: [values]} (non-default only)
         self.settings = QtCore.QSettings('DPQED', 'AutoMatch')
 
         central = QtWidgets.QWidget()
@@ -291,8 +471,9 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         b.clicked.connect(self.refresh_detectors)
         top.addWidget(b)
         lay.addLayout(top)
-        self.det_table = QtWidgets.QTableWidget(0, 3)
-        self.det_table.setHorizontalHeaderLabels(['detector', 'source', 'matchers (check to run)'])
+        self.det_table = QtWidgets.QTableWidget(0, 4)
+        self.det_table.setHorizontalHeaderLabels(['detector', 'source', 'matchers (check to run)',
+                                                  'parameters'])
         self.det_table.horizontalHeader().setStretchLastSection(True)
         self.det_table.setEditTriggers(NO_EDIT)
         lay.addWidget(self.det_table, 1)
@@ -423,8 +604,11 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self._pending_channels = list(j['channels'] or [])
         self._set_channels([self.channels.item(i).text() for i in range(self.channels.count())]
                            or self._pending_channels)
+        self.detector_params = {k: {p: list(v) for p, v in d.items()}
+                                for k, d in (j.get('detector_params') or {}).items()}
         self._pending_detectors = (list(j['detectors']), dict(j['matchers'] or {}))
         self._apply_detector_selection()
+        self._refresh_param_summaries()
         self.smnn.setText(fmt_list(j['smnn_thresholds']))
         self.weights_cache.setText(j['weights_cache_dir'])
         self.windows.setText(fmt_list(j['window_sizes']))
@@ -483,6 +667,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             'manual_gcp_csv': self.gcp_path.text(),
             'detectors': dets,
             'matchers': matchers,
+            'detector_params': {k: v for k, v in self.detector_params.items() if v},
             'smnn_thresholds': parse_float_list(self.smnn.text(), 'SMNN thresholds'),
             'weights_cache_dir': self.weights_cache.text(),
             'window_sizes': parse_int_list(self.windows.text(), 'window sizes'),
@@ -563,21 +748,93 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
                 hl.addWidget(cb)
             hl.addStretch(1)
             self.det_table.setCellWidget(r, 2, box)
+            self.detector_specs[d['name']] = d.get('params') or []
+            pbox = QtWidgets.QWidget()
+            pl = QtWidgets.QHBoxLayout(pbox)
+            pl.setContentsMargins(4, 0, 4, 0)
+            btn = QtWidgets.QPushButton('Configure…')
+            btn.setEnabled(bool(self.detector_specs[d['name']]))
+            btn.clicked.connect(lambda _=False, n=d['name']: self.open_param_dialog(n))
+            pl.addWidget(btn)
+            summary = QtWidgets.QLabel('')
+            summary.setObjectName('summary')
+            pl.addWidget(summary, 1)
+            self.det_table.setCellWidget(r, 3, pbox)
         self.det_table.resizeColumnsToContents()
         self._apply_detector_selection()
+        self._refresh_param_summaries()
 
     def _apply_detector_selection(self):
         dets, matchers = getattr(self, '_pending_detectors', ([], {}))
-        expand = {'disk': ['disk_depth', 'disk_epipolar']}
+        # older job files name the DISK weights as detectors
+        legacy = {'disk_depth': 'depth', 'disk_epipolar': 'epipolar'}
         want = set()
         for d in dets:
-            want.update(expand.get(d, [d]))
+            if d in legacy:
+                want.add('disk')
+                ck = self.detector_params.setdefault('disk', {}).setdefault('checkpoint', [])
+                if legacy[d] not in ck:
+                    ck.append(legacy[d])
+            else:
+                want.add(d)
         for r in range(self.det_table.rowCount()):
             name = self.det_table.item(r, 0).text()
             self.det_table.item(r, 0).setCheckState(CHECKED if name in want else UNCHECKED)
             if name in matchers:
                 for cb in self.det_table.cellWidget(r, 2).findChildren(QtWidgets.QCheckBox):
                     cb.setChecked(cb.text() in matchers[name])
+
+    # ── detector parameters ──────────────────────────────────────────────────
+    def _row_of(self, name):
+        for r in range(self.det_table.rowCount()):
+            if self.det_table.item(r, 0).text() == name:
+                return r
+        return None
+
+    def _param_summary(self, name):
+        specs = self.detector_specs.get(name) or []
+        if not specs:
+            return ''
+        chosen = prune_params(specs, self.detector_params.get(name) or {})
+        if not chosen:
+            return 'defaults'
+        full = {sp['name']: chosen.get(sp['name'], [sp['default']]) for sp in specs}
+        n, passes = count_variants(specs, full)
+        labels = {sp['name']: (sp.get('label') or sp['name']) for sp in specs}
+        text = '; '.join(f"{labels[k]}: {', '.join(fmt_value(v) for v in vals)}"
+                         for k, vals in chosen.items())
+        extra = f' → {n} variants' if n > 1 else ''
+        extra += ''.join(f', {v} {k} passes' for k, v in passes.items() if v > 1)
+        return text + extra
+
+    def _refresh_param_summaries(self):
+        for name in self.detector_specs:
+            r = self._row_of(name)
+            if r is None:
+                continue
+            lbl = self.det_table.cellWidget(r, 3).findChild(QtWidgets.QLabel, 'summary')
+            lbl.setText(self._param_summary(name))
+        self.det_table.resizeColumnToContents(3)
+
+    def open_param_dialog(self, name, run=True):
+        """Open the parameter dialog of one detector. run=False returns the
+        dialog without showing it (tests drive it directly)."""
+        specs = self.detector_specs.get(name) or []
+        current = {sp['name']: (self.detector_params.get(name) or {}).get(sp['name'], [sp['default']])
+                   for sp in specs}
+        dlg = ParamDialog(name, specs, current, self)
+        dlg.accepted.connect(lambda: self._store_params(name, dlg))
+        if run:
+            dlg.exec() if hasattr(dlg, 'exec') else dlg.exec_()
+        return dlg
+
+    def _store_params(self, name, dlg):
+        chosen = prune_params(dlg.specs, dlg.values())
+        if chosen:
+            self.detector_params[name] = chosen
+        else:
+            self.detector_params.pop(name, None)
+        self._refresh_param_summaries()
 
     def refresh_detectors(self):
         try:
@@ -739,6 +996,11 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             lines.append(f"Within the search buffer: {len(c)} — {', '.join(c[:8])}{' …' if len(c) > 8 else ''}")
         if 'working_resolution_m' in info:
             lines.append(f"Working resolution: {info['working_resolution_m']} m")
+        if info.get('runs'):
+            parts = ', '.join(f"{r['detector']}: {r['variants']} variant(s) × {r['passes_per_variant']} pass(es)"
+                              for r in info['runs'])
+            lines.append(f"Matching passes in total: {info.get('matching_passes')} ({parts}), "
+                         f"each filtered with {info.get('ransac_sets_per_pass')} RANSAC setting(s)")
         if 'gpu' in info:
             lines.append(f"GPU: {info['gpu']}")
         box = QtWidgets.QMessageBox(self)

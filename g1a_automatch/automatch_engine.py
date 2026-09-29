@@ -53,6 +53,7 @@ import csv
 import gc
 import glob
 import hashlib
+import itertools
 import json
 import math
 import shutil
@@ -311,9 +312,14 @@ class PipelineConfig:
     pols: Optional[List[str]] = None
 
     # ── Detector / matcher selection ────────────────────────────────────────
-    # {detector_prefix: [matcher, ...]} restricts which matchers run, e.g.
-    # {'disk_depth': ['lgm']}. Missing detectors run all supported matchers.
+    # {detector: [matcher, ...]} restricts which matchers run, e.g.
+    # {'disk': ['lgm']}. Missing detectors run all supported matchers.
     detector_matchers: Optional[Dict[str, List[str]]] = None
+    # {detector: {param: [values...]}}: detector parameters (each combination
+    # runs as a separately named variant) and matcher parameters named
+    # 'lgm.<key>' / 'ada.<key>' (each combination is a matching pass). See
+    # DETECTOR_PARAMS / detector_param_specs().
+    detector_params: Optional[Dict[str, Dict[str, List]]] = None
 
     # Reference DN scale applied before normalisation (1.0 = off). S1 GRD
     # folders used 0.003162 in the S1 pipeline; optical/C1 references use 1.0.
@@ -1416,9 +1422,7 @@ class CoarseAligner:
                      'x02': tb.c, 'y02': tb.f, 'xres2': tb.a, 'yres2': tb.e,
                      'nisar_src_xres': ta.a, 'nisar_src_yres': ta.e,
                      'nisar_crop_row_offset': 0, 'nisar_crop_col_offset': 0})
-        names = matcher.selected_matchers()
-        name = names[0]
-        param = None
+        name, param = matcher.matcher_runs()[0]
         if name == 'smnn':
             param = max(self.config.smnn_thresholds)
         with th.inference_mode():
@@ -1548,8 +1552,14 @@ class BaseMatcher(ABC):
         self.config = config
         self.device = device
         self.use_amp = config.use_amp and th.cuda.is_available()
-        self.lgm_model = None
+        self._lgm_models: Dict = {}
         self.adalam_config = self._setup_adalam_config()
+        # Set by build_variants(): the registry name the user selected, the
+        # variant's name suffix, and per-matcher parameter grids
+        # ({'lgm': {'filter_threshold': [0.1, 0.2]}, 'ada': {...}}).
+        self.registry_name: Optional[str] = None
+        self.variant_suffix: str = ''
+        self.matcher_grid: Dict[str, Dict[str, List]] = {}
 
     def _setup_adalam_config(self) -> Dict:
         cfg = KF.adalam.get_adalam_default_config()
@@ -1740,31 +1750,43 @@ class BaseMatcher(ABC):
     def get_available_matchers(self) -> List[str]:
         pass
 
-    def get_filename_prefix(self) -> str:
+    def _prefix_base(self) -> str:
         return self.get_detector_name()
+
+    def get_filename_prefix(self) -> str:
+        """Detector token in every output name: the class's base prefix plus
+        the variant suffix (non-default parameters, e.g. 'sift-rs0')."""
+        return self._prefix_base() + (self.variant_suffix or '')
 
     def match_smnn(self, descs1, descs2, threshold: float):
         return KF.match_smnn(descs1.squeeze(0), descs2.squeeze(0), th.tensor(threshold))
 
-    def match_adalam(self, descs1, descs2, lafs1, lafs2, hw1, hw2):
+    def match_adalam(self, descs1, descs2, lafs1, lafs2, hw1, hw2, overrides: Optional[Dict] = None):
+        cfg = dict(self.adalam_config)
+        cfg.update(overrides or {})
         return KF.match_adalam(
             descs1.squeeze(0),
             descs2.squeeze(0),
             lafs1,
             lafs2,
-            config=self.adalam_config,
+            config=cfg,
             hw1=hw1,
             hw2=hw2
         )
 
-    def match_lgm(self, descs1, descs2, lafs1, lafs2, hw1, hw2, feature_name='disk'):
-        if self.lgm_model is None:
-            print(f'{self.get_detector_name()}: Initializing LightGlue...')
-            self.lgm_model = KF.LightGlueMatcher(feature_name=feature_name).eval().to(self.device)
+    def match_lgm(self, descs1, descs2, lafs1, lafs2, hw1, hw2, feature_name='disk',
+                  params: Optional[Dict] = None):
+        key = (feature_name, tuple(sorted((params or {}).items())))
+        model = self._lgm_models.get(key)
+        if model is None:
+            print(f'{self.get_detector_name()}: Initializing LightGlue {dict(params or {}) or "(defaults)"}...')
+            model = KF.LightGlueMatcher(feature_name=feature_name,
+                                        params=dict(params or {})).eval().to(self.device)
+            self._lgm_models[key] = model
         d1 = descs1.squeeze(0) if descs1.dim() == 2 else descs1
         d2 = descs2.squeeze(0) if descs2.dim() == 2 else descs2
         with th.no_grad():
-            return self.lgm_model(
+            return model(
                 d1,
                 d2,
                 lafs1,
@@ -1772,6 +1794,21 @@ class BaseMatcher(ABC):
                 hw1=hw1,
                 hw2=hw2
             )
+
+    def unload_model(self):
+        """Drop every loaded network so the next detector starts with free GPU
+        memory (instances are built one at a time, see _iter_matchers)."""
+        released = False
+        for k, v in list(vars(self).items()):
+            if isinstance(v, th.nn.Module):
+                setattr(self, k, None)
+                released = True
+        if self._lgm_models:
+            self._lgm_models.clear()
+            released = True
+        if released:
+            safe_cuda_empty_cache()
+            gc.collect()
 
     def _detector_needs_inpaint(self) -> bool:
         return False  # default: no inpainting
@@ -1793,29 +1830,56 @@ class DiskBasedMatcher(BaseMatcher):
             all_matches = []
             start = time.time()
 
-            for matcher_name in self.selected_matchers():
-                if matcher_name == 'smnn':
-                    for thr in self.config.smnn_thresholds:
-                        matches = self._process_windows_from_disk(
-                            nisar_src, s1_src, pair, strategy, matcher_name, thr
-                        )
-                        all_matches.extend(matches)
-                else:
-                    matches = self._process_windows_from_disk(
-                        nisar_src, s1_src, pair, strategy, matcher_name, None
-                    )
-                    all_matches.extend(matches)
+            for matcher_name, matcher_param in self.matcher_runs():
+                matches = self._process_windows_from_disk(
+                    nisar_src, s1_src, pair, strategy, matcher_name, matcher_param
+                )
+                all_matches.extend(matches)
 
             elapsed = time.time() - start
             print(f"{self.get_filename_prefix()}: {len(all_matches)} match-sets in {elapsed:.2f}s")
             return all_matches
 
+    def matcher_runs(self) -> List[Tuple[str, object]]:
+        """(matcher, parameter) for every matching pass of this detector
+        variant: one per SMNN threshold, one per LightGlue / AdaLAM parameter
+        combination (from matcher_grid), one for anything else."""
+        runs: List[Tuple[str, object]] = []
+        for m in self.selected_matchers():
+            if m == 'smnn':
+                runs += [('smnn', t) for t in self.config.smnn_thresholds]
+            elif self.matcher_grid.get(m):
+                grid = self.matcher_grid[m]
+                keys = list(grid)
+                for combo in itertools.product(*[grid[k] for k in keys]):
+                    runs.append((m, dict(zip(keys, combo))))
+            else:
+                runs.append((m, None))
+        return runs
+
+    def _matcher_param_str(self, matcher_name: str, param) -> str:
+        """File-name token for a matcher parameter ('' = defaults)."""
+        if matcher_name == 'smnn':
+            return f'{param}'
+        if isinstance(param, dict) and param:
+            specs = {sp.name.split('.', 1)[1]: sp
+                     for sp in detector_param_specs(self.registry_name or self.get_detector_name())
+                     if sp.scope == matcher_name}
+            toks = [f'{specs[k].token}{param_token_value(v)}' for k, v in param.items()
+                    if k in specs and v != specs[k].default]
+            return '-'.join(toks)
+        return ''
+
     def selected_matchers(self) -> List[str]:
-        """Supported matchers, narrowed by config.detector_matchers."""
+        """Supported matchers, narrowed by config.detector_matchers (keyed by
+        the registry name the user selected)."""
         supported = self.get_available_matchers()
-        wanted = (self.config.detector_matchers or {}).get(self.get_filename_prefix())
-        if wanted is None:
-            wanted = (self.config.detector_matchers or {}).get(self.get_detector_name())
+        dm = self.config.detector_matchers or {}
+        wanted = None
+        for key in (self.registry_name, self.get_filename_prefix(), self.get_detector_name()):
+            if key and key in dm:
+                wanted = dm[key]
+                break
         if not wanted:
             return supported
         bad = [m for m in wanted if m not in supported]
@@ -1951,8 +2015,8 @@ class DiskBasedMatcher(BaseMatcher):
         s1_nodata = s1_src.nodata if s1_src.nodata is not None else metadata.get('s1_nodata', 0)
         windows = strategy['windows']
         n_err = 0
-        label = f"{self.get_filename_prefix()}/{matcher_name}" + (
-            f"@{matcher_param}" if matcher_param is not None else '')
+        pstr = self._matcher_param_str(matcher_name, matcher_param) if matcher_param is not None else ''
+        label = f"{self.get_filename_prefix()}/{matcher_name}" + (f"@{pstr}" if pstr else '')
 
         for idx, (wx, wy, sx, sy) in enumerate(windows):
             try:
@@ -2091,15 +2155,17 @@ class DiskBasedMatcher(BaseMatcher):
             # ── Match ────────────────────────────────────────────────────────
             with th.no_grad():
                 if matcher_name == 'ada':
-                    _, idxs = self.match_adalam(descs1, descs2, lafs1, lafs2, hw1, hw2)
-                    match_param_str = ''
+                    _, idxs = self.match_adalam(descs1, descs2, lafs1, lafs2, hw1, hw2,
+                                                overrides=matcher_param)
+                    match_param_str = self._matcher_param_str('ada', matcher_param)
                 elif matcher_name == 'smnn':
                     _, idxs = self.match_smnn(descs1, descs2, matcher_param)
                     match_param_str = f'{matcher_param}'
                 elif matcher_name == 'lgm':
                     _, idxs = self.match_lgm(descs1, descs2, lafs1, lafs2, hw1, hw2,
-                                             feature_name=self._lightglue_feature_name())
-                    match_param_str = ''
+                                             feature_name=self._lightglue_feature_name(),
+                                             params=matcher_param)
+                    match_param_str = self._matcher_param_str('lgm', matcher_param)
                 else:
                     raise ValueError(f'Unknown matcher: {matcher_name}')
 
@@ -2268,18 +2334,24 @@ class DiskBasedMatcher(BaseMatcher):
 # DETECTOR IMPLEMENTATIONS
 # =============================================================================
 class SIFTMatcher(DiskBasedMatcher):
-    def __init__(self, config: PipelineConfig):
+    def __init__(self, config: PipelineConfig, rootsift: bool = True, upright: bool = True,
+                 score_threshold: float = 0.0):
         super().__init__(config)
+        self.rootsift = rootsift
+        self.upright = upright
+        self.score_threshold = score_threshold
         self.sift = None
 
     def detect_and_describe(self, img1: th.Tensor, img2: th.Tensor) -> Tuple:
         if self.sift is None:
-            print('SIFT: Initializing...')
+            print(f'SIFT: Initializing (rootsift={self.rootsift}, upright={self.upright})...')
+            extra = {'score_threshold': self.score_threshold} if self.score_threshold else {}
             self.sift = KF.SIFTFeature(
                 self.config.num_features,
-                upright=True,
-                rootsift=True,
-                device=self.device
+                upright=self.upright,
+                rootsift=self.rootsift,
+                device=self.device,
+                **extra
             )
         lafs1, _, descs1 = self.sift(img1)
         lafs2, _, descs2 = self.sift(img2)
@@ -2334,7 +2406,7 @@ class DISKMatcher(DiskBasedMatcher):
     def get_available_matchers(self) -> List[str]:
         return ['smnn', 'lgm', 'ada']
 
-    def get_filename_prefix(self) -> str:
+    def _prefix_base(self) -> str:
         return f'disk_{self.checkpoint}'
 
     def _lightglue_feature_name(self) -> str:
@@ -2390,15 +2462,16 @@ class DeDoDeMatcher(DiskBasedMatcher):
     def get_available_matchers(self) -> List[str]:
         return ['smnn']
 
-    def get_filename_prefix(self) -> str:
+    def _prefix_base(self) -> str:
         return f'dedode_{self.detector_weights}_{self.descriptor_weights}'
 
     def _detector_needs_inpaint(self) -> bool:
         return True  # VGG-19 + DINOv2 both pooling-sensitive to boundaries
 
 class LoFTRMatcher(DiskBasedMatcher):
-    def __init__(self, config: PipelineConfig):
+    def __init__(self, config: PipelineConfig, pretrained: str = 'outdoor'):
         super().__init__(config)
+        self.pretrained = pretrained
         self.loftr = None
 
         # Use your custom config from the test script
@@ -2463,8 +2536,8 @@ class LoFTRMatcher(DiskBasedMatcher):
             t2_padded = th.nn.functional.pad(t2, (0, (8 - w2 % 8) % 8, 0, (8 - h2 % 8) % 8))
 
             if self.loftr is None:
-                print('LoFTR: Initializing model...')
-                self.loftr = KF.LoFTR(pretrained='outdoor', config=self.konfig).eval().to(self.device)
+                print(f'LoFTR: Initializing model ({self.pretrained} weights)...')
+                self.loftr = KF.LoFTR(pretrained=self.pretrained, config=self.konfig).eval().to(self.device)
                 from kornia.feature.loftr.utils.superglue import log_optimal_transport
                 self.loftr.coarse_matching.match_type = 'sinkhorn'
                 self.loftr.coarse_matching.bin_score = th.nn.Parameter(
@@ -2548,9 +2621,12 @@ class LoFTRMatcher(DiskBasedMatcher):
 
 class ALIKEDMatcher(DiskBasedMatcher):
     def __init__(self, config: PipelineConfig,
-                 model_name: str = 'aliked-n16'):
+                 model_name: str = 'aliked-n16', detection_threshold: float = 0.2,
+                 nms_radius: int = 2):
         super().__init__(config)
         self.model_name = model_name
+        self.detection_threshold = detection_threshold
+        self.nms_radius = nms_radius
         self.aliked = None
 
     def detect_and_describe(self, img1: th.Tensor, img2: th.Tensor) -> Tuple:
@@ -2562,7 +2638,8 @@ class ALIKEDMatcher(DiskBasedMatcher):
             self.aliked = KF.ALIKED.from_pretrained(
                 model_name=self.model_name,
                 max_num_keypoints=self.config.num_features,
-                detection_threshold=0.2,
+                detection_threshold=self.detection_threshold,
+                nms_radius=self.nms_radius,
                 device=self.device,
             ).eval().to(self.device)
 
@@ -2592,7 +2669,7 @@ class ALIKEDMatcher(DiskBasedMatcher):
     def get_available_matchers(self) -> List[str]:
         return ['smnn', 'lgm']   # LightGlue natively supports aliked
 
-    def get_filename_prefix(self) -> str:
+    def _prefix_base(self) -> str:
         return f'aliked_{self.model_name}'
 
     def _lightglue_feature_name(self) -> str:
@@ -2642,16 +2719,19 @@ class XFeatMatcher(DiskBasedMatcher):
 class KeyNetMatcher(DiskBasedMatcher):
     """kornia KeyNet + AffNet + HardNet (upright)."""
 
-    def __init__(self, config: PipelineConfig):
+    def __init__(self, config: PipelineConfig, upright: bool = True, score_threshold: float = 0.0):
         super().__init__(config)
+        self.upright = upright
+        self.score_threshold = score_threshold
         self.feat = None
 
     def detect_and_describe(self, img1: th.Tensor, img2: th.Tensor) -> Tuple:
         if self.feat is None:
-            print('KeyNet: Loading KeyNet-AffNet-HardNet...')
+            print(f'KeyNet: Loading KeyNet-AffNet-HardNet (upright={self.upright})...')
+            extra = {'score_threshold': self.score_threshold} if self.score_threshold else {}
             self.feat = KF.KeyNetAffNetHardNet(
-                num_features=self.config.num_features, upright=True,
-                device=self.device).eval()
+                num_features=self.config.num_features, upright=self.upright,
+                device=self.device, **extra).eval()
         lafs1, _, descs1 = self.feat(img1.float())
         lafs2, _, descs2 = self.feat(img2.float())
         return lafs1, descs1, lafs2, descs2
@@ -3429,39 +3509,122 @@ class ChipConsensusSelector:
 # =============================================================================
 # DETECTOR REGISTRY
 # =============================================================================
-# kornia implementations. They take priority: an external bridge (imcui) may
-# only register algorithms that are NOT listed here -- see register_detector.
-KORNIA_DETECTORS: Dict[str, Callable[['PipelineConfig'], DiskBasedMatcher]] = {
-    'sift':          lambda c: SIFTMatcher(c),
-    'disk_depth':    lambda c: DISKMatcher(c, checkpoint='depth'),
-    'disk_epipolar': lambda c: DISKMatcher(c, checkpoint='epipolar'),
-    'dedode':        lambda c: DeDoDeMatcher(c, detector_weights='L-C4', descriptor_weights='G-C4'),
-    'aliked':        lambda c: ALIKEDMatcher(c, model_name='aliked-n16'),
-    'xfeat':         lambda c: XFeatMatcher(c),
-    'xfeatstar':     lambda c: XFeatStarMatcher(c),
-    'keynet':        lambda c: KeyNetMatcher(c),
-    'loftr':         lambda c: LoFTRMatcher(c),
+@dataclass
+class ParamSpec:
+    """One user-settable parameter of a detector or of a matcher it uses.
+
+    scope 'detector' parameters change the model: each combination of values
+    runs as its own named variant. scope 'lgm' / 'ada' parameters change a
+    matcher: each combination is an extra matching pass of the same variant.
+    token is the short tag written into names when the value is not the
+    default ('' when the class's own prefix already encodes the value)."""
+    name: str
+    kind: str                         # 'choice' | 'bool' | 'float' | 'int' | 'str'
+    default: object
+    choices: Optional[List] = None
+    token: str = ''
+    scope: str = 'detector'           # 'detector' | 'lgm' | 'ada'
+    label: str = ''
+    help: str = ''
+
+    def as_dict(self) -> Dict:
+        return asdict(self)
+
+
+_PC = PipelineConfig  # dataclass defaults for the AdaLAM settings below
+LGM_PARAMS = [
+    ParamSpec('lgm.filter_threshold', 'float', 0.1, token='lf', scope='lgm',
+              label='LightGlue filter threshold', help='minimum match confidence (kornia default 0.1)'),
+    ParamSpec('lgm.depth_confidence', 'float', 0.95, token='ld', scope='lgm',
+              label='LightGlue depth confidence', help='early-stop confidence; -1 disables early stopping'),
+    ParamSpec('lgm.width_confidence', 'float', 0.99, token='lw', scope='lgm',
+              label='LightGlue width confidence', help='point-pruning confidence; -1 disables pruning'),
+]
+ADA_PARAMS = [
+    ParamSpec('ada.search_expansion', 'int', _PC.adalam_search_expansion, token='as', scope='ada',
+              label='AdaLAM search expansion', help='neighbourhood radius multiplier'),
+    ParamSpec('ada.ransac_iters', 'int', _PC.adalam_ransac_iters, token='ai', scope='ada',
+              label='AdaLAM RANSAC iterations'),
+    ParamSpec('ada.min_confidence', 'int', _PC.adalam_min_confidence, token='ac', scope='ada',
+              label='AdaLAM min confidence', help='minimum inlier confidence per neighbourhood'),
+    ParamSpec('ada.min_inliers', 'int', 6, token='am', scope='ada', label='AdaLAM min inliers'),
+    ParamSpec('ada.refit', 'bool', _PC.adalam_refit, token='ar', scope='ada', label='AdaLAM refit'),
+]
+
+DETECTOR_PARAMS: Dict[str, List[ParamSpec]] = {
+    'sift': [
+        ParamSpec('rootsift', 'bool', True, token='rs', label='RootSIFT descriptors'),
+        ParamSpec('upright', 'bool', True, token='up', label='Upright (no orientation)'),
+        ParamSpec('score_threshold', 'float', 0.0, token='st', label='Response threshold'),
+    ],
+    'disk': [
+        ParamSpec('checkpoint', 'choice', 'depth', ['depth', 'epipolar'], label='Weights'),
+    ] + LGM_PARAMS + ADA_PARAMS,
+    'dedode': [
+        ParamSpec('detector_weights', 'choice', 'L-C4', ['L-upright', 'L-C4', 'L-SO2', 'L-C4-v2'],
+                  label='Detector weights'),
+        ParamSpec('descriptor_weights', 'choice', 'G-C4',
+                  ['B-upright', 'B-C4', 'B-SO2', 'G-upright', 'G-C4', 'G-SO2'],
+                  label='Descriptor weights', help='G-* load a 1.2 GB DINOv2-L backbone'),
+    ],
+    'aliked': [
+        ParamSpec('model_name', 'choice', 'aliked-n16',
+                  ['aliked-t16', 'aliked-n16', 'aliked-n16rot', 'aliked-n32'], label='Model'),
+        ParamSpec('detection_threshold', 'float', 0.2, token='dt', label='Detection threshold'),
+        ParamSpec('nms_radius', 'int', 2, token='nms', label='NMS radius'),
+    ] + LGM_PARAMS,
+    'xfeat': [
+        ParamSpec('detection_threshold', 'float', 0.05, token='dt', label='Detection threshold'),
+    ],
+    'xfeatstar': [],
+    'keynet': [
+        ParamSpec('upright', 'bool', True, token='up', label='Upright (no orientation)'),
+        ParamSpec('score_threshold', 'float', 0.0, token='st', label='Response threshold'),
+    ] + ADA_PARAMS,
+    'loftr': [
+        ParamSpec('pretrained', 'choice', 'outdoor', ['outdoor', 'indoor', 'indoor_new'],
+                  token='w', label='Weights'),
+    ],
+}
+
+# kornia implementations, built with the detector-scope parameters as kwargs.
+# They take priority: an external bridge (imcui) may only register algorithms
+# that are NOT listed here -- see register_detector.
+KORNIA_DETECTORS: Dict[str, Callable[['PipelineConfig', Dict], DiskBasedMatcher]] = {
+    'sift':      lambda c, kw: SIFTMatcher(c, **kw),
+    'disk':      lambda c, kw: DISKMatcher(c, **kw),
+    'dedode':    lambda c, kw: DeDoDeMatcher(c, **kw),
+    'aliked':    lambda c, kw: ALIKEDMatcher(c, **kw),
+    'xfeat':     lambda c, kw: XFeatMatcher(c, **kw),
+    'xfeatstar': lambda c, kw: XFeatStarMatcher(c),
+    'keynet':    lambda c, kw: KeyNetMatcher(c, **kw),
+    'loftr':     lambda c, kw: LoFTRMatcher(c, **kw),
 }
 # Matchers each kornia detector supports (for GUIs; the classes are the truth).
 KORNIA_MATCHERS: Dict[str, List[str]] = {
-    'sift': ['smnn'], 'disk_depth': ['smnn', 'lgm', 'ada'],
-    'disk_epipolar': ['smnn', 'lgm', 'ada'], 'dedode': ['smnn'],
+    'sift': ['smnn'], 'disk': ['smnn', 'lgm', 'ada'], 'dedode': ['smnn'],
     'aliked': ['smnn', 'lgm'], 'xfeat': ['smnn'], 'xfeatstar': ['internal'],
     'keynet': ['smnn', 'ada'], 'loftr': ['loftr_internal'],
 }
 # Algorithm families kornia covers; an external detector naming one of these
-# is refused (e.g. imcui 'disk-lightglue' -> use kornia 'disk_depth' + 'lgm').
+# is refused (e.g. imcui 'disk-lightglue' -> use kornia 'disk' + 'lgm').
 KORNIA_FAMILIES = {'sift', 'rootsift', 'disk', 'dedode', 'aliked', 'xfeat',
                    'xfeat_dense', 'xfeatstar', 'keynet', 'loftr'}
-DETECTOR_ALIASES = {'disk': ['disk_depth', 'disk_epipolar']}
+# Older names -> (registry name, fixed parameters).
+DETECTOR_ALIASES: Dict[str, Tuple[str, Dict[str, List]]] = {
+    'disk_depth': ('disk', {'checkpoint': ['depth']}),
+    'disk_epipolar': ('disk', {'checkpoint': ['epipolar']}),
+}
 
 EXTERNAL_DETECTORS: Dict[str, Dict] = {}
 
 
 def register_detector(name: str, factory: Callable, families=(), source: str = 'external',
-                      matchers: Optional[List[str]] = None) -> bool:
-    """Register a non-kornia detector. Refused (returns False) when kornia
-    already provides the algorithm (by name or by any of `families`)."""
+                      matchers: Optional[List[str]] = None,
+                      params: Optional[List[ParamSpec]] = None) -> bool:
+    """Register a non-kornia detector. factory(config, params_dict) builds one
+    variant. Refused (returns False) when kornia already provides the
+    algorithm (by name or by any of `families`)."""
     fam = {f.lower() for f in families}
     if name in KORNIA_DETECTORS or fam & KORNIA_FAMILIES:
         covered = sorted(fam & KORNIA_FAMILIES) or [name]
@@ -3469,25 +3632,158 @@ def register_detector(name: str, factory: Callable, families=(), source: str = '
               f'is provided by kornia')
         return False
     EXTERNAL_DETECTORS[name] = {'factory': factory, 'source': source,
-                                'matchers': matchers or ['internal']}
+                                'matchers': matchers or ['internal'], 'params': list(params or [])}
     return True
 
 
+def resolve_detector_name(name: str) -> Tuple[str, Dict[str, List]]:
+    """(registry name, fixed parameters) for a selectable or legacy name."""
+    if name in DETECTOR_ALIASES:
+        return DETECTOR_ALIASES[name]
+    if name in EXTERNAL_DETECTORS:
+        return name, {}
+    return name.lower(), {}
+
+
+def detector_param_specs(name: str) -> List[ParamSpec]:
+    base, _ = resolve_detector_name(name) if name else (name, {})
+    if base in DETECTOR_PARAMS:
+        return DETECTOR_PARAMS[base]
+    return list(EXTERNAL_DETECTORS.get(base, {}).get('params', []))
+
+
+def param_token_value(v) -> str:
+    """Value as a file-name-safe token: True->1, 0.25->0p25, -1->m1."""
+    if isinstance(v, bool):
+        return '1' if v else '0'
+    if isinstance(v, float):
+        return f'{v:g}'.replace('-', 'm').replace('.', 'p').replace('+', '')
+    if isinstance(v, int):
+        return str(v).replace('-', 'm')
+    return re.sub(r'[^A-Za-z0-9]', '', str(v))[:16] or 'x'
+
+
+def _coerce(sp: ParamSpec, v):
+    if sp.kind == 'bool':
+        if isinstance(v, str):
+            low = v.strip().lower()
+            if low not in ('1', '0', 'true', 'false', 'yes', 'no', 'on', 'off'):
+                raise ValueError(f'{sp.name}: {v!r} is not a yes/no value')
+            return low in ('1', 'true', 'yes', 'on')
+        return bool(v)
+    if sp.kind == 'int':
+        f = float(v)
+        if f != int(f):
+            raise ValueError(f'{sp.name}: {v!r} is not a whole number')
+        return int(f)
+    if sp.kind == 'float':
+        return float(v)
+    if sp.kind == 'choice':
+        if v not in (sp.choices or []):
+            raise ValueError(f'{sp.name}: {v!r} is not one of {sp.choices}')
+        return v
+    return str(v)
+
+
+def normalize_param_values(name: str, params: Optional[Dict]) -> Dict[str, List]:
+    """Validate and type user values: {param: [values]} (scalars allowed).
+    Raises ValueError naming the detector and parameter."""
+    specs = {sp.name: sp for sp in detector_param_specs(name)}
+    out: Dict[str, List] = {}
+    for key, vals in (params or {}).items():
+        if key not in specs:
+            raise ValueError(f'{name}: unknown parameter {key!r}; known: {sorted(specs) or "none"}')
+        vals = list(vals) if isinstance(vals, (list, tuple)) else [vals]
+        if not vals:
+            continue
+        try:
+            typed = [_coerce(specs[key], v) for v in vals]
+        except (TypeError, ValueError) as e:
+            raise ValueError(f'{name}: {e}') from None
+        out[key] = list(dict.fromkeys(typed))
+    return out
+
+
+def expand_variants(name: str, params: Optional[Dict] = None) -> List[Tuple[Dict, Dict, str]]:
+    """[(detector kwargs, matcher grid, name suffix)] -- one per combination of
+    detector-scope values. Matcher-scope values stay as lists in the grid."""
+    base, fixed = resolve_detector_name(name)
+    vals = normalize_param_values(base, {**(params or {}), **fixed})
+    specs = detector_param_specs(base)
+    det = [sp for sp in specs if sp.scope == 'detector']
+    axes = [vals.get(sp.name, [sp.default]) for sp in det]
+    grid: Dict[str, Dict[str, List]] = {}
+    for sp in specs:
+        if sp.scope != 'detector':
+            grid.setdefault(sp.scope, {})[sp.name.split('.', 1)[1]] = vals.get(sp.name, [sp.default])
+    out = []
+    for combo in (itertools.product(*axes) if det else [()]):
+        kwargs = {sp.name: v for sp, v in zip(det, combo)}
+        toks = [f'{sp.token}{param_token_value(v)}' for sp, v in zip(det, combo)
+                if sp.token and v != sp.default]
+        out.append((kwargs, grid, ('-' + '-'.join(toks)) if toks else ''))
+    return out
+
+
+def count_runs(name: str, params: Optional[Dict], matchers: List[str], n_smnn: int) -> Tuple[int, int]:
+    """(detector variants, matching passes per variant) for preflight."""
+    variants = expand_variants(name, params)
+    grid = variants[0][1] if variants else {}
+    passes = 0
+    for m in matchers:
+        if m == 'smnn':
+            passes += n_smnn
+        elif grid.get(m):
+            n = 1
+            for v in grid[m].values():
+                n *= len(v)
+            passes += n
+        else:
+            passes += 1
+    return len(variants), passes
+
+
 def available_detectors() -> List[Dict]:
-    out = [{'name': n, 'source': 'kornia', 'matchers': KORNIA_MATCHERS.get(n, [])}
+    out = [{'name': n, 'source': 'kornia', 'matchers': KORNIA_MATCHERS.get(n, []),
+            'params': [sp.as_dict() for sp in DETECTOR_PARAMS.get(n, [])]}
            for n in KORNIA_DETECTORS]
-    out += [{'name': n, 'source': d['source'], 'matchers': d['matchers']}
+    out += [{'name': n, 'source': d['source'], 'matchers': d['matchers'],
+             'params': [sp.as_dict() for sp in d.get('params', [])]}
             for n, d in EXTERNAL_DETECTORS.items()]
     return out
 
 
-def build_detector(name: str, config: 'PipelineConfig') -> DiskBasedMatcher:
-    if name in KORNIA_DETECTORS:
-        return KORNIA_DETECTORS[name](config)
-    if name in EXTERNAL_DETECTORS:
-        return EXTERNAL_DETECTORS[name]['factory'](config)
-    raise ValueError(f'Unknown detector {name!r}. Available: '
-                     f'{[d["name"] for d in available_detectors()]}')
+def build_variants(name: str, config: 'PipelineConfig',
+                   params: Optional[Dict] = None) -> List[DiskBasedMatcher]:
+    """One matcher instance per detector-parameter combination. Models load
+    lazily, so building is cheap; run and release them one at a time."""
+    return list(iter_variants(name, config, params))
+
+
+def iter_variants(name: str, config: 'PipelineConfig', params: Optional[Dict] = None):
+    base, _ = resolve_detector_name(name)
+    if params is None:
+        params = (config.detector_params or {}).get(name)
+        if params is None and base != name:
+            params = (config.detector_params or {}).get(base)
+    if base in KORNIA_DETECTORS:
+        factory = KORNIA_DETECTORS[base]
+    elif base in EXTERNAL_DETECTORS:
+        factory = EXTERNAL_DETECTORS[base]['factory']
+    else:
+        raise ValueError(f'Unknown detector {name!r}. Available: '
+                         f'{[d["name"] for d in available_detectors()]}')
+    for kwargs, grid, suffix in expand_variants(name, params):
+        m = factory(config, dict(kwargs))
+        m.registry_name = base
+        m.variant_suffix = suffix
+        m.matcher_grid = {k: dict(v) for k, v in grid.items()}
+        yield m
+
+
+def build_detector(name: str, config: 'PipelineConfig', params: Optional[Dict] = None) -> DiskBasedMatcher:
+    """The first variant of a detector (defaults unless params say otherwise)."""
+    return next(iter_variants(name, config, params))
 
 
 # =============================================================================
@@ -3526,11 +3822,21 @@ class AutoMatchPipeline:
         d, tag, _ = self._reference_for(pol)
         return d, tag
 
-    def _build_matchers(self, detector_types: List[str]) -> List[DiskBasedMatcher]:
-        names = []
+    def _iter_matchers(self, detector_types: List[str]):
+        """Every detector variant, built one at a time so only one set of
+        model weights is resident: the caller unloads each before the next
+        is constructed. Duplicate names (e.g. 'disk' and 'disk_depth') run once."""
+        seen = set()
         for d in detector_types:
-            names += DETECTOR_ALIASES.get(d.lower(), [d if d in EXTERNAL_DETECTORS else d.lower()])
-        return [build_detector(n, self.config) for n in dict.fromkeys(names)]
+            for m in iter_variants(d, self.config):
+                key = m.get_filename_prefix()
+                if key in seen:
+                    continue
+                seen.add(key)
+                yield m
+
+    def _build_matchers(self, detector_types: List[str]) -> List[DiskBasedMatcher]:
+        return list(self._iter_matchers(detector_types))
 
     # ── one channel ──────────────────────────────────────────────────────────
     def _prepare_pairs(self, channel: str) -> Tuple[List[Dict], str, str]:
@@ -3577,7 +3883,7 @@ class AutoMatchPipeline:
         matcher_free = (cfg.coarse_method or 'auto').lower() in ('none', 'manual', 'phasecorr')
 
         run_records = []
-        for matcher in self._build_matchers(detector_types):
+        for matcher in self._iter_matchers(detector_types):
             tag = matcher.get_filename_prefix()
             print('-' * 80)
             print(f'[{pol}] Running {tag}')
@@ -3607,6 +3913,11 @@ class AutoMatchPipeline:
                 safe_cuda_empty_cache()
 
                 raw_dir = os.path.join(pol_out_dir, f'raw_matches_{suffix}_{tag}')
+                # A rerun replaces this detector's outputs: files left by an
+                # earlier run (other RANSAC / matcher settings) would otherwise
+                # be read back into this run's statistics and consensus.
+                for stage in ('raw_matches', 'filtered', 'statistics', 'final'):
+                    shutil.rmtree(os.path.join(pol_out_dir, f'{stage}_{suffix}_{tag}'), ignore_errors=True)
                 matcher.save_matches_to_csv(all_match_data, raw_dir)
                 pd.DataFrame(offsets).to_csv(os.path.join(raw_dir, 'COARSE_OFFSETS.csv'), index=False)
 
@@ -3656,6 +3967,8 @@ class AutoMatchPipeline:
     def run(self, scene_dir: str, detector_types: List[str] = None):
         if detector_types is None:
             detector_types = ['disk', 'sift']
+        for d in detector_types:  # fail before any preprocessing on a bad parameter
+            expand_variants(d, (self.config.detector_params or {}).get(d))
         self.scene = InputScene(scene_dir, self.config)
         available = self.scene.channels
         wanted = self.config.pols or available

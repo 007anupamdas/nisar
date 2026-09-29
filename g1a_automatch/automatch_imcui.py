@@ -16,6 +16,7 @@ set, and HF_HUB_OFFLINE is set when that folder exists, so an offline machine
 never tries the network.
 """
 
+import copy
 import gc
 import os
 from typing import Dict, List, Optional, Tuple
@@ -76,17 +77,75 @@ def algorithm_family(conf: Dict, dense: bool) -> List[str]:
     return [f.lower() for f in fams if f]
 
 
+# Keys ImageMatchingAPI overwrites from its own arguments (imcui api/core.py
+# _updata_config): they are offered as api.detect_threshold /
+# api.match_threshold instead, and the keypoint budget follows num_features.
+# 'name' / 'model_name' / 'features' select the weights and their pairing.
+_HIDDEN_KEYS = {
+    'feature': {'name', 'model_name', 'max_keypoints', 'keypoint_threshold',
+                'max_num_keypoints', 'detection_threshold'},
+    'matcher': {'name', 'model_name', 'features', 'match_threshold'},
+}
+
+
+def _token_for(section: str, key: str, used: set) -> str:
+    base = (section[0] + ''.join(p[0] for p in key.split('_') if p))[:4].lower()
+    tok, i = base, 2
+    while tok in used or tok in ('kt', 'mt'):
+        tok, i = f'{base}{i}', i + 1
+    used.add(tok)
+    return tok
+
+
+def imcui_param_specs(conf: Dict, dense: bool) -> List[E.ParamSpec]:
+    """Editable parameters of one catalog configuration, read from the conf the
+    installed imcui itself provides (so they always match its version)."""
+    specs: List[E.ParamSpec] = []
+    if not dense:
+        specs.append(E.ParamSpec('api.detect_threshold', 'float', 0.015, token='kt',
+                                 label='Detection threshold',
+                                 help="imcui's keypoint_threshold for the detector"))
+    specs.append(E.ParamSpec('api.match_threshold', 'float', 0.2, token='mt',
+                             label='Match threshold', help="imcui's match_threshold"))
+    used: set = set()
+    for section in (('matcher',) if dense else ('feature', 'matcher')):
+        model = (conf.get(section) or {}).get('model') or {}
+        for key, val in model.items():
+            if key in _HIDDEN_KEYS[section] or isinstance(val, (dict, list, tuple)) or val is None:
+                continue
+            kind = ('bool' if isinstance(val, bool) else 'int' if isinstance(val, int)
+                    else 'float' if isinstance(val, float) else 'str')
+            specs.append(E.ParamSpec(f'{section}.{key}', kind, val, token=_token_for(section, key, used),
+                                     label=f'{section} · {key}'))
+    return specs
+
+
 class IMWMatcher(E.DenseWindowMatcher):
     """One imcui ImageMatchingAPI configuration as a DenseWindowMatcher."""
 
     matcher_token = 'internal'
 
-    def __init__(self, config: E.PipelineConfig, imw_tag: str, imw_conf: Dict, dense: bool):
+    def __init__(self, config: E.PipelineConfig, imw_tag: str, imw_conf: Dict, dense: bool,
+                 overrides: Optional[Dict] = None):
         super().__init__(config)
         if '_' in imw_tag:
             raise ValueError(f"imw_tag must not contain '_' (got '{imw_tag}')")
+        overrides = dict(overrides or {})
+        conf = copy.deepcopy(imw_conf)
+        # 'dense' is what imcui 0.0.x reads; newer imcui reads 'standalone'.
+        conf['dense'] = conf['standalone'] = bool(dense)
+        self.detect_threshold = float(overrides.pop('api.detect_threshold', config.imw_detect_threshold))
+        self.match_threshold = float(overrides.pop('api.match_threshold', config.imw_match_threshold))
+        for key, val in overrides.items():
+            section, k = key.split('.', 1)
+            conf.setdefault(section, {}).setdefault('model', {})[k] = val
+        # Keep the conf in step with what the API forces, whichever version.
+        if not dense and 'feature' in conf:
+            conf['feature'].setdefault('model', {})['keypoint_threshold'] = self.detect_threshold
+        if 'matcher' in conf:
+            conf['matcher'].setdefault('model', {})['match_threshold'] = self.match_threshold
         self.imw_tag = imw_tag
-        self.imw_conf = imw_conf
+        self.imw_conf = conf
         self.dense = dense
         self.api = None
         self._load_failed = False
@@ -95,7 +154,7 @@ class IMWMatcher(E.DenseWindowMatcher):
     def get_detector_name(self) -> str:
         return f'imw-{self.imw_tag}'
 
-    def get_filename_prefix(self) -> str:
+    def _prefix_base(self) -> str:
         return f'imw-{self.imw_tag}'
 
     def _detector_needs_inpaint(self) -> bool:
@@ -111,9 +170,9 @@ class IMWMatcher(E.DenseWindowMatcher):
             self.api = _api_class()(
                 conf=self.imw_conf,
                 device=str(self.device),
-                detect_threshold=getattr(self.config, 'imw_detect_threshold', 0.015),
+                detect_threshold=self.detect_threshold,
                 max_keypoints=self.config.num_features,
-                match_threshold=getattr(self.config, 'imw_match_threshold', 0.2),
+                match_threshold=self.match_threshold,
             )
             return True
         except Exception as e:
@@ -210,8 +269,9 @@ def register_imcui_detectors(weights_cache: Optional[str] = None) -> Dict[str, L
         if covered:
             skipped.append((tag, f'{", ".join(covered)} provided by kornia'))
             continue
-        if E.register_detector(name, (lambda c, t=tag, cf=conf, d=dense: IMWMatcher(c, t, cf, d)),
-                               families=fams, source='imcui', matchers=['internal']):
+        if E.register_detector(name, (lambda c, kw, t=tag, cf=conf, d=dense: IMWMatcher(c, t, cf, d, kw)),
+                               families=fams, source='imcui', matchers=['internal'],
+                               params=imcui_param_specs(conf, dense)):
             registered.append(name)
     for tag, why in skipped:
         print(f'[imcui] {tag}: not offered ({why})')
