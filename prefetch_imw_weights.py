@@ -66,16 +66,9 @@ def _dummy_pair(size: int = 512):
     return rgb0, rgb1
 
 
-def main() -> int:
-    device = os.environ.get('PREFETCH_DEVICE', 'cpu')
-    print(f'[prefetch] device={device}')
-    print(f'[prefetch] HF_HOME={os.environ.get("HF_HOME", "(default ~/.cache/huggingface)")}')
-    print(f'[prefetch] TORCH_HOME={os.environ.get("TORCH_HOME", "(default ~/.cache/torch)")}')
-
-    # Behind a corporate TLS-inspection proxy, torch.hub's plain-urllib calls
-    # (used by xfeat etc.) fail cert verification ("self-signed certificate in
-    # certificate chain"). On a TRUSTED internal download box you can disable
-    # verification just for this prefetch. Gated behind an explicit env var.
+def _enable_insecure_ssl():
+    """Behind a corporate TLS-inspection proxy, torch.hub's plain-urllib calls
+    fail cert verification. On a TRUSTED internal box, disable verification."""
     if os.environ.get('PREFETCH_INSECURE_SSL') == '1':
         import ssl
         ssl._create_default_https_context = ssl._create_unverified_context
@@ -84,34 +77,82 @@ def main() -> int:
         print('[prefetch] WARNING: TLS verification DISABLED '
               '(PREFETCH_INSECURE_SSL=1) -- use only on a trusted network.')
 
-    print(f'[prefetch] {len(IMW_CONFIGS)} configs to fetch\n')
 
+def _run_one(tag: str) -> int:
+    """Worker: download + (optionally) forward-pass a single config.
+    Invoked as a subprocess so OOM-kills don't take down the parent."""
+    _enable_insecure_ssl()
+    device = os.environ.get('PREFETCH_DEVICE', 'cpu')
+    skip_forward = os.environ.get('PREFETCH_SKIP_FORWARD') == '1'
+
+    target = None
+    for t, conf, dense in IMW_CONFIGS:
+        if t == tag:
+            target = (t, conf, dense)
+            break
+    if target is None:
+        print(f'[prefetch-worker] tag {tag!r} not found in IMW_CONFIGS')
+        return 2
+
+    _, conf, dense = target
     from imcui.api import ImageMatchingAPI
+    api = ImageMatchingAPI(conf=conf, device=device,
+                           detect_threshold=0.015,
+                           max_keypoints=2048,
+                           match_threshold=0.2)
+    # Forward pass triggers lazy second-stage downloads, but is RAM-hungry on
+    # CPU for RoMa/DKM-family models. Allow opting out.
+    auto_skip = dense and any(k in tag for k in ('roma', 'dkm'))
+    if skip_forward or auto_skip:
+        if auto_skip:
+            print(f'[prefetch-worker] {tag}: skipping forward pass '
+                  '(heavy dense matcher; weights already on disk)')
+        else:
+            print(f'[prefetch-worker] {tag}: PREFETCH_SKIP_FORWARD=1, skipping forward')
+    else:
+        img0, img1 = _dummy_pair()
+        try:
+            _ = api(img0, img1)
+        except Exception as fe:
+            print(f'[prefetch-worker]   (forward pass note: '
+                  f'{type(fe).__name__}: {fe})')
+    return 0
 
-    img0, img1 = _dummy_pair()
+
+def main() -> int:
+    # Worker mode: --one TAG
+    if len(sys.argv) >= 3 and sys.argv[1] == '--one':
+        return _run_one(sys.argv[2])
+
+    device = os.environ.get('PREFETCH_DEVICE', 'cpu')
+    print(f'[prefetch] device={device}')
+    print(f'[prefetch] HF_HOME={os.environ.get("HF_HOME", "(default ~/.cache/huggingface)")}')
+    print(f'[prefetch] TORCH_HOME={os.environ.get("TORCH_HOME", "(default ~/.cache/torch)")}')
+    _enable_insecure_ssl()
+
+    print(f'[prefetch] {len(IMW_CONFIGS)} configs to fetch '
+          '(each in its own subprocess; OOM-kills are isolated)\n')
+
+    import subprocess
+    only = os.environ.get('PREFETCH_ONLY')
+    only_set = set(only.split(',')) if only else None
     ok, failed = [], []
 
-    for tag, conf, dense in IMW_CONFIGS:
+    for tag, _conf, dense in IMW_CONFIGS:
+        if only_set and tag not in only_set:
+            continue
         print('=' * 70)
         print(f'[prefetch] >>> {tag} (dense={dense})')
-        try:
-            api = ImageMatchingAPI(conf=conf, device=device,
-                                   detect_threshold=0.015,
-                                   max_keypoints=2048,
-                                   match_threshold=0.2)
-            # Force a forward pass so any second-stage weights download too.
-            try:
-                _ = api(img0, img1)
-            except Exception as fe:  # forward may fail on CPU for some models
-                print(f'[prefetch]   (forward pass note: {type(fe).__name__}: {fe})')
-                print('[prefetch]   weights likely still downloaded during init.')
-            del api
+        cmd = [sys.executable, os.path.abspath(__file__), '--one', tag]
+        rc = subprocess.call(cmd)
+        if rc == 0:
             print(f'[prefetch] <<< {tag} OK')
             ok.append(tag)
-        except Exception as e:
-            print(f'[prefetch] !!! {tag} FAILED: {type(e).__name__}: {e}')
-            traceback.print_exc()
-            failed.append((tag, f'{type(e).__name__}: {e}'))
+        else:
+            # rc == -9 / 137 == SIGKILL (OOM); rc == 1 == generic failure
+            reason = 'OOM-killed' if rc in (-9, 137) else f'exit={rc}'
+            print(f'[prefetch] !!! {tag} FAILED ({reason})')
+            failed.append((tag, reason))
 
     print('\n' + '=' * 70)
     print(f'[prefetch] DONE. ok={len(ok)} failed={len(failed)}')

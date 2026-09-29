@@ -1,149 +1,193 @@
 #!/usr/bin/env python3
 """
-imcui (image-matching-webui) configuration catalog.
+imcui (image-matching-webui) configuration catalog -- FULL MATRIX edition.
 
-Configs are resolved from imcui's OWN registry (imcui/hloc/configs/{extractors,
-matchers}.py, exposed as extract_features.confs / match_features.confs /
-match_dense.confs) instead of being hand-written here. That guarantees each
-model gets the exact conf the webui itself uses -- critically:
+Instead of hand-building conf dicts (which silently loaded the wrong
+feature-specific weights, e.g. superpoint_lightglue.pth for an ALIKED run),
+this composes each ImageMatchingAPI conf directly from imcui's own validated
+conf tables:
 
-  * the LightGlue confs carry `features` + `model_name` (e.g. disk-lightglue
-    -> disk_lightglue.pth). A bare {'name': 'lightglue'} silently loads the
-    SuperPoint-LightGlue weights, which cannot match DISK/ALIKED/xfeat
-    descriptors.
-  * eloftr wants `model_name: eloftr_outdoor.ckpt` (not weights='outdoor').
-  * roma / dkm / xfeat expect RGB input (grayscale: False), loftr/superpoint
-    expect grayscale.
+    imcui.hloc.extract_features.confs   # sparse detectors
+    imcui.hloc.match_features.confs     # sparse matchers (need a detector)
+    imcui.hloc.match_dense.confs        # end-to-end / dense matchers
 
-This module therefore needs `imcui` importable (both the prefetch box and the
-pipeline box have it). If imcui is missing, IMW_CONFIGS resolves to [] with a
-loud warning instead of crashing the import.
+That guarantees the correct weights + feature pairing for every entry.
 
-Each resolved entry is: (short_tag, conf_dict, dense_flag)
-  short_tag : lower-case, alphanumeric + '-' only.  NO underscores
-              (underscores break the CSV file_id parser in dqe_imw.py).
-  conf_dict : imcui ImageMatchingAPI conf
-              sparse: {'feature': ..., 'matcher': ..., 'dense': False}
-              dense:  {'matcher': ..., 'dense': True}
-  dense     : True for end-to-end dense matchers, False for detector+matcher.
+Each catalog row is (short_tag, conf_dict, dense_flag):
+  short_tag : lower-case, alphanumeric + '-' only. NO underscores/()/spaces
+              (the CSV file_id parser in dqe_imw.py splits on '_').
+  dense     : True  -> end-to-end matcher (no separate detector)
+              False -> detector + matcher
 
-Tuning via environment variables:
-  NISAR_IMW_RESIZE_MAX    long-side cap fed to imcui preprocessing
-                          (default 2048; window chips of 1024 px pass through
-                          unresized, which preserves the 10 m/px geometry)
-  NISAR_IMW_DENSE_MAX_KP  max matches kept by dense matchers (default 4096)
-  NISAR_IMW_ONLY          comma list of tags to keep, e.g. "sp-lg,roma"
+Edit SPARSE_SPECS / DENSE_SPECS below to choose what to run. Comment a row
+out to skip it (saves prefetch + GPU time).
+
+Runtime knobs (environment variables):
+  NISAR_IMW_ONLY        comma list of tags to keep, e.g. "sp-lg,minima-roma"
+  NISAR_IMW_RESIZE_MAX  long-side cap for imcui preprocessing (default 2048).
+                        force_resize is switched off for every entry: several
+                        registry confs (loftr, eloftr, roma, dkm, ...) resize
+                        to a fixed 640x480 / 320x240, which would resample a
+                        1024 px window and lose the 10 m/px geometry.
+If imcui is not importable, IMW_CONFIGS is [] (with a message) instead of the
+import failing, so dqe_imw.py can report it cleanly.
 """
 
 import copy
 import os
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
+
+try:
+    from imcui.hloc import extract_features, match_features, match_dense
+    _IMPORT_ERROR = None
+except ImportError as _e:  # imcui not installed in this environment
+    extract_features = match_features = match_dense = None
+    _IMPORT_ERROR = _e
 
 RESIZE_MAX = int(os.environ.get('NISAR_IMW_RESIZE_MAX', '2048'))
-DENSE_MAX_KP = int(os.environ.get('NISAR_IMW_DENSE_MAX_KP', '4096'))
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Catalog: (tag, extractor conf name | None, matcher conf name)
-#   extractor None  -> dense / end-to-end matcher (match_dense.confs)
-#   extractor given -> sparse pair (extract_features.confs + match_features.confs)
-# Conf names must exist in YOUR installed imcui version; unknown names are
-# skipped with a warning that lists what IS available, so version drift shows
-# up at startup instead of after hours of matching.
-# ─────────────────────────────────────────────────────────────────────────────
-CATALOG: List[Tuple[str, Optional[str], str]] = [
-    # ── Sparse: detector + matcher ───────────────────────────────────────────
-    ('sp-lg',       'superpoint_max', 'superpoint-lightglue'),
-    ('aliked-lg',   'aliked-n16',     'aliked-lightglue'),
-    ('disk-lg',     'disk',           'disk-lightglue'),
-    ('xfeat-lg',    'xfeat',          'xfeat_lightglue'),
-    ('sp-sg',       'superpoint_max', 'superglue'),
-    ('sift-lg',     'sift',           'sift-lightglue'),
-    # ── Dense / end-to-end matchers ──────────────────────────────────────────
-    ('loftr',       None,             'loftr'),
-    ('eloftr',      None,             'eloftr'),
-    ('aspanformer', None,             'aspanformer'),
-    ('roma',        None,             'roma'),
-    ('dkm',         None,             'dkm'),
-    ('xfeat-dense', None,             'xfeat_dense'),
-]
 
 
-def _override_preprocessing(conf_section: Dict) -> None:
-    """Keep native chip resolution: no forced WxH resize, generous long-side
-    cap. grayscale/dfactor stay whatever the model's registry conf says."""
+def _keep_native_resolution(conf_section: Dict) -> None:
     pp = conf_section.setdefault('preprocessing', {})
     pp['force_resize'] = False
     pp['resize_max'] = RESIZE_MAX
 
 
-def build_conf(feature_name: Optional[str], matcher_name: str) -> Tuple[Dict, bool]:
-    """Resolve one catalog row into an ImageMatchingAPI conf dict."""
-    from imcui.hloc import extract_features, match_dense, match_features
+# =============================================================================
+# SPARSE: (tag, extractor_conf_name, sparse_matcher_conf_name)
+# =============================================================================
+# LightGlue is feature-specific -- pair each detector with ITS lightglue conf.
+# Generic matchers (NN-mutual, adalam, Dual-Softmax) work with any descriptor,
+# so they let you sweep detectors that have no learned matcher of their own.
+SPARSE_SPECS: List[Tuple[str, str, str]] = [
+    # ---- learned, feature-matched (correct weight pairing) -----------------
+    ('sp-lg',        'superpoint_max', 'superpoint-lightglue'),
+    ('disk-lg',      'disk',           'disk-lightglue'),
+    ('aliked-lg',    'aliked-n16',     'aliked-lightglue'),
+    ('sift-lg',      'sift',           'sift-lightglue'),
+    ('sp-sg',        'superpoint_max', 'superglue'),
 
-    dense = feature_name is None
-    if dense:
+    # ---- generic NN sweep across SAR-relevant detectors --------------------
+    # rord = rotation-robust D2Net; darkfeat = low-SNR robust; both good for SAR.
+    ('sp-nn',        'superpoint_max', 'NN-mutual'),
+    ('dedode-nn',    'dedode',         'NN-mutual'),
+    ('r2d2-nn',      'r2d2',           'NN-mutual'),
+    ('rord-nn',      'rord',           'NN-mutual'),
+    ('d2net-nn',     'd2net-ss',       'NN-mutual'),
+    ('alike-nn',     'alike',          'NN-mutual'),
+    ('sfd2-nn',      'sfd2',           'NN-mutual'),
+    ('rdd-nn',       'rdd',            'NN-mutual'),
+    ('liftfeat-nn',  'liftfeat',       'NN-mutual'),
+    ('ripe-nn',      'ripe',           'NN-mutual'),
+    ('darkfeat-nn',  'darkfeat',       'NN-mutual'),
+    ('lanet-nn',     'lanet',          'NN-mutual'),
+    ('rootsift-nn',  'rootsift',       'NN-mutual'),
+    ('sosnet-nn',    'sosnet',         'NN-mutual'),
+    ('hardnet-nn',   'hardnet',        'NN-mutual'),
+
+    # ---- geometry-aware (AdaLAM) -------------------------------------------
+    ('aliked-adalam', 'aliked-n16',    'adalam'),
+    ('disk-adalam',   'disk',          'adalam'),
+]
+
+
+# =============================================================================
+# DENSE: (tag, dense_matcher_conf_name)
+# =============================================================================
+DENSE_SPECS: List[Tuple[str, str]] = [
+    # ---- CROSS-MODAL champions (PRIORITY for SAR<->optical) ----------------
+    ('minima-loftr', 'minima_loftr'),   # trained on multimodal synthetic pairs
+    ('minima-roma',  'minima_roma'),
+    ('xoftr',        'xoftr'),           # thermal<->visible; transfers to SAR<->opt
+    ('omniglue',     'omniglue'),        # cross-domain generalization
+    ('gim-roma',     'gim_roma'),        # trained on diverse internet video
+    ('gim-dkm',      'gim(dkm)'),
+
+    # ---- general dense (strong for SAR<->SAR) ------------------------------
+    ('loftr',        'loftr'),
+    ('eloftr',       'eloftr'),
+    ('aspanformer',  'aspanformer'),
+    ('topicfm',      'topicfm'),
+    ('roma',         'roma'),
+    ('dkm',          'dkm'),
+    ('dad-roma',     'dad_roma'),
+    ('rdd-dense',    'rdd_dense'),
+    ('xfeat-lg',     'xfeat_lightglue'), # self-contained xfeat + lightglue
+    ('xfeat-dense',  'xfeat_dense'),
+    # ('jamma',      'jamma'),  # disabled: imcui ships the conf but not the
+    #                            matcher module (ModuleNotFoundError).
+
+    # ---- heavy / experimental (enable deliberately) ------------------------
+    # ('mast3r',     'mast3r'),     # 3D recon backbone, very heavy
+    # ('duster',     'duster'),     # DUSt3R, very heavy
+    # ('cotr',       'cotr'),       # extremely slow
+    # ('sold2',      'sold2'),      # LINE matcher -- useless on SAR speckle
+    # ('gluestick',  'gluestick'),  # line+point -- speckle unfriendly
+]
+
+# NOTE: global-retrieval descriptors (dir, netvlad, openibl, cosplace,
+# eigenplaces) and the dummy 'example' extractor are intentionally excluded --
+# they are image-retrieval / placeholders, not local feature matchers, and
+# cannot drive the NISAR window-matching pipeline.
+
+
+def _build() -> List[Tuple[str, Dict, bool]]:
+    cfgs: List[Tuple[str, Dict, bool]] = []
+    seen = set()
+    if _IMPORT_ERROR is not None:
+        print(f'[imw_configs] ERROR: imcui not importable ({_IMPORT_ERROR}); '
+              f'IMW_CONFIGS is empty')
+        return cfgs
+    only = {t.strip() for t in os.environ.get('NISAR_IMW_ONLY', '').split(',') if t.strip()}
+
+    def _check_tag(tag):
+        if '_' in tag or '(' in tag or ' ' in tag:
+            raise ValueError(f"bad tag '{tag}' (no _ () or space allowed)")
+        if tag in seen:
+            raise ValueError(f"duplicate tag '{tag}'")
+        seen.add(tag)
+
+    for tag, feat_name, matcher_name in SPARSE_SPECS:
+        _check_tag(tag)
+        if feat_name not in extract_features.confs:
+            print(f"[imw_configs] SKIP {tag}: extractor '{feat_name}' not found")
+            continue
+        if matcher_name not in match_features.confs:
+            print(f"[imw_configs] SKIP {tag}: matcher '{matcher_name}' not found")
+            continue
+        if only and tag not in only:
+            continue
+        conf = {
+            'feature': copy.deepcopy(extract_features.confs[feat_name]),
+            'matcher': copy.deepcopy(match_features.confs[matcher_name]),
+            'dense': False,
+        }
+        _keep_native_resolution(conf['feature'])
+        _keep_native_resolution(conf['matcher'])
+        cfgs.append((tag, conf, False))
+
+    for tag, matcher_name in DENSE_SPECS:
+        _check_tag(tag)
         if matcher_name not in match_dense.confs:
-            raise KeyError(
-                f"dense matcher conf '{matcher_name}' not in this imcui. "
-                f"Available: {sorted(match_dense.confs.keys())}"
-            )
-        mconf = copy.deepcopy(match_dense.confs[matcher_name])
-        _override_preprocessing(mconf)
-        mconf.setdefault('model', {})['max_keypoints'] = DENSE_MAX_KP
-        return {'matcher': mconf, 'dense': True}, True
-
-    if feature_name not in extract_features.confs:
-        raise KeyError(
-            f"extractor conf '{feature_name}' not in this imcui. "
-            f"Available: {sorted(extract_features.confs.keys())}"
-        )
-    if matcher_name not in match_features.confs:
-        raise KeyError(
-            f"matcher conf '{matcher_name}' not in this imcui. "
-            f"Available: {sorted(match_features.confs.keys())}"
-        )
-    fconf = copy.deepcopy(extract_features.confs[feature_name])
-    mconf = copy.deepcopy(match_features.confs[matcher_name])
-    _override_preprocessing(fconf)
-    _override_preprocessing(mconf)
-    # max_keypoints / keypoint_threshold are injected per-run by
-    # ImageMatchingAPI(_update_config) from the dqe_imw.py side.
-    return {'feature': fconf, 'matcher': mconf, 'dense': False}, False
-
-
-def build_catalog(catalog: Optional[List[Tuple[str, Optional[str], str]]] = None
-                  ) -> List[Tuple[str, Dict, bool]]:
-    only = os.environ.get('NISAR_IMW_ONLY', '').strip()
-    keep = {t.strip() for t in only.split(',') if t.strip()} if only else None
-
-    entries: List[Tuple[str, Dict, bool]] = []
-    failures: List[Tuple[str, str]] = []
-    for tag, feat, match in (catalog if catalog is not None else CATALOG):
-        if '_' in tag:
-            failures.append((tag, "tag contains '_' (breaks file_id parser)"))
+            print(f"[imw_configs] SKIP {tag}: dense matcher '{matcher_name}' not found")
             continue
-        if keep is not None and tag not in keep:
+        if only and tag not in only:
             continue
-        try:
-            conf, dense = build_conf(feat, match)
-            entries.append((tag, conf, dense))
-        except Exception as e:
-            failures.append((tag, f'{type(e).__name__}: {e}'))
+        conf = {
+            'matcher': copy.deepcopy(match_dense.confs[matcher_name]),
+            'dense': True,
+        }
+        _keep_native_resolution(conf['matcher'])
+        cfgs.append((tag, conf, True))
 
-    if failures:
-        print('[imw_configs] WARNING: skipped configs (not available in this '
-              'imcui install):')
-        for tag, err in failures:
-            print(f'[imw_configs]   - {tag}: {err}')
-    print(f'[imw_configs] {len(entries)} configs resolved: '
-          f'{", ".join(t for t, _, _ in entries) or "(none)"}')
-    return entries
+    return cfgs
 
 
-try:
-    IMW_CONFIGS: List[Tuple[str, Dict, bool]] = build_catalog()
-except ImportError as _e:
-    print(f'[imw_configs] ERROR: imcui not importable ({_e}). '
-          f'IMW_CONFIGS is empty -- install image-matching-webui '
-          f'(pip install -e <repo>) first.')
-    IMW_CONFIGS = []
+IMW_CONFIGS: List[Tuple[str, Dict, bool]] = _build()
+
+if __name__ == '__main__':
+    print(f"{len(IMW_CONFIGS)} configs built:")
+    for tag, conf, dense in IMW_CONFIGS:
+        kind = 'dense' if dense else 'sparse'
+        mname = conf['matcher']['model'].get('name')
+        print(f"  {tag:16s} [{kind}] matcher.model.name={mname}")
