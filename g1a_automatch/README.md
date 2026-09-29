@@ -96,8 +96,14 @@ is set), so the defaults suit any pixel size.
 ## Detectors
 
 kornia first: `sift`, `disk`, `dedode`, `aliked`, `xfeat`, `xfeatstar`
-(XFeat* semi-dense), `keynet`, `loftr`. Matchers: `smnn`, `lgm` (LightGlue:
-DISK, ALIKED), `ada` (AdaLAM). imcui adds only what kornia lacks:
+(XFeat* semi-dense), `keynet`, `loftr`. Matchers: `smnn`; `ada` (AdaLAM) for
+every sparse detector (SIFT, DISK, DeDoDe, ALIKED, XFeat, KeyNet); `lgm`
+(LightGlue) for DISK, ALIKED and DeDoDe (`dedodeb`/`dedodeg` weights chosen
+from the descriptor). kornia's SIFT LightGlue found no matches on upright
+RootSIFT and XFeat has no kornia LightGlue weights, so neither is offered.
+AdaLAM uses kornia's own defaults (search expansion 4, 128 iterations, min
+confidence 200); the NISAR-S1 pipeline's 1 / 2048 / 1000 can be set in
+Configure…. imcui adds only what kornia lacks:
 SuperPoint+LightGlue, SuperPoint+SuperGlue, eLoFTR, ASpanFormer, RoMa, DKM.
 imcui's DISK/ALIKED/SIFT/XFeat/LoFTR variants are refused in favour of
 kornia's. `python automatch_job.py detectors` lists what is available.
@@ -111,13 +117,13 @@ several choices, or type a comma-separated list, to try each value:
 |---|---|
 | `sift` | RootSIFT on/off, upright on/off, response threshold |
 | `disk` | weights: depth / epipolar |
-| `dedode` | detector weights L-upright / L-C4 / L-SO2 / L-C4-v2 × descriptor weights B- or G- × upright / C4 / SO2 (G-* load a 1.2 GB DINOv2-L) |
+| `dedode` | detector weights × descriptor weights, as listed by the installed kornia (0.8: L-upright / L-C4 / L-SO2 / L-C4-v2 × B-/G- upright / C4 / SO2; G-* load a 1.2 GB DINOv2-L) |
 | `aliked` | model t16 / n16 / n16rot / n32, detection threshold, NMS radius |
 | `xfeat` | detection threshold |
 | `keynet` | upright on/off, response threshold |
 | `loftr` | weights: outdoor / indoor / indoor_new |
 | LightGlue (`lgm`) | filter threshold, depth confidence, width confidence |
-| AdaLAM (`ada`) | search expansion, RANSAC iterations, min confidence, min inliers, refit |
+| AdaLAM (`ada`) | search expansion, RANSAC iterations, min confidence, min inliers, refit, mutual-NN seeds |
 | imcui models | detection / match threshold, plus each model's own settings read from the installed imcui |
 
 - Every combination of **detector** values runs as its own variant, named

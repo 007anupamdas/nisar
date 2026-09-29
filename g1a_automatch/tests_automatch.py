@@ -183,17 +183,25 @@ def test_e2e_variants(tmp):
     out = os.path.join(tmp, 'out_variants')
     rc = _run_job({'input_path': os.path.join(data, 'G1A_SYNTH_L1.tif'),
                    'reference_dir': os.path.join(data, 'C1'), 'output_dir': out,
-                   'channels': ['band1'], 'detectors': ['sift', 'disk'],
-                   'matchers': {'disk': ['lgm']},
+                   'channels': ['band1'], 'detectors': ['sift', 'disk', 'dedode'],
+                   'matchers': {'disk': ['lgm'], 'dedode': ['ada', 'lgm']},
                    'detector_params': {'sift': {'rootsift': [True, False]},
-                                       'disk': {'lgm.filter_threshold': [0.1, 0.2]}},
+                                       'disk': {'lgm.filter_threshold': [0.1, 0.2]},
+                                       'dedode': {'detector_weights': ['L-C4-v2'],
+                                                  'descriptor_weights': ['B-upright']}},
                    'window_sizes': [1024], 'max_expected_error_m': 10000,
                    'smnn_thresholds': [0.95], 'use_amp': False}, tmp)
     check('variants: job exit code', rc, 0)
     man = os.path.join(out, 'RUN_MANIFEST.csv')
     rows = list(_csv.DictReader(open(man, encoding='utf-8'))) if os.path.exists(man) else []
     check('variants: one manifest row per variant', sorted(r['detector'] for r in rows),
-          ['disk_depth', 'sift', 'sift-rs0'])
+          ['dedode_L-C4-v2_B-upright', 'disk_depth', 'sift', 'sift-rs0'])
+    ded = {os.path.basename(p).split('_pix0_')[1].split('_aff')[0]
+           for p in glob.glob(os.path.join(out, '*', 'band1_toC1', 'filtered_*dedode*', '*.csv'))}
+    check('variants: DeDoDe matched with AdaLAM and LightGlue', ded >= {'ada', 'lgm'})
+    sift = {os.path.basename(p).split('_pix0_')[1].split('_aff')[0]
+            for p in glob.glob(os.path.join(out, '*', 'band1_toC1', 'filtered_*_sift', '*.csv'))}
+    check('variants: SIFT matched with SMNN and AdaLAM', {'ada', 'smnn_0.95'} <= sift)
     check('variants: all ran', {r['status'] for r in rows}, {'ok'})
     lgm = {os.path.basename(p).split('_pix0_')[1].split('_aff')[0]
            for p in glob.glob(os.path.join(out, '*', 'band1_toC1', 'filtered_*disk_depth', '*.csv'))}
@@ -271,7 +279,15 @@ def test_detector_params():
     check('params: non-default single value is named', names('aliked', {'detection_threshold': 0.3}),
           ['aliked_aliked-n16-dt0p3'])
     check('params: legacy disk_epipolar name', names('disk_epipolar'), ['disk_epipolar'])
-    m = E.build_detector('disk', cfg, {'lgm.filter_threshold': [0.1, 0.2], 'ada.search_expansion': [1, 2]})
+    check('params: AdaLAM offered for every sparse kornia detector',
+          {d: 'ada' in E.KORNIA_MATCHERS[d] for d in ('sift', 'disk', 'dedode', 'aliked', 'xfeat', 'keynet')},
+          {d: True for d in ('sift', 'disk', 'dedode', 'aliked', 'xfeat', 'keynet')})
+    check('params: AdaLAM defaults are kornia\'s', (cfg.adalam_search_expansion, cfg.adalam_ransac_iters,
+                                                   cfg.adalam_min_confidence), (4, 128, 200))
+    check('params: DeDoDe LightGlue weights follow the descriptor',
+          [E.build_detector('dedode', cfg, {'descriptor_weights': [w]})._lightglue_feature_name()
+           for w in ('B-upright', 'G-C4')], ['dedodeb', 'dedodeg'])
+    m = E.build_detector('disk', cfg, {'lgm.filter_threshold': [0.1, 0.2], 'ada.search_expansion': [4, 2]})
     runs = [(n, m._matcher_param_str(n, p)) for n, p in m.matcher_runs()]
     check('params: matcher values add passes, not variants', runs,
           [('smnn', '0.9'), ('smnn', '0.95'), ('lgm', ''), ('lgm', 'lf0p2'), ('ada', ''), ('ada', 'as2')])

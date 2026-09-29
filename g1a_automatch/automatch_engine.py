@@ -264,10 +264,13 @@ class PipelineConfig:
     use_amp: bool = True
     debug_mode: bool = False
 
+    # kornia's own AdaLAM defaults (what kornia.feature.match_adalam uses when
+    # given no settings). The NISAR-S1 pipeline used 1 / 2048 / 1000, which is
+    # strict for small keypoint budgets; both are reachable from Configure…
     adalam_force_seed_mnn: bool = True
-    adalam_search_expansion: int = 1
-    adalam_ransac_iters: int = 2048
-    adalam_min_confidence: int = 1000
+    adalam_search_expansion: int = 4
+    adalam_ransac_iters: int = 128
+    adalam_min_confidence: int = 200
     adalam_refit: bool = True
 
     smnn_thresholds: List[float] = None
@@ -2361,7 +2364,9 @@ class SIFTMatcher(DiskBasedMatcher):
         return 'sift'
 
     def get_available_matchers(self) -> List[str]:
-        return ['smnn']
+        # kornia's SIFT LightGlue weights found no matches on upright RootSIFT
+        # in testing, so LightGlue is not offered for SIFT.
+        return ['smnn', 'ada']
 
     def _detector_needs_inpaint(self) -> bool:
         return False
@@ -2427,10 +2432,18 @@ class DeDoDeMatcher(DiskBasedMatcher):
     def detect_and_describe(self, img1: th.Tensor, img2: th.Tensor) -> Tuple:
         if self.dedode is None:
             print(f'DeDoDe: Loading {self.detector_weights}/{self.descriptor_weights}...')
-            self.dedode = KF.DeDoDe.from_pretrained(
-                detector_weights=self.detector_weights,
-                descriptor_weights=self.descriptor_weights
-            ).eval().to(self.device)
+            # DeDoDe runs its DINOv2 (G-*) branch in float16 by default; that
+            # only works under CUDA autocast, so use float32 on CPU / MPS.
+            kwargs = {} if self.device.type == 'cuda' else {'amp_dtype': th.float32}
+            try:
+                model = KF.DeDoDe.from_pretrained(
+                    detector_weights=self.detector_weights,
+                    descriptor_weights=self.descriptor_weights, **kwargs)
+            except TypeError:  # kornia without the amp_dtype argument
+                model = KF.DeDoDe.from_pretrained(
+                    detector_weights=self.detector_weights,
+                    descriptor_weights=self.descriptor_weights)
+            self.dedode = model.eval().to(self.device)
 
         img1_rgb = K.color.grayscale_to_rgb(img1)
         img2_rgb = K.color.grayscale_to_rgb(img2)
@@ -2460,7 +2473,11 @@ class DeDoDeMatcher(DiskBasedMatcher):
         return 'dedode'
 
     def get_available_matchers(self) -> List[str]:
-        return ['smnn']
+        return ['smnn', 'lgm', 'ada']
+
+    def _lightglue_feature_name(self) -> str:
+        # kornia ships LightGlue weights for both DeDoDe descriptor families
+        return 'dedodeg' if str(self.descriptor_weights).upper().startswith('G') else 'dedodeb'
 
     def _prefix_base(self) -> str:
         return f'dedode_{self.detector_weights}_{self.descriptor_weights}'
@@ -2667,7 +2684,7 @@ class ALIKEDMatcher(DiskBasedMatcher):
         return 'aliked'
 
     def get_available_matchers(self) -> List[str]:
-        return ['smnn', 'lgm']   # LightGlue natively supports aliked
+        return ['smnn', 'lgm', 'ada']   # LightGlue natively supports aliked
 
     def _prefix_base(self) -> str:
         return f'aliked_{self.model_name}'
@@ -2709,8 +2726,8 @@ class XFeatMatcher(DiskBasedMatcher):
         return 'xfeat'
 
     def get_available_matchers(self) -> List[str]:
-        # kornia's LightGlueMatcher has no 'xfeat' weights (0.8.x), so smnn only.
-        return ['smnn']
+        # kornia's LightGlueMatcher has no 'xfeat' weights (0.8.x): no 'lgm'.
+        return ['smnn', 'ada']
 
     def _detector_needs_inpaint(self) -> bool:
         return True
@@ -3549,33 +3566,51 @@ ADA_PARAMS = [
               label='AdaLAM min confidence', help='minimum inlier confidence per neighbourhood'),
     ParamSpec('ada.min_inliers', 'int', 6, token='am', scope='ada', label='AdaLAM min inliers'),
     ParamSpec('ada.refit', 'bool', _PC.adalam_refit, token='ar', scope='ada', label='AdaLAM refit'),
+    ParamSpec('ada.force_seed_mnn', 'bool', _PC.adalam_force_seed_mnn, token='afs', scope='ada',
+              label='AdaLAM mutual-NN seeds only', help='force_seed_mnn: seeds must be mutual nearest neighbours'),
 ]
+
+def _dedode_weight_names(kind: str, fallback: List[str]) -> List[str]:
+    """DeDoDe weight names the INSTALLED kornia knows ('detector' or
+    'descriptor'), so the dialog never offers a weight that cannot load."""
+    try:
+        from kornia.feature.dedode import dedode as _dd
+        names = list((getattr(_dd, 'urls', {}) or {}).get(kind, {}).keys())
+        return names or fallback
+    except Exception:
+        return fallback
+
+
+_DEDODE_DET = _dedode_weight_names('detector', ['L-upright', 'L-C4', 'L-SO2', 'L-C4-v2'])
+_DEDODE_DESC = _dedode_weight_names('descriptor', ['B-upright', 'B-C4', 'B-SO2', 'G-upright', 'G-C4'])
 
 DETECTOR_PARAMS: Dict[str, List[ParamSpec]] = {
     'sift': [
         ParamSpec('rootsift', 'bool', True, token='rs', label='RootSIFT descriptors'),
         ParamSpec('upright', 'bool', True, token='up', label='Upright (no orientation)'),
         ParamSpec('score_threshold', 'float', 0.0, token='st', label='Response threshold'),
-    ],
+    ] + ADA_PARAMS,
     'disk': [
         ParamSpec('checkpoint', 'choice', 'depth', ['depth', 'epipolar'], label='Weights'),
     ] + LGM_PARAMS + ADA_PARAMS,
     'dedode': [
-        ParamSpec('detector_weights', 'choice', 'L-C4', ['L-upright', 'L-C4', 'L-SO2', 'L-C4-v2'],
-                  label='Detector weights'),
-        ParamSpec('descriptor_weights', 'choice', 'G-C4',
-                  ['B-upright', 'B-C4', 'B-SO2', 'G-upright', 'G-C4', 'G-SO2'],
-                  label='Descriptor weights', help='G-* load a 1.2 GB DINOv2-L backbone'),
-    ],
+        ParamSpec('detector_weights', 'choice',
+                  'L-C4' if 'L-C4' in _DEDODE_DET else _DEDODE_DET[0], _DEDODE_DET,
+                  label='Detector weights', help='names read from the installed kornia'),
+        ParamSpec('descriptor_weights', 'choice',
+                  'G-C4' if 'G-C4' in _DEDODE_DESC else _DEDODE_DESC[0], _DEDODE_DESC,
+                  label='Descriptor weights',
+                  help='names read from the installed kornia; G-* load a 1.2 GB DINOv2-L backbone'),
+    ] + LGM_PARAMS + ADA_PARAMS,
     'aliked': [
         ParamSpec('model_name', 'choice', 'aliked-n16',
                   ['aliked-t16', 'aliked-n16', 'aliked-n16rot', 'aliked-n32'], label='Model'),
         ParamSpec('detection_threshold', 'float', 0.2, token='dt', label='Detection threshold'),
         ParamSpec('nms_radius', 'int', 2, token='nms', label='NMS radius'),
-    ] + LGM_PARAMS,
+    ] + LGM_PARAMS + ADA_PARAMS,
     'xfeat': [
         ParamSpec('detection_threshold', 'float', 0.05, token='dt', label='Detection threshold'),
-    ],
+    ] + ADA_PARAMS,
     'xfeatstar': [],
     'keynet': [
         ParamSpec('upright', 'bool', True, token='up', label='Upright (no orientation)'),
@@ -3602,8 +3637,8 @@ KORNIA_DETECTORS: Dict[str, Callable[['PipelineConfig', Dict], DiskBasedMatcher]
 }
 # Matchers each kornia detector supports (for GUIs; the classes are the truth).
 KORNIA_MATCHERS: Dict[str, List[str]] = {
-    'sift': ['smnn'], 'disk': ['smnn', 'lgm', 'ada'], 'dedode': ['smnn'],
-    'aliked': ['smnn', 'lgm'], 'xfeat': ['smnn'], 'xfeatstar': ['internal'],
+    'sift': ['smnn', 'ada'], 'disk': ['smnn', 'lgm', 'ada'], 'dedode': ['smnn', 'lgm', 'ada'],
+    'aliked': ['smnn', 'lgm', 'ada'], 'xfeat': ['smnn', 'ada'], 'xfeatstar': ['internal'],
     'keynet': ['smnn', 'ada'], 'loftr': ['loftr_internal'],
 }
 # Algorithm families kornia covers; an external detector naming one of these
