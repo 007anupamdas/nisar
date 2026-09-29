@@ -79,11 +79,13 @@ DEFAULT_JOB: Dict = {
     'target_resolution': None,   # None = input's native resolution (metres)
 
     # large offsets (coarse-to-fine)
-    'max_expected_error_m': 35000,
+    'max_expected_error_m': 50000,
     'coarse_method': 'auto',     # auto | matcher | phasecorr | manual | none
     'coarse_resolution_m': 60,
     'initial_offset_m': None,    # [dE, dN] metres, input minus reference
     'search_margin_m': 1500,
+    'coarse_local': True,        # per-cell coarse offsets (internal distortion)
+    'coarse_cell_km': 0,         # cell size; 0 = one window wide
 
     # RANSAC (thresholds in pixels of the working resolution unless *_m given)
     'ransac_methods': ['magsac'],
@@ -97,6 +99,8 @@ DEFAULT_JOB: Dict = {
     'consensus_mode_bin_px': 0.5,
     'min_inliers_per_chip': 6,
     'min_surviving_chips': 1,
+    'consensus_model': 'surface',   # surface | constant | none (see README)
+    'consensus_surface': 'auto',    # auto | affine | bilinear | quadratic | biquadratic
     'manual_gcp_csv': '',
 
     # RIVAL export
@@ -204,6 +208,11 @@ def preflight(job: Dict) -> Dict:
             errors.append(f'output_dir not writable: {e}')
     if job['manual_gcp_csv'] and not os.path.exists(job['manual_gcp_csv']):
         errors.append(f"manual_gcp_csv not found: {job['manual_gcp_csv']}")
+    if job['consensus_model'] not in ('surface', 'constant', 'none'):
+        errors.append(f"consensus_model must be surface, constant or none (got {job['consensus_model']!r})")
+    if job['consensus_surface'] not in ('auto', 'affine', 'bilinear', 'quadratic', 'biquadratic'):
+        errors.append(f"consensus_surface must be auto, affine, bilinear, quadratic or biquadratic "
+                      f"(got {job['consensus_surface']!r})")
     if job['coarse_method'] == 'manual' and job['initial_offset_m'] is None:
         errors.append("coarse_method 'manual' needs initial_offset_m [dE, dN]")
     if any(w < 256 for w in job['window_sizes']):
@@ -355,6 +364,9 @@ def _config_for(job: Dict, win: int, nf: Optional[int], res: float, out_dir: str
         coarse_resolution_m=job['coarse_resolution_m'],
         initial_offset_m=tuple(job['initial_offset_m']) if job['initial_offset_m'] else None,
         search_margin_m=job['search_margin_m'], min_gpu_free_gb=job['min_gpu_free_gb'],
+        coarse_local=bool(job['coarse_local']),
+        coarse_cell_m=(float(job['coarse_cell_km']) * 1000.0) if job['coarse_cell_km'] else None,
+        consensus_model=job['consensus_model'], consensus_surface_degree=job['consensus_surface'],
         save_match_images=job['save_match_images'], weights_cache_dir=job['weights_cache_dir'],
         nisar_band=job['nisar_band'], nisar_frequency=job['nisar_frequency'],
     )
@@ -473,13 +485,15 @@ def run_job(job: Dict) -> Dict:
             if exp:
                 row.update({'rival_csv': exp['rival_csv'], 'detail_csv': exp['detail_csv'],
                             'validated_by_consensus': exp['validated'], 'n_points': exp['n'],
-                            'n_inliers_all': exp['n_inliers_all'],
+                            'n_inliers_all': exp['n_inliers_all'], 'n_chips': exp.get('n_chips'),
+                            **(exp.get('distortion') or {}),
                             'mean_dx_m': exp.get('mean_dx'), 'mean_dy_m': exp.get('mean_dy'),
                             'rmse_x_m': exp['rmse_x'], 'rmse_y_m': exp['rmse_y'], 'ce90_m': exp['ce90'],
                             'matcher_config': exp['matcher_config']})
                 emit({'event': 'result', **{k2: row.get(k2) for k2 in (
-                    'sweep', 'channel', 'detector', 'status', 'n_points', 'mean_dx_m', 'mean_dy_m',
-                    'rmse_x_m', 'rmse_y_m', 'ce90_m', 'rival_csv')}})
+                    'sweep', 'channel', 'detector', 'status', 'n_points', 'n_chips', 'mean_dx_m',
+                    'mean_dy_m', 'dE_min_m', 'dE_max_m', 'dN_min_m', 'dN_max_m', 'affine_rot_deg',
+                    'affine_resid_rmse_m', 'rmse_x_m', 'rmse_y_m', 'ce90_m', 'rival_csv')}})
             else:
                 emit({'event': 'result', 'sweep': tag, 'channel': row['channel'],
                       'detector': row['detector'], 'status': row['status'], 'error': row['error']})

@@ -243,3 +243,34 @@ def make_nisar_h5(out_dir, world, wtf, dE=4013.0, dN=-2487.0, res=20.0, size_km=
         g.create_dataset('projection', data=np.uint32(32644))
         f.create_dataset('science/LSAR/identification/boundingPolygon', data=wkt.encode())
     return path
+
+
+def distortion_field(E, N, Ec, Nc, half=30000.0):
+    """Known error field (input minus true ground), shaped like the manual RIVAL
+    fields seen on real scenes: an east-west scale error, curvature that grows
+    eastwards, and a mild north-south term. Metres."""
+    u, v = (E - Ec) / half, (N - Nc) / half
+    dE = 4000.0 + 0.06 * (E - Ec) + 800.0 * v ** 2 * (u + 1.0)
+    dN = -2500.0 + 0.01 * (N - Nc) + 300.0 * v ** 2
+    return dE, dN
+
+
+def make_input_distorted(out_dir, world, wtf, res=20.0, size_km=60.0):
+    """3-band UTM GeoTIFF whose error varies across the scene by kilometres
+    (see distortion_field). Returns (path, (Ec, Nc))."""
+    to_utm = Transformer.from_crs('EPSG:4326', UTM, always_xy=True)
+    Ec, Nc = to_utm.transform(78.5, 16.45)
+    n = int(size_km * 1000 / res)
+    x0, y1 = Ec - n * res / 2, Nc + n * res / 2
+    tf = Affine(res, 0, x0, 0, -res, y1)
+    cols, rows = np.meshgrid(np.arange(n) + 0.5, np.arange(n) + 0.5)
+    E = x0 + cols * res
+    N = y1 - rows * res
+    dE, dN = distortion_field(E, N, Ec, Nc)
+    base = _sample(world, wtf, E - dE, N - dN)
+    path = os.path.join(out_dir, 'G1A_DIST_L1.tif')
+    with rasterio.open(path, 'w', driver='GTiff', height=n, width=n, count=3,
+                       dtype='uint16', crs=UTM, transform=tf, nodata=0) as dst:
+        for i, b in enumerate([base, 0.8 * base + 30, np.sqrt(base) * 25], start=1):
+            dst.write(np.clip(b, 1, 65535).astype('uint16'), i)
+    return path, (Ec, Nc)

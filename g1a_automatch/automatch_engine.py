@@ -330,11 +330,18 @@ class PipelineConfig:
 
     # Consensus output file suffix (from agdqe_all_v2): '' keeps plain names.
     consensus_filename_suffix: str = ''
+    # How chips are judged consistent:
+    #   'surface'  within tolerance of a robust smooth surface fitted to all
+    #              chips' mean errors (errors that vary across the scene)
+    #   'constant' within tolerance of the most common error (the original rule)
+    #   'none'     every chip with enough RANSAC inliers is kept
+    consensus_model: str = 'surface'
+    consensus_surface_degree: str = 'auto'   # 'auto' | 'affine' | 'bilinear' | 'quadratic'
 
     # ── Large-offset handling (coarse-to-fine) ──────────────────────────────
     # Expected worst-case geolocation error. Reference candidates, and the
     # reference crop, are searched this far beyond the declared overlap.
-    max_expected_error_m: float = 35000.0
+    max_expected_error_m: float = 50000.0
     # 'auto'   matcher at coarse resolution, phase correlation if that is weak
     # 'matcher' / 'phasecorr' force one; 'manual' uses initial_offset_m;
     # 'none'   windows compared at the same map location (legacy behaviour)
@@ -355,6 +362,11 @@ class PipelineConfig:
     initial_offset_m: Optional[Tuple[float, float]] = None
     # Reference windows are padded by this much around the shifted NISAR window.
     search_margin_m: float = 1500.0
+    # Internal distortion: the coarse offset is estimated per grid cell (about
+    # one window wide unless coarse_cell_m is set) and interpolated at each
+    # window, instead of one translation per image/reference pair.
+    coarse_local: bool = True
+    coarse_cell_m: Optional[float] = None
 
     def __post_init__(self):
         if self.smnn_thresholds is None:
@@ -1383,6 +1395,26 @@ class DiskBasedPreprocessor:
 # =============================================================================
 # COARSE ALIGNMENT (km-scale offsets)
 # =============================================================================
+def field_offset(field: Dict, x: float, y: float) -> Tuple[float, float]:
+    """(dx, dy) of a coarse offset field at map point (x, y): bilinear between
+    cell centres, held constant beyond the outermost centres."""
+    nx, ny = int(field['nx']), int(field['ny'])
+    gdx, gdy = np.asarray(field['dx'], dtype=float), np.asarray(field['dy'], dtype=float)
+    fx = (x - field['x0']) / field['cw'] - 0.5
+    fy = (field['y1'] - y) / field['ch'] - 0.5
+    fx = min(max(fx, 0.0), nx - 1.0)
+    fy = min(max(fy, 0.0), ny - 1.0)
+    i0, j0 = int(math.floor(fx)), int(math.floor(fy))
+    i1, j1 = min(i0 + 1, nx - 1), min(j0 + 1, ny - 1)
+    tx, ty = fx - i0, fy - j0
+
+    def interp(g):
+        top = g[j0, i0] * (1 - tx) + g[j0, i1] * tx
+        bot = g[j1, i0] * (1 - tx) + g[j1, i1] * tx
+        return float(top * (1 - ty) + bot * ty)
+    return interp(gdx), interp(gdy)
+
+
 class CoarseAligner:
     """Estimate the (dE, dN) translation, NISAR/input minus reference, of one
     pair at coarse resolution, so fine windows can be read from the right
@@ -1434,9 +1466,15 @@ class CoarseAligner:
                                                  nisar_nodata=0.0, s1_nodata=0.0)
         if not rec or len(rec['X1']) < 3:
             return None
-        dx = np.asarray(rec['X1']) - np.asarray(rec['X2'])
-        dy = np.asarray(rec['Y1']) - np.asarray(rec['Y2'])
-        return self._mode_translation(dx, dy, bin_m=3.0 * res)
+        x = np.asarray(rec['X1'], dtype=np.float64)
+        y = np.asarray(rec['Y1'], dtype=np.float64)
+        dx = x - np.asarray(rec['X2'], dtype=np.float64)
+        dy = y - np.asarray(rec['Y2'], dtype=np.float64)
+        est = self._mode_translation(dx, dy, bin_m=3.0 * res)
+        if est is not None:
+            # every coarse correspondence, for the local offset field
+            est['samples'] = np.column_stack([x, y, dx, dy])
+        return est
 
     def _mode_translation(self, dx, dy, bin_m: float) -> Optional[Dict]:
         """Densest (dx, dy) cluster: 2-D histogram peak, then the median of the
@@ -1503,6 +1541,99 @@ class CoarseAligner:
         return {'dx': float(sx * res), 'dy': float(-sy * res),
                 'support': None, 'n': None, 'peak': float(peak)}
 
+    # ── local offset field ───────────────────────────────────────────────────
+    def _cell_m(self, pair: Dict) -> float:
+        if self.config.coarse_cell_m:
+            return float(self.config.coarse_cell_m)
+        return float(self.config.window_size) * abs(pair['xres1'])
+
+    def _phasecorr_samples(self, pair: Dict, res: float, dx0: float, dy0: float) -> np.ndarray:
+        """Local offsets by tiled phase correlation, after moving the reference
+        by the global offset onto the input's coarse grid: each tile only has to
+        find a small residual. Rows (x, y, dx, dy) at tile centres."""
+        a, ta = self._coarse_read(pair['nisar_path'], res)
+        b, tb = self._coarse_read(pair['s1_path'], res)
+        H, W = a.shape
+        bb = np.full((H, W), np.nan, np.float32)
+        warp_reproject(source=b, destination=bb, src_transform=Affine.translation(dx0, dy0) * tb,
+                       src_crs=pair['utm_crs'], dst_transform=ta, dst_crs=pair['utm_crs'],
+                       resampling=Resampling.average, src_nodata=np.nan, dst_nodata=np.nan)
+        ga, gb = self._edges(a), self._edges(bb)
+        va, vb = np.isfinite(a), np.isfinite(bb)
+        T = int(max(64, min(256, round(self._cell_m(pair) / res))))
+        T = min(T, H, W)
+        if T < 32:
+            return np.zeros((0, 4))
+        step = max(16, T // 2)
+        win = cv2.createHanningWindow((T, T), cv2.CV_32F)
+        out = []
+        for r0 in range(0, H - T + 1, step):
+            for c0 in range(0, W - T + 1, step):
+                if va[r0:r0 + T, c0:c0 + T].mean() < 0.5 or vb[r0:r0 + T, c0:c0 + T].mean() < 0.5:
+                    continue
+                (sx, sy), peak = cv2.phaseCorrelate(gb[r0:r0 + T, c0:c0 + T].copy(),
+                                                    ga[r0:r0 + T, c0:c0 + T].copy(), win)
+                if peak < self.config.coarse_min_peak or max(abs(sx), abs(sy)) > T / 4.0:
+                    continue
+                xc, yc = ta * (c0 + T / 2.0, r0 + T / 2.0)
+                out.append((xc, yc, dx0 + sx * res, dy0 - sy * res))
+        return np.asarray(out, dtype=np.float64).reshape(-1, 4)
+
+    def _offset_field(self, pair: Dict, samples: Optional[np.ndarray], res: float,
+                      min_support: int) -> Optional[Dict]:
+        """Grid of local (dx, dy) over the input crop: each cell takes the
+        robust mode of the samples in and around it (cells overlap by half a
+        cell each side); cells without enough support copy the nearest cell
+        that has it. JSON-serialisable; read with field_offset()."""
+        if samples is None or len(samples) == 0:
+            return None
+        H, W = int(pair['nisar_shape'][1]), int(pair['nisar_shape'][2])
+        x0, y1 = float(pair['x01']), float(pair['y01'])
+        x1 = x0 + W * float(pair['xres1'])
+        y0 = y1 + H * float(pair['yres1'])
+        cell = self._cell_m(pair)
+        nx = max(1, int(round((x1 - x0) / cell)))
+        ny = max(1, int(round((y1 - y0) / cell)))
+        cw, ch = (x1 - x0) / nx, (y1 - y0) / ny
+        gdx = np.full((ny, nx), np.nan)
+        gdy = np.full((ny, nx), np.nan)
+        sup = np.zeros((ny, nx), dtype=int)
+        xs, ys = samples[:, 0], samples[:, 1]
+        for j in range(ny):
+            for i in range(nx):
+                cx, cy = x0 + (i + 0.5) * cw, y1 - (j + 0.5) * ch
+                sel = (np.abs(xs - cx) <= cw) & (np.abs(ys - cy) <= ch)
+                n = int(sel.sum())
+                if n < max(1, min_support):
+                    continue
+                if n >= 3:
+                    est = self._mode_translation(samples[sel, 2], samples[sel, 3], bin_m=3.0 * res)
+                else:
+                    est = {'dx': float(np.median(samples[sel, 2])), 'dy': float(np.median(samples[sel, 3])),
+                           'support': n, 'n': n}
+                if est and est['support'] >= max(1, min_support) and est['support'] >= 0.2 * est['n']:
+                    gdx[j, i], gdy[j, i], sup[j, i] = est['dx'], est['dy'], est['support']
+        valid = np.isfinite(gdx)
+        if not valid.any():
+            return None
+        filled = ~valid
+        if filled.any():
+            vj, vi = np.nonzero(valid)
+            for j, i in zip(*np.nonzero(filled)):
+                k = int(np.argmin((vj - j) ** 2 + (vi - i) ** 2))
+                gdx[j, i], gdy[j, i] = gdx[vj[k], vi[k]], gdy[vj[k], vi[k]]
+        return {'x0': x0, 'y1': y1, 'cw': cw, 'ch': ch, 'nx': nx, 'ny': ny,
+                'dx': np.round(gdx, 3).tolist(), 'dy': np.round(gdy, 3).tolist(),
+                'support': sup.tolist(), 'filled': filled.tolist()}
+
+    @staticmethod
+    def _field_summary(field: Optional[Dict]) -> str:
+        if not field:
+            return ''
+        dx, dy = np.asarray(field['dx']), np.asarray(field['dy'])
+        return (f'field {field["ny"]}x{field["nx"]} cells, dE {dx.min():.0f}..{dx.max():.0f} m, '
+                f'dN {dy.min():.0f}..{dy.max():.0f} m, {int(np.sum(field["filled"]))} filled')
+
     # ── public ───────────────────────────────────────────────────────────────
     def estimate(self, pair: Dict, matcher=None) -> Dict:
         cfg = self.config
@@ -1521,11 +1652,20 @@ class CoarseAligner:
         if method in ('auto', 'matcher') and matcher is not None:
             try:
                 est = self._by_matcher(pair, matcher, res)
+                samples = est.pop('samples', None) if est else None
                 ok = est is not None and est['support'] >= cfg.coarse_min_support \
                     and est['support'] >= 0.2 * est['n']
+                # With internal distortion the global mode can be weak while each
+                # region is consistent, so a good local field also counts.
+                field = (self._offset_field(pair, samples, res, cfg.coarse_min_support)
+                         if cfg.coarse_local and est is not None else None)
                 tried.append(f"matcher: {est if est else 'no matches'}")
-                if ok:
-                    return {**est, 'method': f'matcher@{res:.0f}m'}
+                if ok or field is not None:
+                    out = {**est, 'method': f'matcher@{res:.0f}m', 'field': field}
+                    if not ok:  # report the field's centre value as the pair offset
+                        out['dx'] = float(np.median(np.asarray(field['dx'])))
+                        out['dy'] = float(np.median(np.asarray(field['dy'])))
+                    return out
             except Exception as e:
                 tried.append(f'matcher: {type(e).__name__}: {e}')
         if method in ('auto', 'phasecorr'):
@@ -1533,7 +1673,11 @@ class CoarseAligner:
                 est = self._by_phase_correlation(pair, res)
                 tried.append(f"phasecorr: {est}")
                 if est is not None and est['peak'] >= cfg.coarse_min_peak:
-                    return {**est, 'method': f'phasecorr@{res:.0f}m'}
+                    field = None
+                    if cfg.coarse_local:
+                        samples = self._phasecorr_samples(pair, res, est['dx'], est['dy'])
+                        field = self._offset_field(pair, samples, res, 1)
+                    return {**est, 'method': f'phasecorr@{res:.0f}m', 'field': field}
             except Exception as e:
                 tried.append(f'phasecorr: {type(e).__name__}: {e}')
         if cfg.initial_offset_m is not None:
@@ -2026,10 +2170,23 @@ class DiskBasedMatcher(BaseMatcher):
                 nisar_win = rt.windows.Window(wy, wx, sy, sx)
                 nisar_data = nisar_src.read(1, window=nisar_win)
 
+                field = metadata.get('coarse_field')
+                margin = metadata.get('search_margin_m', 0.0)
+                if field:
+                    xc, yc = nisar_src.transform * (wy + sy / 2.0, wx + sx / 2.0)
+                    wdx, wdy = field_offset(field, xc, yc)
+                    # the offset varies inside the window too (scale / warp):
+                    # widen the search by how far the corners' offsets depart
+                    # from the centre's
+                    spread = 0.0
+                    for cc, rr in ((wy, wx), (wy + sy, wx), (wy, wx + sx), (wy + sy, wx + sx)):
+                        ox, oy = field_offset(field, *(nisar_src.transform * (cc, rr)))
+                        spread = max(spread, abs(ox - wdx), abs(oy - wdy))
+                    margin += spread
+                else:
+                    wdx, wdy = metadata.get('coarse_dx', 0.0), metadata.get('coarse_dy', 0.0)
                 s1_win = self._s1_window_for(
-                    nisar_src, s1_src, wx, wy, sx, sy,
-                    metadata.get('coarse_dx', 0.0), metadata.get('coarse_dy', 0.0),
-                    metadata.get('search_margin_m', 0.0))
+                    nisar_src, s1_src, wx, wy, sx, sy, wdx, wdy, margin)
                 if s1_win is None:
                     continue
                 s1wy, s1wx = int(s1_win.col_off), int(s1_win.row_off)
@@ -3294,6 +3451,89 @@ class ChipConsensusSelector:
             return float((left + right) / 2.0)
         return float(np.median(members))
 
+    SURFACE_TERMS = {'affine': 3, 'bilinear': 4, 'quadratic': 6, 'biquadratic': 9}
+
+    @staticmethod
+    def _surface_design(u, v, degree):
+        cols = [np.ones(len(u)), u, v]
+        if degree in ('bilinear', 'quadratic', 'biquadratic'):
+            cols.append(u * v)
+        if degree in ('quadratic', 'biquadratic'):
+            cols += [u * u, v * v]
+        if degree == 'biquadratic':
+            cols += [u * u * v, u * v * v, u * u * v * v]
+        return np.column_stack(cols)
+
+    @staticmethod
+    def _surface_keep(x, y, a, c, tol: float, degree: str = 'auto', k_sigma: float = 3.0,
+                      iters: int = 6):
+        """Robust smooth surface through chip mean errors (a = along, c = across)
+        over chip position (x, y).
+
+        Fitted by iterative trimming: fit, measure the residual scale robustly
+        (1.4826 x median absolute residual of the kept chips), keep chips within
+        max(tol, k_sigma x scale), refit. The tolerance therefore adapts to how
+        well the surface can follow the real error field, while a chip whose
+        error disagrees with its surroundings by far more is still rejected.
+        Returns (keep, fit_a, fit_c, degree, threshold) or None if too few chips."""
+        x, y = np.asarray(x, float), np.asarray(y, float)
+        a, c = np.asarray(a, float), np.asarray(c, float)
+        n = len(x)
+        if degree == 'auto':
+            degree = ('biquadratic' if n >= 18 else 'quadratic' if n >= 12 else 'bilinear' if n >= 8
+                      else 'affine' if n >= 5 else None)
+        if degree is None or n < ChipConsensusSelector.SURFACE_TERMS[degree] + 2:
+            return None
+        u = (x - x.mean()) / max(np.ptp(x) / 2.0, 1e-9)
+        v = (y - y.mean()) / max(np.ptp(y) / 2.0, 1e-9)
+        A = ChipConsensusSelector._surface_design(u, v, degree)
+        k = A.shape[1]
+        keep = np.ones(n, dtype=bool)
+        thr = tol
+        fa = fc = None
+        for _ in range(iters):
+            if keep.sum() < k:
+                return None
+            ca = np.linalg.lstsq(A[keep], a[keep], rcond=None)[0]
+            cc = np.linalg.lstsq(A[keep], c[keep], rcond=None)[0]
+            fa, fc = A @ ca, A @ cc
+            r = np.maximum(np.abs(a - fa), np.abs(c - fc))
+            thr = max(tol, k_sigma * 1.4826 * float(np.median(r[keep])))
+            new = r <= thr
+            if np.array_equal(new, keep):
+                break
+            keep = new
+        if thr > 3.0 * tol:
+            # The surface cannot follow the field closely (its tolerance had to
+            # grow), so a wrong chip could hide inside it: judge the chips
+            # against their neighbours as well.
+            keep = keep & ChipConsensusSelector._local_keep(u, v, a, c, keep, tol, k_sigma)
+        return keep, fa, fc, degree, thr
+
+    @staticmethod
+    def _local_keep(u, v, a, c, keep, tol: float, k_sigma: float = 3.0, k_nn: int = 8):
+        """Second, model-free test: each kept chip against a plane through its
+        nearest kept neighbours (itself excluded). A smooth error field is
+        predicted well locally even where one global surface cannot follow it,
+        so a chip that disagrees with its surroundings stands out."""
+        idx = np.nonzero(keep)[0]
+        if len(idx) < 6:
+            return np.ones(len(u), dtype=bool)
+        P = np.column_stack([u[idx], v[idx]])
+        r = np.zeros(len(idx))
+        for m, i in enumerate(idx):
+            d = np.hypot(*(P - P[m]).T)
+            d[m] = np.inf
+            nb = np.argsort(d)[:min(k_nn, len(idx) - 1)]
+            A = np.column_stack([np.ones(len(nb)), P[nb, 0] - P[m, 0], P[nb, 1] - P[m, 1]])
+            pa = np.linalg.lstsq(A, a[idx[nb]], rcond=None)[0][0]
+            pc = np.linalg.lstsq(A, c[idx[nb]], rcond=None)[0][0]
+            r[m] = max(abs(a[i] - pa), abs(c[i] - pc))
+        thr = max(tol, k_sigma * 1.4826 * float(np.median(r)))
+        out = np.ones(len(u), dtype=bool)
+        out[idx[r > thr]] = False
+        return out
+
     @staticmethod
     def build_chip_stats(csv_dir: str, min_inliers_per_chip: int = 6) -> pd.DataFrame:
         rows = []
@@ -3354,6 +3594,8 @@ class ChipConsensusSelector:
         min_surviving_chips: int = 3,
         manual_gcp_csv: str = '',
         filename_suffix: str = '',
+        model: str = 'constant',
+        surface_degree: str = 'auto',
     ):
         """
         manual_gcp_csv: path to analyst-observed GCP CSV
@@ -3408,12 +3650,33 @@ class ChipConsensusSelector:
             gg['d_along_std'] = (gg['along_std'] - as_center).abs()
             gg['d_across_std'] = (gg['across_std'] - cs_center).abs()
 
-            gg['keep'] = (
-                (gg['d_along_mean'] <= tolerance_m) &
-                (gg['d_across_mean'] <= tolerance_m) &
-                (gg['d_along_std'] <= tolerance_m) &
-                (gg['d_across_std'] <= tolerance_m)
-            )
+            used = 'constant'
+            surface_rmse = float('nan')
+            fit = None
+            if model == 'surface':
+                fit = ChipConsensusSelector._surface_keep(
+                    gg['pix'].values, gg['scan'].values, gg['along_mean'].values,
+                    gg['across_mean'].values, tolerance_m, surface_degree)
+            if model == 'none':
+                used = 'none'
+                gg['keep'] = True
+            elif fit is not None:
+                keep_s, fa, fc, deg, thr = fit
+                used = f'surface:{deg}:tol{thr:.0f}m'
+                gg['along_fit'], gg['across_fit'] = fa, fc
+                # Per-chip spread follows the local error gradient when the error
+                # varies across the scene, so it is not compared between chips.
+                gg['keep'] = keep_s
+                if keep_s.any():
+                    surface_rmse = float(np.sqrt(np.mean((gg['along_mean'].values[keep_s] - fa[keep_s]) ** 2
+                                                         + (gg['across_mean'].values[keep_s] - fc[keep_s]) ** 2)))
+            else:
+                gg['keep'] = (
+                    (gg['d_along_mean'] <= tolerance_m) &
+                    (gg['d_across_mean'] <= tolerance_m) &
+                    (gg['d_along_std'] <= tolerance_m) &
+                    (gg['d_across_std'] <= tolerance_m)
+                )
 
             kept = gg[gg['keep']].copy()
             rejected = gg[~gg['keep']].copy()
@@ -3472,6 +3735,8 @@ class ChipConsensusSelector:
                 'along_std_chips': along_std_chips,    # diagnostic only
                 'across_std_chips': across_std_chips,  # diagnostic only
                 'mean_resid_rmse': mean_resid,          # surface residual (primary accuracy metric)
+                'consensus_model': used,
+                'surface_rmse_m': surface_rmse,         # kept chips about the fitted surface
                 'score': score,
             })
             survivors.append(kept)
@@ -3938,11 +4203,12 @@ class AutoMatchPipeline:
                         if matcher_free:
                             shared_coarse[pid] = est
                     print(f'[Coarse] {tag} pair {pid}: dE={est["dx"]:.1f} m dN={est["dy"]:.1f} m '
-                          f'({est["method"]}, support={est.get("support")}, peak={est.get("peak")})')
+                          f'({est["method"]}, support={est.get("support")}, peak={est.get("peak")}) '
+                          f'{CoarseAligner._field_summary(est.get("field"))}')
                     offsets.append({'pair_id': pid, 'reference': os.path.basename(pair.get('reference_path', '')),
                                     **est})
                     work = dict(pair, coarse_dx=est['dx'], coarse_dy=est['dy'],
-                                coarse_method=est['method'],
+                                coarse_method=est['method'], coarse_field=est.get('field'),
                                 search_margin_m=0.0 if est['method'] == 'none' else cfg.search_margin_m)
                     all_match_data.extend(matcher.process_disk_cached_pair(work))
                 safe_cuda_empty_cache()
@@ -3954,7 +4220,20 @@ class AutoMatchPipeline:
                 for stage in ('raw_matches', 'filtered', 'statistics', 'final'):
                     shutil.rmtree(os.path.join(pol_out_dir, f'{stage}_{suffix}_{tag}'), ignore_errors=True)
                 matcher.save_matches_to_csv(all_match_data, raw_dir)
-                pd.DataFrame(offsets).to_csv(os.path.join(raw_dir, 'COARSE_OFFSETS.csv'), index=False)
+                pd.DataFrame([{k: v for k, v in o.items() if k != 'field'} for o in offsets]).to_csv(
+                    os.path.join(raw_dir, 'COARSE_OFFSETS.csv'), index=False)
+                for o in offsets:  # the local offset field of each pair, cell by cell
+                    f = o.get('field')
+                    if not f:
+                        continue
+                    rows = [{'row': j, 'col': i,
+                             'x_center': f['x0'] + (i + 0.5) * f['cw'],
+                             'y_center': f['y1'] - (j + 0.5) * f['ch'],
+                             'dE_m': f['dx'][j][i], 'dN_m': f['dy'][j][i],
+                             'support': f['support'][j][i], 'filled_from_neighbour': f['filled'][j][i]}
+                            for j in range(f['ny']) for i in range(f['nx'])]
+                    pd.DataFrame(rows).to_csv(
+                        os.path.join(raw_dir, f'COARSE_FIELD_pair{int(o["pair_id"]):03d}.csv'), index=False)
 
                 filter_dir = os.path.join(pol_out_dir, f'filtered_{suffix}_{tag}')
                 self.ransac_filter.filter_matches_in_memory(all_match_data, filter_dir)
@@ -3968,6 +4247,8 @@ class AutoMatchPipeline:
                     min_surviving_chips=cfg.min_surviving_chips,
                     manual_gcp_csv=self._manual_gcp_csv,
                     filename_suffix=cfg.consensus_filename_suffix,
+                    model=cfg.consensus_model,
+                    surface_degree=cfg.consensus_surface_degree,
                 )
                 rec.update({
                     'raw_dir': raw_dir, 'filtered_dir': filter_dir, 'statistics_dir': stats_dir,

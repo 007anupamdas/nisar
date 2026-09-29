@@ -218,6 +218,64 @@ def test_e2e_variants(tmp):
             check(f"variants: {r['detector']} recovers the offset", ok)
 
 
+def test_e2e_distortion(tmp):
+    """Error that varies across the scene by kilometres (6 % east-west scale,
+    curvature): every exported point must carry the error of ITS location,
+    chips must survive across the whole scene, and the constant rule shows
+    why it is not used."""
+    import csv as _csv
+    import glob
+    import numpy as np
+    import pandas as pd
+    import synthetic_data as S
+    data = os.path.join(tmp, 'synth')
+    if not os.path.exists(os.path.join(data, 'C1')):
+        S.make_all(data, 4013.0, -2487.0)
+    world, wtf = S._world()
+    inp, (Ec, Nc) = S.make_input_distorted(data, world, wtf)
+    base = {'input_path': inp, 'reference_dir': os.path.join(data, 'C1'), 'channels': ['band1'],
+            'detectors': ['sift'], 'window_sizes': [512], 'max_expected_error_m': 10000,
+            'smnn_thresholds': [0.95], 'use_amp': False}
+    runs = {}
+    for model in ('surface', 'constant'):
+        out = os.path.join(tmp, f'out_dist_{model}')
+        rc = _run_job({**base, 'output_dir': out, 'consensus_model': model}, tmp)
+        check(f'distortion ({model}): job exit code', rc, 0)
+        man = os.path.join(out, 'RUN_MANIFEST.csv')
+        runs[model] = (out, list(_csv.DictReader(open(man, encoding='utf-8')))[0] if os.path.exists(man) else {})
+    out, row = runs['surface']
+    field_csv = glob.glob(os.path.join(out, '*', 'band1_toC1', 'raw_matches_*', 'COARSE_FIELD_pair001.csv'))
+    if field_csv:
+        f = pd.read_csv(field_csv[0])
+        print(f"      coarse field: {len(f)} cells, dE {f.dE_m.min():.0f}..{f.dE_m.max():.0f} m")
+        check('distortion: coarse field follows the varying error', f.dE_m.max() - f.dE_m.min() > 2500)
+    else:
+        check('distortion: coarse field written', False)
+    det = row.get('detail_csv') or ''
+    if os.path.exists(det):
+        d = pd.read_csv(det, encoding='utf-8-sig')
+        tE, tN = S.distortion_field(d.In_X.values, d.In_Y.values, Ec, Nc)
+        eE, eN = np.abs(d.DX_Err.values - tE), np.abs(d.DY_Err.values - tN)
+        print(f"      {len(d)} points from {d.source_file.nunique()} chips; |error - truth| median "
+              f"{np.median(eE):.1f} / {np.median(eN):.1f} m, 95% {np.percentile(eE, 95):.1f} / "
+              f"{np.percentile(eN, 95):.1f} m; true dE spans {tE.min():.0f}..{tE.max():.0f} m")
+        check('distortion: each point carries its own location\'s error (median < 10 m)',
+              np.median(eE) < 10 and np.median(eN) < 10)
+        check('distortion: 95% of points within 30 m of the truth',
+              np.percentile(eE, 95) < 30 and np.percentile(eN, 95) < 30)
+        check('distortion: chips kept across the scene (>= 20 of 25)', d.source_file.nunique() >= 20)
+        sc = float(row.get('affine_scale_E_ppm') or 0)
+        print(f"      affine scale E {sc:.0f} ppm (true 60000), rotation {float(row.get('affine_rot_deg') or 0):.3f} deg, "
+              f"residual beyond affine {float(row.get('affine_resid_rmse_m') or 0):.0f} m")
+        check('distortion: scale error measured', abs(sc - 60000) < 6000)
+    else:
+        check('distortion: RIVAL detail written', False)
+    n_const = int(float(runs['constant'][1].get('n_chips') or 0))
+    n_surf = int(float(row.get('n_chips') or 0))
+    print(f"      chips kept: surface {n_surf}, constant {n_const}")
+    check('distortion: constant rule keeps far fewer chips', n_const < n_surf / 2)
+
+
 def test_e2e(tmp):
     import synthetic_data as S
     import automatch_rival as AR
@@ -311,6 +369,38 @@ def test_detector_params():
     r = P('disk_depth_band1_toC1_pair001_scan0_pix0_lgm_lf0p2_aff_magsac_20_0.99_.csv')
     check('params: matcher variant parses', (r['detector'], r['disk_mode'], r['match_method']),
           ('disk', 'depth', 'lgm_lf0p2'))
+
+
+def test_distortion_helpers():
+    """Chip consistency on an error field shaped like the manual RIVAL points
+    (6.8 % east-west scale + curvature over ~280 x 540 km) and the coarse
+    field interpolation."""
+    import numpy as np
+    import automatch_engine as E
+    C = E.ChipConsensusSelector
+    X, Y = np.meshgrid(np.linspace(-150e3, 130e3, 5), np.linspace(-270e3, 268e3, 5))
+    X, Y = X.ravel(), Y.ravel()
+    u, v = X / 140e3, Y / 270e3
+    dE = 27000 + 0.068 * X + 12000 * v ** 2 * (u + 1) / 2
+    dN = 6400 + 0.0024 * Y + 1200 * v ** 2
+    rng = np.random.default_rng(1)
+    a, c = dN + rng.normal(0, 30, 25), dE + rng.normal(0, 30, 25)
+    a[7] += 6000
+    c[18] -= 9000
+    keep, _, _, deg, _ = C._surface_keep(X, Y, a, c, tol=150.0)
+    check('surface: every good chip kept, both wrong chips rejected',
+          (int(keep.sum()), bool(keep[7]), bool(keep[18])), (23, False, False))
+    for forced in ('affine', 'bilinear', 'quadratic'):
+        keep, *_ = C._surface_keep(X, Y, a, c, tol=150.0, degree=forced)
+        check(f'surface ({forced}, cannot fit the curvature): wrong chips still rejected',
+              (bool(keep[7]), bool(keep[18])), (False, False))
+    am, cm = C._mode_center(a, 50), C._mode_center(c, 50)
+    check('constant rule on a varying field keeps almost nothing',
+          int(((abs(a - am) <= 150) & (abs(c - cm) <= 150)).sum()) <= 2)
+    f = {'x0': 0.0, 'y1': 100.0, 'cw': 50.0, 'ch': 50.0, 'nx': 2, 'ny': 2,
+         'dx': [[0.0, 100.0], [0.0, 100.0]], 'dy': [[10.0, 10.0], [30.0, 30.0]]}
+    check('field: bilinear between cell centres', E.field_offset(f, 50.0, 50.0), (50.0, 20.0))
+    check('field: constant beyond the outer centres', E.field_offset(f, -500.0, 500.0), (0.0, 10.0))
 
 
 def test_gui_dialog():
@@ -464,6 +554,7 @@ def main():
         test_engine_helpers()
         test_nisar_h5(tmp)
         test_detector_params()
+        test_distortion_helpers()
         test_imcui_mock()
         if a.gui:
             test_gui_dialog()
@@ -471,6 +562,7 @@ def main():
             test_e2e(tmp)
             test_e2e_variants(tmp)
             test_e2e_rerun(tmp)
+            test_e2e_distortion(tmp)
     finally:
         if not a.keep:
             shutil.rmtree(tmp, ignore_errors=True)

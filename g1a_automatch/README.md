@@ -42,7 +42,7 @@ pip install -e /path/to/image-matching-webui
    Output folder.
 2. *Detectors & matchers*: tick detectors and their matchers.
 3. *Windows & offsets*: window sizes, keypoints, **max expected error**
-   (default 35 km), coarse method, optional known offset from RIVAL.
+   (default 50 km), coarse method, optional known offset from RIVAL.
 4. **Preflight** (checks paths, bands, reference coverage, detectors, GPU),
    then **Run**. Results appear in the table; double-click a row to open its folder.
 
@@ -92,6 +92,49 @@ values either side of the truth.
 RANSAC thresholds and consensus tolerance are given **in pixels** of the
 working resolution (the input's native resolution unless `target_resolution`
 is set), so the defaults suit any pixel size.
+
+## Errors that vary across the scene (internal distortion)
+
+Scenes with a large scale or warp error do not have "an" error: in the manual
+RIVAL points seen so far the east-west error ran from 17 to 40 km across one
+scene, and from -8.6 to +3.9 km across another. The tool treats the error as
+a field:
+
+- **Coarse offsets per cell.** The coarse stage estimates the offset in a grid
+  of cells about one window wide (`coarse_cell_km`, 0 = one window) and each
+  window reads the reference at its own interpolated offset. The field is
+  written to `raw_matches_*/COARSE_FIELD_pair###.csv`.
+- **Search margin per window** grows by how much the offset changes between
+  the window's centre and its corners.
+- **Chip consistency against a surface** (`consensus_model: surface`, the
+  default). Chips are compared with a robust smooth surface through all chips'
+  errors (`consensus_surface`: auto picks affine / bilinear / quadratic /
+  biquadratic from the chip count), with a tolerance that adapts to how well
+  the surface fits, and against their neighbours when it cannot fit closely.
+  `constant` (the NISAR rule: agree with the most common error) keeps only the
+  chips near that value when the error varies -- on a synthetic 6 % scale
+  error it kept a handful of 25 windows. `none` keeps every chip that passed
+  RANSAC.
+- **Distortion summary** in `RUN_MANIFEST.csv` and the GUI results: error range
+  (`dE_min_m`..`dE_max_m`, `dN_min_m`..`dN_max_m`), an affine fit of the error
+  over the scene (`affine_dE_m`, `affine_dN_m` at the points' centroid,
+  `affine_rot_deg`, `affine_scale_E_ppm`, `affine_scale_N_ppm`,
+  `affine_shear_ppm`) and `affine_resid_rmse_m`, the distortion left after the
+  best affine correction.
+
+How to read the results:
+
+1. The per-point errors in the RIVAL CSV *are* the result. Load it in
+   `DPQED_rival.py` (or `quiver.py`) to see the field; a mean, RMSE or CE90
+   over such a scene mixes different errors and describes no single place.
+2. `affine_*` says how much is a simple rotation / scale / shear (a sensor or
+   projection model error that a first-order correction removes);
+   `affine_resid_rmse_m` says how much is left for a higher-order model.
+3. Keep windows small enough that the error is close to linear inside each one
+   (per-window RANSAC fits an affine); where the error curves strongly, try
+   smaller windows in the window-size sweep.
+4. With a manual GCP CSV the consensus score uses each chip's distance from
+   the GCP-fitted error surface, which is the most direct check of the result.
 
 ## Detectors
 

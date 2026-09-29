@@ -152,6 +152,34 @@ def summarize(dx: List[float], dy: List[float]) -> Dict:
     return out
 
 
+def distortion_summary(ix, iy, rx, ry) -> Dict:
+    """How the error varies across the scene, from In/Ref point pairs.
+
+    The error (In - Ref) is fitted as an affine function of position:
+    translation at the points' centroid, rotation, scale per axis and shear
+    (all small), plus the RMS left over -- the distortion that no affine
+    correction removes. Range of the raw errors is reported too."""
+    ix, iy, rx, ry = (np.asarray(v, float) for v in (ix, iy, rx, ry))
+    n = len(ix)
+    if n < 6:
+        return {}
+    dx, dy = ix - rx, iy - ry
+    mx, my = rx.mean(), ry.mean()
+    A = np.column_stack([np.ones(n), rx - mx, ry - my])
+    a, *_ = np.linalg.lstsq(A, dx, rcond=None)
+    b, *_ = np.linalg.lstsq(A, dy, rcond=None)
+    rxs, rys = dx - A @ a, dy - A @ b
+    return {
+        'dE_min_m': float(dx.min()), 'dE_max_m': float(dx.max()),
+        'dN_min_m': float(dy.min()), 'dN_max_m': float(dy.max()),
+        'affine_dE_m': float(a[0]), 'affine_dN_m': float(b[0]),
+        'affine_rot_deg': float(np.degrees((b[1] - a[2]) / 2.0)),
+        'affine_scale_E_ppm': float(a[1] * 1e6), 'affine_scale_N_ppm': float(b[2] * 1e6),
+        'affine_shear_ppm': float((a[2] + b[1]) / 2.0 * 1e6),
+        'affine_resid_rmse_m': float(np.sqrt(np.mean(rxs ** 2 + rys ** 2))),
+    }
+
+
 def _fallback_files(filtered_dir: str, stats_dir: str) -> List[str]:
     """No consensus: the configuration with the most inliers, all its chips."""
     summ = os.path.join(stats_dir, 'SUMMARY_ALL.csv')
@@ -197,6 +225,7 @@ def export_run(record: Dict, working_crs: str, out_dir: str, scene_name: str,
     n_all = len(pts)
     stats_all = summarize((pts['x1-map'] - pts['x2-map']).tolist(),
                           (pts['y1-map'] - pts['y2-map']).tolist())
+    distortion = distortion_summary(pts['x1-map'], pts['y1-map'], pts['x2-map'], pts['y2-map'])
     pts = thin_per_chip(pts, max_per_chip, seed)
 
     first = pts.iloc[0]
@@ -207,7 +236,8 @@ def export_run(record: Dict, working_crs: str, out_dir: str, scene_name: str,
     detail = os.path.join(out_dir, base + '_detail.csv')
     stats = write_rival_csv(pts, working_crs, path, detail)
     return {'rival_csv': path, 'detail_csv': detail, 'validated': validated,
-            'n_inliers_all': n_all, 'stats_all': stats_all, **stats,
+            'n_inliers_all': n_all, 'stats_all': stats_all, 'distortion': distortion,
+            'n_chips': int(pts['source_file'].nunique()), **stats,
             'detector': record['detector_tag'], 'channel': record['nisar_pol'],
             'reference': record['s1_ref_tag'], 'matcher_config': cfg,
             'ransac_threshold': float(first['ransac_threshold'])}

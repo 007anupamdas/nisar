@@ -64,8 +64,11 @@ BTN_DEFAULTS = _DBB.StandardButton.RestoreDefaults if QT_API != 'PyQt5' else _DB
 RANSAC_CHOICES = ['magsac', 'ransac', 'lmeds', 'accurate']
 COARSE_CHOICES = ['auto', 'matcher', 'phasecorr', 'manual', 'none']
 REF_MODES = ['auto', 'index-shp', 'sidecar', 'degree-tile']
-RESULT_COLS = ['sweep', 'channel', 'detector', 'status', 'n_points', 'mean_dx_m',
-               'mean_dy_m', 'rmse_x_m', 'rmse_y_m', 'ce90_m', 'rival_csv']
+RESULT_COLS = ['sweep', 'channel', 'detector', 'status', 'n_points', 'n_chips', 'mean_dx_m',
+               'mean_dy_m', 'dE_min_m', 'dE_max_m', 'dN_min_m', 'dN_max_m', 'affine_rot_deg',
+               'affine_resid_rmse_m', 'rmse_x_m', 'rmse_y_m', 'ce90_m', 'rival_csv']
+CONSENSUS_MODELS = ['surface', 'constant', 'none']
+SURFACE_DEGREES = ['auto', 'affine', 'bilinear', 'quadratic', 'biquadratic']
 MAX_LOG_LINES = 5000
 
 
@@ -529,6 +532,14 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.margin.setRange(0, 50000)
         self.margin.setSuffix(' m')
         f.addRow('Fine search margin', self.margin)
+        self.coarse_local = QtWidgets.QCheckBox('estimate the offset per cell (errors that vary across the scene)')
+        f.addRow('Local coarse offsets', self.coarse_local)
+        self.coarse_cell = QtWidgets.QDoubleSpinBox()
+        self.coarse_cell.setRange(0, 500)
+        self.coarse_cell.setDecimals(1)
+        self.coarse_cell.setSuffix(' km')
+        self.coarse_cell.setSpecialValueText('one window')
+        f.addRow('Offset cell size', self.coarse_cell)
 
     def _build_ransac_tab(self):
         f = self._form_tab('RANSAC & consensus')
@@ -557,6 +568,14 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.min_chips = QtWidgets.QSpinBox()
         self.min_chips.setRange(1, 10000)
         f.addRow('Min surviving chips', self.min_chips)
+        self.cons_model = QtWidgets.QComboBox()
+        self.cons_model.addItems(CONSENSUS_MODELS)
+        self.cons_model.setToolTip('surface: chips must agree with a smooth error surface (error varies '
+                                   'across the scene); constant: with the most common error; none: keep all')
+        f.addRow('Chip consistency', self.cons_model)
+        self.cons_surface = QtWidgets.QComboBox()
+        self.cons_surface.addItems(SURFACE_DEGREES)
+        f.addRow('Error surface', self.cons_surface)
 
     def _build_run_tab(self):
         f = self._form_tab('Output & run')
@@ -623,6 +642,8 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.init_dx.setValue(float(off[0]) if off else 0.0)
         self.init_dy.setValue(float(off[1]) if off else 0.0)
         self.margin.setValue(float(j['search_margin_m']))
+        self.coarse_local.setChecked(bool(j['coarse_local']))
+        self.coarse_cell.setValue(float(j['coarse_cell_km'] or 0))
         for m, cb in self.ransac_boxes.items():
             cb.setChecked(m in [str(x) for x in j['ransac_methods']])
         self.ransac_px.setText(fmt_list(j['ransac_thresholds_px']))
@@ -631,6 +652,8 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.cons_bin.setValue(float(j['consensus_mode_bin_px']))
         self.min_inl.setValue(int(j['min_inliers_per_chip']))
         self.min_chips.setValue(int(j['min_surviving_chips']))
+        self.cons_model.setCurrentText(j['consensus_model'])
+        self.cons_surface.setCurrentText(j['consensus_surface'])
         self.rival_pts.setValue(int(j['rival_max_points_per_chip']))
         self.device.setCurrentText(j['device'])
         self.min_gpu.setValue(float(j['min_gpu_free_gb']))
@@ -679,6 +702,8 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             'coarse_resolution_m': self.coarse_res.value(),
             'initial_offset_m': [self.init_dx.value(), self.init_dy.value()] if self.use_init.isChecked() else None,
             'search_margin_m': self.margin.value(),
+            'coarse_local': self.coarse_local.isChecked(),
+            'coarse_cell_km': self.coarse_cell.value(),
             'ransac_methods': methods,
             'ransac_thresholds_px': parse_float_list(self.ransac_px.text(), 'RANSAC thresholds'),
             'ransac_thresholds_m': [],
@@ -687,6 +712,8 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             'consensus_mode_bin_px': self.cons_bin.value(),
             'min_inliers_per_chip': self.min_inl.value(),
             'min_surviving_chips': self.min_chips.value(),
+            'consensus_model': self.cons_model.currentText(),
+            'consensus_surface': self.cons_surface.currentText(),
             'rival_max_points_per_chip': self.rival_pts.value(),
             'device': self.device.currentText().strip() or 'auto',
             'min_gpu_free_gb': self.min_gpu.value(),
