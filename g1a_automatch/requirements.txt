@@ -1,0 +1,12 @@
+# torch: install the CUDA build for your driver first (see README)
+kornia>=0.7.4
+numpy
+opencv-python-headless
+rasterio
+rioxarray
+xarray
+h5py
+shapely>=2.0
+pyproj
+pandas
+PyQt5

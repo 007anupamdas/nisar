@@ -66,3 +66,12 @@ Add a row to `CATALOG` in `imw_configs.py`:
 
 Conf names come from your installed imcui registry; unknown names are skipped
 at startup with a message listing the available ones.
+
+## G1A automatic matching (separate tool)
+
+`g1a_automatch/` is a self-contained tool (GUI + CLI) that measures the
+geolocation error of G1A multi-band imagery (or NISAR H5) against L8_ref / C1
+reference collections, finds references the way `DPQED_rival.py` does, handles
+errors of tens of kilometres, and writes CSVs that `DPQED_rival.py` loads
+directly. It shares no code with the NISAR↔S1 scripts here and is meant to be
+moved to its own repository — see `g1a_automatch/README.md`.
