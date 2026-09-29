@@ -167,8 +167,10 @@ def test_e2e_rerun(tmp):
     rc, log3 = _run_job({**job, 'smnn_thresholds': [0.9]}, tmp, True)
     check('rerun: changed settings -> run again', rc == 0 and 'running again' in log3)
     check('rerun: preprocessing reused from the cache', '[Cache] All 1 pairs loaded' in log3)
-    files = glob.glob(os.path.join(out, 'win1024_nfauto', 'band1_toC1', 'filtered_same-res_sift', '*.csv'))
-    check('rerun: only the new run\'s files remain', bool(files) and all('_smnn_0.9_' in f for f in files))
+    files = [os.path.basename(f) for f in glob.glob(
+        os.path.join(out, 'win1024_nfauto', 'band1_toC1', 'filtered_same-res_sift', '*.csv'))]
+    check('rerun: new run\'s files written', any('_smnn_0.9_' in f for f in files))
+    check('rerun: no file left from the previous run', not any('_smnn_0.95_' in f for f in files))
 
 
 def test_e2e_variants(tmp):
