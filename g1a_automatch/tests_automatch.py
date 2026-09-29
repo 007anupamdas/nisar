@@ -264,10 +264,17 @@ def test_e2e_distortion(tmp):
         check('distortion: 95% of points within 30 m of the truth',
               np.percentile(eE, 95) < 30 and np.percentile(eN, 95) < 30)
         check('distortion: chips kept across the scene (>= 20 of 25)', d.source_file.nunique() >= 20)
-        sc = float(row.get('affine_scale_E_ppm') or 0)
-        print(f"      affine scale E {sc:.0f} ppm (true 60000), rotation {float(row.get('affine_rot_deg') or 0):.3f} deg, "
-              f"residual beyond affine {float(row.get('affine_resid_rmse_m') or 0):.0f} m")
-        check('distortion: scale error measured', abs(sc - 60000) < 6000)
+        # The summary regresses the error on reference position, so compare it
+        # with the same summary of the TRUE errors at the same points.
+        import automatch_rival as AR
+        truth = AR.distortion_summary(d.In_X, d.In_Y, d.In_X - tE, d.In_Y - tN)
+        sc, sc_t = float(row.get('affine_scale_E_ppm') or 0), truth['affine_scale_E_ppm']
+        rr, rr_t = float(row.get('affine_resid_rmse_m') or 0), truth['affine_resid_rmse_m']
+        print(f"      affine scale E {sc:.0f} ppm (truth {sc_t:.0f}), rotation "
+              f"{float(row.get('affine_rot_deg') or 0):.3f} deg (truth {truth['affine_rot_deg']:.3f}), "
+              f"residual beyond affine {rr:.0f} m (truth {rr_t:.0f})")
+        check('distortion: scale and residual match the truth',
+              abs(sc - sc_t) < 1000 and abs(rr - rr_t) < 20)
     else:
         check('distortion: RIVAL detail written', False)
     n_const = int(float(runs['constant'][1].get('n_chips') or 0))
