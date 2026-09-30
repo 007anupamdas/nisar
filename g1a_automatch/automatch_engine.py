@@ -201,6 +201,79 @@ def safe_cuda_empty_cache():
 
 
 # =============================================================================
+# MODEL WEIGHTS
+# =============================================================================
+# Extra torch-hub folders searched for weights (the configured weights cache);
+# see add_weights_dir(). kornia's own default folder is always searched.
+WEIGHT_DIRS: List[str] = []
+
+
+def add_weights_dir(path: str) -> None:
+    """Also look for model weights in <path>/checkpoints (a torch-hub folder)
+    or <path>/torch/hub/checkpoints (a cache root written by prefetch_weights)."""
+    for cand in (path, os.path.join(path, 'torch', 'hub')):
+        cand = os.path.abspath(os.path.expanduser(cand))
+        if os.path.isdir(os.path.join(cand, 'checkpoints')) and cand not in WEIGHT_DIRS:
+            WEIGHT_DIRS.append(cand)
+
+
+def _default_hub_dir() -> str:
+    xdg = os.getenv('XDG_CACHE_HOME', os.path.join(os.path.expanduser('~'), '.cache'))
+    return os.path.join(xdg, 'torch', 'hub')
+
+
+def weight_search_dirs() -> List[str]:
+    dirs = [th.hub.get_dir(), _default_hub_dir()]
+    if os.getenv('TORCH_HOME'):
+        dirs.append(os.path.join(os.environ['TORCH_HOME'], 'hub'))
+    out: List[str] = []
+    for d in dirs + WEIGHT_DIRS:
+        d = os.path.abspath(os.path.expanduser(d))
+        if d not in out:
+            out.append(d)
+    return out
+
+
+_ORIG_LOAD_STATE_DICT = th.hub.load_state_dict_from_url
+
+
+def _load_state_dict_any_cache(url, model_dir=None, map_location=None, progress=True,
+                               check_hash=False, file_name=None, **kwargs):
+    """torch.hub.load_state_dict_from_url that first looks for the file in
+    every known weights folder, so weights downloaded earlier (e.g. into
+    kornia's default ~/.cache/torch/hub) are used on an offline machine even
+    when TORCH_HOME points elsewhere. Downloads only if found nowhere."""
+    from urllib.parse import urlparse
+    fname = file_name or os.path.basename(urlparse(url).path)
+    folders = ([model_dir] if model_dir else []) + [os.path.join(h, 'checkpoints')
+                                                    for h in weight_search_dirs()]
+    for folder in folders:
+        path = os.path.join(folder, fname)
+        if os.path.isfile(path):
+            if os.path.dirname(path) != os.path.join(th.hub.get_dir(), 'checkpoints'):
+                print(f'[Weights] {fname} from {folder}')
+            try:
+                return th.load(path, map_location=map_location,
+                               weights_only=kwargs.get('weights_only', False))
+            except TypeError:  # torch without weights_only
+                return th.load(path, map_location=map_location)
+    return _ORIG_LOAD_STATE_DICT(url, model_dir=model_dir, map_location=map_location,
+                                 progress=progress, check_hash=check_hash, file_name=file_name, **kwargs)
+
+
+th.hub.load_state_dict_from_url = _load_state_dict_any_cache
+
+
+class ModelLoadError(RuntimeError):
+    """A detector's network could not be built (typically: its weights are not
+    on this machine and cannot be downloaded). Stops that detector."""
+
+
+# label -> message, for the whole job: a failed load is not retried per window
+FAILED_MODELS: Dict[str, str] = {}
+
+
+# =============================================================================
 # PROGRESS
 # =============================================================================
 # dqe_job.py installs a callable here; the engine calls report() at coarse
@@ -1666,6 +1739,8 @@ class CoarseAligner:
                         out['dx'] = float(np.median(np.asarray(field['dx'])))
                         out['dy'] = float(np.median(np.asarray(field['dy'])))
                     return out
+            except ModelLoadError:
+                raise
             except Exception as e:
                 tried.append(f'matcher: {type(e).__name__}: {e}')
         if method in ('auto', 'phasecorr'):
@@ -1900,6 +1975,26 @@ class BaseMatcher(ABC):
     def _prefix_base(self) -> str:
         return self.get_detector_name()
 
+    def _load_model(self, label: str, factory: Callable):
+        """Build a network once. A failure is remembered for the rest of the
+        job and raised as ModelLoadError, so the detector stops with a clear
+        message instead of failing -- and re-trying a download -- silently in
+        every window."""
+        if label in FAILED_MODELS:
+            raise ModelLoadError(FAILED_MODELS[label])
+        try:
+            return factory()
+        except ModelLoadError:
+            raise
+        except Exception as e:
+            looked = '; '.join(os.path.join(d, 'checkpoints') for d in weight_search_dirs())
+            msg = (f'{label} could not be loaded ({type(e).__name__}: {e}). Looked for its weights in: '
+                   f'{looked}. On an offline machine, run prefetch_weights.py on a connected one '
+                   f'and set the weights folder to its output (or copy the files into one of these).')
+            FAILED_MODELS[label] = msg
+            print(f'[{self.get_filename_prefix()}] MODEL LOAD FAILED: {msg}')
+            raise ModelLoadError(msg) from e
+
     def get_filename_prefix(self) -> str:
         """Detector token in every output name: the class's base prefix plus
         the variant suffix (non-default parameters, e.g. 'sift-rs0')."""
@@ -1927,8 +2022,10 @@ class BaseMatcher(ABC):
         model = self._lgm_models.get(key)
         if model is None:
             print(f'{self.get_detector_name()}: Initializing LightGlue {dict(params or {}) or "(defaults)"}...')
-            model = KF.LightGlueMatcher(feature_name=feature_name,
-                                        params=dict(params or {})).eval().to(self.device)
+            model = self._load_model(
+                f'LightGlue ({feature_name})',
+                lambda: KF.LightGlueMatcher(feature_name=feature_name,
+                                            params=dict(params or {})).eval().to(self.device))
             self._lgm_models[key] = model
         d1 = descs1.squeeze(0) if descs1.dim() == 2 else descs1
         d2 = descs2.squeeze(0) if descs2.dim() == 2 else descs2
@@ -1986,6 +2083,26 @@ class DiskBasedMatcher(BaseMatcher):
             elapsed = time.time() - start
             print(f"{self.get_filename_prefix()}: {len(all_matches)} match-sets in {elapsed:.2f}s")
             return all_matches
+
+    def warmup(self) -> None:
+        """Load every network this variant will use (its detector, and one
+        LightGlue per parameter set) on a tiny synthetic pair before any real
+        work, so missing weights stop the detector in seconds, not hours.
+        Raises ModelLoadError."""
+        rng = np.random.default_rng(0)
+        img = (rng.random((256, 256)) * 1000.0 + 1.0).astype(np.float32)
+        meta = {'x01': 0.0, 'y01': 0.0, 'xres1': 1.0, 'yres1': -1.0, 'x02': 0.0, 'y02': 0.0,
+                'xres2': 1.0, 'yres2': -1.0, 'nisar_crop_row_offset': 0, 'nisar_crop_col_offset': 0,
+                'pair_id': 0, 'nisar_pol': 'warmup', 's1_ref_tag': 'warmup'}
+        done = set()
+        for name, param in self.matcher_runs():
+            key = (name, repr(param)) if name == 'lgm' else (name,)
+            if key in done:
+                continue
+            done.add(key)
+            self._process_single_window(img, img.copy(), 0, 0, 0, 0, meta, name, param,
+                                        nisar_nodata=0.0, s1_nodata=0.0)
+        self._window_errors = 0
 
     def matcher_runs(self) -> List[Tuple[str, object]]:
         """(matcher, parameter) for every matching pass of this detector
@@ -2218,6 +2335,8 @@ class DiskBasedMatcher(BaseMatcher):
                 if match_data:
                     matches.append(match_data)
 
+            except ModelLoadError:
+                raise
             except Exception as e:
                 n_err += 1
                 if self.config.debug_mode or n_err <= 3:
@@ -2336,9 +2455,12 @@ class DiskBasedMatcher(BaseMatcher):
                                          nisar_x, nisar_y, s1_x, s1_y,
                                          metadata, matcher_name, match_param_str)
 
+        except ModelLoadError:
+            raise
         except Exception as e:
-            if self.config.debug_mode:
-                print(f'[{self.get_detector_name()}] Exception ({nisar_x},{nisar_y}): '
+            self._window_errors = getattr(self, '_window_errors', 0) + 1
+            if self.config.debug_mode or self._window_errors <= 3:
+                print(f'[{self.get_filename_prefix()}] window ({nisar_x},{nisar_y}) error: '
                       f'{type(e).__name__}: {e}')
             return None
 
@@ -2506,13 +2628,13 @@ class SIFTMatcher(DiskBasedMatcher):
         if self.sift is None:
             print(f'SIFT: Initializing (rootsift={self.rootsift}, upright={self.upright})...')
             extra = {'score_threshold': self.score_threshold} if self.score_threshold else {}
-            self.sift = KF.SIFTFeature(
+            self.sift = self._load_model('SIFT', lambda: KF.SIFTFeature(
                 self.config.num_features,
                 upright=self.upright,
                 rootsift=self.rootsift,
                 device=self.device,
                 **extra
-            )
+            ))
         lafs1, _, descs1 = self.sift(img1)
         lafs2, _, descs2 = self.sift(img2)
         return lafs1, descs1, lafs2, descs2
@@ -2538,7 +2660,9 @@ class DISKMatcher(DiskBasedMatcher):
     def detect_and_describe(self, img1: th.Tensor, img2: th.Tensor) -> Tuple:
         if self.disk is None:
             print(f'DISK: Loading {self.checkpoint} model...')
-            self.disk = KF.DISK.from_pretrained(device=self.device, checkpoint=self.checkpoint).eval()
+            self.disk = self._load_model(
+                f'DISK ({self.checkpoint} weights)',
+                lambda: KF.DISK.from_pretrained(device=self.device, checkpoint=self.checkpoint).eval())
 
         img1_rgb = K.color.grayscale_to_rgb(img1)
         img2_rgb = K.color.grayscale_to_rgb(img2)
@@ -2592,15 +2716,19 @@ class DeDoDeMatcher(DiskBasedMatcher):
             # DeDoDe runs its DINOv2 (G-*) branch in float16 by default; that
             # only works under CUDA autocast, so use float32 on CPU / MPS.
             kwargs = {} if self.device.type == 'cuda' else {'amp_dtype': th.float32}
-            try:
-                model = KF.DeDoDe.from_pretrained(
-                    detector_weights=self.detector_weights,
-                    descriptor_weights=self.descriptor_weights, **kwargs)
-            except TypeError:  # kornia without the amp_dtype argument
-                model = KF.DeDoDe.from_pretrained(
-                    detector_weights=self.detector_weights,
-                    descriptor_weights=self.descriptor_weights)
-            self.dedode = model.eval().to(self.device)
+
+            def build():
+                try:
+                    model = KF.DeDoDe.from_pretrained(
+                        detector_weights=self.detector_weights,
+                        descriptor_weights=self.descriptor_weights, **kwargs)
+                except TypeError:  # kornia without the amp_dtype argument
+                    model = KF.DeDoDe.from_pretrained(
+                        detector_weights=self.detector_weights,
+                        descriptor_weights=self.descriptor_weights)
+                return model.eval().to(self.device)
+            self.dedode = self._load_model(
+                f'DeDoDe ({self.detector_weights} / {self.descriptor_weights})', build)
 
         img1_rgb = K.color.grayscale_to_rgb(img1)
         img2_rgb = K.color.grayscale_to_rgb(img2)
@@ -2711,7 +2839,9 @@ class LoFTRMatcher(DiskBasedMatcher):
 
             if self.loftr is None:
                 print(f'LoFTR: Initializing model ({self.pretrained} weights)...')
-                self.loftr = KF.LoFTR(pretrained=self.pretrained, config=self.konfig).eval().to(self.device)
+                self.loftr = self._load_model(
+                    f'LoFTR ({self.pretrained} weights)',
+                    lambda: KF.LoFTR(pretrained=self.pretrained, config=self.konfig).eval().to(self.device))
                 from kornia.feature.loftr.utils.superglue import log_optimal_transport
                 self.loftr.coarse_matching.match_type = 'sinkhorn'
                 self.loftr.coarse_matching.bin_score = th.nn.Parameter(
@@ -2788,6 +2918,8 @@ class LoFTRMatcher(DiskBasedMatcher):
                 'distance': dist, 'along': along, 'across': across,
             }
 
+        except ModelLoadError:
+            raise
         except Exception as e:
             # Always print LoFTR errors — not gated by debug_mode
             print(f'[LoFTR] Exception at window ({nisar_x},{nisar_y}): {type(e).__name__}: {e}')
@@ -2809,13 +2941,13 @@ class ALIKEDMatcher(DiskBasedMatcher):
             # kornia >= 0.8: from_pretrained(model_name, max_num_keypoints,
             # detection_threshold, nms_radius, device); forward -> list of
             # ALIKEDFeatures, one per image.
-            self.aliked = KF.ALIKED.from_pretrained(
+            self.aliked = self._load_model(f'ALIKED ({self.model_name})', lambda: KF.ALIKED.from_pretrained(
                 model_name=self.model_name,
                 max_num_keypoints=self.config.num_features,
                 detection_threshold=self.detection_threshold,
                 nms_radius=self.nms_radius,
                 device=self.device,
-            ).eval().to(self.device)
+            ).eval().to(self.device))
 
         # ALIKED expects 3-channel input
         img1_rgb = K.color.grayscale_to_rgb(img1)
@@ -2863,9 +2995,9 @@ class XFeatMatcher(DiskBasedMatcher):
     def _model(self):
         if self.xfeat is None:
             print('XFeat: Loading kornia XFeat...')
-            self.xfeat = KF.XFeat.from_pretrained(
+            self.xfeat = self._load_model('XFeat', lambda: KF.XFeat.from_pretrained(
                 top_k=self.config.num_features,
-                detection_threshold=self.detection_threshold).eval().to(self.device)
+                detection_threshold=self.detection_threshold).eval().to(self.device))
         return self.xfeat
 
     def detect_and_describe(self, img1: th.Tensor, img2: th.Tensor) -> Tuple:
@@ -2903,9 +3035,9 @@ class KeyNetMatcher(DiskBasedMatcher):
         if self.feat is None:
             print(f'KeyNet: Loading KeyNet-AffNet-HardNet (upright={self.upright})...')
             extra = {'score_threshold': self.score_threshold} if self.score_threshold else {}
-            self.feat = KF.KeyNetAffNetHardNet(
+            self.feat = self._load_model('KeyNet-AffNet-HardNet', lambda: KF.KeyNetAffNetHardNet(
                 num_features=self.config.num_features, upright=self.upright,
-                device=self.device, **extra).eval()
+                device=self.device, **extra).eval())
         lafs1, _, descs1 = self.feat(img1.float())
         lafs2, _, descs2 = self.feat(img2.float())
         return lafs1, descs1, lafs2, descs2
@@ -3023,7 +3155,8 @@ class XFeatStarMatcher(DenseWindowMatcher):
     def match_images(self, img1, img2):
         if self.xfeat is None:
             print('XFeat*: Loading kornia XFeat...')
-            self.xfeat = KF.XFeat.from_pretrained(top_k=self.config.num_features).eval().to(self.device)
+            self.xfeat = self._load_model(
+                'XFeat*', lambda: KF.XFeat.from_pretrained(top_k=self.config.num_features).eval().to(self.device))
         t1 = th.from_numpy(img1).float()[None, None].to(self.device)
         t2 = th.from_numpy(img2).float()[None, None].to(self.device)
         with th.inference_mode():
@@ -4192,24 +4325,32 @@ class AutoMatchPipeline:
                    'detector_tag': tag, 'output_dir': pol_out_dir, 'status': 'ok', 'error': ''}
             try:
                 matcher.selected_matchers()  # validate the matcher selection early
+                report('stage', stage='warmup', channel=pol, detector=tag)
+                matcher.warmup()             # missing weights stop here, in seconds
                 offsets, all_match_data = [], []
+                ests: Dict[int, Dict] = {}
                 for pair in disk_pairs:
                     pid = pair['pair_id']
                     if matcher_free and pid in shared_coarse:
-                        est = shared_coarse[pid]
+                        ests[pid] = shared_coarse[pid]
                     else:
                         report('stage', stage='coarse', channel=pol, detector=tag, pair=pid)
-                        est = aligner.estimate(pair, None if matcher_free else matcher)
+                        ests[pid] = aligner.estimate(pair, None if matcher_free else matcher)
                         if matcher_free:
-                            shared_coarse[pid] = est
+                            shared_coarse[pid] = ests[pid]
+                self._borrow_failed_offsets(disk_pairs, ests)
+                for pair in disk_pairs:
+                    pid = pair['pair_id']
+                    est = ests[pid]
                     print(f'[Coarse] {tag} pair {pid}: dE={est["dx"]:.1f} m dN={est["dy"]:.1f} m '
                           f'({est["method"]}, support={est.get("support")}, peak={est.get("peak")}) '
                           f'{CoarseAligner._field_summary(est.get("field"))}')
                     offsets.append({'pair_id': pid, 'reference': os.path.basename(pair.get('reference_path', '')),
                                     **est})
+                    margin = 0.0 if est['method'] == 'none' else cfg.search_margin_m * est.get('margin_scale', 1.0)
                     work = dict(pair, coarse_dx=est['dx'], coarse_dy=est['dy'],
                                 coarse_method=est['method'], coarse_field=est.get('field'),
-                                search_margin_m=0.0 if est['method'] == 'none' else cfg.search_margin_m)
+                                search_margin_m=margin)
                     all_match_data.extend(matcher.process_disk_cached_pair(work))
                 safe_cuda_empty_cache()
 
@@ -4261,6 +4402,9 @@ class AutoMatchPipeline:
                 if summary is None:
                     rec['status'] = 'no-consensus'
                 del all_match_data
+            except ModelLoadError as e:
+                rec.update({'status': 'failed', 'error': f'model not available: {e}'})
+                print(f'[{pol}] {tag} SKIPPED -- model not available (see message above)')
             except Exception as e:
                 rec.update({'status': 'failed', 'error': f'{type(e).__name__}: {e}'})
                 print(f'[{pol}] {tag} FAILED: {type(e).__name__}: {e}')
@@ -4278,6 +4422,32 @@ class AutoMatchPipeline:
         if cfg.cleanup_after_pair and disk_pairs:
             shutil.rmtree(os.path.dirname(disk_pairs[0]['nisar_path']), ignore_errors=True)
         return run_records
+
+    @staticmethod
+    def _borrow_failed_offsets(pairs: List[Dict], ests: Dict[int, Dict]) -> None:
+        """A pair whose coarse estimate failed takes the offset of the nearest
+        pair of the same scene that succeeded (its field, read at this pair's
+        centre), with a doubled search margin -- all pairs share one input
+        image, so a neighbour's offset is a far better guess than zero."""
+        good = [p for p in pairs if ests[p['pair_id']]['method'] not in ('failed',)]
+        if not good:
+            return
+
+        def centre(p):
+            b = p['bounds']
+            return (b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0
+
+        for p in pairs:
+            e = ests[p['pair_id']]
+            if e['method'] != 'failed':
+                continue
+            cx, cy = centre(p)
+            src = min(good, key=lambda q: math.hypot(centre(q)[0] - cx, centre(q)[1] - cy))
+            g = ests[src['pair_id']]
+            dx, dy = field_offset(g['field'], cx, cy) if g.get('field') else (g['dx'], g['dy'])
+            ests[p['pair_id']] = {'dx': float(dx), 'dy': float(dy), 'support': None, 'n': None,
+                                  'peak': None, 'field': None, 'margin_scale': 2.0,
+                                  'method': f'from-pair-{src["pair_id"]}'}
 
     # ── whole scene ──────────────────────────────────────────────────────────
     def run(self, scene_dir: str, detector_types: List[str] = None):

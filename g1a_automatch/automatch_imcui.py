@@ -11,11 +11,13 @@ SuperPoint+SuperGlue, eLoFTR, ASpanFormer, RoMa and DKM.
 
 Model weights: set AUTOMATCH_WEIGHTS_CACHE (or PipelineConfig.weights_cache_dir
 via the job file) to a folder laid out like prefetch_imw_weights.py writes it
-(huggingface/, torch/). HF_HOME / TORCH_HOME are only set when not already
-set, and HF_HUB_OFFLINE is set when that folder exists, so an offline machine
-never tries the network.
+(huggingface/, torch/). HF_HOME is set (if not already) and HF_HUB_OFFLINE
+turned on; TORCH_HOME is left alone so kornia keeps its own weight folder --
+the cache's torch/hub is searched for weights and used as the torch-hub folder
+only while imcui models load and run.
 """
 
+import contextlib
 import copy
 import gc
 import os
@@ -28,6 +30,9 @@ import torch as th
 import automatch_engine as E
 
 _API = None
+# torch-hub folder of the configured weights cache: switched in only while an
+# imcui model loads or runs, so kornia keeps its own (default) folder.
+_IMCUI_HUB: Optional[str] = None
 
 
 def configure_weights_cache(path: Optional[str] = None) -> Optional[str]:
@@ -37,12 +42,33 @@ def configure_weights_cache(path: Optional[str] = None) -> Optional[str]:
     if not os.path.isdir(path):
         print(f'[imcui] weights cache {path} not found -- using default caches')
         return None
+    global _IMCUI_HUB
     os.environ.setdefault('HF_HOME', os.path.join(path, 'huggingface'))
-    os.environ.setdefault('TORCH_HOME', os.path.join(path, 'torch'))
     os.environ.setdefault('HF_HUB_OFFLINE', '1')
     os.environ.setdefault('TRANSFORMERS_OFFLINE', '1')
+    # TORCH_HOME is deliberately NOT changed: that would also move kornia's
+    # weight folder away from where its weights were downloaded before. The
+    # cache is searched for kornia weights too (add_weights_dir), and becomes
+    # the torch-hub folder only while imcui models load and run.
+    E.add_weights_dir(path)
+    hub = os.path.join(path, 'torch', 'hub')
+    _IMCUI_HUB = hub if os.path.isdir(hub) else None
     print(f'[imcui] weights cache: {path} (offline)')
     return path
+
+
+@contextlib.contextmanager
+def _imcui_hub():
+    """Use the weights cache as the torch-hub folder for the duration."""
+    if not _IMCUI_HUB:
+        yield
+        return
+    old = th.hub.get_dir()
+    th.hub.set_dir(_IMCUI_HUB)
+    try:
+        yield
+    finally:
+        th.hub.set_dir(old)
 
 
 def imcui_available() -> Tuple[bool, str]:
@@ -148,7 +174,6 @@ class IMWMatcher(E.DenseWindowMatcher):
         self.imw_conf = conf
         self.dense = dense
         self.api = None
-        self._load_failed = False
         self._n_saved = 0
 
     def get_detector_name(self) -> str:
@@ -161,26 +186,23 @@ class IMWMatcher(E.DenseWindowMatcher):
         return True
 
     def _ensure_api(self) -> bool:
+        """Load the imcui model once; raises E.ModelLoadError if it cannot be
+        (remembered for the whole job, so it is not retried per window)."""
         if self.api is not None:
             return True
-        if self._load_failed:
-            return False
-        try:
+
+        def build():
             print(f'[{self.get_detector_name()}] Loading model...')
-            self.api = _api_class()(
-                conf=self.imw_conf,
-                device=str(self.device),
-                detect_threshold=self.detect_threshold,
-                max_keypoints=self.config.num_features,
-                match_threshold=self.match_threshold,
-            )
-            return True
-        except Exception as e:
-            self._load_failed = True
-            print(f'[{self.get_detector_name()}] MODEL LOAD FAILED: {type(e).__name__}: {e}')
-            print(f'[{self.get_detector_name()}] skipping this detector. For an offline '
-                  f'machine, prefetch weights and set AUTOMATCH_WEIGHTS_CACHE.')
-            return False
+            with _imcui_hub():
+                return _api_class()(
+                    conf=self.imw_conf,
+                    device=str(self.device),
+                    detect_threshold=self.detect_threshold,
+                    max_keypoints=self.config.num_features,
+                    match_threshold=self.match_threshold,
+                )
+        self.api = self._load_model(f'imcui {self.imw_tag}', build)
+        return True
 
     @staticmethod
     def _gpu_free_gb() -> Optional[float]:
@@ -193,8 +215,7 @@ class IMWMatcher(E.DenseWindowMatcher):
             return None
 
     def match_images(self, img1: np.ndarray, img2: np.ndarray):
-        if not self._ensure_api():
-            raise RuntimeError(f'{self.get_detector_name()} model unavailable')
+        self._ensure_api()
         need = getattr(self.config, 'min_gpu_free_gb', 1.5)
         free = self._gpu_free_gb()
         if free is not None and free < need:
@@ -204,7 +225,7 @@ class IMWMatcher(E.DenseWindowMatcher):
                 raise RuntimeError(f'only {free:.1f} GB GPU memory free (< {need} GB)')
         u1 = (img1 * 255.0).clip(0, 255).astype(np.uint8)
         u2 = (img2 * 255.0).clip(0, 255).astype(np.uint8)
-        with th.inference_mode():
+        with th.inference_mode(), _imcui_hub():
             pred = self.api(cv2.cvtColor(u1, cv2.COLOR_GRAY2RGB), cv2.cvtColor(u2, cv2.COLOR_GRAY2RGB))
         # imcui's own geometric check first, raw matches if it rejected all
         m1, m2 = pred.get('mmkeypoints0_orig'), pred.get('mmkeypoints1_orig')

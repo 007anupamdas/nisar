@@ -484,7 +484,10 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.smnn = QtWidgets.QLineEdit()
         form.addRow('SMNN thresholds', self.smnn)
         self.weights_cache = PathRow('dir')
-        form.addRow('imcui weights cache (offline)', self.weights_cache)
+        self.weights_cache.edit.setToolTip('Extra folder searched for model weights (kornia and imcui), e.g. '
+                                           'the output of prefetch_weights.py. kornia\'s own default '
+                                           'folder is always searched too.')
+        form.addRow('Weights folder (offline)', self.weights_cache)
         self.lbl_imcui = QtWidgets.QLabel('')
         self.lbl_imcui.setWordWrap(True)
         form.addRow(self.lbl_imcui)

@@ -14,9 +14,10 @@ checkpoints, all DeDoDe detector and descriptor weights, all ALIKED models,
 all LoFTR weights), so any choice made in the GUI works offline;
 --defaults-only fetches just the default of each.
 
-Then copy <cache_root> to the workstation and set AUTOMATCH_WEIGHTS_CACHE (or
-'imcui weights cache' in the GUI) to it; also set TORCH_HOME=<cache_root>/torch
-so kornia finds its files offline.
+Then copy <cache_root> to the workstation and set the GUI's 'Weights folder'
+(or AUTOMATCH_WEIGHTS_CACHE) to it. Weights are looked up there and in kornia's
+default folder (~/.cache/torch/hub) before anything is downloaded; TORCH_HOME
+does not need to be set.
 
 Behind a TLS-inspecting proxy, PREFETCH_INSECURE_SSL=1 disables certificate
 checks for this download only -- use it only on a trusted network.

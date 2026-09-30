@@ -283,6 +283,52 @@ def test_e2e_distortion(tmp):
     check('distortion: constant rule keeps far fewer chips', n_const < n_surf / 2)
 
 
+def test_e2e_missing_weights(tmp):
+    """A detector whose weights are missing is skipped at once with a clear
+    message; the other detectors still run."""
+    import csv as _csv
+    import synthetic_data as S
+    data = os.path.join(tmp, 'synth')
+    if not os.path.exists(os.path.join(data, 'G1A_SYNTH_L1.tif')):
+        S.make_all(data, 4013.0, -2487.0)
+    out = os.path.join(tmp, 'out_missing')
+    # imcui-free, offline-simulated: point loftr at weights this machine never had
+    import automatch_engine as E
+    import time as _t
+    job = os.path.join(tmp, 'job_missing.py')
+    with open(job, 'w') as f:
+        f.write(textwrap.dedent(f"""
+            import sys, json
+            sys.path.insert(0, {HERE!r})
+            import automatch_engine as E
+            def offline(url, *a, **k):
+                raise OSError('offline: ' + url)
+            E._ORIG_LOAD_STATE_DICT = offline
+            import automatch_job as J
+            sys.exit(J.main(['run', {os.path.join(tmp, 'job_missing.json')!r}]))
+        """))
+    with open(os.path.join(tmp, 'job_missing.json'), 'w') as f:
+        json.dump({'input_path': os.path.join(data, 'G1A_SYNTH_L1.tif'),
+                   'reference_dir': os.path.join(data, 'C1'), 'output_dir': out,
+                   'channels': ['band1'], 'detectors': ['loftr', 'sift'],
+                   'detector_params': {'loftr': {'pretrained': ['indoor_new']}},
+                   'window_sizes': [1024], 'max_expected_error_m': 10000,
+                   'smnn_thresholds': [0.95], 'use_amp': False}, f)
+    t0 = _t.time()
+    res = subprocess.run([sys.executable, job], capture_output=True, text=True)
+    rows = list(_csv.DictReader(open(os.path.join(out, 'RUN_MANIFEST.csv'), encoding='utf-8'))) \
+        if os.path.exists(os.path.join(out, 'RUN_MANIFEST.csv')) else []
+    by = {r['detector']: r for r in rows}
+    check('missing weights: job completes', res.returncode, 0)
+    check('missing weights: detector reported as failed with the reason',
+          by.get('loftr-windoornew', {}).get('status') == 'failed'
+          and 'model not available' in by.get('loftr-windoornew', {}).get('error', ''))
+    check('missing weights: other detectors still run', by.get('sift', {}).get('status'), 'ok')
+    check('missing weights: skipped before any window was matched',
+          'loftr-windoornew SKIPPED' in res.stdout and 'loftr-windoornew: Processing pair' not in res.stdout)
+    print(f'      job took {_t.time() - t0:.0f} s')
+
+
 def test_e2e(tmp):
     import synthetic_data as S
     import automatch_rival as AR
@@ -408,6 +454,68 @@ def test_distortion_helpers():
          'dx': [[0.0, 100.0], [0.0, 100.0]], 'dy': [[10.0, 10.0], [30.0, 30.0]]}
     check('field: bilinear between cell centres', E.field_offset(f, 50.0, 50.0), (50.0, 20.0))
     check('field: constant beyond the outer centres', E.field_offset(f, -500.0, 500.0), (0.0, 10.0))
+
+
+def test_weights_and_failfast(tmp):
+    """The user's log: a torch-hub folder pointed elsewhere made kornia miss
+    weights it already had and retry a download in every window. Weights must
+    be found in kornia's default folder; a model that cannot be loaded must
+    fail once, fast, and not be retried."""
+    import torch as th
+    import automatch_engine as E
+    cfg = E.PipelineConfig(num_features=500, use_amp=False)
+    default_ckpt = os.path.join(E._default_hub_dir(), 'checkpoints', 'depth-save.pth')
+    old = th.hub.get_dir()
+    empty = os.path.join(tmp, 'empty_hub')
+    os.makedirs(os.path.join(empty, 'checkpoints'), exist_ok=True)
+    calls = []
+    orig = E._ORIG_LOAD_STATE_DICT
+
+    def offline(url, *a, **k):  # no network: every download fails
+        calls.append(url)
+        raise OSError(f'offline: {url}')
+    try:
+        th.hub.set_dir(empty)
+        E._ORIG_LOAD_STATE_DICT = offline
+        if os.path.exists(default_ckpt):
+            m = E.build_detector('disk', cfg)
+            try:
+                m.warmup()
+                check('weights: kornia default folder used when the hub folder points elsewhere',
+                      not calls and m.disk is not None)
+            finally:
+                m.unload_model()
+        else:
+            print('SKIP  weights: DISK depth weights not in the default folder here')
+        E.FAILED_MODELS.clear()
+        m = E.build_detector('loftr', cfg, {'pretrained': ['indoor_new']})
+        n_before = len(calls)
+        try:
+            m.warmup()
+            check('fail-fast: missing weights raise ModelLoadError', False)
+        except E.ModelLoadError as e:
+            check('fail-fast: missing weights raise ModelLoadError', True)
+            check('fail-fast: message names the folders searched', 'Looked for its weights in' in str(e))
+        m2 = E.build_detector('loftr', cfg, {'pretrained': ['indoor_new']})
+        try:
+            m2.warmup()
+        except E.ModelLoadError:
+            pass
+        check('fail-fast: download tried once for the whole job, not per window', len(calls) - n_before, 1)
+    finally:
+        E._ORIG_LOAD_STATE_DICT = orig
+        th.hub.set_dir(old)
+        E.FAILED_MODELS.clear()
+
+    ests = {1: {'method': 'failed', 'dx': 0.0, 'dy': 0.0},
+            2: {'method': 'matcher@60m', 'dx': 1000.0, 'dy': 2000.0, 'field': None},
+            3: {'method': 'matcher@60m', 'dx': 9000.0, 'dy': 9000.0, 'field': None}}
+    pairs = [{'pair_id': 1, 'bounds': [0, 0, 10, 10]}, {'pair_id': 2, 'bounds': [10, 0, 20, 10]},
+             {'pair_id': 3, 'bounds': [500, 500, 510, 510]}]
+    E.AutoMatchPipeline._borrow_failed_offsets(pairs, ests)
+    check('coarse: failed pair borrows the nearest pair\'s offset',
+          (ests[1]['method'], ests[1]['dx'], ests[1]['dy'], ests[1]['margin_scale']),
+          ('from-pair-2', 1000.0, 2000.0, 2.0))
 
 
 def test_gui_dialog():
@@ -562,6 +670,7 @@ def main():
         test_nisar_h5(tmp)
         test_detector_params()
         test_distortion_helpers()
+        test_weights_and_failfast(tmp)
         test_imcui_mock()
         if a.gui:
             test_gui_dialog()
@@ -570,6 +679,7 @@ def main():
             test_e2e_variants(tmp)
             test_e2e_rerun(tmp)
             test_e2e_distortion(tmp)
+            test_e2e_missing_weights(tmp)
     finally:
         if not a.keep:
             shutil.rmtree(tmp, ignore_errors=True)

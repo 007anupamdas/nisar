@@ -202,11 +202,17 @@ is free. Dense imcui models (RoMa, DKM) are the heaviest; keep them at 1024 px.
 
 ## Offline weights
 
-On a connected machine: `python prefetch_weights.py /path/cache` (fetches every
-selectable weight: both DISK checkpoints, all DeDoDe, ALIKED and LoFTR weights;
-`--defaults-only` for just the defaults). Copy the
-folder, then on the workstation set `TORCH_HOME=/path/cache/torch` and the
-GUI's *imcui weights cache* (or `AUTOMATCH_WEIGHTS_CACHE`) to `/path/cache`.
+Weights are looked for, before any download, in kornia's default folder
+(`~/.cache/torch/hub/checkpoints`, on Windows `%USERPROFILE%\.cache\torch\hub\checkpoints`),
+in `TORCH_HOME` if set, and in the GUI's **Weights folder** (`weights_cache_dir`).
+Weights you downloaded earlier with kornia are therefore used as they are.
+
+For anything missing, on a connected machine run
+`python prefetch_weights.py /path/cache` (every selectable weight: both DISK
+checkpoints, all DeDoDe, ALIKED and LoFTR weights, and the imcui models;
+`--defaults-only` for just the defaults), copy the folder and set it as the
+Weights folder. A model whose weights cannot be found stops that detector at
+once with a message naming the folders searched; the other detectors go on.
 
 ## Tests
 
