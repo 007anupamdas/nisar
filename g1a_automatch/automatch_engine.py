@@ -49,6 +49,7 @@ Robustness notes (this revision)
 
 import os
 import re
+import copy
 import csv
 import gc
 import glob
@@ -237,12 +238,10 @@ def weight_search_dirs() -> List[str]:
 _ORIG_LOAD_STATE_DICT = th.hub.load_state_dict_from_url
 
 
-def _load_state_dict_any_cache(url, model_dir=None, map_location=None, progress=True,
-                               check_hash=False, file_name=None, **kwargs):
-    """torch.hub.load_state_dict_from_url that first looks for the file in
-    every known weights folder, so weights downloaded earlier (e.g. into
-    kornia's default ~/.cache/torch/hub) are used on an offline machine even
-    when TORCH_HOME points elsewhere. Downloads only if found nowhere."""
+def find_weight_file(url: str, file_name: Optional[str] = None,
+                     model_dir: Optional[str] = None) -> Tuple[str, Optional[str], List[str]]:
+    """(file name, path if present in any weights folder else None, folders
+    searched) for a torch-hub weight URL -- the lookup the loader below does."""
     from urllib.parse import urlparse
     fname = file_name or os.path.basename(urlparse(url).path)
     folders = ([model_dir] if model_dir else []) + [os.path.join(h, 'checkpoints')
@@ -250,13 +249,34 @@ def _load_state_dict_any_cache(url, model_dir=None, map_location=None, progress=
     for folder in folders:
         path = os.path.join(folder, fname)
         if os.path.isfile(path):
-            if os.path.dirname(path) != os.path.join(th.hub.get_dir(), 'checkpoints'):
-                print(f'[Weights] {fname} from {folder}')
-            try:
-                return th.load(path, map_location=map_location,
-                               weights_only=kwargs.get('weights_only', False))
-            except TypeError:  # torch without weights_only
-                return th.load(path, map_location=map_location)
+            return fname, path, folders
+    return fname, None, folders
+
+
+# While automatch_weights traces a model, it installs a hook here that sees
+# every weight request (and may answer it); None in normal runs.
+WEIGHTS_TRACE_HOOK: Optional[Callable] = None
+
+
+def _load_state_dict_any_cache(url, model_dir=None, map_location=None, progress=True,
+                               check_hash=False, file_name=None, **kwargs):
+    """torch.hub.load_state_dict_from_url that first looks for the file in
+    every known weights folder, so weights downloaded earlier (e.g. into
+    kornia's default ~/.cache/torch/hub) are used on an offline machine even
+    when TORCH_HOME points elsewhere. Downloads only if found nowhere."""
+    fname, path, folders = find_weight_file(url, file_name, model_dir)
+    if WEIGHTS_TRACE_HOOK is not None:
+        answer = WEIGHTS_TRACE_HOOK('torch-hub', url=url, file=fname, path=path, searched=folders)
+        if answer is not None:
+            return answer
+    if path:
+        if os.path.dirname(path) != os.path.join(th.hub.get_dir(), 'checkpoints'):
+            print(f'[Weights] {fname} from {os.path.dirname(path)}')
+        try:
+            return th.load(path, map_location=map_location,
+                           weights_only=kwargs.get('weights_only', False))
+        except TypeError:  # torch without weights_only
+            return th.load(path, map_location=map_location)
     return _ORIG_LOAD_STATE_DICT(url, model_dir=model_dir, map_location=map_location,
                                  progress=progress, check_hash=check_hash, file_name=file_name, **kwargs)
 
@@ -271,6 +291,9 @@ class ModelLoadError(RuntimeError):
 
 # label -> message, for the whole job: a failed load is not retried per window
 FAILED_MODELS: Dict[str, str] = {}
+# labels of the models being built right now (innermost last), for the
+# weights checker to say which model asked for which file
+MODEL_LABELS: List[str] = []
 
 
 # =============================================================================
@@ -1982,6 +2005,7 @@ class BaseMatcher(ABC):
         every window."""
         if label in FAILED_MODELS:
             raise ModelLoadError(FAILED_MODELS[label])
+        MODEL_LABELS.append(label)
         try:
             return factory()
         except ModelLoadError:
@@ -1994,6 +2018,8 @@ class BaseMatcher(ABC):
             FAILED_MODELS[label] = msg
             print(f'[{self.get_filename_prefix()}] MODEL LOAD FAILED: {msg}')
             raise ModelLoadError(msg) from e
+        finally:
+            MODEL_LABELS.pop()
 
     def get_filename_prefix(self) -> str:
         """Detector token in every output name: the class's base prefix plus
@@ -2016,8 +2042,25 @@ class BaseMatcher(ABC):
             hw2=hw2
         )
 
-    def match_lgm(self, descs1, descs2, lafs1, lafs2, hw1, hw2, feature_name='disk',
-                  params: Optional[Dict] = None):
+    def match_generic(self, name: str, descs1, descs2, lafs1, lafs2, param: Optional[Dict] = None):
+        """kornia's plain matchers: nn, mnn (mutual NN), snn (ratio test) and
+        fginn (ratio test against the first geometrically distinct neighbour)."""
+        d1, d2 = descs1.squeeze(0), descs2.squeeze(0)
+        p = dict(param or {})
+        if name == 'nn':
+            return KF.match_nn(d1, d2)
+        if name == 'mnn':
+            return KF.match_mnn(d1, d2)
+        if name == 'snn':
+            return KF.match_snn(d1, d2, th=float(p.get('th', 0.8)))
+        if name == 'fginn':
+            return KF.match_fginn(d1, d2, lafs1, lafs2, th=float(p.get('th', 0.8)),
+                                  spatial_th=float(p.get('spatial_th', 10.0)),
+                                  mutual=bool(p.get('mutual', False)))
+        raise ValueError(f'Unknown matcher: {name}')
+
+    def _lightglue(self, feature_name: str, params: Optional[Dict] = None):
+        """The LightGlue matcher for these features and parameters (built once)."""
         key = (feature_name, tuple(sorted((params or {}).items())))
         model = self._lgm_models.get(key)
         if model is None:
@@ -2027,8 +2070,15 @@ class BaseMatcher(ABC):
                 lambda: KF.LightGlueMatcher(feature_name=feature_name,
                                             params=dict(params or {})).eval().to(self.device))
             self._lgm_models[key] = model
-        d1 = descs1.squeeze(0) if descs1.dim() == 2 else descs1
-        d2 = descs2.squeeze(0) if descs2.dim() == 2 else descs2
+        return model
+
+    def match_lgm(self, descs1, descs2, lafs1, lafs2, hw1, hw2, feature_name='disk',
+                  params: Optional[Dict] = None):
+        model = self._lightglue(feature_name, params)
+        # LightGlueMatcher wants (N, D): a (1, N, D) batch (SIFT, KeyNet, DoG)
+        # reads as a single descriptor and silently returns no matches
+        d1 = descs1.squeeze(0) if descs1.dim() == 3 else descs1
+        d2 = descs2.squeeze(0) if descs2.dim() == 3 else descs2
         with th.no_grad():
             return model(
                 d1,
@@ -2084,6 +2134,19 @@ class DiskBasedMatcher(BaseMatcher):
             print(f"{self.get_filename_prefix()}: {len(all_matches)} match-sets in {elapsed:.2f}s")
             return all_matches
 
+    def _build_models(self) -> None:
+        """Build the detector network(s) of this variant if not built yet
+        (each subclass; nothing for model-free detectors)."""
+
+    def load_models(self) -> None:
+        """Build every network this variant uses -- the detector, and one
+        LightGlue per parameter set of the selected matchers -- without
+        running any of them. Raises ModelLoadError."""
+        self._build_models()
+        for name, param in self.matcher_runs():
+            if name == 'lgm':
+                self._lightglue(self._lightglue_feature_name(), param)
+
     def warmup(self) -> None:
         """Load every network this variant will use (its detector, and one
         LightGlue per parameter set) on a tiny synthetic pair before any real
@@ -2134,9 +2197,14 @@ class DiskBasedMatcher(BaseMatcher):
             return '-'.join(toks)
         return ''
 
+    def get_optional_matchers(self) -> List[str]:
+        """kornia matchers offered on request: they run only when selected."""
+        return list(GENERIC_MATCHERS) if 'smnn' in self.get_available_matchers() else []
+
     def selected_matchers(self) -> List[str]:
-        """Supported matchers, narrowed by config.detector_matchers (keyed by
-        the registry name the user selected)."""
+        """The default matchers (get_available_matchers), or the selection in
+        config.detector_matchers (keyed by the registry name the user
+        selected), which may add the optional ones."""
         supported = self.get_available_matchers()
         dm = self.config.detector_matchers or {}
         wanted = None
@@ -2146,11 +2214,21 @@ class DiskBasedMatcher(BaseMatcher):
                 break
         if not wanted:
             return supported
-        bad = [m for m in wanted if m not in supported]
+        offered = supported + [m for m in self.get_optional_matchers() if m not in supported]
+        # matchers the detector family offers but this variant cannot run
+        # (LightGlue has DoG weights for HardNet only): skipped, with a note
+        family = (KORNIA_MATCHERS.get(self.registry_name or '', [])
+                  + OPTIONAL_MATCHERS.get(self.registry_name or '', []))
+        bad = [m for m in wanted if m not in offered and m not in family]
         if bad:
             raise ValueError(f'{self.get_filename_prefix()}: unsupported matcher(s) {bad}; '
-                             f'supported: {supported}')
-        return [m for m in supported if m in wanted]
+                             f'supported: {offered}')
+        missing = [m for m in wanted if m not in offered]
+        if missing and not getattr(self, '_noted_missing', False):
+            self._noted_missing = True
+            print(f'[{self.get_filename_prefix()}] {", ".join(missing)} not available for this '
+                  f'variant -- skipped (available: {", ".join(offered)})')
+        return [m for m in offered if m in wanted]
 
     def save_matches_to_csv(self, all_matches: List[Dict], output_dir: str):
         os.makedirs(output_dir, exist_ok=True)
@@ -2445,6 +2523,10 @@ class DiskBasedMatcher(BaseMatcher):
                                              feature_name=self._lightglue_feature_name(),
                                              params=matcher_param)
                     match_param_str = self._matcher_param_str('lgm', matcher_param)
+                elif matcher_name in GENERIC_MATCHERS:
+                    _, idxs = self.match_generic(matcher_name, descs1, descs2, lafs1, lafs2,
+                                                 matcher_param)
+                    match_param_str = self._matcher_param_str(matcher_name, matcher_param)
                 else:
                     raise ValueError(f'Unknown matcher: {matcher_name}')
 
@@ -2624,7 +2706,7 @@ class SIFTMatcher(DiskBasedMatcher):
         self.score_threshold = score_threshold
         self.sift = None
 
-    def detect_and_describe(self, img1: th.Tensor, img2: th.Tensor) -> Tuple:
+    def _build_models(self) -> None:
         if self.sift is None:
             print(f'SIFT: Initializing (rootsift={self.rootsift}, upright={self.upright})...')
             extra = {'score_threshold': self.score_threshold} if self.score_threshold else {}
@@ -2635,6 +2717,9 @@ class SIFTMatcher(DiskBasedMatcher):
                 device=self.device,
                 **extra
             ))
+
+    def detect_and_describe(self, img1: th.Tensor, img2: th.Tensor) -> Tuple:
+        self._build_models()
         lafs1, _, descs1 = self.sift(img1)
         lafs2, _, descs2 = self.sift(img2)
         return lafs1, descs1, lafs2, descs2
@@ -2643,9 +2728,10 @@ class SIFTMatcher(DiskBasedMatcher):
         return 'sift'
 
     def get_available_matchers(self) -> List[str]:
-        # kornia's SIFT LightGlue weights found no matches on upright RootSIFT
-        # in testing, so LightGlue is not offered for SIFT.
-        return ['smnn', 'ada']
+        return ['smnn', 'lgm', 'ada']
+
+    def _lightglue_feature_name(self) -> str:
+        return 'sift'
 
     def _detector_needs_inpaint(self) -> bool:
         return False
@@ -2657,13 +2743,15 @@ class DISKMatcher(DiskBasedMatcher):
         self.checkpoint = checkpoint
         self.disk = None
 
-    def detect_and_describe(self, img1: th.Tensor, img2: th.Tensor) -> Tuple:
+    def _build_models(self) -> None:
         if self.disk is None:
             print(f'DISK: Loading {self.checkpoint} model...')
             self.disk = self._load_model(
                 f'DISK ({self.checkpoint} weights)',
                 lambda: KF.DISK.from_pretrained(device=self.device, checkpoint=self.checkpoint).eval())
 
+    def detect_and_describe(self, img1: th.Tensor, img2: th.Tensor) -> Tuple:
+        self._build_models()
         img1_rgb = K.color.grayscale_to_rgb(img1)
         img2_rgb = K.color.grayscale_to_rgb(img2)
 
@@ -2710,7 +2798,7 @@ class DeDoDeMatcher(DiskBasedMatcher):
         self.descriptor_weights = descriptor_weights
         self.dedode = None
 
-    def detect_and_describe(self, img1: th.Tensor, img2: th.Tensor) -> Tuple:
+    def _build_models(self) -> None:
         if self.dedode is None:
             print(f'DeDoDe: Loading {self.detector_weights}/{self.descriptor_weights}...')
             # DeDoDe runs its DINOv2 (G-*) branch in float16 by default; that
@@ -2730,6 +2818,8 @@ class DeDoDeMatcher(DiskBasedMatcher):
             self.dedode = self._load_model(
                 f'DeDoDe ({self.detector_weights} / {self.descriptor_weights})', build)
 
+    def detect_and_describe(self, img1: th.Tensor, img2: th.Tensor) -> Tuple:
+        self._build_models()
         img1_rgb = K.color.grayscale_to_rgb(img1)
         img2_rgb = K.color.grayscale_to_rgb(img2)
 
@@ -2771,38 +2861,38 @@ class DeDoDeMatcher(DiskBasedMatcher):
         return True  # VGG-19 + DINOv2 both pooling-sensitive to boundaries
 
 class LoFTRMatcher(DiskBasedMatcher):
-    def __init__(self, config: PipelineConfig, pretrained: str = 'outdoor'):
+    """kornia LoFTR with kornia's own configuration for the pretrained weights
+    (dual-softmax coarse matching). The coarse threshold is the confidence a
+    coarse match needs (kornia default 0.2).
+
+    The configuration this class inherited switched the coarse matching to
+    Sinkhorn with an untrained dustbin score and a threshold of 1; with the
+    released weights that finds no matches at all, so it is not used."""
+
+    def __init__(self, config: PipelineConfig, pretrained: str = 'outdoor', coarse_threshold: float = 0.2):
         super().__init__(config)
         self.pretrained = pretrained
+        self.coarse_threshold = coarse_threshold
         self.loftr = None
+        from kornia.feature.loftr.loftr import default_cfg
+        # a copy: kornia's LoFTR writes into the config it is given
+        self.konfig = copy.deepcopy(default_cfg)
+        self.konfig['match_coarse']['thr'] = float(coarse_threshold)
 
-        # Use your custom config from the test script
-        self.konfig = {
-            "backbone_type": "ResNetFPN",
-            "resolution": (8, 2),
-            "fine_window_size": 5,
-            "fine_concat_coarse_feat": True,
-            "resnetfpn": {"initial_dim": 128, "block_dims": [128, 196, 256]},
-            "coarse": {
-                "d_model": 256, "d_ffn": 256, "nhead": 8,
-                "layer_names": ["self", "cross"] * 4,
-                "attention": "linear", "temp_bug_fix": False,
-            },
-            "match_coarse": {
-                "thr": 1, "border_rm": 2, "match_type": "dual_softmax",
-                "dsmax_temperature": 0.12, "skh_iters": 10,
-                "skh_init_bin_score": 0.1, "skh_prefilter": True,
-                "train_coarse_percent": 0.4, "train_pad_num_gt_min": 200,
-                "sparse_spvs": False
-            },
-            "fine": {"d_model": 128, "d_ffn": 128, "nhead": 8, "layer_names": ["self", "cross"], "attention": "linear"},
-        }
     def _determine_window_strategy(self, nisar_src, s1_src) -> Dict:
         original = self.config.window_size
         self.config.window_size = self.config.loftr_max_window
         strategy = super()._determine_window_strategy(nisar_src, s1_src)
         self.config.window_size = original
         return strategy
+
+    def _build_models(self) -> None:
+        if self.loftr is None:
+            print(f'LoFTR: Initializing model ({self.pretrained} weights, '
+                  f'coarse threshold {self.coarse_threshold})...')
+            self.loftr = self._load_model(
+                f'LoFTR ({self.pretrained} weights)',
+                lambda: KF.LoFTR(pretrained=self.pretrained, config=self.konfig).eval().to(self.device))
 
     def detect_and_describe(self, img1: th.Tensor, img2: th.Tensor) -> Tuple:
         # LoFTR doesn't use this, but we must implement the abstract method
@@ -2837,20 +2927,7 @@ class LoFTRMatcher(DiskBasedMatcher):
             t1_padded = th.nn.functional.pad(t1, (0, (8 - w1 % 8) % 8, 0, (8 - h1 % 8) % 8))
             t2_padded = th.nn.functional.pad(t2, (0, (8 - w2 % 8) % 8, 0, (8 - h2 % 8) % 8))
 
-            if self.loftr is None:
-                print(f'LoFTR: Initializing model ({self.pretrained} weights)...')
-                self.loftr = self._load_model(
-                    f'LoFTR ({self.pretrained} weights)',
-                    lambda: KF.LoFTR(pretrained=self.pretrained, config=self.konfig).eval().to(self.device))
-                from kornia.feature.loftr.utils.superglue import log_optimal_transport
-                self.loftr.coarse_matching.match_type = 'sinkhorn'
-                self.loftr.coarse_matching.bin_score = th.nn.Parameter(
-                    th.tensor(self.konfig['match_coarse']['skh_init_bin_score'], requires_grad=True)
-                ).to(self.device)
-                self.loftr.coarse_matching.log_optimal_transport = log_optimal_transport
-                self.loftr.coarse_matching.skh_iters = 2
-                self.loftr.coarse_matching.skh_prefilter = True
-
+            self._build_models()
             with th.no_grad():
                 if self.use_amp and th.cuda.is_available():
                     with th.cuda.amp.autocast():
@@ -2935,7 +3012,7 @@ class ALIKEDMatcher(DiskBasedMatcher):
         self.nms_radius = nms_radius
         self.aliked = None
 
-    def detect_and_describe(self, img1: th.Tensor, img2: th.Tensor) -> Tuple:
+    def _build_models(self) -> None:
         if self.aliked is None:
             print(f'ALIKED: Loading {self.model_name}...')
             # kornia >= 0.8: from_pretrained(model_name, max_num_keypoints,
@@ -2949,6 +3026,8 @@ class ALIKEDMatcher(DiskBasedMatcher):
                 device=self.device,
             ).eval().to(self.device))
 
+    def detect_and_describe(self, img1: th.Tensor, img2: th.Tensor) -> Tuple:
+        self._build_models()
         # ALIKED expects 3-channel input
         img1_rgb = K.color.grayscale_to_rgb(img1)
         img2_rgb = K.color.grayscale_to_rgb(img2)
@@ -2992,6 +3071,9 @@ class XFeatMatcher(DiskBasedMatcher):
         self.detection_threshold = detection_threshold
         self.xfeat = None
 
+    def _build_models(self) -> None:
+        self._model()
+
     def _model(self):
         if self.xfeat is None:
             print('XFeat: Loading kornia XFeat...')
@@ -3023,21 +3105,28 @@ class XFeatMatcher(DiskBasedMatcher):
 
 
 class KeyNetMatcher(DiskBasedMatcher):
-    """kornia KeyNet + AffNet + HardNet (upright)."""
+    """kornia KeyNet + (AffNet) + HardNet; LightGlue with kornia's KeyNet-AffNet-HardNet weights."""
 
-    def __init__(self, config: PipelineConfig, upright: bool = True, score_threshold: float = 0.0):
+    def __init__(self, config: PipelineConfig, upright: bool = True, score_threshold: float = 0.0,
+                 affnet: bool = True):
         super().__init__(config)
         self.upright = upright
         self.score_threshold = score_threshold
+        self.affnet = affnet
         self.feat = None
 
-    def detect_and_describe(self, img1: th.Tensor, img2: th.Tensor) -> Tuple:
+    def _build_models(self) -> None:
         if self.feat is None:
-            print(f'KeyNet: Loading KeyNet-AffNet-HardNet (upright={self.upright})...')
+            cls = KF.KeyNetAffNetHardNet if self.affnet else KF.KeyNetHardNet
+            label = 'KeyNet-AffNet-HardNet' if self.affnet else 'KeyNet-HardNet'
+            print(f'KeyNet: Loading {label} (upright={self.upright})...')
             extra = {'score_threshold': self.score_threshold} if self.score_threshold else {}
-            self.feat = self._load_model('KeyNet-AffNet-HardNet', lambda: KF.KeyNetAffNetHardNet(
+            self.feat = self._load_model(label, lambda: cls(
                 num_features=self.config.num_features, upright=self.upright,
                 device=self.device, **extra).eval())
+
+    def detect_and_describe(self, img1: th.Tensor, img2: th.Tensor) -> Tuple:
+        self._build_models()
         lafs1, _, descs1 = self.feat(img1.float())
         lafs2, _, descs2 = self.feat(img2.float())
         return lafs1, descs1, lafs2, descs2
@@ -3048,6 +3137,109 @@ class KeyNetMatcher(DiskBasedMatcher):
     def get_available_matchers(self) -> List[str]:
         # kornia's keynet_affnet_hardnet LightGlue returned no matches on
         # upright KeyNet features in testing, so it is not offered.
+        return ['smnn', 'lgm', 'ada']
+
+    def _lightglue_feature_name(self) -> str:
+        return 'keynet_affnet_hardnet'
+
+    def _detector_needs_inpaint(self) -> bool:
+        return False
+
+
+class DoGDescriptorMatcher(DiskBasedMatcher):
+    """kornia DoG keypoints (SIFT's scale space) with a learned patch
+    descriptor: HardNet, HardNet8, SOSNet, HyNet or TFeat; optionally AffNet
+    affine shapes. LightGlue has weights for DoG-HardNet (with or without
+    AffNet), so 'lgm' is offered for the HardNet descriptor only."""
+
+    DESCRIPTORS = {'hardnet': 'HardNet', 'hardnet8': 'HardNet8', 'sosnet': 'SOSNet',
+                   'hynet': 'HyNet', 'tfeat': 'TFeat'}
+
+    def __init__(self, config: PipelineConfig, descriptor: str = 'hardnet', affnet: bool = False,
+                 upright: bool = True, score_threshold: float = 0.0):
+        super().__init__(config)
+        if descriptor not in self.DESCRIPTORS:
+            raise ValueError(f'descriptor must be one of {sorted(self.DESCRIPTORS)}')
+        self.descriptor = descriptor
+        self.affnet = affnet
+        self.upright = upright
+        self.score_threshold = score_threshold
+        self.feat = None
+
+    def _build_models(self) -> None:
+        if self.feat is None:
+            def build():
+                try:
+                    from kornia.feature.scale_space_detector import get_default_detector_config
+                    cfg = get_default_detector_config()
+                except ImportError:
+                    cfg = None
+                extra = {'score_threshold': self.score_threshold} if self.score_threshold else {}
+                det = KF.MultiResolutionDetector(
+                    KF.BlobDoGSingle(1.0, 1.6), self.config.num_features, cfg,
+                    ori_module=KF.PassLAF() if self.upright else KF.LAFOrienter(19),
+                    aff_module=KF.LAFAffNetShapeEstimator(True) if self.affnet else KF.PassLAF(),
+                    **extra)
+                desc = KF.LAFDescriptor(getattr(KF, self.DESCRIPTORS[self.descriptor])(True),
+                                        patch_size=32, grayscale_descriptor=True)
+                return KF.LocalFeature(det, desc).to(self.device).eval()
+            print(f'DoG: Loading {self.DESCRIPTORS[self.descriptor]}'
+                  f'{" + AffNet" if self.affnet else ""} (upright={self.upright})...')
+            self.feat = self._load_model(
+                f'DoG-{"AffNet-" if self.affnet else ""}{self.DESCRIPTORS[self.descriptor]}', build)
+
+    def detect_and_describe(self, img1: th.Tensor, img2: th.Tensor) -> Tuple:
+        self._build_models()
+        lafs1, _, descs1 = self.feat(img1.float())
+        lafs2, _, descs2 = self.feat(img2.float())
+        return lafs1, descs1, lafs2, descs2
+
+    def get_detector_name(self) -> str:
+        return 'dog'
+
+    def _prefix_base(self) -> str:
+        return f'dog_{self.descriptor}'
+
+    def get_available_matchers(self) -> List[str]:
+        return ['smnn', 'lgm', 'ada'] if self.descriptor == 'hardnet' else ['smnn', 'ada']
+
+    def _lightglue_feature_name(self) -> str:
+        return 'dog_affnet_hardnet' if self.affnet else 'doghardnet'
+
+    def _detector_needs_inpaint(self) -> bool:
+        return False
+
+
+class AffNetHardNetMatcher(DiskBasedMatcher):
+    """kornia's ready-made GFTT-AffNet-HardNet and Hessian-AffNet-HardNet."""
+
+    KINDS = {'gftt': ('GFTTAffNetHardNet', 'GFTT-AffNet-HardNet'),
+             'hessian': ('HesAffNetHardNet', 'Hessian-AffNet-HardNet')}
+
+    def __init__(self, config: PipelineConfig, kind: str = 'gftt', upright: bool = True):
+        super().__init__(config)
+        self.kind = kind
+        self.upright = upright
+        self.feat = None
+
+    def _build_models(self) -> None:
+        if self.feat is None:
+            cls_name, label = self.KINDS[self.kind]
+            print(f'{label}: Loading (upright={self.upright})...')
+            self.feat = self._load_model(label, lambda: getattr(KF, cls_name)(
+                num_features=self.config.num_features, upright=self.upright,
+                device=self.device).eval())
+
+    def detect_and_describe(self, img1: th.Tensor, img2: th.Tensor) -> Tuple:
+        self._build_models()
+        lafs1, _, descs1 = self.feat(img1.float())
+        lafs2, _, descs2 = self.feat(img2.float())
+        return lafs1, descs1, lafs2, descs2
+
+    def get_detector_name(self) -> str:
+        return self.kind
+
+    def get_available_matchers(self) -> List[str]:
         return ['smnn', 'ada']
 
     def _detector_needs_inpaint(self) -> bool:
@@ -3152,11 +3344,14 @@ class XFeatStarMatcher(DenseWindowMatcher):
         super().__init__(config)
         self.xfeat = None
 
-    def match_images(self, img1, img2):
+    def _build_models(self) -> None:
         if self.xfeat is None:
             print('XFeat*: Loading kornia XFeat...')
             self.xfeat = self._load_model(
                 'XFeat*', lambda: KF.XFeat.from_pretrained(top_k=self.config.num_features).eval().to(self.device))
+
+    def match_images(self, img1, img2):
+        self._build_models()
         t1 = th.from_numpy(img1).float()[None, None].to(self.device)
         t2 = th.from_numpy(img2).float()[None, None].to(self.device)
         with th.inference_mode():
@@ -3968,6 +4163,22 @@ ADA_PARAMS = [
               label='AdaLAM mutual-NN seeds only', help='force_seed_mnn: seeds must be mutual nearest neighbours'),
 ]
 
+# kornia's plain descriptor matchers, offered for every descriptor-based
+# detector but run only when selected (the defaults stay smnn / lgm / ada).
+GENERIC_MATCHERS = ['mnn', 'snn', 'nn', 'fginn']
+SNN_PARAMS = [
+    ParamSpec('snn.th', 'float', 0.8, token='sn', scope='snn', label='SNN ratio threshold',
+              help="Lowe's ratio test: best / second-best descriptor distance must be below this"),
+]
+FGINN_PARAMS = [
+    ParamSpec('fginn.th', 'float', 0.8, token='ft', scope='fginn', label='FGINN ratio threshold'),
+    ParamSpec('fginn.spatial_th', 'float', 10.0, token='fs', scope='fginn', label='FGINN spatial threshold (px)',
+              help='the second neighbour is the nearest one at least this far from the first'),
+    ParamSpec('fginn.mutual', 'bool', False, token='fm', scope='fginn', label='FGINN mutual check'),
+]
+GENERIC_PARAMS = SNN_PARAMS + FGINN_PARAMS
+
+
 def _dedode_weight_names(kind: str, fallback: List[str]) -> List[str]:
     """DeDoDe weight names the INSTALLED kornia knows ('detector' or
     'descriptor'), so the dialog never offers a weight that cannot load."""
@@ -3987,10 +4198,10 @@ DETECTOR_PARAMS: Dict[str, List[ParamSpec]] = {
         ParamSpec('rootsift', 'bool', True, token='rs', label='RootSIFT descriptors'),
         ParamSpec('upright', 'bool', True, token='up', label='Upright (no orientation)'),
         ParamSpec('score_threshold', 'float', 0.0, token='st', label='Response threshold'),
-    ] + ADA_PARAMS,
+    ] + LGM_PARAMS + ADA_PARAMS + GENERIC_PARAMS,
     'disk': [
         ParamSpec('checkpoint', 'choice', 'depth', ['depth', 'epipolar'], label='Weights'),
-    ] + LGM_PARAMS + ADA_PARAMS,
+    ] + LGM_PARAMS + ADA_PARAMS + GENERIC_PARAMS,
     'dedode': [
         ParamSpec('detector_weights', 'choice',
                   'L-C4' if 'L-C4' in _DEDODE_DET else _DEDODE_DET[0], _DEDODE_DET,
@@ -3999,24 +4210,38 @@ DETECTOR_PARAMS: Dict[str, List[ParamSpec]] = {
                   'G-C4' if 'G-C4' in _DEDODE_DESC else _DEDODE_DESC[0], _DEDODE_DESC,
                   label='Descriptor weights',
                   help='names read from the installed kornia; G-* load a 1.2 GB DINOv2-L backbone'),
-    ] + LGM_PARAMS + ADA_PARAMS,
+    ] + LGM_PARAMS + ADA_PARAMS + GENERIC_PARAMS,
     'aliked': [
         ParamSpec('model_name', 'choice', 'aliked-n16',
                   ['aliked-t16', 'aliked-n16', 'aliked-n16rot', 'aliked-n32'], label='Model'),
         ParamSpec('detection_threshold', 'float', 0.2, token='dt', label='Detection threshold'),
         ParamSpec('nms_radius', 'int', 2, token='nms', label='NMS radius'),
-    ] + LGM_PARAMS + ADA_PARAMS,
+    ] + LGM_PARAMS + ADA_PARAMS + GENERIC_PARAMS,
     'xfeat': [
         ParamSpec('detection_threshold', 'float', 0.05, token='dt', label='Detection threshold'),
-    ] + ADA_PARAMS,
+    ] + ADA_PARAMS + GENERIC_PARAMS,
     'xfeatstar': [],
     'keynet': [
+        ParamSpec('affnet', 'bool', True, token='aff', label='AffNet affine shapes'),
         ParamSpec('upright', 'bool', True, token='up', label='Upright (no orientation)'),
         ParamSpec('score_threshold', 'float', 0.0, token='st', label='Response threshold'),
-    ] + ADA_PARAMS,
+    ] + LGM_PARAMS + ADA_PARAMS + GENERIC_PARAMS,
+    'dog': [
+        ParamSpec('descriptor', 'choice', 'hardnet', ['hardnet', 'hardnet8', 'sosnet', 'hynet', 'tfeat'],
+                  label='Descriptor', help="LightGlue ('lgm') runs for HardNet only"),
+        ParamSpec('affnet', 'bool', False, token='aff', label='AffNet affine shapes'),
+        ParamSpec('upright', 'bool', True, token='up', label='Upright (no orientation)'),
+        ParamSpec('score_threshold', 'float', 0.0, token='st', label='Response threshold'),
+    ] + LGM_PARAMS + ADA_PARAMS + GENERIC_PARAMS,
+    'gftt': [ParamSpec('upright', 'bool', True, token='up', label='Upright (no orientation)')]
+    + ADA_PARAMS + GENERIC_PARAMS,
+    'hessian': [ParamSpec('upright', 'bool', True, token='up', label='Upright (no orientation)')]
+    + ADA_PARAMS + GENERIC_PARAMS,
     'loftr': [
         ParamSpec('pretrained', 'choice', 'outdoor', ['outdoor', 'indoor', 'indoor_new'],
                   token='w', label='Weights'),
+        ParamSpec('coarse_threshold', 'float', 0.2, token='ct', label='Coarse match threshold',
+                  help='confidence a coarse match needs (kornia default 0.2)'),
     ],
 }
 
@@ -4031,18 +4256,34 @@ KORNIA_DETECTORS: Dict[str, Callable[['PipelineConfig', Dict], DiskBasedMatcher]
     'xfeat':     lambda c, kw: XFeatMatcher(c, **kw),
     'xfeatstar': lambda c, kw: XFeatStarMatcher(c),
     'keynet':    lambda c, kw: KeyNetMatcher(c, **kw),
+    'dog':       lambda c, kw: DoGDescriptorMatcher(c, **kw),
+    'gftt':      lambda c, kw: AffNetHardNetMatcher(c, kind='gftt', **kw),
+    'hessian':   lambda c, kw: AffNetHardNetMatcher(c, kind='hessian', **kw),
     'loftr':     lambda c, kw: LoFTRMatcher(c, **kw),
 }
-# Matchers each kornia detector supports (for GUIs; the classes are the truth).
+# Matchers each kornia detector runs by default (for GUIs; the classes are the
+# truth), and the ones it offers on request.
 KORNIA_MATCHERS: Dict[str, List[str]] = {
-    'sift': ['smnn', 'ada'], 'disk': ['smnn', 'lgm', 'ada'], 'dedode': ['smnn', 'lgm', 'ada'],
+    'sift': ['smnn', 'lgm', 'ada'], 'disk': ['smnn', 'lgm', 'ada'], 'dedode': ['smnn', 'lgm', 'ada'],
     'aliked': ['smnn', 'lgm', 'ada'], 'xfeat': ['smnn', 'ada'], 'xfeatstar': ['internal'],
-    'keynet': ['smnn', 'ada'], 'loftr': ['loftr_internal'],
+    'keynet': ['smnn', 'lgm', 'ada'], 'loftr': ['loftr_internal'],
+    'dog': ['smnn', 'lgm', 'ada'], 'gftt': ['smnn', 'ada'], 'hessian': ['smnn', 'ada'],
 }
+OPTIONAL_MATCHERS: Dict[str, List[str]] = {
+    d: list(GENERIC_MATCHERS) for d, ms in KORNIA_MATCHERS.items() if 'smnn' in ms}
 # Algorithm families kornia covers; an external detector naming one of these
 # is refused (e.g. imcui 'disk-lightglue' -> use kornia 'disk' + 'lgm').
 KORNIA_FAMILIES = {'sift', 'rootsift', 'disk', 'dedode', 'aliked', 'xfeat',
-                   'xfeat_dense', 'xfeatstar', 'keynet', 'loftr'}
+                   'xfeat_dense', 'xfeatstar', 'keynet', 'loftr',
+                   'dog', 'hardnet', 'hardnet8', 'sosnet', 'hynet', 'tfeat', 'gftt', 'hessian'}
+# The kornia detector that replaces an external row of a covered family
+# (shown when an imcui row is not offered).
+KORNIA_EQUIVALENT: Dict[str, str] = {
+    'sift': 'sift', 'rootsift': 'sift', 'disk': 'disk', 'dedode': 'dedode', 'aliked': 'aliked',
+    'xfeat': 'xfeat', 'xfeat_dense': 'xfeatstar', 'xfeatstar': 'xfeatstar', 'keynet': 'keynet',
+    'loftr': 'loftr', 'dog': 'dog', 'hardnet': 'dog', 'hardnet8': 'dog', 'sosnet': 'dog',
+    'hynet': 'dog', 'tfeat': 'dog', 'gftt': 'gftt', 'hessian': 'hessian',
+}
 # Older names -> (registry name, fixed parameters).
 DETECTOR_ALIASES: Dict[str, Tuple[str, Dict[str, List]]] = {
     'disk_depth': ('disk', {'checkpoint': ['depth']}),
@@ -4159,28 +4400,28 @@ def expand_variants(name: str, params: Optional[Dict] = None) -> List[Tuple[Dict
 
 
 def count_runs(name: str, params: Optional[Dict], matchers: List[str], n_smnn: int) -> Tuple[int, int]:
-    """(detector variants, matching passes per variant) for preflight."""
-    variants = expand_variants(name, params)
-    grid = variants[0][1] if variants else {}
-    passes = 0
-    for m in matchers:
-        if m == 'smnn':
-            passes += n_smnn
-        elif grid.get(m):
-            n = 1
-            for v in grid[m].values():
-                n *= len(v)
-            passes += n
-        else:
-            passes += 1
+    """(detector variants, matching passes over all variants) for preflight.
+    Counted on the variants themselves (building one loads no model), so a
+    matcher a variant cannot run (lgm with DoG-SOSNet) is not counted.
+    ValueError for an unsupported matcher or parameter."""
+    base, _ = resolve_detector_name(name)
+    cfg = PipelineConfig(smnn_thresholds=[0.5 + i for i in range(n_smnn)],
+                         detector_matchers={base: list(matchers)} if matchers else {})
+    variants = list(iter_variants(name, cfg, params or {}))
+    passes = sum(len(v.matcher_runs()) for v in variants)
     return len(variants), passes
 
 
 def available_detectors() -> List[Dict]:
-    out = [{'name': n, 'source': 'kornia', 'matchers': KORNIA_MATCHERS.get(n, []),
+    """Selectable detectors: 'matchers' lists every matcher offered,
+    'default_matchers' the ones that run when the job names none."""
+    out = [{'name': n, 'source': 'kornia',
+            'matchers': KORNIA_MATCHERS.get(n, []) + OPTIONAL_MATCHERS.get(n, []),
+            'default_matchers': KORNIA_MATCHERS.get(n, []),
             'params': [sp.as_dict() for sp in DETECTOR_PARAMS.get(n, [])]}
            for n in KORNIA_DETECTORS]
     out += [{'name': n, 'source': d['source'], 'matchers': d['matchers'],
+             'default_matchers': d['matchers'],
              'params': [sp.as_dict() for sp in d.get('params', [])]}
             for n, d in EXTERNAL_DETECTORS.items()]
     return out

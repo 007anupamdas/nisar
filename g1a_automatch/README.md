@@ -14,13 +14,15 @@ NISAR↔S1 production scripts in the repo root are separate and untouched.
 | File | Role |
 |------|------|
 | `DPQED_automatch.py` | GUI (PyQt5 / PyQt6 / PySide6). Every setting is a control; runs jobs as a subprocess. |
-| `automatch_job.py` | Job file + CLI: `template`, `preflight`, `run`, `detectors`, `inspect`. The GUI uses exactly this. |
+| `automatch_job.py` | Job file + CLI: `template`, `preflight`, `run`, `detectors`, `weights`, `compare`, `inspect`. The GUI uses exactly this. |
 | `automatch_engine.py` | Engine: input reader (raster bands / NISAR pols), reference search, coarse-to-fine matching, RANSAC, statistics, chip consensus. Derived from `dqeagdq_integrated_v2.py`. |
 | `automatch_refs.py` | Reference discovery. The rules are **copied verbatim from `DPQED_rival.py`** (index-shp / sidecar / degree-tile); the tests check they still match. No QGIS needed. |
 | `automatch_rival.py` | RIVAL CSV writer (RIVAL's own header, `csv_record` and `accuracy_stats`). |
 | `automatch_imcui.py` | image-matching-webui models, **only for algorithms kornia lacks**. |
-| `imw_configs.py` | imcui model catalog (resolved from the installed imcui's registry). |
-| `prefetch_weights.py` | Download all kornia + imcui weights into one folder for an offline workstation. |
+| `imw_configs.py` | imcui catalogue: the full matrix (22 sparse + 16 dense rows), resolved from the installed imcui's registry. |
+| `automatch_weights.py` | Which weight files each detector needs and whether they are on this machine (nothing is downloaded). |
+| `automatch_truth.py` | Ranks every detector + matcher of a run against manually measured ground truth. |
+| `prefetch_weights.py` | Collect all kornia + imcui weights into one folder for an offline workstation. |
 | `tests_automatch.py`, `synthetic_data.py` | Tests, with synthetic data whose geolocation error is known. |
 
 ## Install (workstation, 16 GB GPU)
@@ -40,17 +42,21 @@ pip install -e /path/to/image-matching-webui
 1. *Data*: input image → **Inspect input** (lists band1…bandN or HH/HV…; tick
    the ones to run, none = all). Reference folder (mode is detected like RIVAL).
    Output folder.
-2. *Detectors & matchers*: tick detectors and their matchers.
+2. *Detectors & matchers*: tick detectors and their matchers. **Check weights**
+   shows which weight files they need and whether they are on this machine.
 3. *Windows & offsets*: window sizes, keypoints, **max expected error**
    (default 50 km), coarse method, optional known offset from RIVAL.
-4. **Preflight** (checks paths, bands, reference coverage, detectors, GPU),
-   then **Run**. Results appear in the table; double-click a row to open its folder.
+4. **Preflight** (checks paths, bands, reference coverage, detectors, weight
+   files, GPU), then **Run**. Results appear in the table; double-click a row
+   to open its folder.
 
 **Command line (same job file):**
 ```bash
 python automatch_job.py template > job.json      # edit paths
 python automatch_job.py preflight job.json
 python automatch_job.py run job.json --set window_sizes=[1024,2048]
+python automatch_job.py weights job.json          # weight files that job needs
+python automatch_job.py compare <output> --truth manual_pts_rival.csv
 ```
 
 ## Output → RIVAL
@@ -138,18 +144,38 @@ How to read the results:
 
 ## Detectors
 
-kornia first: `sift`, `disk`, `dedode`, `aliked`, `xfeat`, `xfeatstar`
-(XFeat* semi-dense), `keynet`, `loftr`. Matchers: `smnn`; `ada` (AdaLAM) for
-every sparse detector (SIFT, DISK, DeDoDe, ALIKED, XFeat, KeyNet); `lgm`
-(LightGlue) for DISK, ALIKED and DeDoDe (`dedodeb`/`dedodeg` weights chosen
-from the descriptor). kornia's SIFT LightGlue found no matches on upright
-RootSIFT and XFeat has no kornia LightGlue weights, so neither is offered.
+`python automatch_job.py detectors` (or the GUI's list) shows the whole
+catalogue: what can be selected, and every imcui row that is not offered with
+the reason.
+
+**kornia first.** Detectors: `sift`, `disk`, `dedode`, `aliked`, `xfeat`,
+`xfeatstar` (XFeat* semi-dense), `keynet` (with or without AffNet), `dog` (DoG
+keypoints with a learned descriptor: HardNet, HardNet8, SOSNet, HyNet or
+TFeat, AffNet on/off), `gftt` and `hessian` (GFTT- / Hessian-AffNet-HardNet),
+`loftr`.
+
+Matchers run by default: `smnn`; `ada` (AdaLAM) for every sparse detector;
+`lgm` (LightGlue) for SIFT, DISK, DeDoDe (`dedodeb`/`dedodeg` weights from the
+descriptor), ALIKED, KeyNet and DoG-HardNet. kornia's LightGlue cannot run
+XFeat, so XFeat has no `lgm`. Offered but run only when ticked: `mnn` (mutual
+nearest neighbour), `snn` (ratio test), `nn` and `fginn`. On a synthetic pair
+shifted by (7, −4) px every detector recovered the shift with every matcher.
 AdaLAM uses kornia's own defaults (search expansion 4, 128 iterations, min
 confidence 200); the NISAR-S1 pipeline's 1 / 2048 / 1000 can be set in
-Configure…. imcui adds only what kornia lacks:
-SuperPoint+LightGlue, SuperPoint+SuperGlue, eLoFTR, ASpanFormer, RoMa, DKM.
-imcui's DISK/ALIKED/SIFT/XFeat/LoFTR variants are refused in favour of
-kornia's. `python automatch_job.py detectors` lists what is available.
+Configure….
+
+**imcui adds only what kornia lacks.** The catalogue is the full matrix
+(`imw_configs.py`): SuperPoint + LightGlue / SuperGlue / mutual-NN, R2D2,
+RoRD, D2-Net, ALIKE, SFD2, RDD, LiftFeat, RIPE, DarkFeat, LANet (each with
+mutual-NN), MINIMA-LoFTR / -RoMa, XoFTR, OmniGlue, GIM-RoMa / -DKM, eLoFTR,
+ASpanFormer, TopicFM, RoMa, DKM, DaD-RoMa, RDD-dense and XFeat+LightGlue. Rows
+kornia covers are refused, each with the kornia replacement named (DISK/ALIKED
+/SIFT LightGlue → `disk`/`aliked`/`sift` with `lgm`; `hardnet-nn`,
+`sosnet-nn` → `dog` with that descriptor and `mnn`; `rootsift-nn` → `sift`;
+`dedode-nn` → `dedode`; AdaLAM rows → `ada`; `loftr` → `loftr`;
+`xfeat-dense` → `xfeatstar`). MINIMA and GIM rows are always offered: kornia
+does not ship those weights. Rows missing from the installed imcui are listed
+as such.
 
 ### Detector and matcher parameters
 
@@ -163,10 +189,13 @@ several choices, or type a comma-separated list, to try each value:
 | `dedode` | detector weights × descriptor weights, as listed by the installed kornia (0.8: L-upright / L-C4 / L-SO2 / L-C4-v2 × B-/G- upright / C4 / SO2; G-* load a 1.2 GB DINOv2-L) |
 | `aliked` | model t16 / n16 / n16rot / n32, detection threshold, NMS radius |
 | `xfeat` | detection threshold |
-| `keynet` | upright on/off, response threshold |
-| `loftr` | weights: outdoor / indoor / indoor_new |
+| `keynet` | AffNet on/off, upright on/off, response threshold |
+| `dog` | descriptor HardNet / HardNet8 / SOSNet / HyNet / TFeat, AffNet on/off, upright on/off, response threshold |
+| `gftt`, `hessian` | upright on/off |
+| `loftr` | weights: outdoor / indoor / indoor_new, coarse match threshold (kornia default 0.2) |
 | LightGlue (`lgm`) | filter threshold, depth confidence, width confidence |
 | AdaLAM (`ada`) | search expansion, RANSAC iterations, min confidence, min inliers, refit, mutual-NN seeds |
+| SNN (`snn`), FGINN (`fginn`) | ratio threshold; FGINN also spatial threshold and mutual check |
 | imcui models | detection / match threshold, plus each model's own settings read from the installed imcui |
 
 - Every combination of **detector** values runs as its own variant, named
@@ -194,6 +223,36 @@ and high keypoint counts. With `manual_gcp_csv` the score uses each chip's
 distance from the GCP-fitted error surface, which is the better basis for
 choosing between variants.
 
+## Which detector + matcher is most accurate? (ground truth)
+
+Give the manually measured points (a RIVAL CSV such as `manual_pts_rival.csv`:
+`In_X … In_Lon, In_Lat, Ref_Lon, Ref_Lat`) as **Ground truth CSV** (`truth_csv`).
+After the run, **every configuration each detector ran** -- detector variant ×
+matcher × matcher setting × RANSAC setting, not only the one the consensus
+picked -- is scored against it:
+
+- at each truth point the configuration's own error is estimated: the median
+  of its matches within `truth_radius_m` (5 km), else its robust error
+  surface; points outside its coverage are listed as extrapolated and not
+  scored. Truth errors are recomputed from the lon/lat columns in the working
+  CRS, so the truth file's own X/Y grid does not matter;
+- `TRUTH_BY_DETECTOR_MATCHER.csv`: each detector + matcher at its best setting,
+  ranked by truth points reached, then RMSE of (tool − truth), with the bias
+  (mean dE, dN) and the largest disagreement. `TRUTH_RANKING.csv` has every
+  configuration, `TRUTH_POINTS.csv` every configuration × truth point;
+- the GUI shows the ranking when the run ends and adds `truth_rmse_m` to each
+  result row; `RUN_MANIFEST.csv` gets the same columns.
+
+Existing results can be scored again, e.g. with more truth points, without
+matching again:
+```bash
+python automatch_job.py compare <output> --truth manual_pts_rival.csv [--radius-km 5] [--chips all]
+```
+To choose a detector + matcher first and fine-tune later: tick all detectors
+and all matchers (including the optional ones), keep one window size and one
+RANSAC setting, and read `TRUTH_BY_DETECTOR_MATCHER.csv`. The ground truth is
+used for evaluation only; it does not steer matching or the consensus.
+
 ## 16 GB GPU
 
 Defaults: 1024 px windows, one model resident at a time (unloaded after its
@@ -204,15 +263,34 @@ is free. Dense imcui models (RoMa, DKM) are the heaviest; keep them at 1024 px.
 
 Weights are looked for, before any download, in kornia's default folder
 (`~/.cache/torch/hub/checkpoints`, on Windows `%USERPROFILE%\.cache\torch\hub\checkpoints`),
-in `TORCH_HOME` if set, and in the GUI's **Weights folder** (`weights_cache_dir`).
-Weights you downloaded earlier with kornia are therefore used as they are.
+in `TORCH_HOME` if set, and in the GUI's **Weights folder** (`weights_cache_dir`);
+imcui's HuggingFace files likewise in the active HuggingFace cache, the Weights
+folder's and `~/.cache/huggingface/hub`. Weights downloaded earlier with kornia
+or imcui are therefore used as they are.
+
+**Checking** (GUI: *Check weights*; CLI below; preflight does it for the
+selected detectors): every model is built on the CPU while its weight requests
+are intercepted and looked up; nothing is downloaded and no weight file is
+read, so the whole catalogue takes about half a minute. For each detector it
+lists every file with its model, status (ok / MISSING / TRUNCATED -- an
+interrupted download / EMPTY), the folder it was found in, and for missing
+files the URL and the exact name to save it under.
+```bash
+python automatch_weights.py                          # every detector, every weight choice
+python automatch_weights.py --detectors dedode,dog   # or: automatch_job.py weights job.json
+python automatch_weights.py --load                   # also load each model from the files (slower)
+```
+Some imcui models load their weights in ways the quick check cannot follow;
+they are marked `partial` -- use `--load` for those.
 
 For anything missing, on a connected machine run
-`python prefetch_weights.py /path/cache` (every selectable weight: both DISK
-checkpoints, all DeDoDe, ALIKED and LoFTR weights, and the imcui models;
-`--defaults-only` for just the defaults), copy the folder and set it as the
-Weights folder. A model whose weights cannot be found stops that detector at
-once with a message naming the folders searched; the other detectors go on.
+`python prefetch_weights.py /path/cache` (every weight choice of every
+detector and the imcui models; `--defaults-only` for just the defaults;
+`--only dog,sift`): files already on that machine are copied into the folder,
+the rest downloaded under the names the loaders expect. Copy the folder and
+set it as the Weights folder. A model whose weights cannot be found stops that
+detector at once with a message naming the folders searched; the other
+detectors go on.
 
 ## Tests
 
@@ -238,8 +316,14 @@ git push <new-repo-url> g1a-automatch:main
 - **G1A format:** read through rasterio (GeoTIFF/VRT/JP2/…, any georeferenced
   multi-band raster). A product that needs per-pixel lat/lon arrays (no
   affine georeferencing) needs a small reader added to `InputScene`.
-- Not verified here: DeDoDe (weights could not be fetched in the test
-  sandbox; the class is unchanged from the original pipeline) and the imcui
-  models (imcui was not installed in the sandbox).
-- kornia's LightGlue has no XFeat weights, and its KeyNet weights returned no
-  matches in testing, so `lgm` is not offered for `xfeat` or `keynet`.
+- Not verified here: the imcui models themselves (imcui is not installed in
+  the test sandbox; the bridge, the catalogue and the HuggingFace lookup are
+  tested against a mock with imcui's registry layout).
+- LightGlue for SIFT and KeyNet used to find no matches: their descriptors
+  came as a (1, N, D) batch, which kornia's LightGlue matcher reads as a
+  single descriptor. Fixed; with LightGlue they now match (95–100 % correct
+  on the synthetic test).
+- LoFTR used a configuration (Sinkhorn coarse matching with an untrained
+  dustbin score, threshold 1) that finds no matches with the released weights,
+  and a module kornia does not ship. It now uses kornia's own configuration for
+  those weights (dual softmax, threshold 0.2, settable).

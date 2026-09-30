@@ -21,6 +21,7 @@ import contextlib
 import copy
 import gc
 import os
+import sys
 from typing import Dict, List, Optional, Tuple
 
 import cv2
@@ -33,6 +34,8 @@ _API = None
 # torch-hub folder of the configured weights cache: switched in only while an
 # imcui model loads or runs, so kornia keeps its own (default) folder.
 _IMCUI_HUB: Optional[str] = None
+_WEIGHTS_ROOT: Optional[str] = None
+_ORIG_HF = None
 
 
 def configure_weights_cache(path: Optional[str] = None) -> Optional[str]:
@@ -42,7 +45,8 @@ def configure_weights_cache(path: Optional[str] = None) -> Optional[str]:
     if not os.path.isdir(path):
         print(f'[imcui] weights cache {path} not found -- using default caches')
         return None
-    global _IMCUI_HUB
+    global _IMCUI_HUB, _WEIGHTS_ROOT
+    _WEIGHTS_ROOT = os.path.abspath(path)
     os.environ.setdefault('HF_HOME', os.path.join(path, 'huggingface'))
     os.environ.setdefault('HF_HUB_OFFLINE', '1')
     os.environ.setdefault('TRANSFORMERS_OFFLINE', '1')
@@ -55,6 +59,90 @@ def configure_weights_cache(path: Optional[str] = None) -> Optional[str]:
     _IMCUI_HUB = hub if os.path.isdir(hub) else None
     print(f'[imcui] weights cache: {path} (offline)')
     return path
+
+
+# ── HuggingFace weights ──────────────────────────────────────────────────────
+# imcui fetches most checkpoints with huggingface_hub.hf_hub_download. Like the
+# torch-hub lookup in automatch_engine, the file is first looked for in every
+# HuggingFace cache on this machine -- the active one, the weights folder's
+# and the default ~/.cache/huggingface/hub -- so weights imcui downloaded
+# earlier are used even when HF_HOME points elsewhere.
+def hf_cache_dirs() -> List[str]:
+    dirs = []
+    try:
+        from huggingface_hub import constants
+        dirs.append(constants.HF_HUB_CACHE)
+    except Exception:
+        pass
+    if os.getenv('HF_HUB_CACHE'):
+        dirs.append(os.environ['HF_HUB_CACHE'])
+    if os.getenv('HF_HOME'):
+        dirs.append(os.path.join(os.environ['HF_HOME'], 'hub'))
+    if _WEIGHTS_ROOT:
+        dirs.append(os.path.join(_WEIGHTS_ROOT, 'huggingface', 'hub'))
+    xdg = os.getenv('XDG_CACHE_HOME', os.path.join(os.path.expanduser('~'), '.cache'))
+    dirs.append(os.path.join(xdg, 'huggingface', 'hub'))
+    out: List[str] = []
+    for d in dirs:
+        d = os.path.abspath(os.path.expanduser(d))
+        if d not in out:
+            out.append(d)
+    return out
+
+
+def find_hf_file(repo_id: str, filename: str, subfolder: Optional[str] = None,
+                 repo_type: Optional[str] = None, revision: Optional[str] = None
+                 ) -> Tuple[Optional[str], List[str]]:
+    """(path in a HuggingFace cache or None, caches searched)."""
+    dirs = hf_cache_dirs()
+    try:
+        from huggingface_hub import try_to_load_from_cache
+    except ImportError:
+        return None, dirs
+    name = f'{subfolder}/{filename}' if subfolder else filename
+    for d in dirs:
+        try:
+            p = try_to_load_from_cache(repo_id, name, cache_dir=d, revision=revision, repo_type=repo_type)
+        except Exception:
+            p = None
+        if isinstance(p, str) and os.path.isfile(p):
+            return p, dirs
+    return None, dirs
+
+
+def _hf_download_any_cache(repo_id, filename, *args, **kwargs):
+    path, searched = find_hf_file(repo_id, filename, kwargs.get('subfolder'),
+                                  kwargs.get('repo_type'), kwargs.get('revision'))
+    if E.WEIGHTS_TRACE_HOOK is not None:
+        sub = kwargs.get('subfolder')
+        name = f'{sub}/{filename}' if sub else filename
+        answer = E.WEIGHTS_TRACE_HOOK('hf', url=f'hf:{repo_id}/{name}', file=os.path.basename(filename),
+                                      path=path, searched=searched, repo=repo_id, repo_file=name,
+                                      repo_type=kwargs.get('repo_type'), revision=kwargs.get('revision'))
+        if answer is not None:
+            return answer
+    if path:
+        return path
+    return _ORIG_HF(repo_id, filename, *args, **kwargs)
+
+
+def install_hf_lookup() -> bool:
+    """Route hf_hub_download (the package's and any imcui module's copy)
+    through the cache lookup. Safe to call repeatedly; False without
+    huggingface_hub."""
+    global _ORIG_HF
+    try:
+        import huggingface_hub
+        import huggingface_hub.file_download as fd
+    except ImportError:
+        return False
+    if _ORIG_HF is None:
+        _ORIG_HF = getattr(fd, 'hf_hub_download', None) or huggingface_hub.hf_hub_download
+    for mod in [huggingface_hub, fd] + [m for n, m in list(sys.modules.items())
+                                        if m is not None and n.split('.')[0] == 'imcui']:
+        if getattr(mod, 'hf_hub_download', None) is _ORIG_HF:
+            setattr(mod, 'hf_hub_download', _hf_download_any_cache)
+    return True
 
 
 @contextlib.contextmanager
@@ -96,7 +184,10 @@ def algorithm_family(conf: Dict, dense: bool) -> List[str]:
     if dense:
         fams.append(str(conf.get('matcher', {}).get('model', {}).get('name', '')))
     else:
-        fams.append(str(conf.get('feature', {}).get('model', {}).get('name', '')))
+        fmodel = conf.get('feature', {}).get('model', {})
+        fams.append(str(fmodel.get('name', '')))
+        if fmodel.get('descriptor'):      # imcui 'hardnet' = DoG + HardNet, etc.
+            fams.append(str(fmodel['descriptor']))
         feats = conf.get('matcher', {}).get('model', {}).get('features')
         if feats:
             fams.append(str(feats))
@@ -193,6 +284,7 @@ class IMWMatcher(E.DenseWindowMatcher):
 
         def build():
             print(f'[{self.get_detector_name()}] Loading model...')
+            install_hf_lookup()   # model modules imported since registration
             with _imcui_hub():
                 return _api_class()(
                     conf=self.imw_conf,
@@ -203,6 +295,9 @@ class IMWMatcher(E.DenseWindowMatcher):
                 )
         self.api = self._load_model(f'imcui {self.imw_tag}', build)
         return True
+
+    def _build_models(self) -> None:
+        self._ensure_api()
 
     @staticmethod
     def _gpu_free_gb() -> Optional[float]:
@@ -272,28 +367,68 @@ def save_match_image(out_root, tag, img1, img2, mkp1, mkp2, pair_id, wx, wy, max
         print(f'[{tag}] match image not saved: {e}')
 
 
-def register_imcui_detectors(weights_cache: Optional[str] = None) -> Dict[str, List]:
-    """Register every catalog row kornia does not cover.
+# imcui matcher model -> the kornia matcher that does the same job
+_MATCHER_EQUIVALENT = {'lightglue': 'lgm', 'nearest_neighbor': 'mnn', 'adalam': 'ada'}
 
-    Returns {'registered': [names], 'skipped': [(tag, reason)], 'error': str}."""
+
+def kornia_replacement(conf: Dict, dense: bool, fams: List[str]) -> str:
+    """How to get a kornia-covered row from kornia, e.g. "'dog' (descriptor
+    hardnet) with mnn". '' when kornia does not cover the row."""
+    covered = [f for f in fams if f in E.KORNIA_FAMILIES]
+    if not covered:
+        return ''
+    fam = covered[-1]            # most specific: descriptor / matcher features
+    det = E.KORNIA_EQUIVALENT.get(fam, fam)
+    text = f"'{det}'"
+    if det == 'dog' and fam != 'dog':
+        text += f' (descriptor {fam})'
+    elif det == 'sift' and fam == 'rootsift':
+        text += ' (RootSIFT on)'
+    if not dense:
+        mname = str(conf.get('matcher', {}).get('model', {}).get('name', '')).lower()
+        m = _MATCHER_EQUIVALENT.get(mname)
+        if m and m in E.KORNIA_MATCHERS.get(det, []) + E.OPTIONAL_MATCHERS.get(det, []):
+            text += f' with {m}'
+    return text
+
+
+def register_imcui_detectors(weights_cache: Optional[str] = None) -> Dict[str, List]:
+    """Register every catalogue row kornia does not cover.
+
+    Returns {'registered': [names], 'skipped': [(tag, reason)],
+    'not_offered': [{'tag', 'kind', 'reason', 'use'}], 'error': str};
+    kind is 'kornia' (use the kornia detector named in 'use') or
+    'unavailable' (not in the installed imcui)."""
     configure_weights_cache(weights_cache)
     ok, err = imcui_available()
     if not ok:
-        return {'registered': [], 'skipped': [], 'error': f'imcui not importable: {err}'}
+        return {'registered': [], 'skipped': [], 'not_offered': [], 'error': f'imcui not importable: {err}'}
+    install_hf_lookup()
     import imw_configs
-    catalog = imw_configs.build_catalog()
-    registered, skipped = [], []
+    unavailable: List[Tuple[str, str]] = []
+    try:
+        catalog = imw_configs.build_catalog(unavailable)
+    except ImportError as e:
+        return {'registered': [], 'skipped': [], 'not_offered': [], 'error': f'imcui not importable: {e}'}
+    exempt = set(getattr(imw_configs, 'KORNIA_EXEMPT', ()))
+    registered, not_offered = [], []
     for tag, conf, dense in catalog:
         fams = algorithm_family(conf, dense)
         name = f'imw-{tag}'
-        covered = sorted(set(fams) & E.KORNIA_FAMILIES)
-        if covered:
-            skipped.append((tag, f'{", ".join(covered)} provided by kornia'))
+        use = '' if tag in exempt else kornia_replacement(conf, dense, fams)
+        if use:
+            covered = sorted(set(fams) & E.KORNIA_FAMILIES)
+            not_offered.append({'tag': tag, 'kind': 'kornia', 'use': use,
+                                'reason': f'{", ".join(covered)} is provided by kornia: use {use}'})
             continue
         if E.register_detector(name, (lambda c, kw, t=tag, cf=conf, d=dense: IMWMatcher(c, t, cf, d, kw)),
-                               families=fams, source='imcui', matchers=['internal'],
-                               params=imcui_param_specs(conf, dense)):
+                               families=() if tag in exempt else fams, source='imcui',
+                               matchers=['internal'], params=imcui_param_specs(conf, dense)):
             registered.append(name)
-    for tag, why in skipped:
-        print(f'[imcui] {tag}: not offered ({why})')
-    return {'registered': registered, 'skipped': skipped, 'error': ''}
+    for tag, why in unavailable:
+        not_offered.append({'tag': tag, 'kind': 'unavailable', 'use': '',
+                            'reason': f'not in the installed imcui: {why}'})
+    for row in not_offered:
+        print(f"[imcui] {row['tag']}: not offered ({row['reason']})")
+    return {'registered': registered, 'skipped': [(r['tag'], r['reason']) for r in not_offered],
+            'not_offered': not_offered, 'error': ''}

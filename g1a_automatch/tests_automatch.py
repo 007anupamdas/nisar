@@ -304,13 +304,16 @@ def test_e2e_missing_weights(tmp):
             def offline(url, *a, **k):
                 raise OSError('offline: ' + url)
             E._ORIG_LOAD_STATE_DICT = offline
+            E._default_hub_dir = lambda: {os.path.join(tmp, 'no_weights_here')!r}
+            import torch
+            torch.hub.set_dir({os.path.join(tmp, 'no_weights_here')!r})
             import automatch_job as J
             sys.exit(J.main(['run', {os.path.join(tmp, 'job_missing.json')!r}]))
         """))
     with open(os.path.join(tmp, 'job_missing.json'), 'w') as f:
         json.dump({'input_path': os.path.join(data, 'G1A_SYNTH_L1.tif'),
                    'reference_dir': os.path.join(data, 'C1'), 'output_dir': out,
-                   'channels': ['band1'], 'detectors': ['loftr', 'sift'],
+                   'channels': ['band1'], 'detectors': ['loftr', 'sift'], 'matchers': {'sift': ['smnn']},
                    'detector_params': {'loftr': {'pretrained': ['indoor_new']}},
                    'window_sizes': [1024], 'max_expected_error_m': 10000,
                    'smnn_thresholds': [0.95], 'use_amp': False}, f)
@@ -327,6 +330,61 @@ def test_e2e_missing_weights(tmp):
     check('missing weights: skipped before any window was matched',
           'loftr-windoornew SKIPPED' in res.stdout and 'loftr-windoornew: Processing pair' not in res.stdout)
     print(f'      job took {_t.time() - t0:.0f} s')
+
+
+def test_e2e_truth(tmp):
+    """A run with truth_csv ranks every detector + matcher against the manual
+    points: right truth -> metres, truth off by 400 m -> ~400 m."""
+    import csv as _csv
+    import numpy as np
+    import pandas as pd
+    import rasterio
+    from pyproj import Transformer
+    import synthetic_data as S
+    data = os.path.join(tmp, 'synth')
+    if not os.path.exists(os.path.join(data, 'G1A_SYNTH_L1.tif')):
+        S.make_all(data, 4013.0, -2487.0)
+    src = rasterio.open(os.path.join(data, 'G1A_SYNTH_L1.tif'))
+    b = src.bounds
+    to_ll = Transformer.from_crs(src.crs, 'EPSG:4326', always_xy=True)
+    xs = np.array([0.25, 0.5, 0.75, 0.3, 0.7]) * (b.right - b.left) + b.left
+    ys = np.array([0.3, 0.5, 0.7, 0.75, 0.25]) * (b.top - b.bottom) + b.bottom
+
+    def truth_file(name, dE, dN):
+        ilo, ila = to_ll.transform(xs, ys)
+        rlo, rla = to_ll.transform(xs - dE, ys - dN)
+        p = os.path.join(tmp, name)
+        pd.DataFrame({'In_X': xs, 'In_Y': ys, 'Ref_X': xs - dE, 'Ref_Y': ys - dN, 'DX_Err': dE, 'DY_Err': dN,
+                      'Row': range(1, 6), 'In_Lon': ilo, 'In_Lat': ila, 'Ref_Lon': rlo,
+                      'Ref_Lat': rla}).to_csv(p, index=False, encoding='utf-8-sig')
+        return p
+    out = os.path.join(tmp, 'out_truth')
+    job = {'input_path': os.path.join(data, 'G1A_SYNTH_L1.tif'), 'reference_dir': os.path.join(data, 'C1'),
+           'output_dir': out, 'channels': ['band1'], 'detectors': ['sift'],
+           'matchers': {'sift': ['smnn', 'mnn', 'ada']}, 'window_sizes': [1024],
+           'max_expected_error_m': 10000, 'smnn_thresholds': [0.95], 'use_amp': False,
+           'truth_csv': truth_file('truth_ok.csv', 4013.0, -2487.0), 'truth_radius_m': 5000}
+    code, stdout = _run_job(job, tmp, want_output=True)
+    check('truth e2e: job completes', code, 0)
+    by_path = os.path.join(out, 'TRUTH_BY_DETECTOR_MATCHER.csv')
+    by = pd.read_csv(by_path) if os.path.exists(by_path) else pd.DataFrame()
+    check('truth e2e: every detector + matcher ranked', sorted(by.get('matcher_family', pd.Series()).tolist()),
+          ['ada', 'mnn', 'smnn'])
+    if not by.empty:
+        top = by.iloc[0]
+        check('truth e2e: best agrees with the truth to a few metres',
+              (int(top['truth_reached']) >= 4, float(top['truth_rmse_m']) < 15.0), (True, True))
+        print(f"      best: {top['detector']} + {top['best_matcher_setting']} RMSE {top['truth_rmse_m']:.1f} m")
+    man = list(_csv.DictReader(open(os.path.join(out, 'RUN_MANIFEST.csv'), encoding='utf-8')))
+    check('truth e2e: manifest carries the run\'s truth RMSE',
+          bool(man) and man[0].get('truth_rmse_m') not in (None, '') and float(man[0]['truth_rmse_m']) < 15.0)
+    check('truth e2e: ranking printed', '[Truth]' in stdout and 'Best detector + matcher' in stdout)
+    # the same results against a truth that is 400 m off: re-scored without matching again
+    res = subprocess.run([sys.executable, os.path.join(HERE, 'automatch_job.py'), 'compare', out, '--truth',
+                          truth_file('truth_off.csv', 4413.0, -2487.0)], capture_output=True, text=True)
+    by2 = pd.read_csv(by_path)
+    check('truth e2e: compare on existing results measures a 400 m disagreement',
+          (res.returncode, round(float(by2.iloc[0]['truth_rmse_m']) / 50) * 50), (0, 400))
 
 
 def test_e2e(tmp):
@@ -404,9 +462,38 @@ def test_detector_params():
     runs = [(n, m._matcher_param_str(n, p)) for n, p in m.matcher_runs()]
     check('params: matcher values add passes, not variants', runs,
           [('smnn', '0.9'), ('smnn', '0.95'), ('lgm', ''), ('lgm', 'lf0p2'), ('ada', ''), ('ada', 'as2')])
-    check('params: run count', E.count_runs('disk', {'checkpoint': ['depth', 'epipolar'],
-                                                     'lgm.filter_threshold': [0.1, 0.2]},
-                                            ['smnn', 'lgm'], 2), (2, 4))
+    check('params: run count (variants, passes in total)',
+          E.count_runs('disk', {'checkpoint': ['depth', 'epipolar'], 'lgm.filter_threshold': [0.1, 0.2]},
+                       ['smnn', 'lgm'], 2), (2, 8))
+    check('params: a matcher a variant cannot run is not counted (lgm: DoG-HardNet only)',
+          E.count_runs('dog', {'descriptor': ['hardnet', 'sosnet']}, ['smnn', 'lgm'], 1), (2, 3))
+    check('params: new kornia detectors and names',
+          (names('dog', {'descriptor': ['hardnet', 'sosnet'], 'affnet': [True]}),
+           names('keynet', {'affnet': [False]}), names('gftt'), names('hessian')),
+          (['dog_hardnet-aff1', 'dog_sosnet-aff1'], ['keynet-aff0'], ['gftt'], ['hessian']))
+    check('params: LightGlue for SIFT, KeyNet and DoG-HardNet (not DoG-SOSNet)',
+          [('lgm' in E.build_detector(d, cfg, p).get_available_matchers(),
+            E.build_detector(d, cfg, p)._lightglue_feature_name())
+           for d, p in (('sift', {}), ('keynet', {}), ('dog', {}), ('dog', {'affnet': [True]}))]
+          + ['lgm' in E.build_detector('dog', cfg, {'descriptor': ['sosnet']}).get_available_matchers()],
+          [(True, 'sift'), (True, 'keynet_affnet_hardnet'), (True, 'doghardnet'),
+           (True, 'dog_affnet_hardnet'), False])
+    check('params: default matchers unchanged by the optional ones',
+          (E.build_detector('sift', cfg).selected_matchers(), E.OPTIONAL_MATCHERS['sift']),
+          (['smnn', 'lgm', 'ada'], ['mnn', 'snn', 'nn', 'fginn']))
+    opt = E.build_detector('sift', E.PipelineConfig(smnn_thresholds=[0.9], detector_matchers={
+        'sift': ['smnn', 'snn', 'fginn', 'mnn']}), {'snn.th': [0.7, 0.8]})
+    runs = [(n, opt._matcher_param_str(n, p)) for n, p in opt.matcher_runs()]
+    check('params: optional matchers run when selected, with their parameter passes', runs,
+          [('smnn', '0.9'), ('mnn', ''), ('snn', 'sn0p7'), ('snn', ''), ('fginn', '')])
+    r = P0 = E.MatchStatistics._parse_filename('dog_sosnet-aff1_band1_toC1_pair001_scan0_pix0_snn_sn0p7'
+                                               '_aff_magsac_20_0.99_.csv')
+    check('params: new names parse', (r['detector'], r['disk_mode'], r['match_method']),
+          ('dog', 'sosnet-aff1', 'snn_sn0p7'))
+    cat = {d['name']: d for d in E.available_detectors()}
+    check('params: catalogue lists defaults and optional matchers',
+          (cat['sift']['default_matchers'], cat['sift']['matchers'][-4:], cat['loftr']['matchers']),
+          (['smnn', 'lgm', 'ada'], ['mnn', 'snn', 'nn', 'fginn'], ['loftr_internal']))
     for bad, why in ((('sift', {'rootsift': ['maybe']}), 'bad bool'),
                      (('dedode', {'detector_weights': ['L-X']}), 'bad choice'),
                      (('sift', {'nope': [1]}), 'unknown name'),
@@ -470,6 +557,7 @@ def test_weights_and_failfast(tmp):
     os.makedirs(os.path.join(empty, 'checkpoints'), exist_ok=True)
     calls = []
     orig = E._ORIG_LOAD_STATE_DICT
+    default_hub = E._default_hub_dir
 
     def offline(url, *a, **k):  # no network: every download fails
         calls.append(url)
@@ -488,6 +576,9 @@ def test_weights_and_failfast(tmp):
         else:
             print('SKIP  weights: DISK depth weights not in the default folder here')
         E.FAILED_MODELS.clear()
+        # from here on the default folder is not searched either, so the
+        # weights count as missing whatever this machine has cached
+        E._default_hub_dir = lambda: empty
         m = E.build_detector('loftr', cfg, {'pretrained': ['indoor_new']})
         n_before = len(calls)
         try:
@@ -504,6 +595,7 @@ def test_weights_and_failfast(tmp):
         check('fail-fast: download tried once for the whole job, not per window', len(calls) - n_before, 1)
     finally:
         E._ORIG_LOAD_STATE_DICT = orig
+        E._default_hub_dir = default_hub
         th.hub.set_dir(old)
         E.FAILED_MODELS.clear()
 
@@ -558,6 +650,46 @@ def test_gui_dialog():
         check('gui: legacy disk names -> disk with both checkpoints',
               (w.detector_params.get('disk'), w.det_table.item(w._row_of('disk'), 0).checkState() == G.CHECKED),
               ({'checkpoint': ['depth', 'epipolar']}, True))
+        # the whole catalogue: rows not offered are shown greyed and never selected
+        w._fill_detector_table(E.available_detectors(), [
+            {'tag': 'disk-lg', 'kind': 'kornia', 'use': "'disk' with lgm",
+             'reason': "disk is provided by kornia: use 'disk' with lgm"}])
+        r = w._row_of('imw-disk-lg')
+        check('gui: not-offered row shown, greyed, with the kornia replacement',
+              (r is not None, w._selectable(r), w.det_table.cellWidget(r, 2).text()),
+              (True, False, "use kornia 'disk' with lgm"))
+        w.set_job({**G.DEFAULT_JOB, 'detectors': ['sift', 'imw-disk-lg']})
+        job = w.get_job()
+        check('gui: default matchers ticked, optional ones not; nothing stored when unchanged',
+              (job['detectors'], job['matchers']), (['sift'], {}))
+        r = w._row_of('sift')
+        for cb in w.det_table.cellWidget(r, 2).findChildren(G.QtWidgets.QCheckBox):
+            if cb.text() == 'mnn':
+                cb.setChecked(True)
+        check('gui: ticking an optional matcher stores the selection',
+              w.get_job()['matchers'].get('sift'), ['smnn', 'lgm', 'ada', 'mnn'])
+        ev = {'event': 'weights', 'mode': 'check', 'torch_folders': ['/a/checkpoints'], 'hf_caches': [],
+              'put_in': '/a/checkpoints', 'summary': {'files': 2, 'found': 1, 'missing': 1, 'detectors': 1},
+              'missing': [{'file': 'x.pth', 'source': 'http://h/x.pth', 'kind': 'torch-hub', 'detectors': ['sift']}],
+              'detectors': [{'detector': 'sift', 'status': 'missing', 'error': '', 'variants': [
+                  {'variant': 'sift', 'status': 'missing', 'error': ''}], 'files': [
+                  {'file': 'x.pth', 'status': 'MISSING', 'model': 'LightGlue (sift)', 'source': 'http://h/x.pth',
+                   'folder': '', 'needed_by': ['sift'], 'all_variants': True},
+                  {'file': 'y.pth', 'status': 'ok', 'model': 'SIFT', 'source': 'http://h/y.pth',
+                   'folder': '/a/checkpoints', 'needed_by': ['sift'], 'all_variants': True}]}]}
+        w._show_weights(ev)
+        dlg = w._last_weights_dialog
+        check('gui: weights dialog lists the files and the detector column says what is missing',
+              (dlg.table.rowCount(), w.det_table.item(w._row_of('sift'), 4).text(),
+               'x.pth\thttp://h/x.pth' in dlg.missing_text()), (2, '1 missing', True))
+        dlg.close()
+        w._show_truth({'event': 'truth', 'n_truth': 3, 'files': {}, 'top': [
+            {'rank': 1, 'channel': 'band1', 'detector': 'sift', 'matcher_family': 'lgm',
+             'best_matcher_setting': 'lgm', 'ransac': 'magsac2', 'truth_rmse_m': 12.5,
+             'truth_reached': 3, 'truth_total': 3}]})
+        check('gui: truth ranking shown and summarised',
+              (w._last_truth_dialog.table.rowCount(), 'sift + lgm' in w.lbl_status.text()), (1, True))
+        w._last_truth_dialog.close()
     finally:
         if w.proc is not None:
             w.proc.kill()
@@ -566,23 +698,33 @@ def test_gui_dialog():
 
 
 def test_imcui_mock():
-    """imcui bridge against a mock imcui (real registry shapes): kornia-covered
-    models refused, the rest registered and runnable through DenseWindowMatcher."""
+    """imcui bridge against a mock imcui (real registry shapes) and the full
+    catalogue: kornia-covered rows refused with the kornia replacement named,
+    rows the installed imcui lacks reported, the rest registered and runnable."""
     import types
     import numpy as np
     sp = {'output': 'f-sp', 'model': {'name': 'superpoint', 'max_keypoints': 4096, 'nms_radius': 4},
           'preprocessing': {'grayscale': True}}
     feat = {'superpoint_max': sp, 'aliked-n16': {'output': 'f-a', 'model': {'name': 'aliked'}, 'preprocessing': {}},
             'disk': {'output': 'f-d', 'model': {'name': 'disk'}, 'preprocessing': {}},
-            'xfeat': {'output': 'f-x', 'model': {'name': 'xfeat'}, 'preprocessing': {}},
-            'sift': {'output': 'f-s', 'model': {'name': 'sift'}, 'preprocessing': {}}}
+            'sift': {'output': 'f-s', 'model': {'name': 'sift', 'rootsift': True}, 'preprocessing': {}},
+            'dedode': {'output': 'f-dd', 'model': {'name': 'dedode'}, 'preprocessing': {}},
+            'rootsift': {'output': 'f-r', 'model': {'name': 'dog', 'descriptor': 'rootsift'}, 'preprocessing': {}},
+            'hardnet': {'output': 'f-h', 'model': {'name': 'dog', 'descriptor': 'hardnet'}, 'preprocessing': {}},
+            'r2d2': {'output': 'f-r2', 'model': {'name': 'r2d2'}, 'preprocessing': {}}}
+
     def lg(f):
         return {'output': 'm', 'model': {'name': 'lightglue', 'features': f}, 'preprocessing': {}}
     match = {'superpoint-lightglue': lg('superpoint'), 'aliked-lightglue': lg('aliked'),
-             'disk-lightglue': lg('disk'), 'xfeat_lightglue': lg('xfeat'), 'sift-lightglue': lg('sift'),
-             'superglue': {'output': 'm', 'model': {'name': 'superglue'}, 'preprocessing': {}}}
-    for n in ('loftr', 'eloftr', 'aspanformer', 'roma', 'dkm', 'xfeat_dense'):
-        match[n] = {'output': 'm', 'model': {'name': n}, 'preprocessing': {}}
+             'disk-lightglue': lg('disk'), 'sift-lightglue': lg('sift'),
+             'superglue': {'output': 'm', 'model': {'name': 'superglue'}, 'preprocessing': {}},
+             'NN-mutual': {'output': 'm', 'model': {'name': 'nearest_neighbor', 'do_mutual_check': True},
+                           'preprocessing': {}},
+             'adalam': {'output': 'm', 'model': {'name': 'adalam'}, 'preprocessing': {}}}
+    dense = {n: {'output': 'm', 'model': {'name': n}, 'preprocessing': {}}
+             for n in ('loftr', 'eloftr', 'aspanformer', 'roma', 'dkm', 'xfeat_dense', 'xfeat_lightglue')}
+    dense['minima_loftr'] = {'output': 'm', 'model': {'name': 'loftr', 'model_name': 'minima_loftr.ckpt'},
+                             'preprocessing': {}}
 
     class API:
         def __init__(self, conf, device, detect_threshold, max_keypoints, match_threshold):
@@ -596,7 +738,7 @@ def test_imcui_mock():
     mods = {'imcui': types.ModuleType('imcui'), 'imcui.api': types.ModuleType('imcui.api'),
             'imcui.hloc': types.ModuleType('imcui.hloc')}
     mods['imcui.api'].ImageMatchingAPI = API
-    for sub, confs in (('extract_features', feat), ('match_features', match), ('match_dense', match)):
+    for sub, confs in (('extract_features', feat), ('match_features', match), ('match_dense', dense)):
         m = types.ModuleType('imcui.hloc.' + sub)
         m.confs = confs
         mods['imcui.hloc.' + sub] = m
@@ -608,10 +750,28 @@ def test_imcui_mock():
         import automatch_imcui as IM
         IM._API = None
         res = IM.register_imcui_detectors()
-        check('imcui: registered only non-kornia algorithms', sorted(res['registered']),
-              ['imw-aspanformer', 'imw-dkm', 'imw-eloftr', 'imw-roma', 'imw-sp-lg', 'imw-sp-sg'])
-        check('imcui: refused kornia-covered', sorted(t for t, _ in res['skipped']),
-              ['aliked-lg', 'disk-lg', 'loftr', 'sift-lg', 'xfeat-dense', 'xfeat-lg'])
+        check('imcui: registered only what kornia lacks (MINIMA-LoFTR exempt: other weights)',
+              sorted(res['registered']),
+              ['imw-aspanformer', 'imw-dkm', 'imw-eloftr', 'imw-minima-loftr', 'imw-r2d2-nn', 'imw-roma',
+               'imw-sp-lg', 'imw-sp-nn', 'imw-sp-sg', 'imw-xfeat-lg'])
+        by_kind = {}
+        for row in res['not_offered']:
+            by_kind.setdefault(row['kind'], {})[row['tag']] = row
+        check('imcui: kornia-covered rows refused', sorted(by_kind.get('kornia', {})),
+              ['aliked-adalam', 'aliked-lg', 'dedode-nn', 'disk-adalam', 'disk-lg', 'hardnet-nn', 'loftr',
+               'rootsift-nn', 'sift-lg', 'xfeat-dense'])
+        use = {t: r['use'] for t, r in by_kind.get('kornia', {}).items()}
+        check('imcui: refusals name the kornia replacement',
+              (use['hardnet-nn'], use['rootsift-nn'], use['disk-lg'], use['sift-lg'], use['aliked-adalam'],
+               use['xfeat-dense']),
+              ("'dog' (descriptor hardnet) with mnn", "'sift' (RootSIFT on) with mnn", "'disk' with lgm",
+               "'sift' with lgm", "'aliked' with ada", "'xfeatstar'"))
+        unavailable = by_kind.get('unavailable', {})
+        check('imcui: rows the installed imcui lacks are reported',
+              ('rord-nn' in unavailable and 'omniglue' in unavailable
+               and 'not in the installed imcui' in unavailable['rord-nn']['reason']), True)
+        check('imcui: every catalogue row is either offered or explained',
+              len(res['registered']) + len(res['not_offered']), len(__import__('imw_configs').catalog_rows()))
         m = E.build_detector('imw-sp-lg', E.PipelineConfig(num_features=100))
         rng = np.random.default_rng(0)
         img = rng.random((300, 300)).astype('float32') * 100 + 1
@@ -655,6 +815,233 @@ def test_imcui_mock():
             pass
 
 
+def _texture(size=320, seed=3):
+    import numpy as np
+    import cv2
+    rng = np.random.default_rng(seed)
+    img = np.zeros((size, size), np.float32)
+    for scale, amp in ((64, 1.0), (16, 0.6), (4, 0.35)):
+        small = rng.random((size // scale + 2, size // scale + 2)).astype(np.float32)
+        img += amp * cv2.resize(small, (size, size), interpolation=cv2.INTER_CUBIC)
+    for _ in range(size * size // 600):
+        cv2.circle(img, (int(rng.random() * size * 16), int(rng.random() * size * 16)),
+                   int(rng.integers(2, 9)) * 16, float(rng.random() * 2), -1, lineType=cv2.LINE_AA, shift=4)
+    img = cv2.GaussianBlur(img, (0, 0), 0.8)
+    img = 50 + 1000 * (img - img.min()) / (img.max() - img.min())
+    shifted = cv2.warpAffine(img, np.float32([[1, 0, 7], [0, 1, -4]]), (size, size), borderValue=0)
+    return img, shifted
+
+
+_META = {'x01': 0.0, 'y01': 0.0, 'xres1': 1.0, 'yres1': -1.0, 'x02': 0.0, 'y02': 0.0, 'xres2': 1.0,
+         'yres2': -1.0, 'nisar_crop_row_offset': 0, 'nisar_crop_col_offset': 0, 'pair_id': 1,
+         'nisar_pol': 'band1', 's1_ref_tag': 'C1'}
+
+
+def _shift_of(rec):
+    import numpy as np
+    if rec is None:
+        return None
+    d = np.array(rec['X1']) - np.array(rec['X2'])
+    e = np.array(rec['Y1']) - np.array(rec['Y2'])
+    return len(d), round(float(np.median(d))), round(float(np.median(e)))
+
+
+def test_truth_helpers(tmp):
+    """Ground-truth scoring of one configuration: local median near a truth
+    point, error surface elsewhere, extrapolation flagged and not scored."""
+    import numpy as np
+    import pandas as pd
+    import automatch_truth as T
+    rng = np.random.default_rng(1)
+    E0, N0 = 500000.0, 3000000.0
+    field = lambda e, n: (4000.0 + 0.002 * (e - E0), -2500.0 + 0.001 * (n - N0))  # 2 / 1 m per km
+    rows = []
+    for ci, (ce, cn) in enumerate([(E0 + x, N0 + y) for x in range(0, 60001, 15000) for y in range(0, 60001, 15000)]):
+        e = ce + rng.uniform(-3000, 3000, 40)
+        n = cn + rng.uniform(-3000, 3000, 40)
+        de, dn = field(e, n)
+        rows.append(pd.DataFrame({'E': e, 'N': n, 'dE': de + rng.normal(0, 3, 40),
+                                  'dN': dn + rng.normal(0, 3, 40), 'chip': ci}))
+    pts = pd.concat(rows, ignore_index=True)
+    te = np.array([E0 + 15000, E0 + 37500, E0 + 250000])
+    tn = np.array([N0 + 30000, N0 + 22500, N0 + 30000])
+    de, dn = field(te, tn)
+    truth = pd.DataFrame({'truth_id': [1, 2, 3], 'E': te, 'N': tn, 'dE': de, 'dN': dn})
+    summ, per = T.score_config({'points': pts}, truth, 5000.0)
+    check('truth: local, surface, extrapolated', [r['method'] for r in per], ['local', 'surface', 'extrapolated'])
+    check('truth: agreeing configuration scores a few metres',
+          (summ['truth_reached'], summ['truth_rmse_m'] < 5.0), (2, True))
+    truth2 = truth.assign(dE=truth['dE'] + 300.0)
+    summ2, _ = T.score_config({'points': pts}, truth2, 5000.0)
+    check('truth: a 300 m disagreement is measured', round(summ2['truth_rmse_m'] / 10) * 10, 300)
+    ranked = T.rank(pd.DataFrame([{**summ, 'detector': 'a'}, {**summ2, 'detector': 'b'},
+                                  {**summ, 'truth_reached': 0, 'truth_rmse_m': None, 'detector': 'c'}]))
+    check('truth: ranking by coverage then RMSE', ranked['detector'].tolist(), ['a', 'b', 'c'])
+    # a RIVAL truth file: errors recomputed in the working CRS from lon/lat
+    from pyproj import Transformer
+    to_ll = Transformer.from_crs('EPSG:32640', 'EPSG:4326', always_xy=True)
+    ilo, ila = to_ll.transform(te, tn)
+    rlo, rla = to_ll.transform(te - de, tn - dn)
+    path = os.path.join(tmp, 'truth.csv')
+    pd.DataFrame({'In_X': te, 'In_Y': tn, 'Ref_X': te - de, 'Ref_Y': tn - dn, 'DX_Err': de, 'DY_Err': dn,
+                  'Row': [1, 2, 3], 'In_Lon': ilo, 'In_Lat': ila, 'Ref_Lon': rlo, 'Ref_Lat': rla}).to_csv(
+        path, index=False, encoding='utf-8-sig')
+    back = T.truth_in_crs(T.load_truth(path), 'EPSG:32640')
+    check('truth: RIVAL file read back in the working CRS',
+          (np.allclose(back['dE'], de, atol=0.01), np.allclose(back['N'], tn, atol=0.01)), (True, True))
+    try:
+        pd.DataFrame({'a': [1]}).to_csv(os.path.join(tmp, 'bad.csv'), index=False)
+        T.load_truth(os.path.join(tmp, 'bad.csv'))
+        check('truth: file without lon/lat refused', False)
+    except ValueError as e:
+        check('truth: file without lon/lat refused', 'In_Lon' in str(e))
+
+
+def test_kornia_catalogue():
+    """The matchers on a synthetic pair shifted by (7, -4) px: every kornia
+    matcher recovers it, and LightGlue gets matches for SIFT / DoG-HardNet
+    (their (1, N, D) descriptors once made it return nothing)."""
+    import automatch_engine as E
+    img, img2 = _texture()
+    cfg = E.PipelineConfig(num_features=600, use_amp=False, smnn_thresholds=[0.95])
+    m = E.build_detector('sift', cfg)
+    got = {mn: _shift_of(m._process_single_window(img, img2, 0, 0, 0, 0, dict(_META), mn,
+                                                  0.95 if mn == 'smnn' else None, 0.0, 0.0))
+           for mn in ['smnn', 'ada'] + E.GENERIC_MATCHERS}
+    check('matchers: smnn / ada / mnn / snn / nn / fginn recover the shift',
+          {k: (v[1:] if v else None) for k, v in got.items()}, {k: (-7, -4) for k in got})
+    for det, params in (('sift', {}), ('dog', {})):
+        m = E.build_detector(det, cfg, params)
+        fname = os.path.join(E._default_hub_dir(), 'checkpoints', {
+            'sift': 'sift_lightglue_v0-1_arxiv-pth', 'dog': 'doghardnet_v0-1_arxiv-pth'}[det])
+        if det == 'dog' and not os.path.exists(os.path.join(E._default_hub_dir(), 'checkpoints',
+                                                            'checkpoint_liberty_with_aug.pth')):
+            print('SKIP  DoG-HardNet: HardNet weights not cached here')
+            continue
+        if not os.path.exists(fname):
+            print(f'SKIP  {det} LightGlue: weights not cached here')
+            continue
+        rec = m._process_single_window(img, img2, 0, 0, 0, 0, dict(_META), 'lgm', None, 0.0, 0.0)
+        res = _shift_of(rec)
+        check(f'LightGlue: {det} gets matches and the shift', (res[0] > 50, res[1:]) if res else None,
+              (True, (-7, -4)))
+        m.unload_model()
+
+
+def test_weights_check(tmp):
+    """automatch_weights against a private weights folder: found / missing /
+    truncated reported with folder and URL, nothing downloaded, nothing read
+    in quick mode; --load reads; the HuggingFace lookup finds imcui files in
+    other caches."""
+    import types
+    import torch as th
+    import automatch_engine as E
+    import automatch_imcui as IM
+    import automatch_weights as W
+    hub = os.path.join(tmp, 'wt_hub')
+    ck = os.path.join(hub, 'checkpoints')
+    os.makedirs(ck, exist_ok=True)
+    th.save({'not': th.zeros(1)}, os.path.join(ck, 'depth-save.pth'))       # wrong content on purpose
+    th.save({'x': th.zeros(1000)}, os.path.join(tmp, 'full.pth'))
+    with open(os.path.join(tmp, 'full.pth'), 'rb') as f:
+        head = f.read(200)
+    with open(os.path.join(ck, 'disk_lightglue_v0-1_arxiv-pth'), 'wb') as f:
+        f.write(head)                                                    # an interrupted download
+    old_dir, default_hub, orig = th.hub.get_dir(), E._default_hub_dir, E._ORIG_LOAD_STATE_DICT
+    calls = []
+
+    def offline(url, *a, **k):
+        calls.append(url)
+        raise OSError('offline')
+    try:
+        th.hub.set_dir(hub)
+        E._default_hub_dir = lambda: hub
+        E._ORIG_LOAD_STATE_DICT = offline
+        rep = W.check(detectors=['disk'], imcui=False, quiet=True)
+        files = {f['file']: f for f in rep['detectors'][0]['files']}
+        check('weights: found / missing / truncated',
+              (files['depth-save.pth']['status'], files['epipolar-save.pth']['status'],
+               files['disk_lightglue_v0-1_arxiv-pth']['status']), ('ok', 'MISSING', 'TRUNCATED'))
+        check('weights: folder and URL reported',
+              (files['depth-save.pth']['folder'] == ck, files['epipolar-save.pth']['source'].endswith(
+                  'epipolar-save.pth'), files['epipolar-save.pth']['needed_by']), (True, True, ['disk_epipolar']))
+        check('weights: quick check downloads nothing and reads nothing (the bad file passed)',
+              (calls, [v['status'] for v in rep['detectors'][0]['variants']]), ([], ['missing', 'missing']))
+        text = W.format_report(rep)
+        check('weights: report says where to put the missing files',
+              'epipolar-save.pth' in text and 'UNDER THE NAME SHOWN' in text and ck in text)
+        rep = W.check(detectors=['keynet'], imcui=False, quiet=True)
+        ori = {f['file']: f for f in rep['detectors'][0]['files']}.get('OriNet.pth', {})
+        check('weights: OriNet needed only by the non-upright KeyNet variants',
+              sorted(ori.get('needed_by', [])), ['keynet-aff0-up0', 'keynet-up0'])
+        rep = W.check(job={'detectors': ['disk'], 'detector_params': {'disk': {'checkpoint': ['epipolar']}},
+                           'matchers': {'disk': ['smnn']}}, imcui=False, quiet=True)
+        check('weights: a job checks only what it runs (no LightGlue without lgm)',
+              [f['file'] for f in rep['detectors'][0]['files']], ['epipolar-save.pth'])
+        rep = W.check(detectors=['disk'], imcui=False, quiet=True, load=True)
+        st = {v['variant']: v for v in rep['detectors'][0]['variants']}
+        check('weights: --load reads the files (the wrong content is caught)',
+              (st['disk_depth']['status'], 'extractor' in st['disk_depth']['error'],
+               st['disk_epipolar']['status'], calls), ('error', True, 'missing', []))
+        check('weights: tracing leaves nothing behind',
+              (E.WEIGHTS_TRACE_HOOK, dict(E.FAILED_MODELS), E.MODEL_LABELS,
+               th.nn.Module.load_state_dict.__name__), (None, {}, [], 'load_state_dict'))
+    finally:
+        th.hub.set_dir(old_dir)
+        E._default_hub_dir = default_hub
+        E._ORIG_LOAD_STATE_DICT = orig
+
+    # HuggingFace: a file cached in the default HF cache is used although
+    # HF_HOME points at the (empty) weights folder -- as for kornia's weights
+    fake = types.ModuleType('huggingface_hub')
+    fd = types.ModuleType('huggingface_hub.file_download')
+    consts = types.ModuleType('huggingface_hub.constants')
+    consts.HF_HUB_CACHE = os.path.join(tmp, 'wf', 'huggingface', 'hub')
+    hf_calls = []
+
+    def try_to_load_from_cache(repo_id, filename, cache_dir=None, revision=None, repo_type=None):
+        p = os.path.join(cache_dir or '', repo_id.replace('/', '--'), filename)
+        return p if os.path.isfile(p) else None
+
+    def hf_hub_download(repo_id, filename, **kw):
+        hf_calls.append(filename)
+        raise OSError('offline')
+    fake.try_to_load_from_cache, fake.hf_hub_download, fake.constants = try_to_load_from_cache, hf_hub_download, consts
+    fd.hf_hub_download = hf_hub_download
+    saved = {k: sys.modules.get(k) for k in ('huggingface_hub', 'huggingface_hub.file_download',
+                                             'huggingface_hub.constants')}
+    old_xdg, old_orig = os.environ.get('XDG_CACHE_HOME'), IM._ORIG_HF
+    try:
+        sys.modules.update({'huggingface_hub': fake, 'huggingface_hub.file_download': fd,
+                            'huggingface_hub.constants': consts})
+        os.environ['XDG_CACHE_HOME'] = os.path.join(tmp, 'xdg')
+        target = os.path.join(tmp, 'xdg', 'huggingface', 'hub', 'Realcat--imcui_checkpoints', 'roma')
+        os.makedirs(target, exist_ok=True)
+        open(os.path.join(target, 'roma_outdoor.pth'), 'wb').write(b'x' * 10)
+        IM._ORIG_HF = None
+        check('weights: HF lookup installed', IM.install_hf_lookup(), True)
+        got = fake.hf_hub_download('Realcat/imcui_checkpoints', 'roma/roma_outdoor.pth')
+        check('weights: imcui file found in the default HuggingFace cache, no download',
+              (got == os.path.join(target, 'roma_outdoor.pth'), hf_calls), (True, []))
+        tr = W.Tracer()
+        with tr.active():
+            miss = fake.hf_hub_download('Realcat/imcui_checkpoints', 'dkm/dkm_outdoor.pth')
+        check('weights: traced HF request, missing file answered with a stand-in',
+              (tr.requests[-1]['kind'], tr.requests[-1]['status'], tr.requests[-1]['repo_file'],
+               miss.startswith(W.STUB_PREFIX), hf_calls), ('hf', 'MISSING', 'dkm/dkm_outdoor.pth', True, []))
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+        if old_xdg is None:
+            os.environ.pop('XDG_CACHE_HOME', None)
+        else:
+            os.environ['XDG_CACHE_HOME'] = old_xdg
+        IM._ORIG_HF = old_orig
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--e2e', action='store_true')
@@ -672,6 +1059,9 @@ def main():
         test_distortion_helpers()
         test_weights_and_failfast(tmp)
         test_imcui_mock()
+        test_weights_check(tmp)
+        test_truth_helpers(tmp)
+        test_kornia_catalogue()
         if a.gui:
             test_gui_dialog()
         if a.e2e:
@@ -680,6 +1070,7 @@ def main():
             test_e2e_rerun(tmp)
             test_e2e_distortion(tmp)
             test_e2e_missing_weights(tmp)
+            test_e2e_truth(tmp)
     finally:
         if not a.keep:
             shutil.rmtree(tmp, ignore_errors=True)

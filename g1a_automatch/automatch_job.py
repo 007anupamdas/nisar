@@ -7,6 +7,8 @@ file and runs this script as a subprocess, so GUI and command line are one path)
     python automatch_job.py preflight job.json       # validate, no matching
     python automatch_job.py run       job.json       # match + RIVAL CSVs
     python automatch_job.py detectors                # what can be selected
+    python automatch_job.py weights   [job.json]     # which weight files are on this machine
+    python automatch_job.py compare   <output_dir> --truth manual.csv   # rank vs ground truth
     python automatch_job.py inspect   <input>        # channels, CRS, footprint
 
 Any job key can be overridden on the command line, e.g.
@@ -18,6 +20,8 @@ Outputs (under output_dir):
                                          loadable in DPQED_rival.py ('Load CSV')
     RIVAL_BEST_<scene>_<channel>.csv     highest consensus score per channel
     RUN_MANIFEST.csv                     every run: status, offsets, RMSE, CE90, paths
+    TRUTH_BY_DETECTOR_MATCHER.csv        with truth_csv: detector + matcher ranked vs ground truth
+    TRUTH_RANKING.csv, TRUTH_POINTS.csv  ... every configuration, every truth point
     automatch.log                        full log
 Progress is printed as lines starting with '@@AUTOMATCH ' followed by JSON.
 """
@@ -103,6 +107,10 @@ DEFAULT_JOB: Dict = {
     'consensus_surface': 'auto',    # auto | affine | bilinear | quadratic | biquadratic
     'manual_gcp_csv': '',
 
+    # ground truth (evaluation only: it does not steer matching or consensus)
+    'truth_csv': '',             # RIVAL CSV of manually measured points (In/Ref lon/lat)
+    'truth_radius_m': 5000,      # tool points this close to a truth point estimate its error
+
     # RIVAL export
     'rival_max_points_per_chip': 200,   # 0 = all inliers
 
@@ -125,6 +133,7 @@ JOB_HELP = {
     'max_expected_error_m': 'Worst-case geolocation error; search buffer for references and coarse alignment',
     'coarse_method': 'auto = matcher at coarse resolution, phase correlation if weak',
     'initial_offset_m': '[dE, dN] metres (input minus reference) if known, e.g. from RIVAL',
+    'truth_csv': 'Manually measured points (RIVAL CSV): every detector + matcher is ranked against them',
 }
 
 
@@ -187,8 +196,10 @@ def detector_catalog(weights_cache: str = '') -> Dict:
 # ─────────────────────────────────────────────────────────────────────────────
 # Preflight
 # ─────────────────────────────────────────────────────────────────────────────
-def preflight(job: Dict) -> Dict:
-    """Validate a job without matching. {'errors', 'warnings', 'info'}."""
+def preflight(job: Dict, check_weights: bool = True) -> Dict:
+    """Validate a job without matching. {'errors', 'warnings', 'info'}.
+    check_weights: also look for every model weight file the job will load
+    (missing ones are warnings: they download on first use when online)."""
     errors, warnings, info = [], [], {}
     job = normalize(job)
 
@@ -208,6 +219,12 @@ def preflight(job: Dict) -> Dict:
             errors.append(f'output_dir not writable: {e}')
     if job['manual_gcp_csv'] and not os.path.exists(job['manual_gcp_csv']):
         errors.append(f"manual_gcp_csv not found: {job['manual_gcp_csv']}")
+    if job['truth_csv']:
+        try:
+            import automatch_truth as T
+            info['truth_points'] = len(T.load_truth(job['truth_csv']))
+        except Exception as e:
+            errors.append(f"truth_csv: {type(e).__name__}: {e}")
     if job['consensus_model'] not in ('surface', 'constant', 'none'):
         errors.append(f"consensus_model must be surface, constant or none (got {job['consensus_model']!r})")
     if job['consensus_surface'] not in ('auto', 'affine', 'bilinear', 'quadratic', 'biquadratic'):
@@ -284,6 +301,7 @@ def preflight(job: Dict) -> Dict:
                 why = skipped.get(tag) or cat['imcui'].get('error') or 'not available'
                 errors.append(f'detector {d!r}: {why}')
         supported = {x['name']: x['matchers'] for x in cat['detectors']}
+        defaults = {x['name']: x.get('default_matchers', x['matchers']) for x in cat['detectors']}
         for det, ms in (job['matchers'] or {}).items():
             sup = supported.get(E.resolve_detector_name(det)[0])
             if sup is None:
@@ -299,10 +317,10 @@ def preflight(job: Dict) -> Dict:
             if base not in supported:
                 continue
             try:
-                ms = (job['matchers'] or {}).get(d) or (job['matchers'] or {}).get(base) or supported[base]
+                ms = (job['matchers'] or {}).get(d) or (job['matchers'] or {}).get(base) or defaults[base]
                 nv, npass = E.count_runs(d, job['detector_params'].get(d), ms, len(job['smnn_thresholds']))
-                runs.append({'detector': d, 'variants': nv, 'passes_per_variant': npass})
-                total += nv * npass
+                runs.append({'detector': d, 'variants': nv, 'passes': npass})
+                total += npass
             except ValueError as e:
                 errors.append(str(e))
         for d in job['detector_params']:
@@ -315,6 +333,23 @@ def preflight(job: Dict) -> Dict:
                                         * len(job['ransac_thresholds_m'] or job['ransac_thresholds_px']))
     except Exception as e:
         errors.append(f'detector catalog: {type(e).__name__}: {e}')
+
+    # model weights
+    if check_weights and not errors:
+        try:
+            import automatch_weights as W
+            wrep = W.check(job=job, quiet=True)
+            info['weights'] = wrep['summary']
+            for m in wrep['missing']:
+                warnings.append(f"weights: {m['file']} ({', '.join(m['detectors'])}) is not on this machine "
+                                f"-- it is downloaded on first use if this machine is online; offline, that "
+                                f"detector is skipped. Source: {m['source']}. See 'Check weights'.")
+            for d in wrep['detectors']:
+                for v in d['variants']:
+                    if v['status'] in ('error', 'partial'):
+                        warnings.append(f"weights: {v['variant']}: {v['status']} ({v['error']})")
+        except Exception as e:
+            warnings.append(f'weights check skipped: {type(e).__name__}: {e}')
 
     # device
     try:
@@ -376,7 +411,7 @@ def _config_for(job: Dict, win: int, nf: Optional[int], res: float, out_dir: str
 
 # Job keys that cannot change what the matcher computes for a sweep point.
 _RESULT_NEUTRAL_KEYS = {'output_dir', 'temp_dir', 'resume', 'debug', 'rival_max_points_per_chip',
-                        'save_match_images', 'weights_cache_dir'}
+                        'save_match_images', 'weights_cache_dir', 'truth_csv', 'truth_radius_m'}
 
 
 def _sweep_key(job: Dict, win: int, nf: Optional[int]) -> str:
@@ -403,9 +438,43 @@ def _best_score(record: Dict) -> Optional[float]:
         return None
 
 
+def _compare_with_truth(job: Dict, out_root: str, working_crs: str, manifest: List[Dict]) -> Dict:
+    """Rank every detector + matcher configuration against the ground truth;
+    add each run's own truth metrics to its manifest row."""
+    import automatch_truth as T
+    runs = [{'filtered_dir': r['filtered_dir'], 'final_dir': r['final_dir'], 'sweep': r['sweep']}
+            for r in manifest if isinstance(r.get('filtered_dir'), str) and isinstance(r.get('final_dir'), str)
+            and os.path.isdir(r['filtered_dir']) and os.path.isdir(r['final_dir'])]
+    try:
+        res = T.compare(out_root, job['truth_csv'], float(job['truth_radius_m']), 'consensus', working_crs,
+                        runs=runs)
+    except Exception as e:
+        print(f'[Truth] comparison failed: {type(e).__name__}: {e}')
+        traceback.print_exc()
+        return {}
+    for row in manifest:
+        if row.get('detail_csv') and os.path.exists(row['detail_csv']):
+            try:
+                m = T.score_detail_csv(row['detail_csv'], res['truth'], float(job['truth_radius_m']))
+                row.update({'truth_rmse_m': m.get('truth_rmse_m'), 'truth_reached': m.get('truth_reached'),
+                            'truth_mean_dE_m': m.get('truth_mean_dE_m'),
+                            'truth_mean_dN_m': m.get('truth_mean_dN_m')})
+                emit({'event': 'truth_result', 'sweep': row['sweep'], 'channel': row['channel'],
+                      'detector': row['detector'], 'truth_rmse_m': m.get('truth_rmse_m'),
+                      'truth_reached': m.get('truth_reached')})
+            except Exception as e:
+                print(f"[Truth] {row.get('detector')}: {type(e).__name__}: {e}")
+    files = {k: os.path.join(out_root, f'{k}.csv')
+             for k in ('TRUTH_BY_DETECTOR_MATCHER', 'TRUTH_RANKING', 'TRUTH_POINTS')}
+    by = res['by_detector_matcher']
+    emit({'event': 'truth', 'files': files, 'n_truth': len(res['truth']),
+          'top': json.loads(by.head(30).to_json(orient='records')) if not by.empty else []})
+    return files
+
+
 def run_job(job: Dict) -> Dict:
     job = normalize(job)
-    pf = preflight(job)
+    pf = preflight(job, check_weights=False)   # warmup stops a detector whose weights are missing
     for w in pf['warnings']:
         print(f'[Preflight] WARNING: {w}')
     if pf['errors']:
@@ -475,7 +544,8 @@ def run_job(job: Dict) -> Dict:
                    'detector': rec.get('detector_tag'), 'status': rec.get('status'),
                    'error': rec.get('error') if isinstance(rec.get('error'), str) else '',
                    'coarse_offsets': rec.get('coarse_offsets'), 'consensus_score': _best_score(rec),
-                   'minutes': round((time.time() - t0) / 60.0, 2)}
+                   'minutes': round((time.time() - t0) / 60.0, 2), 'working_crs': scene.working_crs,
+                   'filtered_dir': rec.get('filtered_dir'), 'final_dir': rec.get('final_dir')}
             try:
                 exp = R.export_run(rec, scene.working_crs, rival_dir, f'{scene.name}_{tag}',
                                    job['rival_max_points_per_chip'])
@@ -499,6 +569,9 @@ def run_job(job: Dict) -> Dict:
                       'detector': row['detector'], 'status': row['status'], 'error': row['error']})
             manifest.append(row)
 
+    truth_files = {}
+    if job['truth_csv']:
+        truth_files = _compare_with_truth(job, out_root, scene.working_crs, manifest)
     man = pd.DataFrame(manifest)
     man_path = os.path.join(out_root, 'RUN_MANIFEST.csv')
     man.to_csv(man_path, index=False)
@@ -517,7 +590,7 @@ def run_job(job: Dict) -> Dict:
                 print(f'[Job] best for {ch}: {best["detector"]} {best["sweep"]} '
                       f'(mean dE {best["mean_dx_m"]:.1f} m, dN {best["mean_dy_m"]:.1f} m, '
                       f'CE90 {best["ce90_m"]:.1f} m) -> {dst}')
-    emit({'event': 'done', 'manifest': man_path, 'best': best_files,
+    emit({'event': 'done', 'manifest': man_path, 'best': best_files, 'truth': truth_files,
           'minutes': round((time.time() - t_job) / 60.0, 2)})
     print(f'[Job] done in {(time.time() - t_job) / 60.0:.1f} min; manifest {man_path}')
     return {'manifest': man_path, 'best': best_files}
@@ -538,6 +611,24 @@ def main(argv: Optional[List[str]] = None) -> int:
     d.add_argument('--weights-cache', default='')
     i = sub.add_parser('inspect', help='describe an input image')
     i.add_argument('input')
+    w = sub.add_parser('weights', help='check which model weight files are on this machine '
+                                       '(options: python automatch_weights.py -h)')
+    w.add_argument('rest', nargs=argparse.REMAINDER)
+    c = sub.add_parser('compare', help='rank the detector + matcher configurations of an output folder '
+                                       'against ground truth (options: python automatch_truth.py -h)')
+    c.add_argument('rest', nargs=argparse.REMAINDER)
+    if argv is None:
+        argv = sys.argv[1:]
+    if argv and argv[0] == 'compare':
+        import automatch_truth as T
+        return T.main(list(argv[1:]))
+    if argv and argv[0] == 'weights':
+        # a job file as first argument, everything else as automatch_weights takes it
+        import automatch_weights as W
+        rest = list(argv[1:])
+        if rest and not rest[0].startswith('-'):
+            rest = ['--job'] + rest
+        return W.main(rest)
     a = ap.parse_args(argv)
 
     if a.cmd == 'template':
@@ -546,12 +637,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     if a.cmd == 'detectors':
         cat = detector_catalog(a.weights_cache)
         for det in cat['detectors']:
-            ps = ', '.join(p['name'] for p in det.get('params', [])) or '-'
-            print(f"{det['name']:<18} {det['source']:<7} matchers: {', '.join(det['matchers']):<16} params: {ps}")
+            defaults = det.get('default_matchers', det['matchers'])
+            extra = [m for m in det['matchers'] if m not in defaults]
+            ms = ', '.join(defaults) + (f" (+ {', '.join(extra)} when selected)" if extra else '')
+            ps = ', '.join(p['name'] for p in det.get('params', [])
+                           if p.get('scope', 'detector') == 'detector' and '.' not in p['name']) or '-'
+            if det['source'] != 'kornia' and det.get('params'):
+                ps = ', '.join(p['name'] for p in det['params'])   # imcui: thresholds + model keys
+            print(f"{det['name']:<22} {det['source']:<7} matchers: {ms:<52} settings: {ps}")
         if cat['imcui'].get('error'):
             print(f"(imcui: {cat['imcui']['error']})")
         for tag, why in cat['imcui'].get('skipped', []):
-            print(f'  imcui {tag}: not offered ({why})')
+            print(f'{"imw-" + tag:<22} not offered: {why}')
         emit({'event': 'detectors', **cat})
         return 0
     if a.cmd == 'inspect':

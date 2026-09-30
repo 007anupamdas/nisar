@@ -24,6 +24,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 
 try:
     from PyQt5 import QtCore, QtGui, QtWidgets
@@ -64,7 +65,7 @@ BTN_DEFAULTS = _DBB.StandardButton.RestoreDefaults if QT_API != 'PyQt5' else _DB
 RANSAC_CHOICES = ['magsac', 'ransac', 'lmeds', 'accurate']
 COARSE_CHOICES = ['auto', 'matcher', 'phasecorr', 'manual', 'none']
 REF_MODES = ['auto', 'index-shp', 'sidecar', 'degree-tile']
-RESULT_COLS = ['sweep', 'channel', 'detector', 'status', 'n_points', 'n_chips', 'mean_dx_m',
+RESULT_COLS = ['sweep', 'channel', 'detector', 'status', 'truth_rmse_m', 'n_points', 'n_chips', 'mean_dx_m',
                'mean_dy_m', 'dE_min_m', 'dE_max_m', 'dN_min_m', 'dN_max_m', 'affine_rot_deg',
                'affine_resid_rmse_m', 'rmse_x_m', 'rmse_y_m', 'ce90_m', 'rival_csv']
 CONSENSUS_MODELS = ['surface', 'constant', 'none']
@@ -152,6 +153,8 @@ GROUP_TITLES = {
     'detector': 'Detector',
     'lgm': "LightGlue matcher — used when 'lgm' is ticked",
     'ada': "AdaLAM matcher — used when 'ada' is ticked",
+    'snn': "SNN matcher (ratio test) — used when 'snn' is ticked",
+    'fginn': "FGINN matcher — used when 'fginn' is ticked",
     'api': 'imcui thresholds',
     'feature': 'imcui detector model',
     'matcher': 'imcui matcher model',
@@ -325,6 +328,121 @@ class ParamDialog(QtWidgets.QDialog):
 # ─────────────────────────────────────────────────────────────────────────────
 # main window
 # ─────────────────────────────────────────────────────────────────────────────
+class WeightsDialog(QtWidgets.QDialog):
+    """Result of a weights check: one row per detector x weight file."""
+
+    COLS = ['detector', 'status', 'file', 'model', 'found in / download from', 'needed by']
+
+    def __init__(self, ev, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('Model weights')
+        self.resize(1100, 600)
+        self.ev = ev
+        lay = QtWidgets.QVBoxLayout(self)
+        s = ev.get('summary', {})
+        head = QtWidgets.QLabel(
+            f"{s.get('files', 0)} weight file(s) for {s.get('detectors', 0)} detector(s): "
+            f"{s.get('found', 0)} found, {s.get('missing', 0)} missing or damaged "
+            f"({ev.get('mode', 'check')} mode).\nSearched: "
+            + '; '.join(ev.get('torch_folders', []) + ev.get('hf_caches', []))
+            + (f"\nPut missing torch-hub files, under the name shown, in: {ev.get('put_in')}"
+               if ev.get('missing') else ''))
+        head.setWordWrap(True)
+        head.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse if QT_API != 'PyQt5'
+                                     else Qt.TextSelectableByMouse)
+        lay.addWidget(head)
+        self.table = QtWidgets.QTableWidget(0, len(self.COLS))
+        self.table.setHorizontalHeaderLabels(self.COLS)
+        self.table.setEditTriggers(NO_EDIT)
+        self.table.setSelectionBehavior(SEL_ROWS)
+        bad_brush = QtGui.QBrush(QtGui.QColor(255, 215, 215))
+        for d in ev.get('detectors', []):
+            files = d.get('files') or [{'status': d['status'], 'file': '(none needed)' if d['status'] ==
+                                        'no weights' else '', 'model': '', 'source': '', 'folder': '',
+                                        'needed_by': [], 'all_variants': True}]
+            for f in files:
+                r = self.table.rowCount()
+                self.table.insertRow(r)
+                where = f.get('folder') if f['status'] == 'ok' else f.get('source', '')
+                need = 'all variants' if f.get('all_variants') else ', '.join(f.get('needed_by', []))
+                vals = [d['detector'], f['status'], f.get('file', ''), f.get('model', ''), where, need]
+                for c, v in enumerate(vals):
+                    it = QtWidgets.QTableWidgetItem(str(v))
+                    it.setToolTip(str(v))
+                    if f['status'] not in ('ok', 'no weights'):
+                        it.setBackground(bad_brush)
+                    self.table.setItem(r, c, it)
+            for v in d.get('variants', []):
+                if v.get('status') in ('error', 'partial'):
+                    r = self.table.rowCount()
+                    self.table.insertRow(r)
+                    for c, val in enumerate([d['detector'], v['status'], '', '', v.get('error', ''),
+                                             v.get('variant', '')]):
+                        it = QtWidgets.QTableWidgetItem(str(val))
+                        it.setToolTip(str(val))
+                        it.setBackground(bad_brush)
+                        self.table.setItem(r, c, it)
+        self.table.resizeColumnsToContents()
+        lay.addWidget(self.table, 1)
+        row = QtWidgets.QHBoxLayout()
+        copy = QtWidgets.QPushButton('Copy missing list')
+        copy.setEnabled(bool(ev.get('missing')))
+        copy.clicked.connect(self.copy_missing)
+        row.addWidget(copy)
+        row.addStretch(1)
+        close = QtWidgets.QPushButton('Close')
+        close.clicked.connect(self.accept)
+        row.addWidget(close)
+        lay.addLayout(row)
+
+    def missing_text(self) -> str:
+        return '\n'.join(f"{m['file']}\t{m['source']}\t{', '.join(m.get('detectors', []))}"
+                         for m in self.ev.get('missing', []))
+
+    def copy_missing(self):
+        QtWidgets.QApplication.clipboard().setText(self.missing_text())
+
+
+class TruthDialog(QtWidgets.QDialog):
+    """Detector + matcher ranking against the ground truth (best setting each)."""
+
+    COLS = [('rank', '#'), ('channel', 'channel'), ('detector', 'detector'), ('matcher_family', 'matcher'),
+            ('best_matcher_setting', 'setting'), ('ransac', 'RANSAC'), ('sweep', 'sweep'),
+            ('truth_rmse_m', 'RMSE m'), ('truth_mean_dE_m', 'bias dE m'), ('truth_mean_dN_m', 'bias dN m'),
+            ('truth_max_m', 'max m'), ('truth_reached', 'reached'), ('truth_total', 'of'),
+            ('n_chips', 'chips')]
+
+    def __init__(self, ev, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('Detector + matcher vs ground truth')
+        self.resize(1100, 520)
+        lay = QtWidgets.QVBoxLayout(self)
+        files = ev.get('files') or {}
+        head = QtWidgets.QLabel(
+            f"{ev.get('n_truth', '?')} ground-truth point(s). Each detector + matcher at its best setting; "
+            f"ranked by truth points reached, then RMSE of (tool - truth).\nAll configurations: "
+            f"{files.get('TRUTH_RANKING', '')}\nPer truth point: {files.get('TRUTH_POINTS', '')}")
+        head.setWordWrap(True)
+        lay.addWidget(head)
+        t = QtWidgets.QTableWidget(0, len(self.COLS))
+        t.setHorizontalHeaderLabels([c[1] for c in self.COLS])
+        t.setEditTriggers(NO_EDIT)
+        t.setSelectionBehavior(SEL_ROWS)
+        for row in ev.get('top') or []:
+            r = t.rowCount()
+            t.insertRow(r)
+            for c, (key, _) in enumerate(self.COLS):
+                v = row.get(key)
+                txt = '' if v is None else (f'{v:.1f}' if isinstance(v, float) else str(v))
+                t.setItem(r, c, QtWidgets.QTableWidgetItem(txt))
+        t.resizeColumnsToContents()
+        self.table = t
+        lay.addWidget(t, 1)
+        close = QtWidgets.QPushButton('Close')
+        close.clicked.connect(self.accept)
+        lay.addWidget(close)
+
+
 class AutoMatchWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
@@ -336,6 +454,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self._queue = []              # quick commands waiting for the process
         self.detector_info = []       # [{'name','source','matchers','params'}]
         self.detector_specs = {}      # name -> [param spec dicts]
+        self.detector_defaults = {}   # name -> matchers ticked by default
         self.detector_params = {}     # name -> {param: [values]} (non-default only)
         self.settings = QtCore.QSettings('DPQED', 'AutoMatch')
 
@@ -463,20 +582,47 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         f.addRow('Cache folder', self.tmp_path)
         self.gcp_path = PathRow('file', 'CSV (*.csv);;All (*)')
         f.addRow('Manual GCP CSV (optional)', self.gcp_path)
+        self.truth_path = PathRow('file', 'CSV (*.csv);;All (*)')
+        self.truth_path.edit.setToolTip('Manually measured points as a RIVAL CSV (In/Ref lon/lat columns). '
+                                        'After the run every detector + matcher is ranked against them '
+                                        '(TRUTH_BY_DETECTOR_MATCHER.csv). Evaluation only: it does not '
+                                        'steer the matching.')
+        f.addRow('Ground truth CSV (optional)', self.truth_path)
+        self.truth_radius = QtWidgets.QDoubleSpinBox()
+        self.truth_radius.setRange(0.5, 100.0)
+        self.truth_radius.setSuffix(' km')
+        self.truth_radius.setToolTip('Tool matches this close to a truth point estimate its error there '
+                                     '(else the tool\'s error surface is used)')
+        f.addRow('Truth neighbourhood', self.truth_radius)
 
     def _build_algo_tab(self):
         w = QtWidgets.QWidget()
         lay = QtWidgets.QVBoxLayout(w)
         top = QtWidgets.QHBoxLayout()
-        top.addWidget(QtWidgets.QLabel('kornia first; imcui lists only algorithms kornia lacks.'))
+        top.addWidget(QtWidgets.QLabel('kornia first; imcui adds what kornia lacks (greyed rows: not '
+                                       'offered, with the reason). Unticked matchers run only if ticked.'))
         top.addStretch(1)
         b = QtWidgets.QPushButton('Refresh list')
         b.clicked.connect(self.refresh_detectors)
         top.addWidget(b)
+        wb = QtWidgets.QToolButton()
+        wb.setText('Check weights')
+        wb.setToolTip('Which model weight files the detectors need, and whether they are on this '
+                      'machine (nothing is downloaded)')
+        menu = QtWidgets.QMenu(wb)
+        menu.addAction('Selected detectors (as configured)', lambda: self.check_weights('selected'))
+        menu.addAction('All detectors, every weight choice', lambda: self.check_weights('all'))
+        menu.addAction('Selected detectors — load each model (slower)',
+                       lambda: self.check_weights('selected', load=True))
+        wb.setMenu(menu)
+        wb.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup if QT_API != 'PyQt5'
+                        else QtWidgets.QToolButton.InstantPopup)
+        top.addWidget(wb)
+        self.btn_weights = wb
         lay.addLayout(top)
-        self.det_table = QtWidgets.QTableWidget(0, 4)
+        self.det_table = QtWidgets.QTableWidget(0, 5)
         self.det_table.setHorizontalHeaderLabels(['detector', 'source', 'matchers (check to run)',
-                                                  'parameters'])
+                                                  'parameters', 'weights'])
         self.det_table.horizontalHeader().setStretchLastSection(True)
         self.det_table.setEditTriggers(NO_EDIT)
         lay.addWidget(self.det_table, 1)
@@ -623,6 +769,8 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.out_path.setText(j['output_dir'])
         self.tmp_path.setText(j['temp_dir'])
         self.gcp_path.setText(j['manual_gcp_csv'])
+        self.truth_path.setText(j.get('truth_csv') or '')
+        self.truth_radius.setValue(float(j.get('truth_radius_m') or 5000) / 1000.0)
         self._pending_channels = list(j['channels'] or [])
         self._set_channels([self.channels.item(i).text() for i in range(self.channels.count())]
                            or self._pending_channels)
@@ -691,6 +839,8 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             'output_dir': self.out_path.text(),
             'temp_dir': self.tmp_path.text(),
             'manual_gcp_csv': self.gcp_path.text(),
+            'truth_csv': self.truth_path.text().strip(),
+            'truth_radius_m': self.truth_radius.value() * 1000.0,
             'detectors': dets,
             'matchers': matchers,
             'detector_params': {k: v for k, v in self.detector_params.items() if v},
@@ -742,9 +892,16 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             self.channels.addItem(it)
 
     # ── detectors ────────────────────────────────────────────────────────────
+    def _selectable(self, r):
+        """False for the greyed catalogue rows that are not offered."""
+        item = self.det_table.item(r, 0)
+        return item is not None and bool(item.flags() & USER_CHECKABLE)
+
     def _selected_detectors(self):
         dets, matchers = [], {}
         for r in range(self.det_table.rowCount()):
+            if not self._selectable(r):
+                continue
             name = self.det_table.item(r, 0).text()
             if self.det_table.item(r, 0).checkState() != CHECKED:
                 continue
@@ -754,11 +911,11 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             on = [cb.text() for cb in box.findChildren(QtWidgets.QCheckBox) if cb.isChecked()]
             if not on:
                 raise ValueError(f'{name}: check at least one matcher.')
-            if set(on) != set(all_m):
+            if set(on) != set(self.detector_defaults.get(name, all_m)):
                 matchers[name] = on
         return dets, matchers
 
-    def _fill_detector_table(self, info):
+    def _fill_detector_table(self, info, not_offered=()):
         self.detector_info = info
         self.det_table.setRowCount(0)
         for d in info:
@@ -772,9 +929,13 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             box = QtWidgets.QWidget()
             hl = QtWidgets.QHBoxLayout(box)
             hl.setContentsMargins(4, 0, 4, 0)
+            defaults = d.get('default_matchers', d['matchers'])
+            self.detector_defaults[d['name']] = list(defaults)
             for m in d['matchers']:
                 cb = QtWidgets.QCheckBox(m)
-                cb.setChecked(True)
+                cb.setChecked(m in defaults)
+                if m not in defaults:
+                    cb.setToolTip('optional kornia matcher: runs only when ticked')
                 hl.addWidget(cb)
             hl.addStretch(1)
             self.det_table.setCellWidget(r, 2, box)
@@ -790,6 +951,25 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             summary.setObjectName('summary')
             pl.addWidget(summary, 1)
             self.det_table.setCellWidget(r, 3, pbox)
+            self.det_table.setItem(r, 4, QtWidgets.QTableWidgetItem(''))
+        # the rest of the catalogue: shown, greyed, with the reason
+        for row in not_offered:
+            r = self.det_table.rowCount()
+            self.det_table.insertRow(r)
+            it = QtWidgets.QTableWidgetItem(f"imw-{row['tag']}")
+            it.setFlags(Qt.ItemFlag.NoItemFlags if QT_API != 'PyQt5' else Qt.NoItemFlags)
+            it.setToolTip(row['reason'])
+            self.det_table.setItem(r, 0, it)
+            src = QtWidgets.QTableWidgetItem('imcui — not offered')
+            src.setFlags(Qt.ItemFlag.NoItemFlags if QT_API != 'PyQt5' else Qt.NoItemFlags)
+            self.det_table.setItem(r, 1, src)
+            use = QtWidgets.QLabel(f"use kornia {row['use']}" if row.get('use') else '—')
+            use.setEnabled(False)
+            self.det_table.setCellWidget(r, 2, use)
+            why = QtWidgets.QLabel(row['reason'])
+            why.setEnabled(False)
+            why.setToolTip(row['reason'])
+            self.det_table.setCellWidget(r, 3, why)
         self.det_table.resizeColumnsToContents()
         self._apply_detector_selection()
         self._refresh_param_summaries()
@@ -808,6 +988,8 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             else:
                 want.add(d)
         for r in range(self.det_table.rowCount()):
+            if not self._selectable(r):
+                continue
             name = self.det_table.item(r, 0).text()
             self.det_table.item(r, 0).setCheckState(CHECKED if name in want else UNCHECKED)
             if name in matchers:
@@ -882,8 +1064,9 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         if self.proc is not None and self.proc.state() == PROC_NOT_RUNNING:
             self.proc = None
         if self.proc is not None:
-            if kind in ('detectors', 'inspect'):
+            if kind in ('detectors', 'inspect', 'weights'):
                 self._queue = [q for q in self._queue if q[1] != kind] + [(args, kind)]
+                self.lbl_status.setText(f'{kind}: queued until {self.proc_kind} finishes')
                 return True
             QtWidgets.QMessageBox.information(self, 'Busy', f'Busy ({self.proc_kind}); try again when it finishes.')
             return False
@@ -935,11 +1118,17 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         if kind == 'detectors':
             ev = next((e for e in events if e.get('event') == 'detectors'), None)
             if ev:
-                self._fill_detector_table(ev['detectors'])
                 imw = ev.get('imcui') or {}
-                txt = imw.get('error') or (f"imcui: {len(imw.get('registered', []))} extra detector(s)")
-                if imw.get('skipped'):
-                    txt += '; not offered (kornia has them): ' + ', '.join(t for t, _ in imw['skipped'])
+                not_offered = imw.get('not_offered') or [
+                    {'tag': t, 'reason': why, 'use': ''} for t, why in imw.get('skipped', [])]
+                self._fill_detector_table(ev['detectors'], not_offered)
+                txt = imw.get('error') or (f"imcui: {len(imw.get('registered', []))} detector(s) offered")
+                n_k = sum(1 for r in not_offered if r.get('kind', 'kornia') == 'kornia')
+                n_u = len(not_offered) - n_k
+                if n_k:
+                    txt += f'; {n_k} not offered because kornia provides them'
+                if n_u:
+                    txt += f'; {n_u} not in the installed imcui'
                 self.lbl_imcui.setText(txt)
                 self.lbl_status.setText('Detector list updated.')
             else:
@@ -958,6 +1147,19 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         elif kind == 'preflight':
             ev = next((e for e in events if e.get('event') == 'preflight'), None)
             self._show_preflight(ev)
+        elif kind == 'weights':
+            tmp_job = getattr(self, '_weights_job_file', None)
+            if tmp_job:
+                try:
+                    os.remove(tmp_job)
+                except OSError:
+                    pass
+                self._weights_job_file = None
+            ev = next((e for e in events if e.get('event') == 'weights'), None)
+            if ev:
+                self._show_weights(ev)
+            else:
+                self.lbl_status.setText('Weights check did not complete — see Log.')
         elif kind == 'run':
             done = next((e for e in events if e.get('event') == 'done'), None)
             if done:
@@ -989,6 +1191,14 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             self.lbl_status.setText(f"{ev['channel']}: running {ev['detector']}")
         elif kind == 'result':
             self._add_result(ev)
+        elif kind == 'truth_result':
+            self._set_truth_cell(ev)
+        elif kind == 'truth':
+            self._show_truth(ev)
+        elif kind == 'weights_progress':
+            self.bar_step.setMaximum(int(ev['total']))
+            self.bar_step.setValue(int(ev['done']))
+            self.bar_step.setFormat(f"weights: {ev['detector']}  %v/%m")
 
     def _add_result(self, ev):
         r = self.results.rowCount()
@@ -1001,6 +1211,32 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         if ev.get('error'):
             self.results.item(r, 3).setToolTip(ev['error'])
         self.results.resizeColumnsToContents()
+
+    def _set_truth_cell(self, ev):
+        c = RESULT_COLS.index('truth_rmse_m')
+        for r in range(self.results.rowCount()):
+            vals = [self.results.item(r, RESULT_COLS.index(k)) for k in ('sweep', 'channel', 'detector')]
+            if [v.text() if v else '' for v in vals] == [str(ev.get(k)) for k in ('sweep', 'channel', 'detector')]:
+                v = ev.get('truth_rmse_m')
+                it = QtWidgets.QTableWidgetItem('' if v is None else f'{v:.1f}')
+                it.setToolTip(f"RMSE against the ground truth at {ev.get('truth_reached')} point(s)")
+                self.results.setItem(r, c, it)
+        self.results.resizeColumnsToContents()
+
+    def _show_truth(self, ev):
+        top = ev.get('top') or []
+        if not top:
+            self.lbl_status.setText('Ground truth: no configuration could be scored — see Log.')
+            return
+        dlg = TruthDialog(ev, self)
+        dlg.show()
+        self._last_truth_dialog = dlg
+        b = top[0]
+        rmse = b.get('truth_rmse_m')
+        self.lbl_status.setText(f"Best vs ground truth: {b.get('detector')} + {b.get('matcher_family')} "
+                                f"({b.get('best_matcher_setting')} {b.get('ransac')}), RMSE "
+                                + ('-' if rmse is None else f'{rmse:.1f} m')
+                                + f" at {b.get('truth_reached')}/{b.get('truth_total')} truth points")
 
     def _open_result(self, row, _col):
         item = self.results.item(row, RESULT_COLS.index('rival_csv'))
@@ -1027,7 +1263,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         if 'working_resolution_m' in info:
             lines.append(f"Working resolution: {info['working_resolution_m']} m")
         if info.get('runs'):
-            parts = ', '.join(f"{r['detector']}: {r['variants']} variant(s) × {r['passes_per_variant']} pass(es)"
+            parts = ', '.join(f"{r['detector']}: {r['variants']} variant(s), {r['passes']} pass(es)"
                               for r in info['runs'])
             lines.append(f"Matching passes in total: {info.get('matching_passes')} ({parts}), "
                          f"each filtered with {info.get('ransac_sets_per_pass')} RANSAC setting(s)")
@@ -1069,6 +1305,52 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         path = self._write_job()
         if path:
             self._start(['preflight', path], 'preflight')
+
+    def check_weights(self, scope='selected', load=False):
+        """Run the weights check (automatch_weights) for the selected
+        detectors as configured, or for every detector and weight choice."""
+        args = ['weights']
+        if scope == 'selected':
+            try:
+                job = self.get_job()
+            except ValueError as e:
+                QtWidgets.QMessageBox.warning(self, 'Check weights', str(e))
+                return
+            if not job['detectors']:
+                QtWidgets.QMessageBox.information(self, 'Check weights', 'Tick at least one detector, '
+                                                  'or choose "All detectors".')
+                return
+            fd, path = tempfile.mkstemp(prefix='automatch_weights_', suffix='.json')
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                json.dump(job, f, indent=2)
+            self._weights_job_file = path
+            args += ['--job', path]
+        elif self.weights_cache.text():
+            args += ['--weights-cache', self.weights_cache.text()]
+        if load:
+            args.append('--load')
+        self.log.appendPlainText(f"--- weights check ({scope}{', load' if load else ''})")
+        self._start(args, 'weights')
+
+    def _show_weights(self, ev):
+        per_det = {d['detector']: d for d in ev.get('detectors', [])}
+        for r in range(self.det_table.rowCount()):
+            item0 = self.det_table.item(r, 0)
+            it = self.det_table.item(r, 4)
+            d = per_det.get(item0.text()) if item0 else None
+            if it is None or d is None:
+                continue
+            bad = [f for f in d.get('files', []) if f['status'] != 'ok']
+            it.setText({'ok': 'ok', 'no weights': 'none needed', 'partial': 'partly checked',
+                        'error': 'error'}.get(d['status'], f'{len(bad)} missing'))
+            it.setToolTip('\n'.join(f"{f['status']}: {f['file']}" for f in d.get('files', []))
+                          or 'no weight files')
+        dlg = WeightsDialog(ev, self)
+        dlg.show()
+        self._last_weights_dialog = dlg
+        s = ev.get('summary', {})
+        self.lbl_status.setText(f"Weights: {s.get('found', 0)} of {s.get('files', 0)} file(s) found"
+                                + (f", {s.get('missing')} missing" if s.get('missing') else ''))
 
     def run_job(self):
         path = self._write_job()
