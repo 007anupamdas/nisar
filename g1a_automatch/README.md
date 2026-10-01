@@ -22,6 +22,7 @@ NISAR↔S1 production scripts in the repo root are separate and untouched.
 | `imw_configs.py` | imcui catalogue: the full matrix (22 sparse + 16 dense rows), resolved from the installed imcui's registry. |
 | `automatch_weights.py` | Which weight files each detector needs and whether they are on this machine (nothing is downloaded). |
 | `automatch_truth.py` | Ranks every detector + matcher of a run against manually measured ground truth. |
+| `automatch_gpuaas.py` | Entry point for the GPU service (`submit_job` `code_path`). |
 | `automatch_server.py` | HTTP front end for a GPU server: submit and follow jobs with curl. |
 | `prefetch_weights.py` | Collect all kornia + imcui weights into one folder for an offline workstation. |
 | `tests_automatch.py`, `synthetic_data.py` | Tests, with synthetic data whose geolocation error is known. |
@@ -261,6 +262,46 @@ matcher (the same file in both fields would score the consensus with the
 points that picked it). If a run's consensus did not complete, `compare`
 rebuilds it from the saved matches, so the run can still be ranked without
 matching again.
+
+## GPU service (gpuaas submit_job)
+
+`automatch_gpuaas.py` is the `code_path` for the GPU service. It takes the
+same arguments as the NISAR scripts (`sys.argv[2]` = the output folder the
+service assigns, `sys.argv[3]` = the request's comma-separated `input_path`)
+and runs the normal job, so the outputs are those of the GUI / CLI, plus
+`PERFORMANCE.csv`.
+
+`input_path`: `<input image>,<reference folder>[,<truth.csv>][,<settings.json>]`
+(server paths), or a single job file that holds the paths too. The settings
+file is a job file without paths, e.g. `examples/gpuaas_g1a_select.json`
+(every kornia detector and matcher, 3072 px windows for a 40 GB A100, one
+RANSAC setting, the weights folder of the NISAR runs).
+
+```bash
+# 1. are all weight files on the GPU node? (nothing is downloaded; WEIGHTS_REPORT.txt)
+curl -X POST "http://gpuaas.private.nrsc.gov.in:8000/submit_job" -H "Content-Type: application/json" \
+  -H "X-User-Name: $(whoami)" -d '{
+  "code_path": "/maintenance/ICIGDev/GPUPOC/exe/g1a_automatch/automatch_gpuaas.py",
+  "conda_env": "mpad", "max_gpu_mem_required": 40000,
+  "input_path": "/maintenance/ICIGDev/GPUPOC/exe/g1a_automatch/examples/gpuaas_g1a_weights.json"}'
+
+# 2. the detector + matcher selection run
+curl -X POST "http://gpuaas.private.nrsc.gov.in:8000/submit_job" -H "Content-Type: application/json" \
+  -H "X-User-Name: $(whoami)" -d '{
+  "code_path": "/maintenance/ICIGDev/GPUPOC/exe/g1a_automatch/automatch_gpuaas.py",
+  "conda_env": "mpad", "max_gpu_mem_required": 40000,
+  "input_path": "/maintenance/.../g1a/<scene>.tif,/maintenance/.../L8_ref,/maintenance/.../<scene>_manual_rival.csv,/maintenance/ICIGDev/GPUPOC/exe/g1a_automatch/examples/gpuaas_g1a_select.json"}'
+```
+A token `preflight` (or `weights`) first in `input_path`, or `"mode"` in the
+job file, validates without matching. `key=value` tokens override settings
+(`|` separates list items: `window_sizes=2048|3072`). The conda environment
+needs this folder's requirements (torch, kornia, rasterio, ...); imcui only for
+`imw-...` detectors.
+
+`PERFORMANCE.csv` (any run): per channel × detector × matcher, seconds per
+window (detection included), the chips and inliers its best RANSAC setting
+kept, the truth RMSE when there is ground truth, and the detector's peak GPU
+memory.
 
 ## A100 server: run it with curl
 

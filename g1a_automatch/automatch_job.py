@@ -175,6 +175,8 @@ def load_job(path: str, overrides: Optional[List[str]] = None) -> Dict:
 
 
 def emit(event: Dict):
+    if os.environ.get('AUTOMATCH_EVENTS', '1') == '0':   # e.g. batch services: log only
+        return
     try:
         print(PROGRESS_PREFIX + json.dumps(event, default=str), flush=True)
     except Exception:
@@ -467,6 +469,81 @@ def _best_score(record: Dict) -> Optional[float]:
         return None
 
 
+def _matcher_label(method, param) -> str:
+    """Same label as the file names / PASS_TIMING / truth ranking."""
+    import pandas as pd
+    if str(method) == 'smnn' and param is not None and not pd.isna(param):
+        return f'smnn{float(param):g}'
+    return str(method)
+
+
+def _performance_table(out_root: str, manifest: List[Dict]) -> Optional[str]:
+    """PERFORMANCE.csv: per channel x sweep x detector x matcher -- speed
+    (seconds per window, detection included), what its best RANSAC setting
+    kept in the chip consensus, and its agreement with the ground truth when
+    there is one. Sorted by truth RMSE, else by chips kept."""
+    import glob as _glob
+    import pandas as pd
+    truth = {}
+    tr = os.path.join(out_root, 'TRUTH_RANKING.csv')
+    if os.path.exists(tr):
+        t = pd.read_csv(tr)
+        if not t.empty:
+            t = t.sort_values('truth_rmse_m', na_position='last')
+            for key, g in t.groupby(['channel', 'sweep', 'detector', 'matcher'], sort=False):
+                truth[tuple(str(k) for k in key)] = g.iloc[0]
+    rows = []
+    for row in manifest:
+        fd = row.get('final_dir')
+        if not isinstance(fd, str) or not os.path.isdir(fd):
+            continue
+        tp = os.path.join(fd, 'PASS_TIMING.csv')
+        timing = pd.read_csv(tp).to_dict('records') if os.path.exists(tp) else []
+        best = {}
+        for sp in _glob.glob(os.path.join(fd, 'CONSENSUS_SCORES*.csv')):
+            sc = pd.read_csv(sp)
+            for r in sc.to_dict('records'):
+                lab = _matcher_label(r.get('match_method'), r.get('match_parameter'))
+                cur = best.get(lab)
+                if cur is None or (r['surviving_chips'], r['agg_inliers']) > (cur['surviving_chips'],
+                                                                               cur['agg_inliers']):
+                    best[lab] = r
+        for t in timing:
+            lab = t['matcher']
+            b = best.get(lab) or {}
+            k = (str(row.get('channel')), str(row.get('sweep')), str(row.get('detector')), lab)
+            tru = truth.get(k)
+            rows.append({
+                'channel': row.get('channel'), 'sweep': row.get('sweep'), 'detector': row.get('detector'),
+                'matcher': lab, 'sec_per_window': t.get('sec_per_window'), 'pass_seconds': t.get('seconds'),
+                'windows': t.get('windows'),
+                'chips_kept': b.get('surviving_chips'), 'inliers': b.get('agg_inliers'),
+                'surface_rmse_m': b.get('surface_rmse_m'),
+                'best_ransac': (f"{b.get('ransac_method')}{float(b['ransac_threshold']):g}"
+                                if b.get('ransac_threshold') is not None else None),
+                'truth_rmse_m': None if tru is None else tru.get('truth_rmse_m'),
+                'truth_reached': None if tru is None else tru.get('truth_reached'),
+                'truth_ransac': None if tru is None else tru.get('ransac'),
+                'detector_seconds': row.get('detector_seconds'), 'gpu_peak_gb': row.get('gpu_peak_gb')})
+    if not rows:
+        return None
+    df = pd.DataFrame(rows)
+    if df['truth_rmse_m'].notna().any():
+        df = df.sort_values(['truth_rmse_m', 'sec_per_window'], na_position='last')
+    else:
+        df = df.sort_values(['chips_kept', 'sec_per_window'], ascending=[False, True], na_position='last')
+    path = os.path.join(out_root, 'PERFORMANCE.csv')
+    df.to_csv(path, index=False)
+    print('[Job] detector + matcher performance (PERFORMANCE.csv):')
+    print(f"  {'channel':<8} {'detector':<26} {'matcher':<12} {'s/window':>9} {'chips':>6} {'inliers':>8} "
+          f"{'truth RMSE m':>13} {'GPU GB':>7}")
+    for r in df.head(40).itertuples():
+        f = (lambda v, w, p=1: f'{v:{w}.{p}f}' if v is not None and not pd.isna(v) else f"{'-':>{w}}")
+        print(f"  {str(r.channel):<8} {str(r.detector):<26} {str(r.matcher):<12} {f(r.sec_per_window, 9, 2)} "
+              f"{f(r.chips_kept, 6, 0)} {f(r.inliers, 8, 0)} {f(r.truth_rmse_m, 13)} {f(r.gpu_peak_gb, 7, 1)}")
+    return path
+
+
 def _compare_with_truth(job: Dict, out_root: str, working_crs: str, manifest: List[Dict]) -> Dict:
     """Rank every detector + matcher configuration against the ground truth;
     add each run's own truth metrics to its manifest row."""
@@ -605,6 +682,10 @@ def run_job(job: Dict) -> Dict:
     man = pd.DataFrame(manifest)
     man_path = os.path.join(out_root, 'RUN_MANIFEST.csv')
     man.to_csv(man_path, index=False)
+    try:
+        _performance_table(out_root, manifest)
+    except Exception as e:
+        print(f'[Job] performance table not written: {type(e).__name__}: {e}')
 
     best_files = {}
     if not man.empty and 'rival_csv' in man.columns:

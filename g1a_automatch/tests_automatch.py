@@ -961,6 +961,32 @@ def test_server(tmp):
         httpd.shutdown()
 
 
+def test_gpuaas_args(tmp):
+    """GPU-service entry: sys.argv[2] = output folder, sys.argv[3] = the
+    comma-separated input_path (as the NISAR scripts take it)."""
+    import automatch_gpuaas as G
+    settings = os.path.join(tmp, 'settings.json')
+    with open(settings, 'w') as f:
+        json.dump({'detectors': ['sift', 'dog'], 'window_sizes': [3072], 'mode': 'run'}, f)
+    ref = os.path.join(tmp, 'refdir')
+    os.makedirs(ref, exist_ok=True)
+    mode, job = G.build_job(['s.py', 'id', '/out/x', f'/in/scene.tif,{ref},/in/truth.csv,{settings}'])
+    check('gpuaas: positional paths, settings file, output folder from the service',
+          (mode, job['input_path'], job['reference_dir'], job['truth_csv'], job['detectors'],
+           job['window_sizes'], job['output_dir'], job['temp_dir']),
+          ('run', '/in/scene.tif', ref, '/in/truth.csv', ['sift', 'dog'], [3072], '/out/x',
+           os.path.join('/out/x', '_cache')))
+    mode, job = G.build_job(['s.py', 'id', '/out/y', 'weights,/in/scene.tif,window_sizes=2048|3072,coarse_local=false'])
+    check('gpuaas: mode token and key=value overrides (| for lists)',
+          (mode, job['window_sizes'], job['coarse_local'], job['input_path']),
+          ('weights', [2048, 3072], False, '/in/scene.tif'))
+    try:
+        G.build_job(['s.py', 'id', '/o', '/a,/b,/c'])
+        check('gpuaas: three folders refused', False)
+    except ValueError:
+        check('gpuaas: three folders refused', True)
+
+
 def test_kornia_catalogue():
     """The matchers on a synthetic pair shifted by (7, -4) px: every kornia
     matcher recovers it, and LightGlue gets matches for SIFT / DoG-HardNet
@@ -1126,6 +1152,7 @@ def main():
         test_weights_check(tmp)
         test_truth_helpers(tmp)
         test_server(tmp)
+        test_gpuaas_args(tmp)
         test_kornia_catalogue()
         if a.gui:
             test_gui_dialog()
