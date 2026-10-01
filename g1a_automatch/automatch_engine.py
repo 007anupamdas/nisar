@@ -3944,9 +3944,16 @@ class ChipConsensusSelector:
         # ── Fit error surface from manual GCPs ───────────────────────────────
         surf_model: Optional[ErrorSurfaceModel] = None
         if manual_gcp_csv and os.path.exists(manual_gcp_csv):
-            gcp_df     = ManualGCPLoader.load(manual_gcp_csv)
-            surf_model = ErrorSurfaceModel(mode='bilinear')
-            surf_model.fit(gcp_df)
+            try:
+                gcp_df = ManualGCPLoader.load(manual_gcp_csv)
+                surf_model = ErrorSurfaceModel(mode='bilinear')
+                surf_model.fit(gcp_df)
+            except Exception as e:
+                # a file that cannot be used must not throw away the matching
+                print(f'WARNING: manual GCP file not used ({type(e).__name__}: {e}); '
+                      f'consensus scored without it')
+                surf_model = None
+        if surf_model is not None:
             pred_a, pred_c          = surf_model.predict(df['pix'].values,
                                                           df['scan'].values)
             df['along_resid']  = df['along_mean']  - pred_a

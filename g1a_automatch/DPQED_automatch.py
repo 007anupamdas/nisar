@@ -581,6 +581,9 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.tmp_path.edit.setPlaceholderText('default: <output>/_cache')
         f.addRow('Cache folder', self.tmp_path)
         self.gcp_path = PathRow('file', 'CSV (*.csv);;All (*)')
+        self.gcp_path.edit.setToolTip('NISAR-style GCPs (columns scan, pix, Map_X, Map_Y, Map_X_ref, Map_Y_ref) '
+                                      'that steer the chip consensus. Manually measured RIVAL points go in '
+                                      'Ground truth CSV below; leave this empty when choosing a detector.')
         f.addRow('Manual GCP CSV (optional)', self.gcp_path)
         self.truth_path = PathRow('file', 'CSV (*.csv);;All (*)')
         self.truth_path.edit.setToolTip('Manually measured points as a RIVAL CSV (In/Ref lon/lat columns). '

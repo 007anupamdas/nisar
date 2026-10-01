@@ -106,13 +106,25 @@ def _matcher_label(p: Dict) -> str:
     return m
 
 
-def config_points(run_dir_filtered: str, final_dir: str, chips: str = 'consensus') -> Dict[str, Dict]:
+def config_points(run_dir_filtered: str, final_dir: str, chips: str = 'consensus',
+                  settings: Optional[Dict] = None) -> Dict[str, Dict]:
     """{config_key: {'detector','matcher','ransac','points': DataFrame(E, N, dE, dN, chip)}}
     from one run's filtered match files."""
     import automatch_rival as R
     import automatch_engine as E
     name = 'CHIP_STATS_SURVIVORS' if chips == 'consensus' else 'CHIP_STATS_ALL'
     tables = sorted(glob.glob(os.path.join(final_dir, f'{name}*.csv')))
+    if not tables and not glob.glob(os.path.join(final_dir, 'CHIP_STATS_ALL*.csv')) and settings is not None:
+        # the run stopped before its consensus (e.g. an unusable manual GCP
+        # file): redo the consensus from the saved matches, no re-matching
+        print(f'[Truth] {os.path.basename(final_dir)}: no consensus tables -- rebuilding them from '
+              f'the saved matches')
+        try:
+            E.ChipConsensusSelector.select_configs(csv_dir=run_dir_filtered, output_dir=final_dir,
+                                                   manual_gcp_csv='', **settings)
+        except Exception as e:
+            print(f'[Truth] rebuild failed: {type(e).__name__}: {e}')
+        tables = sorted(glob.glob(os.path.join(final_dir, f'{name}*.csv')))
     if not tables:
         return {}
     stats = pd.read_csv(tables[0])
@@ -264,6 +276,31 @@ def find_runs(output_dir: str) -> List[Dict]:
     return runs
 
 
+def consensus_settings(output_dir: str) -> Optional[Dict]:
+    """The job's chip-consensus settings (from job_used.json), for rebuilding
+    a consensus that did not run. None when the folder has no job file."""
+    path = os.path.join(output_dir, 'job_used.json')
+    if not os.path.exists(path):
+        return None
+    import automatch_engine as E
+    import automatch_job as J
+    with open(path, encoding='utf-8') as f:
+        job = J.normalize(json.load(f))
+    res = job['target_resolution']
+    if not res:
+        try:
+            res = E.InputScene(job['input_path'], E.PipelineConfig(
+                nisar_band=job['nisar_band'], nisar_frequency=job['nisar_frequency'])).native_res
+        except Exception:
+            res = None
+    res = float(res or 10.0)
+    return {'tolerance_m': job['consensus_tolerance_m'] or job['consensus_tolerance_px'] * res,
+            'mode_bin_m': max(0.1, job['consensus_mode_bin_px'] * res),
+            'min_inliers_per_chip': job['min_inliers_per_chip'],
+            'min_surviving_chips': job['min_surviving_chips'],
+            'model': job['consensus_model'], 'surface_degree': job['consensus_surface']}
+
+
 def working_crs_of(output_dir: str) -> Optional[str]:
     man = os.path.join(output_dir, 'RUN_MANIFEST.csv')
     if os.path.exists(man):
@@ -293,8 +330,9 @@ def compare(output_dir: str, truth_csv: str, radius_m: float = 5000.0, chips: st
         raise ValueError('working CRS unknown: pass working_crs (e.g. EPSG:32640)')
     truth = truth_in_crs(load_truth(truth_csv), crs)
     rows, point_rows = [], []
+    settings = consensus_settings(output_dir)
     for run in (runs if runs is not None else find_runs(output_dir)):
-        for key, cfg in config_points(run['filtered_dir'], run['final_dir'], chips).items():
+        for key, cfg in config_points(run['filtered_dir'], run['final_dir'], chips, settings).items():
             summary, prow = score_config(cfg, truth, radius_m)
             base = {'channel': cfg['channel'], 'sweep': run['sweep'], 'detector': cfg['detector'],
                     'matcher': cfg['matcher'], 'ransac': cfg['ransac'], 'chips': chips}

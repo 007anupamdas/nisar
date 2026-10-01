@@ -385,6 +385,21 @@ def test_e2e_truth(tmp):
     by2 = pd.read_csv(by_path)
     check('truth e2e: compare on existing results measures a 400 m disagreement',
           (res.returncode, round(float(by2.iloc[0]['truth_rmse_m']) / 50) * 50), (0, 400))
+    # a run whose consensus never ran (e.g. stopped by an unusable GCP file):
+    # compare rebuilds it from the saved matches instead of matching again
+    import glob as _glob
+    for p in _glob.glob(os.path.join(out, '**', 'final_*', '*.csv'), recursive=True):
+        os.remove(p)
+    res = subprocess.run([sys.executable, os.path.join(HERE, 'automatch_job.py'), 'compare', out, '--truth',
+                          job['truth_csv']], capture_output=True, text=True)
+    by3 = pd.read_csv(by_path)
+    check('truth e2e: missing consensus rebuilt from the saved matches, same ranking',
+          (res.returncode, 'rebuilding' in res.stdout, float(by3.iloc[0]['truth_rmse_m']) < 15.0),
+          (0, True, True))
+    bad = dict(job, output_dir=os.path.join(tmp, 'out_bad_gcp'), manual_gcp_csv=job['truth_csv'])
+    code, stdout = _run_job(bad, tmp, want_output=True)
+    check('truth e2e: RIVAL file as manual GCP stops the job in preflight, before matching',
+          (code, 'manual_gcp_csv is a RIVAL CSV' in stdout, 'Processing pair' in stdout), (2, True, False))
 
 
 def test_e2e(tmp):
@@ -889,6 +904,10 @@ def test_truth_helpers(tmp):
     back = T.truth_in_crs(T.load_truth(path), 'EPSG:32640')
     check('truth: RIVAL file read back in the working CRS',
           (np.allclose(back['dE'], de, atol=0.01), np.allclose(back['N'], tn, atol=0.01)), (True, True))
+    import automatch_job as J
+    errs = J._check_gcp_file(path)
+    check('truth: a RIVAL file given as manual GCP CSV is refused with the fix named',
+          len(errs) == 1 and 'Ground truth CSV' in errs[0])
     try:
         pd.DataFrame({'a': [1]}).to_csv(os.path.join(tmp, 'bad.csv'), index=False)
         T.load_truth(os.path.join(tmp, 'bad.csv'))

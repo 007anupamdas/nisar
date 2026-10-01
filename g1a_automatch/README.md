@@ -253,6 +253,14 @@ and all matchers (including the optional ones), keep one window size and one
 RANSAC setting, and read `TRUTH_BY_DETECTOR_MATCHER.csv`. The ground truth is
 used for evaluation only; it does not steer matching or the consensus.
 
+**Manual GCP CSV is a different input**: NISAR-style GCPs (`scan, pix, Map_X,
+Map_Y, Map_X_ref, Map_Y_ref`) that steer the chip consensus. A RIVAL file
+there is refused by preflight; leave it empty when choosing a detector +
+matcher (the same file in both fields would score the consensus with the
+points that picked it). If a run's consensus did not complete, `compare`
+rebuilds it from the saved matches, so the run can still be ranked without
+matching again.
+
 ## 16 GB GPU
 
 Defaults: 1024 px windows, one model resident at a time (unloaded after its

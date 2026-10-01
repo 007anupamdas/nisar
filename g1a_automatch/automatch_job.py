@@ -196,6 +196,28 @@ def detector_catalog(weights_cache: str = '') -> Dict:
 # ─────────────────────────────────────────────────────────────────────────────
 # Preflight
 # ─────────────────────────────────────────────────────────────────────────────
+GCP_COLUMNS = {'scan', 'pix', 'Map_X', 'Map_Y', 'Map_X_ref', 'Map_Y_ref'}
+
+
+def _check_gcp_file(path: str) -> List[str]:
+    """Errors for a manual GCP CSV the consensus cannot use."""
+    import csv as _csv
+    try:
+        with open(path, newline='', encoding='utf-8-sig') as f:
+            cols = {c.strip() for c in next(_csv.reader(f), [])}
+    except Exception as e:
+        return [f'manual_gcp_csv unreadable: {type(e).__name__}: {e}']
+    missing = GCP_COLUMNS - cols
+    if not missing:
+        return []
+    if {'In_Lon', 'In_Lat', 'Ref_Lon', 'Ref_Lat'} <= cols:
+        return ['manual_gcp_csv is a RIVAL CSV. Manual GCP CSV takes NISAR-style GCPs (columns scan, pix, '
+                'Map_X, Map_Y, Map_X_ref, Map_Y_ref) that steer the chip consensus. To rank detectors and '
+                'matchers against manually measured RIVAL points, give the file as Ground truth CSV '
+                '(truth_csv) and leave Manual GCP CSV empty.']
+    return [f'manual_gcp_csv lacks the columns {sorted(missing)} (needs {sorted(GCP_COLUMNS)})']
+
+
 def preflight(job: Dict, check_weights: bool = True) -> Dict:
     """Validate a job without matching. {'errors', 'warnings', 'info'}.
     check_weights: also look for every model weight file the job will load
@@ -219,6 +241,13 @@ def preflight(job: Dict, check_weights: bool = True) -> Dict:
             errors.append(f'output_dir not writable: {e}')
     if job['manual_gcp_csv'] and not os.path.exists(job['manual_gcp_csv']):
         errors.append(f"manual_gcp_csv not found: {job['manual_gcp_csv']}")
+    elif job['manual_gcp_csv']:
+        errors += _check_gcp_file(job['manual_gcp_csv'])
+        if job['truth_csv'] and os.path.exists(job['truth_csv']) and \
+                os.path.samefile(job['manual_gcp_csv'], job['truth_csv']):
+            warnings.append('the same file is both Manual GCP CSV (it steers the chip consensus) and Ground '
+                            'truth CSV (it scores the result): the ranking would favour configurations picked '
+                            'to agree with it. Leave Manual GCP CSV empty when choosing a detector + matcher.')
     if job['truth_csv']:
         try:
             import automatch_truth as T
