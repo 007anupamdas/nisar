@@ -49,7 +49,8 @@ if HERE not in sys.path:
 
 TRUTH_COLUMNS = ['In_Lon', 'In_Lat', 'Ref_Lon', 'Ref_Lat']
 RANK_COLS = ['rank', 'channel', 'sweep', 'detector', 'matcher', 'ransac', 'truth_rmse_m', 'truth_mean_dE_m',
-             'truth_mean_dN_m', 'truth_max_m', 'truth_reached', 'truth_total', 'n_local', 'n_surface',
+             'truth_mean_dN_m', 'truth_max_m', 'truth_reached', 'truth_total', 'sec_per_window', 'pass_seconds',
+             'n_local', 'n_surface',
              'n_extrapolated', 'n_chips', 'n_points', 'chips']
 
 
@@ -332,8 +333,15 @@ def compare(output_dir: str, truth_csv: str, radius_m: float = 5000.0, chips: st
     rows, point_rows = [], []
     settings = consensus_settings(output_dir)
     for run in (runs if runs is not None else find_runs(output_dir)):
+        timing = {}
+        tpath = os.path.join(run['final_dir'], 'PASS_TIMING.csv')
+        if os.path.exists(tpath):
+            timing = {r['matcher']: r for r in pd.read_csv(tpath).to_dict('records')}
         for key, cfg in config_points(run['filtered_dir'], run['final_dir'], chips, settings).items():
             summary, prow = score_config(cfg, truth, radius_m)
+            t = timing.get(cfg['matcher'], {})
+            summary['pass_seconds'] = t.get('seconds')
+            summary['sec_per_window'] = t.get('sec_per_window')
             base = {'channel': cfg['channel'], 'sweep': run['sweep'], 'detector': cfg['detector'],
                     'matcher': cfg['matcher'], 'ransac': cfg['ransac'], 'chips': chips}
             rows.append({**base, **summary, 'filtered_dir': run['filtered_dir']})
@@ -381,13 +389,14 @@ def format_ranking(by: pd.DataFrame, n_truth: int, radius_m: float, chips: str, 
     lines = [f'[Truth] {n_truth} ground-truth point(s); tool error estimated within {radius_m / 1000:g} km '
              f'(else from its error surface); {chips} chips. Best detector + matcher:',
              f"  {'#':>3} {'channel':<8} {'detector':<26} {'matcher':<7} {'setting':<14} {'RMSE m':>8} "
-             f"{'bias dE':>8} {'bias dN':>8} {'max m':>8} {'reached':>8}"]
+             f"{'bias dE':>8} {'bias dN':>8} {'max m':>8} {'reached':>8} {'s/window':>9}"]
     for r in by.head(top).itertuples():
         f = (lambda v: f'{v:8.1f}' if v is not None and not pd.isna(v) else f"{'-':>8}")
         lines.append(f"  {r.rank:>3} {str(r.channel):<8} {str(r.detector):<26} {str(r.matcher_family):<7} "
                      f"{str(r.best_matcher_setting) + ' ' + str(r.ransac):<14} {f(r.truth_rmse_m)} "
                      f"{f(r.truth_mean_dE_m)} {f(r.truth_mean_dN_m)} {f(r.truth_max_m)} "
-                     f"{r.truth_reached:>4}/{r.truth_total:<3}")
+                     f"{r.truth_reached:>4}/{r.truth_total:<3} "
+                     f"{f(getattr(r, 'sec_per_window', None))}")
     return '\n'.join(lines)
 
 

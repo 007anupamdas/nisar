@@ -916,6 +916,51 @@ def test_truth_helpers(tmp):
         check('truth: file without lon/lat refused', 'In_Lon' in str(e))
 
 
+def test_server(tmp):
+    """HTTP front end: health, token, job state, file download confined to the
+    output folder (no subprocess: a finished job is faked)."""
+    import threading
+    import urllib.request
+    import urllib.error
+    from http.server import ThreadingHTTPServer
+    import automatch_server as SV
+    srv = SV.Server(os.path.join(tmp, 'srv_jobs'))
+    out = os.path.join(tmp, 'srv_out')
+    os.makedirs(out, exist_ok=True)
+    open(os.path.join(out, 'TRUTH_BY_DETECTOR_MATCHER.csv'), 'w').write('rank,detector\n1,sift\n')
+    open(os.path.join(tmp, 'secret.txt'), 'w').write('x')
+    j = SV.Job('j1', {'output_dir': out, 'detectors': ['sift']}, os.path.join(tmp, 'srv_jobs'))
+    j.state = 'done'
+    srv.jobs['j1'] = j
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), SV.make_handler(srv, 'tok'))
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = f'http://127.0.0.1:{httpd.server_address[1]}'
+
+    def get(path, token='tok'):
+        req = urllib.request.Request(base + path, headers={'Authorization': f'Bearer {token}'} if token else {})
+        try:
+            with urllib.request.urlopen(req) as r:
+                return r.status, r.read().decode()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode()
+    try:
+        check('server: health without token', get('/health', None)[0], 200)
+        check('server: token required', get('/jobs', 'bad')[0], 401)
+        code, body = get('/jobs/j1')
+        check('server: job state', (code, json.loads(body)['state']), (200, 'done'))
+        check('server: output file download', get('/jobs/j1/files/TRUTH_BY_DETECTOR_MATCHER.csv'),
+              (200, 'rank,detector\n1,sift\n'))
+        check('server: no file outside the output folder', get('/jobs/j1/files/..%2Fsecret.txt')[0], 404)
+        check('server: unknown job', get('/jobs/nope')[0], 404)
+        try:
+            srv.submit({'detectors': ['sift']})
+            check('server: job without output_dir refused', False)
+        except ValueError:
+            check('server: job without output_dir refused', True)
+    finally:
+        httpd.shutdown()
+
+
 def test_kornia_catalogue():
     """The matchers on a synthetic pair shifted by (7, -4) px: every kornia
     matcher recovers it, and LightGlue gets matches for SIFT / DoG-HardNet
@@ -1080,6 +1125,7 @@ def main():
         test_imcui_mock()
         test_weights_check(tmp)
         test_truth_helpers(tmp)
+        test_server(tmp)
         test_kornia_catalogue()
         if a.gui:
             test_gui_dialog()

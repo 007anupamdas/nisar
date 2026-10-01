@@ -22,6 +22,7 @@ NISAR↔S1 production scripts in the repo root are separate and untouched.
 | `imw_configs.py` | imcui catalogue: the full matrix (22 sparse + 16 dense rows), resolved from the installed imcui's registry. |
 | `automatch_weights.py` | Which weight files each detector needs and whether they are on this machine (nothing is downloaded). |
 | `automatch_truth.py` | Ranks every detector + matcher of a run against manually measured ground truth. |
+| `automatch_server.py` | HTTP front end for a GPU server: submit and follow jobs with curl. |
 | `prefetch_weights.py` | Collect all kornia + imcui weights into one folder for an offline workstation. |
 | `tests_automatch.py`, `synthetic_data.py` | Tests, with synthetic data whose geolocation error is known. |
 
@@ -260,6 +261,45 @@ matcher (the same file in both fields would score the consensus with the
 points that picked it). If a run's consensus did not complete, `compare`
 rebuilds it from the saved matches, so the run can still be ranked without
 matching again.
+
+## A100 server: run it with curl
+
+`automatch_server.py` puts an HTTP front end on the same job runner (standard
+library only). Jobs are the same JSON files; paths in them are paths on the
+server. Jobs run one at a time on the GPU.
+
+```bash
+# on the server
+python automatch_server.py --port 8765 --jobs-dir /data/automatch_jobs        # localhost only
+#   or reachable from other machines:  --host 0.0.0.0 --token SECRET
+# from the workstation: ssh -L 8765:localhost:8765 user@server   (then use localhost:8765)
+
+H="Authorization: Bearer SECRET"                    # only if --token was given
+curl -s -H "$H" -X POST localhost:8765/weights   --data-binary @examples/a100_select_job.json
+curl -s -H "$H" -X POST localhost:8765/preflight --data-binary @examples/a100_select_job.json
+curl -s -H "$H" -X POST localhost:8765/jobs      --data-binary @examples/a100_select_job.json   # -> {"id": ...}
+curl -s -H "$H" localhost:8765/jobs/<id>                        # state, progress, results, truth ranking
+curl -s -H "$H" "localhost:8765/jobs/<id>/log?tail=50"
+curl -s -H "$H" localhost:8765/jobs/<id>/files                  # output files
+curl -s -H "$H" localhost:8765/jobs/<id>/files/TRUTH_BY_DETECTOR_MATCHER.csv -o ranking.csv
+curl -s -H "$H" -X POST localhost:8765/jobs/<id>/stop
+curl -s -H "$H" -X POST localhost:8765/compare -d '{"output_dir": "/data/out", "truth_csv": "/data/manual.csv"}'
+```
+Without HTTP: `nohup python automatch_job.py run job.json > run.log 2>&1 &` does the same.
+
+`examples/a100_select_job.json` is a detector + matcher selection run for a
+40 GB A100: every kornia detector with every matcher, one RANSAC setting,
+3072 px windows, the ground truth. Window size: at 2048 px the keypoint budget
+already reaches its 32 000 cap, so larger windows mostly grow the image-sized
+memory, about with window area -- 16 GB full at 2048 px scales to about 3072 px
+on 40 GB (2.25x the area); 4096 px (4x) is likely too much for DeDoDe-G / DISK.
+Add imcui detectors (`imw-...`) to `detectors` as listed by `/detectors`.
+
+**Speed next to accuracy.** Each run records the wall time of every matching
+pass (`PASS_TIMING.csv`: seconds and seconds per window, detection included,
+since each pass detects again) and each detector's total time and peak GPU
+memory (`detector_seconds`, `gpu_peak_gb` in `RUN_MANIFEST.csv`); the truth
+ranking carries `sec_per_window` beside the RMSE.
 
 ## 16 GB GPU
 

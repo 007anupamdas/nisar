@@ -574,6 +574,7 @@ def run_job(job: Dict) -> Dict:
                    'error': rec.get('error') if isinstance(rec.get('error'), str) else '',
                    'coarse_offsets': rec.get('coarse_offsets'), 'consensus_score': _best_score(rec),
                    'minutes': round((time.time() - t0) / 60.0, 2), 'working_crs': scene.working_crs,
+                   'detector_seconds': rec.get('seconds'), 'gpu_peak_gb': rec.get('gpu_peak_gb'),
                    'filtered_dir': rec.get('filtered_dir'), 'final_dir': rec.get('final_dir')}
             try:
                 exp = R.export_run(rec, scene.working_crs, rival_dir, f'{scene.name}_{tag}',

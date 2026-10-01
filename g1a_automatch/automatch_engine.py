@@ -2125,9 +2125,13 @@ class DiskBasedMatcher(BaseMatcher):
             start = time.time()
 
             for matcher_name, matcher_param in self.matcher_runs():
+                t_pass = time.time()
                 matches = self._process_windows_from_disk(
                     nisar_src, s1_src, pair, strategy, matcher_name, matcher_param
                 )
+                if th.cuda.is_available():
+                    th.cuda.synchronize()
+                self._time_pass(matcher_name, matcher_param, time.time() - t_pass, len(matches))
                 all_matches.extend(matches)
 
             elapsed = time.time() - start
@@ -2166,6 +2170,23 @@ class DiskBasedMatcher(BaseMatcher):
             self._process_single_window(img, img.copy(), 0, 0, 0, 0, meta, name, param,
                                         nisar_nodata=0.0, s1_nodata=0.0)
         self._window_errors = 0
+
+    def _pass_label(self, matcher_name: str, param) -> str:
+        """The matcher label the file names (and the truth ranking) use."""
+        if matcher_name == 'smnn':
+            return f'smnn{float(param):g}'
+        p = self._matcher_param_str(matcher_name, param)
+        return f'{matcher_name}_{p}' if p else matcher_name
+
+    def _time_pass(self, matcher_name: str, param, seconds: float, n_windows: int) -> None:
+        """Wall time of each matching pass (detection + matching of every
+        window; each pass detects again), summed over pairs."""
+        t = getattr(self, 'pass_timing', None)
+        if t is None:
+            t = self.pass_timing = {}
+        rec = t.setdefault(self._pass_label(matcher_name, param), {'seconds': 0.0, 'windows': 0})
+        rec['seconds'] += seconds
+        rec['windows'] += n_windows
 
     def matcher_runs(self) -> List[Tuple[str, object]]:
         """(matcher, parameter) for every matching pass of this detector
@@ -4571,6 +4592,12 @@ class AutoMatchPipeline:
             report('detector', channel=pol, detector=tag)
             rec = {'nisar_pol': pol, 's1_ref_tag': s1_ref_tag, 'reference_dir': reference_dir,
                    'detector_tag': tag, 'output_dir': pol_out_dir, 'status': 'ok', 'error': ''}
+            t_det = time.time()
+            if th.cuda.is_available():
+                try:
+                    th.cuda.reset_peak_memory_stats()
+                except Exception:
+                    pass
             try:
                 matcher.selected_matchers()  # validate the matcher selection early
                 report('stage', stage='warmup', channel=pol, detector=tag)
@@ -4649,6 +4676,13 @@ class AutoMatchPipeline:
                 })
                 if summary is None:
                     rec['status'] = 'no-consensus'
+                timing = getattr(matcher, 'pass_timing', None) or {}
+                if timing:
+                    os.makedirs(final_dir, exist_ok=True)
+                    pd.DataFrame([{'matcher': k, 'seconds': round(v['seconds'], 2), 'windows': v['windows'],
+                                   'sec_per_window': round(v['seconds'] / max(1, v['windows']), 3)}
+                                  for k, v in timing.items()]).to_csv(
+                        os.path.join(final_dir, 'PASS_TIMING.csv'), index=False)
                 del all_match_data
             except ModelLoadError as e:
                 rec.update({'status': 'failed', 'error': f'model not available: {e}'})
@@ -4658,6 +4692,12 @@ class AutoMatchPipeline:
                 print(f'[{pol}] {tag} FAILED: {type(e).__name__}: {e}')
                 traceback.print_exc()
             finally:
+                rec['seconds'] = round(time.time() - t_det, 1)
+                if th.cuda.is_available():
+                    try:
+                        rec['gpu_peak_gb'] = round(th.cuda.max_memory_allocated() / 1024 ** 3, 2)
+                    except Exception:
+                        pass
                 unload = getattr(matcher, 'unload_model', None)
                 if callable(unload):
                     unload()
