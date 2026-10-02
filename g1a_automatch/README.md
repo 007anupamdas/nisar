@@ -166,6 +166,11 @@ AdaLAM uses kornia's own defaults (search expansion 4, 128 iterations, min
 confidence 200); the NISAR-S1 pipeline's 1 / 2048 / 1000 can be set in
 Configure….
 
+A detector whose class the installed kornia lacks is not offered on that
+machine (kornia 0.8.1 has no ALIKED or XFeat); imcui's version of it is
+offered there instead, and `detectors` / the env check list it as
+"not available here".
+
 **imcui adds only what kornia lacks.** The catalogue is the full matrix
 (`imw_configs.py`): SuperPoint + LightGlue / SuperGlue / mutual-NN, R2D2,
 RoRD, D2-Net, ALIKE, SFD2, RDD, LiftFeat, RIPE, DarkFeat, LANet (each with
@@ -441,6 +446,11 @@ git push <new-repo-url> g1a-automatch:main
 (or simply copy this folder).
 
 ## Known limits
+
+- **Mixed conda / pip environments (Linux):** if a pip wheel (pandas, torch)
+  loads the system C++ runtime before conda-forge GDAL, rasterio fails with
+  "GLIBCXX_3.4.30 not found". `automatch_native.py` imports rasterio first in
+  every entry module to avoid it.
 
 - **G1A format:** read through rasterio (GeoTIFF/VRT/JP2/…, any georeferenced
   multi-band raster). A product that needs per-pixel lat/lon arrays (no

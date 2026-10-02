@@ -194,6 +194,11 @@ def check_variant(m, tracer: Tracer) -> Dict:
     if any(r['status'] != 'ok' for r in reqs) and status in ('ok', 'error'):
         # a missing file is the finding; any error after it came from the stand-in
         status, error = 'missing', ('' if not tracer.load else error)
+    elif status == 'error' and reqs and not tracer.load:
+        # every file was found; the model then read the stand-in itself (e.g.
+        # imcui's r2d2 takes its network definition from the checkpoint)
+        status, error = 'partial', (f'its weight files are found, but the quick check cannot build it '
+                                    f'from stand-ins ({error}); the run loads them for real, or use --load')
     elif status == 'ok' and not reqs:
         status = 'no weights'
     return {'variant': m.get_filename_prefix(), 'status': status, 'error': error, 'files': reqs}

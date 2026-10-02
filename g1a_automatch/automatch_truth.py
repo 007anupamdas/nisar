@@ -40,8 +40,12 @@ import os
 import sys
 from typing import Dict, List, Optional, Tuple
 
-import numpy as np
-import pandas as pd
+HERE_ = os.path.dirname(os.path.abspath(__file__))
+if HERE_ not in sys.path:
+    sys.path.insert(0, HERE_)
+import automatch_native  # noqa: F401,E402  (rasterio's C++ runtime before pandas')
+import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:

@@ -49,6 +49,7 @@ from typing import Dict, List, Tuple
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
+import automatch_native  # noqa: F401,E402  (rasterio's C++ runtime before any other)
 
 MODES = ('run', 'preflight', 'weights', 'env')
 

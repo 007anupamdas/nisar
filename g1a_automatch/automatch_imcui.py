@@ -24,6 +24,7 @@ import os
 import sys
 from typing import Dict, List, Optional, Tuple
 
+import automatch_native  # noqa: F401  (rasterio's C++ runtime before any other)
 import cv2
 import numpy as np
 import torch as th
@@ -374,7 +375,7 @@ _MATCHER_EQUIVALENT = {'lightglue': 'lgm', 'nearest_neighbor': 'mnn', 'adalam': 
 def kornia_replacement(conf: Dict, dense: bool, fams: List[str]) -> str:
     """How to get a kornia-covered row from kornia, e.g. "'dog' (descriptor
     hardnet) with mnn". '' when kornia does not cover the row."""
-    covered = [f for f in fams if f in E.KORNIA_FAMILIES]
+    covered = [f for f in fams if f in E.kornia_families()]
     if not covered:
         return ''
     fam = covered[-1]            # most specific: descriptor / matcher features
@@ -417,7 +418,7 @@ def register_imcui_detectors(weights_cache: Optional[str] = None) -> Dict[str, L
         name = f'imw-{tag}'
         use = '' if tag in exempt else kornia_replacement(conf, dense, fams)
         if use:
-            covered = sorted(set(fams) & E.KORNIA_FAMILIES)
+            covered = sorted(set(fams) & E.kornia_families())
             not_offered.append({'tag': tag, 'kind': 'kornia', 'use': use,
                                 'reason': f'{", ".join(covered)} is provided by kornia: use {use}'})
             continue

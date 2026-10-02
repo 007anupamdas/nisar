@@ -194,7 +194,8 @@ def detector_catalog(weights_cache: str = '') -> Dict:
     import automatch_engine as E
     import automatch_imcui as IM
     imw = IM.register_imcui_detectors(weights_cache or None)
-    return {'detectors': E.available_detectors(), 'imcui': imw}
+    return {'detectors': E.available_detectors(), 'imcui': imw,
+            'kornia_unavailable': E.kornia_unavailable()}
 
 
 def format_catalog(cat: Dict) -> str:
@@ -210,6 +211,8 @@ def format_catalog(cat: Dict) -> str:
         if det['source'] != 'kornia' and det.get('params'):
             ps = ', '.join(p['name'] for p in det['params'])   # imcui: thresholds + model keys
         lines.append(f"{det['name']:<22} {det['source']:<7} matchers: {ms:<52} settings: {ps}")
+    for name, why in (cat.get('kornia_unavailable') or {}).items():
+        lines.append(f'{name:<22} kornia  not available here: {why}')
     if cat['imcui'].get('error'):
         lines.append(f"(imcui: {cat['imcui']['error']})")
     for tag, why in cat['imcui'].get('skipped', []):
@@ -395,9 +398,11 @@ def preflight(job: Dict, check_weights: bool = True) -> Dict:
         unknown = [d for d in wanted if E.resolve_detector_name(d)[0] not in names]
         if unknown:
             skipped = dict(cat['imcui'].get('skipped') or [])
+            lacking = E.kornia_unavailable()
             for d in unknown:
                 tag = d[len('imw-'):] if d.startswith('imw-') else d
-                why = skipped.get(tag) or cat['imcui'].get('error') or 'not available'
+                why = (lacking.get(E.resolve_detector_name(d)[0]) or skipped.get(tag)
+                       or cat['imcui'].get('error') or 'not available')
                 errors.append(f'detector {d!r}: {why}')
         supported = {x['name']: x['matchers'] for x in cat['detectors']}
         defaults = {x['name']: x.get('default_matchers', x['matchers']) for x in cat['detectors']}

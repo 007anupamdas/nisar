@@ -63,6 +63,8 @@ import warnings
 import sys
 import traceback
 import xml.etree.ElementTree as ET
+
+import automatch_native  # noqa: F401  (rasterio's C++ runtime before any other)
 import h5py as hp
 
 from abc import ABC, abstractmethod
@@ -4304,6 +4306,36 @@ OPTIONAL_MATCHERS: Dict[str, List[str]] = {
 KORNIA_FAMILIES = {'sift', 'rootsift', 'disk', 'dedode', 'aliked', 'xfeat',
                    'xfeat_dense', 'xfeatstar', 'keynet', 'loftr',
                    'dog', 'hardnet', 'hardnet8', 'sosnet', 'hynet', 'tfeat', 'gftt', 'hessian'}
+# kornia class each detector / algorithm family needs. A detector whose class
+# the installed kornia lacks (ALIKED and XFeat are missing from kornia 0.8.1)
+# is not offered, and an external bridge may then provide that algorithm.
+KORNIA_CLASS: Dict[str, str] = {
+    'sift': 'SIFTFeature', 'rootsift': 'SIFTFeature', 'disk': 'DISK', 'dedode': 'DeDoDe',
+    'aliked': 'ALIKED', 'xfeat': 'XFeat', 'xfeat_dense': 'XFeat', 'xfeatstar': 'XFeat',
+    'keynet': 'KeyNetHardNet', 'loftr': 'LoFTR', 'dog': 'HardNet', 'hardnet': 'HardNet',
+    'hardnet8': 'HardNet8', 'sosnet': 'SOSNet', 'hynet': 'HyNet', 'tfeat': 'TFeat',
+    'gftt': 'GFTTAffNetHardNet', 'hessian': 'HesAffNetHardNet',
+}
+
+
+def kornia_lacks(name: str) -> Optional[str]:
+    """Why the installed kornia cannot provide this detector / family, or None."""
+    cls = KORNIA_CLASS.get(name)
+    if cls and not hasattr(KF, cls):
+        return f'kornia {K.__version__} has no {cls}'
+    return None
+
+
+def kornia_unavailable() -> Dict[str, str]:
+    """{kornia detector: reason} for those the installed kornia cannot run."""
+    return {n: kornia_lacks(n) for n in KORNIA_DETECTORS if kornia_lacks(n)}
+
+
+def kornia_families() -> set:
+    """The algorithm families the installed kornia really provides."""
+    return {f for f in KORNIA_FAMILIES if not kornia_lacks(f)}
+
+
 # The kornia detector that replaces an external row of a covered family
 # (shown when an imcui row is not offered).
 KORNIA_EQUIVALENT: Dict[str, str] = {
@@ -4328,8 +4360,9 @@ def register_detector(name: str, factory: Callable, families=(), source: str = '
     variant. Refused (returns False) when kornia already provides the
     algorithm (by name or by any of `families`)."""
     fam = {f.lower() for f in families}
-    if name in KORNIA_DETECTORS or fam & KORNIA_FAMILIES:
-        covered = sorted(fam & KORNIA_FAMILIES) or [name]
+    provided = kornia_families()
+    if (name in KORNIA_DETECTORS and not kornia_lacks(name)) or fam & provided:
+        covered = sorted(fam & provided) or [name]
         print(f'[Registry] {name} ({source}) not registered: {", ".join(covered)} '
               f'is provided by kornia')
         return False
@@ -4443,11 +4476,12 @@ def count_runs(name: str, params: Optional[Dict], matchers: List[str], n_smnn: i
 def available_detectors() -> List[Dict]:
     """Selectable detectors: 'matchers' lists every matcher offered,
     'default_matchers' the ones that run when the job names none."""
+    missing = kornia_unavailable()
     out = [{'name': n, 'source': 'kornia',
             'matchers': KORNIA_MATCHERS.get(n, []) + OPTIONAL_MATCHERS.get(n, []),
             'default_matchers': KORNIA_MATCHERS.get(n, []),
             'params': [sp.as_dict() for sp in DETECTOR_PARAMS.get(n, [])]}
-           for n in KORNIA_DETECTORS]
+           for n in KORNIA_DETECTORS if n not in missing]
     out += [{'name': n, 'source': d['source'], 'matchers': d['matchers'],
              'default_matchers': d['matchers'],
              'params': [sp.as_dict() for sp in d.get('params', [])]}
@@ -4469,6 +4503,9 @@ def iter_variants(name: str, config: 'PipelineConfig', params: Optional[Dict] = 
         if params is None and base != name:
             params = (config.detector_params or {}).get(base)
     if base in KORNIA_DETECTORS:
+        why = kornia_lacks(base)
+        if why:
+            raise ValueError(f'detector {name!r} cannot run here: {why}')
         factory = KORNIA_DETECTORS[base]
     elif base in EXTERNAL_DETECTORS:
         factory = EXTERNAL_DETECTORS[base]['factory']

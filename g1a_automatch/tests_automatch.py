@@ -1068,6 +1068,92 @@ def test_gpuaas_args(tmp):
     check('selection: a job without "all" is left as it is', J.expand_selection(plain) is plain)
 
 
+def test_kornia_versions(tmp):
+    """A kornia without ALIKED / XFeat (the GPU node has 0.8.1): those detectors
+    are not offered, imcui's ALIKED / XFeat are; native libraries load in the
+    order that keeps conda GDAL working next to pip wheels."""
+    import automatch_engine as E
+    import kornia.feature as KF
+    saved = {n: getattr(KF, n) for n in ('ALIKED', 'XFeat')}
+    try:
+        for n in saved:
+            delattr(KF, n)
+        names = [d['name'] for d in E.available_detectors()]
+        check('kornia 0.8.1: aliked / xfeat / xfeatstar not offered, the rest are',
+              (sorted(E.kornia_unavailable()), 'aliked' in names, 'xfeat' in names, 'dog' in names),
+              (['aliked', 'xfeat', 'xfeatstar'], False, False, True))
+        check('kornia 0.8.1: imcui may provide ALIKED / XFeat, not DISK',
+              ('aliked' in E.kornia_families(), 'xfeat_dense' in E.kornia_families(), 'disk' in E.kornia_families()),
+              (False, False, True))
+        try:
+            E.build_detector('aliked', E.PipelineConfig())
+            check('kornia 0.8.1: selecting aliked explains why it cannot run', False)
+        except ValueError as e:
+            check('kornia 0.8.1: selecting aliked explains why it cannot run', 'has no ALIKED' in str(e))
+    finally:
+        for n, v in saved.items():
+            setattr(KF, n, v)
+    check('kornia: restored', sorted(E.kornia_unavailable()), [])
+    # a model that reads its checkpoint itself (imcui's r2d2): files found -> partial, not error
+    import torch as th
+    import automatch_weights as W
+    hub = os.path.join(tmp, 'kv_hub')
+    os.makedirs(os.path.join(hub, 'checkpoints'), exist_ok=True)
+    th.save({'net': 'Net()'}, os.path.join(hub, 'checkpoints', 'reads_ckpt.pth'))
+
+    class Reads(E.DiskBasedMatcher):
+        def __init__(self, c):
+            super().__init__(c)
+            self.m = None
+
+        def _build_models(self):
+            self.m = self._load_model('Reads', lambda: 'net = ' + th.hub.load_state_dict_from_url(
+                'http://example.invalid/reads_ckpt.pth')['net'])
+
+        def detect_and_describe(self, a, b):
+            return None
+
+        def get_detector_name(self):
+            return 'ext-reads'
+
+        def get_available_matchers(self):
+            return ['internal']
+    old_dir, default_hub = th.hub.get_dir(), E._default_hub_dir
+    try:
+        th.hub.set_dir(hub)
+        E._default_hub_dir = lambda: hub
+        E.register_detector('ext-reads', lambda c, kw: Reads(c), families=('reads',), source='test')
+        rep = W.check(detectors=['ext-reads'], imcui=False, quiet=True)
+        v = rep['detectors'][0]['variants'][0]
+        check('weights: files found but the model reads them itself -> partial, not error',
+              (v['status'], 'files are found' in v['error'], rep['detectors'][0]['files'][0]['status']),
+              ('partial', True, 'ok'))
+    finally:
+        th.hub.set_dir(old_dir)
+        E._default_hub_dir = default_hub
+        E.EXTERNAL_DETECTORS.pop('ext-reads', None)
+    order = {}
+    for mod in ('automatch_truth', 'automatch_engine', 'automatch_gpuaas', 'automatch_imcui'):
+        out = subprocess.run([sys.executable, '-c', textwrap.dedent(f"""
+            import sys; sys.path.insert(0, {HERE!r})
+            import importlib, ctypes
+            loaded = []
+            import builtins
+            real = builtins.__import__
+            def spy(name, *a, **k):
+                top = name.split('.')[0]
+                if top in ('rasterio', 'pandas', 'torch', 'cv2', 'h5py') and top not in loaded:
+                    loaded.append(top)
+                return real(name, *a, **k)
+            builtins.__import__ = spy
+            import {mod}
+            print(','.join(loaded))
+        """)], capture_output=True, text=True)
+        order[mod] = (out.stdout.strip().splitlines() or [''])[-1].split(',')[0]
+    check('native: rasterio is the first compiled package each entry module imports',
+          order, {m: 'rasterio' for m in order})
+
+
 def test_kornia_catalogue():
     """The matchers on a synthetic pair shifted by (7, -4) px: every kornia
     matcher recovers it, and LightGlue gets matches for SIFT / DoG-HardNet
@@ -1234,6 +1320,7 @@ def main():
         test_truth_helpers(tmp)
         test_server(tmp)
         test_gpuaas_args(tmp)
+        test_kornia_versions(tmp)
         test_kornia_catalogue()
         if a.gui:
             test_gui_dialog()
