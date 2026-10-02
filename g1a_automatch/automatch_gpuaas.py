@@ -17,14 +17,23 @@ the same outputs as the GUI and the command line.
     <job.json>
         one job file that also holds input_path / reference_dir / truth_csv
 
-A job file may hold "mode": "run" (default), "weights" (check every model
-weight file on the GPU node, nothing downloaded) or "preflight" (validate,
-no matching); a token run / weights / preflight in input_path does the same.
+A job file may hold "mode", or a token in input_path names it:
+    run        (default) the job
+    env        what the GPU node has: Python packages, GPU, weight folders,
+               internet, and the detector catalogue there (ENVIRONMENT.txt)
+    weights    every model weight file the job needs, found or missing;
+               nothing downloaded (WEIGHTS_REPORT.txt). With detectors "all"
+               every weight choice of every detector is checked
+    preflight  validate inputs, references and settings, no matching
+               (PREFLIGHT.json)
+A job file may also hold "env": {"NAME": "value"}: environment variables set
+before anything is imported (e.g. NISAR_IMW_RESIZE_MAX, NISAR_IMW_ONLY).
 The output folder of the request replaces the job file's output_dir.
 
 Outputs (in the output folder): RUN_MANIFEST.csv, PERFORMANCE.csv (speed and
 accuracy of every detector + matcher), TRUTH_*.csv (with a truth file),
-rival/*.csv, automatch.log; WEIGHTS_REPORT.txt / PREFLIGHT.json in those modes.
+rival/*.csv, automatch.log; ENVIRONMENT.txt / WEIGHTS_REPORT.txt /
+PREFLIGHT.json in the other modes.
 """
 
 import json
@@ -36,7 +45,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
-MODES = ('run', 'preflight', 'weights')
+MODES = ('run', 'preflight', 'weights', 'env')
 
 
 def _value(text: str):
@@ -71,6 +80,8 @@ def build_job(argv: List[str]) -> Tuple[str, Dict]:
             with open(t, encoding='utf-8-sig') as f:
                 d = json.load(f)
             mode = str(d.pop('mode', mode)).lower()
+            for k, v in (d.pop('env', None) or {}).items():
+                os.environ[str(k)] = str(v)
             job.update(d)
         elif '=' in t and not os.path.exists(t):
             k, v = t.split('=', 1)
@@ -98,6 +109,78 @@ def build_job(argv: List[str]) -> Tuple[str, Dict]:
     return mode, J.normalize(job)
 
 
+def environment_report(job: Dict) -> str:
+    """Everything worth knowing about the GPU node before a long run; never
+    raises (each part reports its own failure)."""
+    import importlib
+    import platform
+    lines = ['== Python',
+             f'  {sys.executable}  {platform.python_version()}  on {platform.platform()}',
+             f"  conda env: {os.environ.get('CONDA_DEFAULT_ENV', '-')}  ({os.environ.get('CONDA_PREFIX', '-')})",
+             f"  user: {os.environ.get('USER') or os.environ.get('USERNAME') or '-'}  "
+             f"home: {os.path.expanduser('~')}",
+             '== Packages']
+    for mod in ('torch', 'kornia', 'numpy', 'cv2', 'rasterio', 'shapely', 'pyproj', 'h5py', 'pandas',
+                'huggingface_hub', 'imcui'):
+        try:
+            m = importlib.import_module(mod)
+            v = getattr(m, '__version__', '') or getattr(m, 'VERSION', '') or 'installed'
+            extra = ''
+            if mod == 'rasterio':
+                extra = f"  (GDAL {getattr(m, '__gdal_version__', '?')})"
+            lines.append(f'  {mod:<16} {v}{extra}')
+        except Exception as e:
+            need = 'needed only for imw-... detectors' if mod in ('imcui', 'huggingface_hub') else 'REQUIRED'
+            lines.append(f'  {mod:<16} MISSING ({type(e).__name__}: {e}) -- {need}')
+    lines.append('== GPU')
+    try:
+        import torch
+        if torch.cuda.is_available():
+            for i in range(torch.cuda.device_count()):
+                p = torch.cuda.get_device_properties(i)
+                free, total = torch.cuda.mem_get_info(i)
+                lines.append(f'  cuda:{i} {p.name}  {total / 1024 ** 3:.1f} GB, {free / 1024 ** 3:.1f} GB free  '
+                             f'(CUDA {torch.version.cuda})')
+        else:
+            lines.append('  no CUDA device visible -- the run would use the CPU')
+    except Exception as e:
+        lines.append(f'  torch not usable: {type(e).__name__}: {e}')
+    lines.append('== Environment variables')
+    for k in ('TORCH_HOME', 'HF_HOME', 'HF_HUB_OFFLINE', 'XDG_CACHE_HOME', 'CUDA_VISIBLE_DEVICES',
+              'NISAR_IMW_RESIZE_MAX', 'NISAR_IMW_ONLY'):
+        lines.append(f"  {k}={os.environ.get(k, '')}")
+    lines.append('== Internet (can missing weights download on first use?)')
+    import urllib.request
+    for url in ('https://github.com', 'https://huggingface.co', 'http://cmp.felk.cvut.cz'):
+        try:
+            urllib.request.urlopen(url, timeout=5)
+            lines.append(f'  {url}: reachable')
+        except Exception as e:
+            lines.append(f'  {url}: NOT reachable ({type(e).__name__})')
+    lines.append('== Detector catalogue on this node')
+    try:
+        import io
+        import contextlib
+        import automatch_job as J
+        with contextlib.redirect_stdout(io.StringIO()):
+            cat = J.detector_catalog(job.get('weights_cache_dir', ''))
+        lines.append(J.format_catalog(cat))
+        import automatch_engine as E
+        lines.append('== Weight folders searched')
+        lines += [f"  {os.path.join(d, 'checkpoints')}"
+                  + (f"  ({len(os.listdir(os.path.join(d, 'checkpoints')))} files)"
+                     if os.path.isdir(os.path.join(d, 'checkpoints')) else '  (does not exist)')
+                  for d in E.weight_search_dirs()]
+        try:
+            import automatch_imcui as IM
+            lines += [f'  {d}' + ('' if os.path.isdir(d) else '  (does not exist)') for d in IM.hf_cache_dirs()]
+        except Exception:
+            pass
+    except Exception as e:
+        lines.append(f'  could not build it: {type(e).__name__}: {e}')
+    return '\n'.join(lines)
+
+
 def main(argv: List[str] = None) -> int:
     argv = list(sys.argv if argv is None else argv)
     print(f'[GPUaaS] arguments: {argv[1:]}', flush=True)
@@ -114,9 +197,20 @@ def main(argv: List[str] = None) -> int:
           f"truth {job['truth_csv'] or '-'}, output {job['output_dir']}", flush=True)
 
     import automatch_job as J
+    if mode == 'env':
+        text = environment_report(job)
+        print(text)
+        with open(os.path.join(job['output_dir'], 'ENVIRONMENT.txt'), 'w', encoding='utf-8') as f:
+            f.write(text + '\n')
+        return 0
     if mode == 'weights':
         import automatch_weights as W
-        rep = W.check(job=job, quiet=True)
+        every = any(isinstance(d, str) and d.strip().lower() in J.ALL_DETECTORS for d in job['detectors'])
+        job = J.expand_selection(job)
+        if every:      # the whole catalogue of this machine, every weight choice
+            rep = W.check(detectors=job['detectors'], weights_cache=job['weights_cache_dir'], quiet=True)
+        else:          # exactly what the job will load
+            rep = W.check(job=job, quiet=True)
         text = W.format_report(rep)
         print(text)
         with open(os.path.join(job['output_dir'], 'WEIGHTS_REPORT.txt'), 'w', encoding='utf-8') as f:

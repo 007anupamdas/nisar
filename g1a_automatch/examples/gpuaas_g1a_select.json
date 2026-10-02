@@ -1,101 +1,14 @@
 {
-  "mode": "run",
+  "input_path": "/maintenance/ICIGDev/GPUPOC/input/g1a/<set>/input/<scene>.tif",
+  "reference_dir": "/maintenance/ICIGDev/GPUPOC/input/g1a/<set>/reference/L8_ref",
+  "truth_csv": "/maintenance/ICIGDev/GPUPOC/input/g1a/<set>/truth/<scene>_manual.csv",
   "channels": [
     "band1"
   ],
   "detectors": [
-    "sift",
-    "disk",
-    "dedode",
-    "aliked",
-    "xfeat",
-    "xfeatstar",
-    "keynet",
-    "dog",
-    "gftt",
-    "hessian",
-    "loftr"
+    "all"
   ],
-  "matchers": {
-    "sift": [
-      "smnn",
-      "lgm",
-      "ada",
-      "mnn",
-      "snn",
-      "nn",
-      "fginn"
-    ],
-    "disk": [
-      "smnn",
-      "lgm",
-      "ada",
-      "mnn",
-      "snn",
-      "nn",
-      "fginn"
-    ],
-    "dedode": [
-      "smnn",
-      "lgm",
-      "ada",
-      "mnn",
-      "snn",
-      "nn",
-      "fginn"
-    ],
-    "aliked": [
-      "smnn",
-      "lgm",
-      "ada",
-      "mnn",
-      "snn",
-      "nn",
-      "fginn"
-    ],
-    "keynet": [
-      "smnn",
-      "lgm",
-      "ada",
-      "mnn",
-      "snn",
-      "nn",
-      "fginn"
-    ],
-    "dog": [
-      "smnn",
-      "lgm",
-      "ada",
-      "mnn",
-      "snn",
-      "nn",
-      "fginn"
-    ],
-    "xfeat": [
-      "smnn",
-      "ada",
-      "mnn",
-      "snn",
-      "nn",
-      "fginn"
-    ],
-    "gftt": [
-      "smnn",
-      "ada",
-      "mnn",
-      "snn",
-      "nn",
-      "fginn"
-    ],
-    "hessian": [
-      "smnn",
-      "ada",
-      "mnn",
-      "snn",
-      "nn",
-      "fginn"
-    ]
-  },
+  "matchers": "all",
   "window_sizes": [
     3072
   ],

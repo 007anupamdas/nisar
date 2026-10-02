@@ -9,6 +9,7 @@ file and runs this script as a subprocess, so GUI and command line are one path)
     python automatch_job.py detectors                # what can be selected
     python automatch_job.py weights   [job.json]     # which weight files are on this machine
     python automatch_job.py compare   <output_dir> --truth manual.csv   # rank vs ground truth
+    python automatch_job.py pack      job.json --to <dir> --server-dir <dir>  # bundle for the GPU server
     python automatch_job.py inspect   <input>        # channels, CRS, footprint
 
 Any job key can be overridden on the command line, e.g.
@@ -63,8 +64,9 @@ DEFAULT_JOB: Dict = {
     'resume': True,              # reuse sweep points finished with identical settings
 
     # algorithms (kornia first; imcui only for algorithms kornia lacks)
-    'detectors': ['sift', 'disk'],
-    'matchers': {},              # per detector, e.g. {"disk": ["lgm"]}; {} = all
+    'detectors': ['sift', 'disk'],   # or "all" / "all-kornia" / "all-imcui" (what this machine offers)
+    'matchers': {},              # per detector, e.g. {"disk": ["lgm"]}; {} = each detector's defaults;
+                                 # "all" = every matcher each detector offers
     # Per-detector parameters, each a list of values to try, e.g.
     #   {"sift": {"rootsift": [true, false]},
     #    "dedode": {"detector_weights": ["L-C4-v2"], "descriptor_weights": ["B-upright", "G-upright"]},
@@ -195,6 +197,71 @@ def detector_catalog(weights_cache: str = '') -> Dict:
     return {'detectors': E.available_detectors(), 'imcui': imw}
 
 
+def format_catalog(cat: Dict) -> str:
+    """The catalogue as text: one line per selectable detector (default and
+    optional matchers, settings), then every imcui row not offered and why."""
+    lines = []
+    for det in cat['detectors']:
+        defaults = det.get('default_matchers', det['matchers'])
+        extra = [m for m in det['matchers'] if m not in defaults]
+        ms = ', '.join(defaults) + (f" (+ {', '.join(extra)} when selected)" if extra else '')
+        ps = ', '.join(p['name'] for p in det.get('params', [])
+                       if p.get('scope', 'detector') == 'detector' and '.' not in p['name']) or '-'
+        if det['source'] != 'kornia' and det.get('params'):
+            ps = ', '.join(p['name'] for p in det['params'])   # imcui: thresholds + model keys
+        lines.append(f"{det['name']:<22} {det['source']:<7} matchers: {ms:<52} settings: {ps}")
+    if cat['imcui'].get('error'):
+        lines.append(f"(imcui: {cat['imcui']['error']})")
+    for tag, why in cat['imcui'].get('skipped', []):
+        lines.append(f'{"imw-" + tag:<22} not offered: {why}')
+    return '\n'.join(lines)
+
+
+# 'all' tokens for job['detectors']: everything selectable ON THIS MACHINE
+# (the imcui part depends on the installed imcui), or one source of it.
+ALL_DETECTORS = {'all': None, 'all-kornia': 'kornia', 'all-imcui': 'imcui'}
+
+
+def _is_all(v) -> bool:
+    return isinstance(v, str) and v.strip().lower() == 'all'
+
+
+def expand_selection(job: Dict) -> Dict:
+    """Replace 'all' / 'all-kornia' / 'all-imcui' in detectors and "all" as
+    matchers (for every detector, or as one detector's value) by explicit
+    lists from this machine's catalogue. A job without them is returned as is."""
+    dets = list(job.get('detectors') or [])
+    m = job.get('matchers')
+    want_d = any(isinstance(d, str) and d.strip().lower() in ALL_DETECTORS for d in dets)
+    want_m = _is_all(m) or (isinstance(m, dict) and any(_is_all(v) for v in m.values()))
+    if not (want_d or want_m):
+        return job
+    import automatch_engine as E
+    cat = detector_catalog(job.get('weights_cache_dir', ''))
+    info = {d['name']: d for d in cat['detectors']}
+    names: List[str] = []
+    for d in dets:
+        key = d.strip().lower() if isinstance(d, str) else d
+        if key in ALL_DETECTORS:
+            names += [n for n, x in info.items() if ALL_DETECTORS[key] in (None, x['source'])]
+        else:
+            names.append(d)
+    names = list(dict.fromkeys(names))
+    out = dict(job, detectors=names)
+    if want_m:
+        per = {}
+        for d in names:
+            offered = info.get(E.resolve_detector_name(d)[0], {}).get('matchers')
+            given = m if _is_all(m) else (m or {}).get(d)
+            if _is_all(given) and offered:
+                per[d] = list(offered)
+            elif isinstance(given, list):
+                per[d] = given
+        out['matchers'] = per
+    print(f"[Job] selection expanded on this machine: {len(names)} detector(s): {', '.join(names)}")
+    return out
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Preflight
 # ─────────────────────────────────────────────────────────────────────────────
@@ -321,6 +388,7 @@ def preflight(job: Dict, check_weights: bool = True) -> Dict:
 
     # detectors
     try:
+        job = expand_selection(job)
         cat = detector_catalog(job['weights_cache_dir'])
         names = {d['name'] for d in cat['detectors']}
         wanted = list(dict.fromkeys(job['detectors']))
@@ -579,7 +647,7 @@ def _compare_with_truth(job: Dict, out_root: str, working_crs: str, manifest: Li
 
 
 def run_job(job: Dict) -> Dict:
-    job = normalize(job)
+    job = expand_selection(normalize(job))
     pf = preflight(job, check_weights=False)   # warmup stops a detector whose weights are missing
     for w in pf['warnings']:
         print(f'[Preflight] WARNING: {w}')
@@ -728,11 +796,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     c = sub.add_parser('compare', help='rank the detector + matcher configurations of an output folder '
                                        'against ground truth (options: python automatch_truth.py -h)')
     c.add_argument('rest', nargs=argparse.REMAINDER)
+    k = sub.add_parser('pack', help='copy a scene, the references it needs and server settings for the '
+                                    'GPU server (options: python automatch_pack.py -h)')
+    k.add_argument('rest', nargs=argparse.REMAINDER)
     if argv is None:
         argv = sys.argv[1:]
     if argv and argv[0] == 'compare':
         import automatch_truth as T
         return T.main(list(argv[1:]))
+    if argv and argv[0] == 'pack':
+        import automatch_pack as P
+        return P.main(list(argv[1:]))
     if argv and argv[0] == 'weights':
         # a job file as first argument, everything else as automatch_weights takes it
         import automatch_weights as W
@@ -747,19 +821,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
     if a.cmd == 'detectors':
         cat = detector_catalog(a.weights_cache)
-        for det in cat['detectors']:
-            defaults = det.get('default_matchers', det['matchers'])
-            extra = [m for m in det['matchers'] if m not in defaults]
-            ms = ', '.join(defaults) + (f" (+ {', '.join(extra)} when selected)" if extra else '')
-            ps = ', '.join(p['name'] for p in det.get('params', [])
-                           if p.get('scope', 'detector') == 'detector' and '.' not in p['name']) or '-'
-            if det['source'] != 'kornia' and det.get('params'):
-                ps = ', '.join(p['name'] for p in det['params'])   # imcui: thresholds + model keys
-            print(f"{det['name']:<22} {det['source']:<7} matchers: {ms:<52} settings: {ps}")
-        if cat['imcui'].get('error'):
-            print(f"(imcui: {cat['imcui']['error']})")
-        for tag, why in cat['imcui'].get('skipped', []):
-            print(f'{"imw-" + tag:<22} not offered: {why}')
+        print(format_catalog(cat))
         emit({'event': 'detectors', **cat})
         return 0
     if a.cmd == 'inspect':

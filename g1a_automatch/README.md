@@ -263,45 +263,76 @@ points that picked it). If a run's consensus did not complete, `compare`
 rebuilds it from the saved matches, so the run can still be ranked without
 matching again.
 
-## GPU service (gpuaas submit_job)
+## GPU service (gpuaas submit_job): step by step
 
-`automatch_gpuaas.py` is the `code_path` for the GPU service. It takes the
-same arguments as the NISAR scripts (`sys.argv[2]` = the output folder the
-service assigns, `sys.argv[3]` = the request's comma-separated `input_path`)
-and runs the normal job, so the outputs are those of the GUI / CLI, plus
-`PERFORMANCE.csv`.
+The GPU server already has the packages and weights the NISAR runs use, but
+not the G1A image or the reference collection. Everything below is done from
+the workstation; the server is only reached through the GPU service.
 
-`input_path`: `<input image>,<reference folder>[,<truth.csv>][,<settings.json>]`
-(server paths), or a single job file that holds the paths too. The settings
-file is a job file without paths, e.g. `examples/gpuaas_g1a_select.json`
-(every kornia detector and matcher, 3072 px windows for a 40 GB A100, one
-RANSAC setting, the weights folder of the NISAR runs).
+**1. Copy the code once.** Copy this folder to the server's exe folder, e.g.
+`V:\ICIGDev\GPUPOC\exe\g1a_automatch` (= `/maintenance/ICIGDev/GPUPOC/exe/g1a_automatch`).
+Copy it again after updating the code.
 
-```bash
-# 1. are all weight files on the GPU node? (nothing is downloaded; WEIGHTS_REPORT.txt)
-curl -X POST "http://gpuaas.private.nrsc.gov.in:8000/submit_job" -H "Content-Type: application/json" \
-  -H "X-User-Name: $(whoami)" -d '{
-  "code_path": "/maintenance/ICIGDev/GPUPOC/exe/g1a_automatch/automatch_gpuaas.py",
-  "conda_env": "mpad", "max_gpu_mem_required": 40000,
-  "input_path": "/maintenance/ICIGDev/GPUPOC/exe/g1a_automatch/examples/gpuaas_g1a_weights.json"}'
+**2. Make a job in the GUI on the workstation**, as for a local run (input,
+reference folder, Ground truth CSV, Manual GCP CSV empty, detectors,
+matchers, window size, ...), and *Save job…*. This only collects the
+settings and paths; nothing needs to run locally.
 
-# 2. the detector + matcher selection run
-curl -X POST "http://gpuaas.private.nrsc.gov.in:8000/submit_job" -H "Content-Type: application/json" \
-  -H "X-User-Name: $(whoami)" -d '{
-  "code_path": "/maintenance/ICIGDev/GPUPOC/exe/g1a_automatch/automatch_gpuaas.py",
-  "conda_env": "mpad", "max_gpu_mem_required": 40000,
-  "input_path": "/maintenance/.../g1a/<scene>.tif,/maintenance/.../L8_ref,/maintenance/.../<scene>_manual_rival.csv,/maintenance/ICIGDev/GPUPOC/exe/g1a_automatch/examples/gpuaas_g1a_select.json"}'
+**3. Pack the scene for the server** (conda prompt on the workstation):
+```bat
+python automatch_job.py pack D:\jobs\set1.json ^
+   --to V:\ICIGDev\GPUPOC\input\g1a\set1 ^
+   --server-dir /maintenance/ICIGDev/GPUPOC/input/g1a/set1 ^
+   --server-weights /maintenance/ICIGDev/GPUPOC/input/dqe/imw_runtime/imw_cache ^
+   --set window_sizes=[3072] --set detectors=all --set matchers=all
 ```
-A token `preflight` (or `weights`) first in `input_path`, or `"mode"` in the
-job file, validates without matching. `key=value` tokens override settings
-(`|` separates list items: `window_sizes=2048|3072`). The conda environment
-needs this folder's requirements (torch, kornia, rasterio, ...); imcui only for
-`imw-...` detectors.
+It copies the image (with its sidecars), **only the reference rasters within
+`max_expected_error_m` of the image** together with the collection's index
+shapefile or sidecars, and the truth CSV, and writes
+`automatch_settings.json` with the server paths, `submit_gpuaas.sh` and
+`PACK_REPORT.txt` (the four curl requests, ready to paste). `--dry-run`
+shows the list and size first. `--server-weights` is the folder `imw.py` uses
+(imcui weights; kornia's default folder on the server is searched as well).
+`--set` changes settings for the server only: 3072 px windows suit a 40 GB
+A100; `"all"` takes every detector and every matcher the server offers
+(kornia + imcui).
 
-`PERFORMANCE.csv` (any run): per channel × detector × matcher, seconds per
-window (detection included), the chips and inliers its best RANSAC setting
-kept, the truth RMSE when there is ground truth, and the detector's peak GPU
-memory.
+**4. Submit, in this order** (from `PACK_REPORT.txt`, or `./submit_gpuaas.sh <mode>`):
+```bash
+curl -X POST "http://gpuaas.private.nrsc.gov.in:8000/submit_job" -H "Content-Type: application/json" -H "X-User-Name: $(whoami)" -d '{
+ "code_path": "/maintenance/ICIGDev/GPUPOC/exe/g1a_automatch/automatch_gpuaas.py",
+ "conda_env": "mpad",
+ "max_gpu_mem_required": 40000,
+ "input_path": "env,/maintenance/ICIGDev/GPUPOC/input/g1a/set1/automatch_settings.json"
+ }'
+```
+then the same with `weights,...`, `preflight,...` and finally `run,...`:
+
+| first word | what it does (seconds unless `run`) | read in the job's output folder |
+|---|---|---|
+| `env` | packages and versions, GPU and free memory, internet, weight folders, detector list on the node | `ENVIRONMENT.txt` |
+| `weights` | every weight file the selection needs, found or missing (nothing downloaded) | `WEIGHTS_REPORT.txt` |
+| `preflight` | image, references, truth, settings; number of matching passes | `PREFLIGHT.json` |
+| `run` | the run | `PERFORMANCE.csv`, `TRUTH_BY_DETECTOR_MATCHER.csv`, `RUN_MANIFEST.csv`, `rival/`, `automatch.log` |
+
+If `weights` lists missing files (a detector the NISAR runs never used),
+either drop that detector, or run `python prefetch_weights.py D:\w --only <detectors>`
+on a connected machine and copy `D:\w\torch\hub\checkpoints\*` into
+`<weights folder>/torch/hub/checkpoints/`.
+
+**5. Read the result.** `PERFORMANCE.csv`: one row per detector + matcher,
+best first -- truth RMSE, seconds per window, chips and inliers kept, peak
+GPU memory. `TRUTH_BY_DETECTOR_MATCHER.csv`: the accuracy ranking alone.
+
+Notes:
+- All paths in the settings are server paths (`/maintenance/...`), never `V:\`.
+- `key=value` words after the mode override a setting for one job, e.g.
+  `"input_path": "run,/maintenance/.../automatch_settings.json,channels=band2,window_sizes=2048|3072"`.
+- `"env": {"NISAR_IMW_RESIZE_MAX": "3072"}` in the settings sets environment
+  variables for the job (here: imcui models see the full 3072 px window
+  instead of 2048).
+- Without pack: put the image, references and truth on the server yourself
+  and use `examples/gpuaas_g1a_select.json` with its paths filled in.
 
 ## A100 server: run it with curl
 

@@ -402,6 +402,42 @@ def test_e2e_truth(tmp):
           (code, 'manual_gcp_csv is a RIVAL CSV' in stdout, 'Processing pair' in stdout), (2, True, False))
 
 
+def test_pack(tmp):
+    """pack: only the references the scene can need, with their index; paths
+    rewritten for the server; the bundle runs through the GPU-service entry."""
+    import synthetic_data as S
+    import automatch_pack as P
+    import automatch_job as J
+    data = os.path.join(tmp, 'synth')
+    if not os.path.exists(os.path.join(data, 'G1A_SYNTH_L1.tif')):
+        S.make_all(data, 4013.0, -2487.0)
+    for ref, want_files in (('L8_ref', {'Meta/index.shp', 'Meta/index.dbf', 'Meta/index.shx'}), ('C1', set())):
+        job = J.normalize({'input_path': os.path.join(data, 'G1A_SYNTH_L1.tif'),
+                           'reference_dir': os.path.join(data, ref), 'output_dir': os.path.join(tmp, 'x'),
+                           'channels': ['band1'], 'detectors': ['sift'], 'max_expected_error_m': 10000})
+        dest = os.path.join(tmp, f'bundle_{ref}')
+        res = P.pack(job, dest, dest, server_weights='/srv/weights')
+        got = {os.path.relpath(os.path.join(dp, f), os.path.join(dest, 'reference', ref)).replace(os.sep, '/')
+               for dp, _, fs in os.walk(os.path.join(dest, 'reference', ref)) for f in fs}
+        n_all = len([f for f in os.listdir(os.path.join(data, ref)) if f.endswith('.tif')])
+        check(f'pack {ref}: selected references copied with their footprint source, check OK',
+              (want_files <= got, len(res['references']) >= 1, res['check'].get('lost'),
+               len([g for g in got if g.endswith('.tif')]) == len(res['references']) <= n_all),
+              (True, True, [], True))
+        st = json.load(open(os.path.join(dest, 'automatch_settings.json')))
+        check(f'pack {ref}: settings point at the server folder',
+              (st['input_path'], st['reference_dir'], st['weights_cache_dir']),
+              (f'{dest}/input/G1A_SYNTH_L1.tif', f'{dest}/reference/{ref}', '/srv/weights'))
+        again = P.pack(job, dest, dest)
+        check(f'pack {ref}: a second pack copies nothing again', (again['copied'], again['skipped'] > 0), (0, True))
+    sh = open(os.path.join(dest, 'submit_gpuaas.sh')).read()
+    check('pack: curl script for env / weights / preflight / run', 'submit_job' in sh and '$1,$SETTINGS' in sh)
+    res = subprocess.run([sys.executable, os.path.join(HERE, 'automatch_gpuaas.py'), 'id', os.path.join(tmp, 'o_pre'),
+                          f"preflight,{os.path.join(dest, 'automatch_settings.json')}"], capture_output=True, text=True)
+    pf = json.load(open(os.path.join(tmp, 'o_pre', 'PREFLIGHT.json')))
+    check('pack: the bundle passes preflight through the GPU-service entry', (res.returncode, pf['errors']), (0, []))
+
+
 def test_e2e(tmp):
     import synthetic_data as S
     import automatch_rival as AR
@@ -985,6 +1021,34 @@ def test_gpuaas_args(tmp):
         check('gpuaas: three folders refused', False)
     except ValueError:
         check('gpuaas: three folders refused', True)
+    envfile = os.path.join(tmp, 'envmode.json')
+    with open(envfile, 'w') as f:
+        json.dump({'mode': 'env', 'env': {'AUTOMATCH_TEST_VAR': '42'}}, f)
+    old = os.environ.pop('AUTOMATCH_TEST_VAR', None)
+    try:
+        mode, job = G.build_job(['s.py', 'id', '/o', envfile])
+        check('gpuaas: env mode, and "env" settings applied before imports',
+              (mode, os.environ.get('AUTOMATCH_TEST_VAR'), 'env' in job), ('env', '42', False))
+    finally:
+        os.environ.pop('AUTOMATCH_TEST_VAR', None)
+        if old is not None:
+            os.environ['AUTOMATCH_TEST_VAR'] = old
+    text = G.environment_report({'weights_cache_dir': ''})
+    check('gpuaas: environment report has packages, GPU, catalogue and weight folders',
+          all(k in text for k in ('== Packages', 'kornia', '== GPU', '== Detector catalogue', 'dog ',
+                                  '== Weight folders searched')))
+    import automatch_job as J
+    ex = J.expand_selection(J.normalize({'detectors': ['all-kornia'], 'matchers': 'all'}))
+    import automatch_engine as E
+    check('selection: "all-kornia" and matchers "all" expand to this machine\'s catalogue',
+          (ex['detectors'] == list(E.KORNIA_DETECTORS), ex['matchers'].get('dog'),
+           ex['matchers'].get('loftr')),
+          (True, ['smnn', 'lgm', 'ada', 'mnn', 'snn', 'nn', 'fginn'], ['loftr_internal']))
+    ex = J.expand_selection(J.normalize({'detectors': ['sift', 'dog'], 'matchers': {'sift': 'all', 'dog': ['lgm']}}))
+    check('selection: per-detector "all" next to an explicit list',
+          (ex['detectors'], ex['matchers']['sift'][-1], ex['matchers']['dog']), (['sift', 'dog'], 'fginn', ['lgm']))
+    plain = J.normalize({'detectors': ['sift']})
+    check('selection: a job without "all" is left as it is', J.expand_selection(plain) is plain)
 
 
 def test_kornia_catalogue():
@@ -1163,6 +1227,7 @@ def main():
             test_e2e_distortion(tmp)
             test_e2e_missing_weights(tmp)
             test_e2e_truth(tmp)
+            test_pack(tmp)
     finally:
         if not a.keep:
             shutil.rmtree(tmp, ignore_errors=True)
