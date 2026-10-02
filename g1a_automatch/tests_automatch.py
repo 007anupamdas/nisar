@@ -431,11 +431,28 @@ def test_pack(tmp):
         again = P.pack(job, dest, dest)
         check(f'pack {ref}: a second pack copies nothing again', (again['copied'], again['skipped'] > 0), (0, True))
     sh = open(os.path.join(dest, 'submit_gpuaas.sh')).read()
-    check('pack: curl script for env / weights / preflight / run', 'submit_job' in sh and '$1,$SETTINGS' in sh)
-    res = subprocess.run([sys.executable, os.path.join(HERE, 'automatch_gpuaas.py'), 'id', os.path.join(tmp, 'o_pre'),
-                          f"preflight,{os.path.join(dest, 'automatch_settings.json')}"], capture_output=True, text=True)
-    pf = json.load(open(os.path.join(tmp, 'o_pre', 'PREFLIGHT.json')))
-    check('pack: the bundle passes preflight through the GPU-service entry', (res.returncode, pf['errors']), (0, []))
+    check('pack: curl script for env / weights / preflight / run', 'submit_job' in sh and 'mode_$1.json' in sh)
+    inputs = again['inputs']
+    check('pack: input_path holds only existing files (the service checks each item)',
+          all(os.path.exists(p) for m in ('env', 'weights', 'preflight', 'run') for p in inputs[m].split(',')))
+    for m in ('preflight', 'env'):
+        res = subprocess.run([sys.executable, os.path.join(HERE, 'automatch_gpuaas.py'), 'id',
+                              os.path.join(tmp, f'o_{m}'), inputs[m]], capture_output=True, text=True)
+        check(f'pack: mode file selects {m}', (res.returncode, os.path.exists(os.path.join(
+            tmp, f'o_{m}', {'preflight': 'PREFLIGHT.json', 'env': 'ENVIRONMENT.txt'}[m]))), (0, True))
+    pf = json.load(open(os.path.join(tmp, 'o_preflight', 'PREFLIGHT.json')))
+    check('pack: the bundle passes preflight through the GPU-service entry', pf['errors'], [])
+    # V:\X\Y <-> /maintenance/X/Y : server paths checked through the share
+    lf = P.local_for('/maintenance/ICIGDev/GPUPOC/exe/a.py', '/mnt/v/ICIGDev/GPUPOC/input/g1a/set1',
+                     '/maintenance/ICIGDev/GPUPOC/input/g1a/set1')
+    check('pack: server path mapped to the local share', lf, '/mnt/v/ICIGDev/GPUPOC/exe/a.py')
+    d = os.path.join(tmp, 'comp')
+    os.makedirs(d, exist_ok=True)
+    for n in ('X.tif', 'X.tif.aux.xml', 'X.tfw', 'X_meta.txt', 'X_B5.tif', 'Y.tif', 'X.TIF.ovr', 'XX.tfw'):
+        open(os.path.join(d, n), 'w').close()
+    check('pack: companions of a raster (aux, world file, sidecar; not other rasters)',
+          sorted(os.path.basename(c) for c in P.companions(os.path.join(d, 'X.tif'))),
+          ['X.TIF.ovr', 'X.tfw', 'X.tif.aux.xml', 'X_meta.txt'])
 
 
 def test_e2e(tmp):

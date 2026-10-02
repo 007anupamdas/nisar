@@ -8,16 +8,21 @@ sys.argv[3] = the request's "input_path" (comma-separated). Everything after
 that is the normal automatch job (automatch_job.run_job): the same logic and
 the same outputs as the GUI and the command line.
 
-"input_path" (paths on the server, comma-separated, no spaces needed):
+"input_path" (paths on the server, comma-separated, no spaces needed). The
+GPU service checks that EVERY item is an existing file or folder, so through
+the service only paths can be given -- the mode comes from a file:
 
+    <settings.json>                      run the job (automatch_pack writes it)
+    <settings.json>,<mode_env.json>      a check; mode_*.json holds {"mode": "env"}
     <input image>,<reference folder>[,<truth.csv>][,<settings.json>]
         the G1A raster (or NISAR scene), the L8_ref / C1 folder, optionally
         the manual RIVAL points, optionally a job file with the settings
-        (detectors, matchers, window sizes, RANSAC, weights folder, ...)
-    <job.json>
-        one job file that also holds input_path / reference_dir / truth_csv
 
-A job file may hold "mode", or a token in input_path names it:
+Job files are merged in the order given. From the command line (not through
+the service) a word run / env / weights / preflight, or key=value, may also
+be given in input_path.
+
+A job file may hold "mode":
     run        (default) the job
     env        what the GPU node has: Python packages, GPU, weight folders,
                internet, and the detector catalogue there (ENVIRONMENT.txt)

@@ -286,34 +286,43 @@ python automatch_job.py pack D:\jobs\set1.json ^
    --server-weights /maintenance/ICIGDev/GPUPOC/input/dqe/imw_runtime/imw_cache ^
    --set window_sizes=[3072] --set detectors=all --set matchers=all
 ```
-It copies the image (with its sidecars), **only the reference rasters within
+It prints its progress (copying references can take a while: one scene
+with 24 Landsat-8 pan tiles was 12 GB) and copies the image (with its sidecars), **only the reference rasters within
 `max_expected_error_m` of the image** together with the collection's index
 shapefile or sidecars, and the truth CSV, and writes
-`automatch_settings.json` with the server paths, `submit_gpuaas.sh` and
-`PACK_REPORT.txt` (the four curl requests, ready to paste). `--dry-run`
+`automatch_settings.json` with the server paths, the three `mode_*.json`
+files, `submit_gpuaas.sh` and `PACK_REPORT.txt` (the four curl requests,
+ready to paste). It also checks, through the share, that `code_path` and
+`--server-weights` exist on the server. An interrupted pack can be started
+again: files already copied are kept. `--dry-run`
 shows the list and size first. `--server-weights` is the folder `imw.py` uses
 (imcui weights; kornia's default folder on the server is searched as well).
 `--set` changes settings for the server only: 3072 px windows suit a 40 GB
 A100; `"all"` takes every detector and every matcher the server offers
 (kornia + imcui).
 
-**4. Submit, in this order** (from `PACK_REPORT.txt`, or `./submit_gpuaas.sh <mode>`):
+**4. Submit, in this order** (from `PACK_REPORT.txt`, or `./submit_gpuaas.sh <mode>`).
+The service checks that every item of `input_path` is an existing file, so
+the check to run is chosen with a file: the settings, plus `mode_env.json`,
+`mode_weights.json` or `mode_preflight.json` (written by pack, each just
+`{"mode": "env"}` etc.); the run is the settings file alone.
 ```bash
 curl -X POST "http://gpuaas.private.nrsc.gov.in:8000/submit_job" -H "Content-Type: application/json" -H "X-User-Name: $(whoami)" -d '{
  "code_path": "/maintenance/ICIGDev/GPUPOC/exe/g1a_automatch/automatch_gpuaas.py",
  "conda_env": "mpad",
  "max_gpu_mem_required": 40000,
- "input_path": "env,/maintenance/ICIGDev/GPUPOC/input/g1a/set1/automatch_settings.json"
+ "input_path": "/maintenance/ICIGDev/GPUPOC/input/g1a/set1/automatch_settings.json,/maintenance/ICIGDev/GPUPOC/input/g1a/set1/mode_env.json"
  }'
 ```
-then the same with `weights,...`, `preflight,...` and finally `run,...`:
+then the same with `mode_weights.json`, `mode_preflight.json`, and finally
+`"input_path": ".../automatch_settings.json"` alone for the run:
 
-| first word | what it does (seconds unless `run`) | read in the job's output folder |
+| input_path | what it does (seconds unless run) | read in the job's output folder |
 |---|---|---|
-| `env` | packages and versions, GPU and free memory, internet, weight folders, detector list on the node | `ENVIRONMENT.txt` |
-| `weights` | every weight file the selection needs, found or missing (nothing downloaded) | `WEIGHTS_REPORT.txt` |
-| `preflight` | image, references, truth, settings; number of matching passes | `PREFLIGHT.json` |
-| `run` | the run | `PERFORMANCE.csv`, `TRUTH_BY_DETECTOR_MATCHER.csv`, `RUN_MANIFEST.csv`, `rival/`, `automatch.log` |
+| settings + `mode_env.json` | packages and versions, GPU and free memory, internet, weight folders, detector list on the node | `ENVIRONMENT.txt` |
+| settings + `mode_weights.json` | every weight file the selection needs, found or missing (nothing downloaded) | `WEIGHTS_REPORT.txt` |
+| settings + `mode_preflight.json` | image, references, truth, settings; number of matching passes | `PREFLIGHT.json` |
+| settings alone | the run | `PERFORMANCE.csv`, `TRUTH_BY_DETECTOR_MATCHER.csv`, `RUN_MANIFEST.csv`, `rival/`, `automatch.log` |
 
 If `weights` lists missing files (a detector the NISAR runs never used),
 either drop that detector, or run `python prefetch_weights.py D:\w --only <detectors>`
@@ -326,8 +335,8 @@ GPU memory. `TRUTH_BY_DETECTOR_MATCHER.csv`: the accuracy ranking alone.
 
 Notes:
 - All paths in the settings are server paths (`/maintenance/...`), never `V:\`.
-- `key=value` words after the mode override a setting for one job, e.g.
-  `"input_path": "run,/maintenance/.../automatch_settings.json,channels=band2,window_sizes=2048|3072"`.
+- To change a setting, edit `automatch_settings.json` on the server share (or
+  re-run pack with other `--set` values: files already copied are kept).
 - `"env": {"NISAR_IMW_RESIZE_MAX": "3072"}` in the settings sets environment
   variables for the job (here: imcui models see the full 3072 px window
   instead of 2048).
