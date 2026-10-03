@@ -49,7 +49,8 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
 GPUAAS_URL = 'http://gpuaas.private.nrsc.gov.in:8000/submit_job'
-GPUAAS_CODE = '/maintenance/ICIGDev/GPUPOC/exe/g1a_automatch/automatch_gpuaas.py'
+GPUAAS_CODE = '/maintenance/ICIGDev/GPUPOC/exe/anup/nisar/g1a_automatch/automatch_gpuaas.py'
+SERVER_WEIGHTS = '/maintenance/ICIGDev/GPUPOC/input/dqe/imw_runtime/imw_cache'
 MODES = ('env', 'weights', 'preflight')
 
 
@@ -421,8 +422,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument('--to', required=True, help='local folder the server can read, e.g. V:\\...\\g1a\\set1')
     ap.add_argument('--server-dir', required=True,
                     help='the same folder as the server sees it, e.g. /maintenance/.../g1a/set1')
-    ap.add_argument('--server-weights', default='',
-                    help='weights folder on the server (the one imw.py uses: .../imw_runtime/imw_cache)')
+    ap.add_argument('--server-weights', default=SERVER_WEIGHTS,
+                    help=f'weights folder on the server (default: the one imw.py uses, {SERVER_WEIGHTS})')
     ap.add_argument('--server-cache', default='',
                     help='writable folder on the server for the preprocessing cache, reused between '
                          'jobs (default: inside each job\'s output folder)')

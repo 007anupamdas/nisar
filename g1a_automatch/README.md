@@ -293,7 +293,12 @@ reference folder, Ground truth CSV, Manual GCP CSV empty, detectors,
 matchers, window size, ...), and *Save job…*. This only collects the
 settings and paths; nothing needs to run locally.
 
-**3. Pack the scene for the server** (conda prompt on the workstation):
+**3. Pack the scene for the server.** In the GUI: *Pack for server…* (bottom
+row). It remembers the folders that stay the same (server weights folder,
+code path, the `V:\` = `/maintenance/` share mapping, GPU memory to request),
+fills the server folder from the share folder, takes optional window sizes and
+keypoint cap for the server, shows the copying in the Log and the curl
+requests at the end. Or from the conda prompt:
 ```bat
 python automatch_job.py pack D:\jobs\set1.json ^
    --to V:\ICIGDev\GPUPOC\input\g1a\set1 ^
@@ -401,6 +406,20 @@ pass (`PASS_TIMING.csv`: seconds and seconds per window, detection included,
 since each pass detects again) and each detector's total time and peak GPU
 memory (`detector_seconds`, `gpu_peak_gb` in `RUN_MANIFEST.csv`); the truth
 ranking carries `sec_per_window` beside the RMSE.
+
+## Keypoints per window
+
+With `num_features` "auto", a window gets `keypoint_density` keypoints per
+megapixel (9000), up to `max_num_features` (32000, GUI: *Max keypoints per
+window*; the Windows tab shows what each window size gets). 2048 px windows
+already reach 32000, so larger windows get fewer keypoints per km² unless the
+cap is raised: 90000 keeps the density at 3072 px. Matching then builds no
+keypoints × keypoints distance table (29 GB at 85000 a side): SMNN, MNN, SNN,
+NN, FGINN and AdaLAM find nearest neighbours a slice at a time above
+1.5e8 pairs, with the same matches as kornia's functions. LightGlue and the
+detectors' time still grow with the count. FGINN follows the method row by
+row (kornia's version compares every row with the first row's candidates).
+The log prints each detector's time and peak GPU memory when it finishes.
 
 ## 16 GB GPU
 

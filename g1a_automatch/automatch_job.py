@@ -82,6 +82,8 @@ DEFAULT_JOB: Dict = {
     'window_sizes': [1024],
     'num_features': [None],      # None = from keypoint_density and window size
     'keypoint_density': 9000,    # keypoints per megapixel of window
+    'max_num_features': 32000,   # cap per window; raise it to keep the density at large windows
+                                 # (e.g. 90000 for 3072 px on a 40 GB GPU)
     'target_resolution': None,   # None = input's native resolution (metres)
 
     # large offsets (coarse-to-fine)
@@ -431,6 +433,16 @@ def preflight(job: Dict, check_weights: bool = True) -> Dict:
             if d not in wanted:
                 warnings.append(f'parameters given for {d!r}, which is not selected (ignored)')
         info['detectors'] = wanted
+        cfgk = E.PipelineConfig(keypoint_density=job['keypoint_density'],
+                                max_num_features=int(job['max_num_features']))
+        info['keypoints_per_window'] = {
+            int(w): (int(nf) if nf else cfgk.compute_num_features(int(w)))
+            for w in job['window_sizes'] for nf in job['num_features']}
+        for w, n in info['keypoints_per_window'].items():
+            want = int(job['keypoint_density'] * w * w / 1e6)
+            if n < want:
+                warnings.append(f'{w} px windows get {n} keypoints, the cap (max_num_features); '
+                                f'{want} would keep the density of {job["keypoint_density"]} per megapixel')
         info['runs'] = runs
         info['matching_passes'] = total * n_channels * n_sweep
         info['ransac_sets_per_pass'] = (len(job['ransac_methods']) * len(job['ransac_confidences'])
@@ -481,7 +493,7 @@ def _config_for(job: Dict, win: int, nf: Optional[int], res: float, out_dir: str
     tol = job['consensus_tolerance_m'] or job['consensus_tolerance_px'] * res
     cfg = E.PipelineConfig(
         window_size=win, window_size_small=max(256, win // 2), loftr_max_window=win,
-        keypoint_density=job['keypoint_density'],
+        keypoint_density=job['keypoint_density'], max_num_features=int(job['max_num_features']),
         target_resolution=job['target_resolution'],
         use_disk_cache=True, check_existing_pairs=True, cleanup_after_pair=False,
         use_amp=job['use_amp'], debug_mode=job['debug'],
@@ -708,7 +720,8 @@ def run_job(job: Dict) -> Dict:
             if os.path.exists(key_path):
                 os.remove(key_path)
             cfg = _config_for(job, win, nf, res, out_dir)
-            print(f'[Job] >>> {tag}: window {win} px, {cfg.num_features} features')
+            print(f'[Job] >>> {tag}: window {win} px, {cfg.num_features} keypoints per window '
+              f'({cfg.num_features / (win * win / 1e6):.0f} per megapixel)')
             try:
                 records = E.AutoMatchPipeline(cfg).run(job['input_path'], detectors)
                 with open(key_path, 'w') as fh:

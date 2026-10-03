@@ -1793,6 +1793,136 @@ class CoarseAligner:
 # =============================================================================
 # BASE MATCHER
 # =============================================================================
+# =============================================================================
+# MATCHING IN SLICES
+# =============================================================================
+# kornia's matchers build the whole keypoints x keypoints distance table: 4
+# bytes a pair, 29 GB at 85,000 keypoints a side (the density of 2048 px
+# windows kept at 3072 px). Above MATCH_TABLE_PAIRS pairs the nearest
+# neighbours are found one slice of rows at a time instead: the same
+# distances and the same rules, with memory for one slice.
+MATCH_TABLE_PAIRS = 1.5e8     # up to ~0.6 GB tables are built whole, as kornia does
+MATCH_SLICE_ELEMS = 2.5e8     # ~1 GB per slice
+
+
+def _needs_slices(d1: th.Tensor, d2: th.Tensor) -> bool:
+    return d1.shape[0] * d2.shape[0] > MATCH_TABLE_PAIRS
+
+
+def _knn(d1: th.Tensor, d2: th.Tensor, k: int, squared: bool = False) -> Tuple[th.Tensor, th.Tensor]:
+    """The k smallest distances from each row of d1 to the rows of d2, and
+    their indices, computed a slice of rows at a time. squared: squared L2,
+    as AdaLAM uses."""
+    a, b = d1.float(), d2.float()
+    b_norm = (b ** 2).sum(1).view(1, -1) if squared else None
+    step = max(64, int(MATCH_SLICE_ELEMS // max(1, b.shape[0])))
+    vals, idxs = [], []
+    for s in range(0, a.shape[0], step):
+        part = a[s:s + step]
+        if squared:   # kornia.feature.adalam.utils.dist_matrix, per slice
+            dm = (part ** 2).sum(1).view(-1, 1) + b_norm - 2.0 * part @ b.t()
+        else:
+            dm = th.cdist(part, b)
+        v, i = th.topk(dm, k, dim=1, largest=False)
+        vals.append(v)
+        idxs.append(i)
+        del dm
+    return th.cat(vals), th.cat(idxs)
+
+
+def _no_matches(d: th.Tensor) -> Tuple[th.Tensor, th.Tensor]:
+    return (th.empty(0, 1, device=d.device, dtype=th.float32),
+            th.empty(0, 2, device=d.device, dtype=th.long))
+
+
+def _pairs(i1: th.Tensor, i2: th.Tensor) -> th.Tensor:
+    return th.stack([i1, i2], 1)
+
+
+def match_sliced(name: str, d1: th.Tensor, d2: th.Tensor, ratio_th: float = 0.8) -> Tuple[th.Tensor, th.Tensor]:
+    """kornia's nn / mnn / snn / smnn rules on sliced nearest neighbours:
+    (distance or ratio (N, 1), index pairs (N, 2))."""
+    n1, n2 = d1.shape[0], d2.shape[0]
+    if n1 == 0 or n2 == 0 or (name in ('snn', 'smnn') and (n2 < 2 or n1 < 2)):
+        return _no_matches(d1)
+    ar1 = th.arange(n1, device=d1.device)
+    if name == 'nn':
+        v, i = _knn(d1, d2, 1)
+        return v, _pairs(ar1, i[:, 0])
+    if name == 'mnn':
+        v, i12 = _knn(d1, d2, 1)
+        _, i21 = _knn(d2, d1, 1)
+        keep = i21[i12[:, 0], 0] == ar1
+        return v[keep], _pairs(ar1[keep], i12[keep, 0])
+    v12, i12 = _knn(d1, d2, 2)
+    r12 = v12[:, 0] / v12[:, 1]
+    ok12 = r12 <= ratio_th
+    if name == 'snn':
+        return r12[ok12].view(-1, 1), _pairs(ar1[ok12], i12[ok12, 0])
+    if name == 'smnn':   # the ratio test both ways, and mutual
+        v21, i21 = _knn(d2, d1, 2)
+        r21 = v21[:, 0] / v21[:, 1]
+        ok21 = r21 <= ratio_th
+        back = th.full((n2,), -1, device=d1.device, dtype=th.long)
+        ar2 = th.arange(n2, device=d1.device)
+        back[ar2[ok21]] = i21[ok21, 0]
+        j = i12[:, 0]
+        keep = ok12 & (back[j] == ar1)
+        dist = th.maximum(r12[keep], r21[j[keep]])
+        return dist.view(-1, 1), _pairs(ar1[keep], j[keep])
+    raise ValueError(f'Unknown matcher: {name}')
+
+
+def match_fginn_sliced(d1: th.Tensor, d2: th.Tensor, lafs2: th.Tensor, ratio_th: float = 0.8,
+                       spatial_th: float = 10.0, mutual: bool = False) -> Tuple[th.Tensor, th.Tensor]:
+    """FGINN (Mishkin et al.): the ratio test against the nearest neighbour
+    that lies more than spatial_th pixels from the best one in image 2.
+    kornia's match_fginn measures that distance against the candidates of
+    the first descriptor for every row; this follows the method, row by row."""
+    n1, n2 = d1.shape[0], d2.shape[0]
+    if n1 == 0 or n2 < 2:
+        return _no_matches(d1)
+    k = max(2, min(10, n2))
+    vals, idxs = _knn(d1, d2, k)
+    xy2 = KF.get_laf_center(lafs2).view(-1, 2).float()
+    cxy = xy2[idxs]                                           # (n1, k, 2)
+    far = th.norm(cxy[:, 1:] - cxy[:, :1], dim=2) >= spatial_th
+    second = th.where(far, vals[:, 1:], th.full_like(vals[:, 1:], 1e6)).min(dim=1).values
+    ratio = vals[:, 0] / second
+    ar1 = th.arange(n1, device=d1.device)
+    keep = ratio <= ratio_th
+    if mutual:
+        _, i21 = _knn(d2, d1, 1)
+        keep = keep & (i21[idxs[:, 0], 0] == ar1)
+    return ratio[keep].view(-1, 1), _pairs(ar1[keep], idxs[keep, 0])
+
+
+def match_adalam_sliced(d1: th.Tensor, d2: th.Tensor, lafs1: th.Tensor, lafs2: th.Tensor, cfg: Dict,
+                        hw1=None, hw2=None) -> Tuple[th.Tensor, th.Tensor]:
+    """kornia's match_adalam with the putative matches (nearest neighbour,
+    ratio score, mutual seeds) found in slices, then AdaLAM's own filter."""
+    from kornia.feature.adalam.adalam import AdalamFilter
+    config = KF.adalam.get_adalam_default_config()
+    config.update({k: v for k, v in cfg.items() if k in config})
+    dev = config['device']
+    if d1.shape[0] <= 1 or d2.shape[0] <= 1:
+        return _no_matches(d1)
+    as32 = (lambda t: th.as_tensor(t, device=dev, dtype=th.float32))
+    k1, k2 = as32(KF.get_laf_center(lafs1).reshape(-1, 2)), as32(KF.get_laf_center(lafs2).reshape(-1, 2))
+    o1, o2 = as32(KF.get_laf_orientation(lafs1).reshape(-1)), as32(KF.get_laf_orientation(lafs2).reshape(-1))
+    s1, s2 = as32(KF.get_laf_scale(lafs1).reshape(-1)), as32(KF.get_laf_scale(lafs2).reshape(-1))
+    dd12, nn12 = _knn(as32(d1), as32(d2), 2, squared=True)
+    putative = nn12[:, 0]
+    scores = dd12[:, 0] / dd12[:, 1].clamp_min(1e-3)
+    mnn = None
+    if config['force_seed_mnn']:
+        _, nn21 = _knn(as32(d2), as32(d1), 1, squared=True)
+        mnn = nn21[:, 0][putative] == th.arange(k1.shape[0], device=dev)
+    idxs, quality = AdalamFilter(config).filter_matches(k1, k2, putative, scores, mnn, hw1, hw2,
+                                                        o1, o2, s1, s2, return_dist=True)
+    return quality, idxs
+
+
 class BaseMatcher(ABC):
 
     def __init__(self, config: PipelineConfig):
@@ -2029,11 +2159,16 @@ class BaseMatcher(ABC):
         return self._prefix_base() + (self.variant_suffix or '')
 
     def match_smnn(self, descs1, descs2, threshold: float):
-        return KF.match_smnn(descs1.squeeze(0), descs2.squeeze(0), th.tensor(threshold))
+        d1, d2 = descs1.squeeze(0), descs2.squeeze(0)
+        if _needs_slices(d1, d2):
+            return match_sliced('smnn', d1, d2, float(threshold))
+        return KF.match_smnn(d1, d2, th.tensor(threshold))
 
     def match_adalam(self, descs1, descs2, lafs1, lafs2, hw1, hw2, overrides: Optional[Dict] = None):
         cfg = dict(self.adalam_config)
         cfg.update(overrides or {})
+        if _needs_slices(descs1.squeeze(0), descs2.squeeze(0)):
+            return match_adalam_sliced(descs1.squeeze(0), descs2.squeeze(0), lafs1, lafs2, cfg, hw1, hw2)
         return KF.match_adalam(
             descs1.squeeze(0),
             descs2.squeeze(0),
@@ -2049,16 +2184,17 @@ class BaseMatcher(ABC):
         fginn (ratio test against the first geometrically distinct neighbour)."""
         d1, d2 = descs1.squeeze(0), descs2.squeeze(0)
         p = dict(param or {})
+        if name == 'fginn':   # always our version: see match_fginn_sliced
+            return match_fginn_sliced(d1, d2, lafs2, float(p.get('th', 0.8)),
+                                      float(p.get('spatial_th', 10.0)), bool(p.get('mutual', False)))
+        if name in ('nn', 'mnn', 'snn') and _needs_slices(d1, d2):
+            return match_sliced(name, d1, d2, float(p.get('th', 0.8)))
         if name == 'nn':
             return KF.match_nn(d1, d2)
         if name == 'mnn':
             return KF.match_mnn(d1, d2)
         if name == 'snn':
             return KF.match_snn(d1, d2, th=float(p.get('th', 0.8)))
-        if name == 'fginn':
-            return KF.match_fginn(d1, d2, lafs1, lafs2, th=float(p.get('th', 0.8)),
-                                  spatial_th=float(p.get('spatial_th', 10.0)),
-                                  mutual=bool(p.get('mutual', False)))
         raise ValueError(f'Unknown matcher: {name}')
 
     def _lightglue(self, feature_name: str, params: Optional[Dict] = None):
@@ -4744,11 +4880,15 @@ class AutoMatchPipeline:
                 traceback.print_exc()
             finally:
                 rec['seconds'] = round(time.time() - t_det, 1)
+                mem = ''
                 if th.cuda.is_available():
                     try:
                         rec['gpu_peak_gb'] = round(th.cuda.max_memory_allocated() / 1024 ** 3, 2)
+                        total = th.cuda.get_device_properties(th.cuda.current_device()).total_memory / 1024 ** 3
+                        mem = f", peak GPU memory {rec['gpu_peak_gb']:.1f} of {total:.1f} GB"
                     except Exception:
                         pass
+                print(f"[{pol}] {tag} {rec['status']} in {rec['seconds'] / 60:.1f} min{mem}")
                 unload = getattr(matcher, 'unload_model', None)
                 if callable(unload):
                     unload()

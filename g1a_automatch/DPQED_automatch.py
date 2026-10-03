@@ -328,6 +328,151 @@ class ParamDialog(QtWidgets.QDialog):
 # ─────────────────────────────────────────────────────────────────────────────
 # main window
 # ─────────────────────────────────────────────────────────────────────────────
+class PackDialog(QtWidgets.QDialog):
+    """Settings for packing the current job for the GPU server. Folders that
+    stay the same (server weights, code path, drive mapping, GPU request) are
+    remembered between sessions."""
+
+    DEFAULTS = {'pack/local': '', 'pack/server': '', 'pack/share_local': 'V:\\',
+                'pack/share_server': '/maintenance/',
+                'pack/weights': '/maintenance/ICIGDev/GPUPOC/input/dqe/imw_runtime/imw_cache',
+                'pack/cache': '', 'pack/code': '/maintenance/ICIGDev/GPUPOC/exe/anup/nisar/g1a_automatch/automatch_gpuaas.py',
+                'pack/gpu_mb': 40000, 'pack/windows': '', 'pack/max_feat': 0,
+                'pack/all_det': False, 'pack/all_match': False}
+
+    def __init__(self, settings, job, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('Pack for the GPU server')
+        self.settings = settings
+        self.job = job
+        get = (lambda k: settings.value(k, self.DEFAULTS[k]))
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.addWidget(QtWidgets.QLabel(
+            'Copies the image, only the reference tiles it can need, the ground truth and a settings file with '
+            'server paths into a folder the server can read, and writes the curl requests.'))
+        f = QtWidgets.QFormLayout()
+        self.local = PathRow('dir')
+        self.local.setText(get('pack/local'))
+        f.addRow('Folder on the share (here)', self.local)
+        self.server = QtWidgets.QLineEdit(get('pack/server'))
+        self.server.setPlaceholderText('/maintenance/ICIGDev/GPUPOC/input/dqe/g1a/<set>')
+        f.addRow('Same folder on the server', self.server)
+        self.share_local = QtWidgets.QLineEdit(get('pack/share_local'))
+        self.share_server = QtWidgets.QLineEdit(get('pack/share_server'))
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(self.share_local)
+        row.addWidget(QtWidgets.QLabel('is'))
+        row.addWidget(self.share_server)
+        f.addRow('Share mapping', row)
+        self.weights = QtWidgets.QLineEdit(get('pack/weights'))
+        f.addRow('Weights folder on the server', self.weights)
+        self.cache = QtWidgets.QLineEdit(get('pack/cache'))
+        self.cache.setPlaceholderText('optional: reused preprocessing cache, e.g. /maintenance/.../inter/g1a')
+        f.addRow('Cache folder on the server', self.cache)
+        self.code = QtWidgets.QLineEdit(get('pack/code'))
+        f.addRow('automatch_gpuaas.py on the server', self.code)
+        self.gpu_mb = QtWidgets.QSpinBox()
+        self.gpu_mb.setRange(500, 200000)
+        self.gpu_mb.setSingleStep(1000)
+        self.gpu_mb.setSuffix(' MB')
+        self.gpu_mb.setValue(int(get('pack/gpu_mb')))
+        self.gpu_mb.setToolTip('max_gpu_mem_required: 40000 for the A100, ~19000 for the A4500')
+        f.addRow('GPU memory to request', self.gpu_mb)
+        self.windows = QtWidgets.QLineEdit(get('pack/windows'))
+        self.windows.setPlaceholderText(f"as in the job ({fmt_list(job['window_sizes'])}); e.g. 3072 on the A100")
+        f.addRow('Window sizes on the server', self.windows)
+        self.max_feat = QtWidgets.QSpinBox()
+        self.max_feat.setRange(0, 1000000)
+        self.max_feat.setSingleStep(1000)
+        self.max_feat.setSpecialValueText(f"as in the job ({job['max_num_features']})")
+        self.max_feat.setValue(int(get('pack/max_feat')))
+        f.addRow('Max keypoints per window', self.max_feat)
+        self.all_det = QtWidgets.QCheckBox('every detector the server offers (kornia + imcui)')
+        self.all_det.setChecked(str(get('pack/all_det')).lower() == 'true')
+        self.all_match = QtWidgets.QCheckBox('every matcher each detector offers')
+        self.all_match.setChecked(str(get('pack/all_match')).lower() == 'true')
+        f.addRow('Detectors', self.all_det)
+        f.addRow('Matchers', self.all_match)
+        self.dry = QtWidgets.QCheckBox('only list what would be copied, and its size')
+        f.addRow('', self.dry)
+        lay.addLayout(f)
+        bb = _DBB(BTN_OK | BTN_CANCEL)
+        bb.button(BTN_OK).setText('Pack')
+        bb.accepted.connect(self._accept)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+        self.local.edit.textChanged.connect(self._suggest_server)
+
+    def _suggest_server(self, text):
+        """V:\\X\\Y -> /maintenance/X/Y with the share mapping."""
+        lp, sp = self.share_local.text(), self.share_server.text()
+        if lp and text.lower().startswith(lp.lower()):
+            rest = text[len(lp):].replace('\\', '/').strip('/')
+            self.server.setText(sp.rstrip('/') + '/' + rest)
+
+    def args(self):
+        a = ['--to', self.local.text(), '--server-dir', self.server.text().strip(),
+             '--server-weights', self.weights.text().strip(), '--code-path', self.code.text().strip(),
+             '--gpu-mb', str(self.gpu_mb.value())]
+        if self.cache.text().strip():
+            a += ['--server-cache', self.cache.text().strip()]
+        if self.windows.text().strip():
+            a += ['--set', f'window_sizes={json.dumps(parse_int_list(self.windows.text(), "window sizes"))}']
+        if self.max_feat.value():
+            a += ['--set', f'max_num_features={self.max_feat.value()}']
+        if self.all_det.isChecked():
+            a += ['--set', 'detectors=all']
+        if self.all_match.isChecked():
+            a += ['--set', 'matchers=all']
+        if self.dry.isChecked():
+            a.append('--dry-run')
+        return a, self.job
+
+    def _accept(self):
+        if not self.local.text() or not self.server.text().strip().startswith('/'):
+            QtWidgets.QMessageBox.warning(self, 'Pack', 'Give the folder on the share, and the same folder '
+                                                        'as the server sees it (starting with /).')
+            return
+        try:
+            self.args()
+        except ValueError as e:
+            QtWidgets.QMessageBox.warning(self, 'Pack', str(e))
+            return
+        for key, val in (('pack/local', self.local.text()), ('pack/server', self.server.text().strip()),
+                         ('pack/share_local', self.share_local.text()), ('pack/share_server', self.share_server.text()),
+                         ('pack/weights', self.weights.text().strip()), ('pack/cache', self.cache.text().strip()),
+                         ('pack/code', self.code.text().strip()), ('pack/gpu_mb', self.gpu_mb.value()),
+                         ('pack/windows', self.windows.text().strip()), ('pack/max_feat', self.max_feat.value()),
+                         ('pack/all_det', self.all_det.isChecked()), ('pack/all_match', self.all_match.isChecked())):
+            self.settings.setValue(key, val)
+        self.accept()
+
+
+class ReportDialog(QtWidgets.QDialog):
+    """A read-only text report with a Copy button."""
+
+    def __init__(self, title, text, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(1000, 600)
+        lay = QtWidgets.QVBoxLayout(self)
+        self.text = QtWidgets.QPlainTextEdit(text)
+        self.text.setReadOnly(True)
+        mono = QtGui.QFont('Monospace')
+        mono.setStyleHint(QtGui.QFont.StyleHint.TypeWriter if QT_API != 'PyQt5' else QtGui.QFont.TypeWriter)
+        self.text.setFont(mono)
+        lay.addWidget(self.text, 1)
+        row = QtWidgets.QHBoxLayout()
+        copy = QtWidgets.QPushButton('Copy all')
+        copy.clicked.connect(lambda: QtWidgets.QApplication.clipboard().setText(self.text.toPlainText()))
+        row.addWidget(copy)
+        row.addStretch(1)
+        close = QtWidgets.QPushButton('Close')
+        close.clicked.connect(self.accept)
+        row.addWidget(close)
+        lay.addLayout(row)
+
+
 class WeightsDialog(QtWidgets.QDialog):
     """Result of a weights check: one row per detector x weight file."""
 
@@ -452,6 +597,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.proc_kind = None
         self.proc_buffer = ''
         self._queue = []              # quick commands waiting for the process
+        self._pack_lines, self._pack_dry, self._pack_dest = [], False, ''
         self.detector_info = []       # [{'name','source','matchers','params'}]
         self.detector_specs = {}      # name -> [param spec dicts]
         self.detector_defaults = {}   # name -> matchers ticked by default
@@ -478,7 +624,8 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         btns = QtWidgets.QHBoxLayout()
         for label, slot in (('Load job…', self.load_job_dialog), ('Save job…', self.save_job_dialog),
                             ('Preflight', self.preflight), ('Run', self.run_job),
-                            ('Stop', self.stop), ('Open output', self.open_output)):
+                            ('Stop', self.stop), ('Open output', self.open_output),
+                            ('Pack for server…', self.pack_dialog)):
             b = QtWidgets.QPushButton(label)
             b.clicked.connect(slot)
             btns.addWidget(b)
@@ -652,6 +799,20 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.kp_density = QtWidgets.QSpinBox()
         self.kp_density.setRange(100, 200000)
         f.addRow('Keypoint density for auto (/Mpx)', self.kp_density)
+        self.max_feat = QtWidgets.QSpinBox()
+        self.max_feat.setRange(1000, 1000000)
+        self.max_feat.setSingleStep(1000)
+        self.max_feat.setToolTip('Cap on keypoints per window. Raise it to keep the density at large windows '
+                                 '(e.g. 90000 for 3072 px on a 40 GB GPU); matching is done in slices, so '
+                                 'memory stays bounded, but time grows with the count.')
+        f.addRow('Max keypoints per window', self.max_feat)
+        self.lbl_kp = QtWidgets.QLabel('')
+        self.lbl_kp.setWordWrap(True)
+        f.addRow('', self.lbl_kp)
+        for w in (self.windows, self.nfeat):
+            w.textChanged.connect(self._update_kp_label)
+        for w in (self.kp_density, self.max_feat):
+            w.valueChanged.connect(self._update_kp_label)
         self.target_res = QtWidgets.QLineEdit()
         self.target_res.setPlaceholderText('native')
         f.addRow('Working resolution (m, blank = native)', self.target_res)
@@ -787,6 +948,8 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.windows.setText(fmt_list(j['window_sizes']))
         self.nfeat.setText(fmt_list(j['num_features']))
         self.kp_density.setValue(int(j['keypoint_density']))
+        self.max_feat.setValue(int(j.get('max_num_features') or 32000))
+        self._update_kp_label()
         self.target_res.setText('' if j['target_resolution'] is None else f"{j['target_resolution']:g}")
         self.max_err.setValue(float(j['max_expected_error_m']) / 1000.0)
         self.coarse.setCurrentText(j['coarse_method'])
@@ -852,6 +1015,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             'window_sizes': parse_int_list(self.windows.text(), 'window sizes'),
             'num_features': parse_int_list(self.nfeat.text(), 'keypoints', allow_auto=True) or [None],
             'keypoint_density': self.kp_density.value(),
+            'max_num_features': self.max_feat.value(),
             'target_resolution': float(tr) if tr else None,
             'max_expected_error_m': self.max_err.value() * 1000.0,
             'coarse_method': self.coarse.currentText(),
@@ -1085,10 +1249,10 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.proc_buffer = ''
         self._events = []
         self.proc.start(sys.executable, [JOB_SCRIPT] + args)
-        busy = kind in ('run', 'preflight')
+        busy = kind in ('run', 'preflight', 'pack')
         self.btn_run.setEnabled(not busy)
         self.btn_preflight.setEnabled(not busy)
-        self.btn_stop.setEnabled(kind == 'run')
+        self.btn_stop.setEnabled(kind in ('run', 'pack'))
         self.lbl_status.setText(f'{kind} …')
         return True
 
@@ -1107,6 +1271,15 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
                 self._on_event(ev)
             elif line.strip():
                 self.log.appendPlainText(line)
+                if self.proc_kind == 'pack':
+                    self._pack_lines.append(line)
+                    m = re.match(r'\[pack\] \((\d+)/(\d+)\) (.*)', line)
+                    if m:
+                        self.bar_step.setMaximum(int(m.group(2)))
+                        self.bar_step.setValue(int(m.group(1)) - (0 if ' done' in line or 'already' in line else 1))
+                        self.bar_step.setFormat('copying  %v/%m')
+                    if line.startswith('[pack]'):
+                        self.lbl_status.setText(line[:160])
 
     def _finished(self, code, _status=None):
         if self.proc_buffer.strip():
@@ -1150,6 +1323,8 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         elif kind == 'preflight':
             ev = next((e for e in events if e.get('event') == 'preflight'), None)
             self._show_preflight(ev)
+        elif kind == 'pack':
+            self._pack_finished(code)
         elif kind == 'weights':
             tmp_job = getattr(self, '_weights_job_file', None)
             if tmp_job:
@@ -1308,6 +1483,65 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         path = self._write_job()
         if path:
             self._start(['preflight', path], 'preflight')
+
+    def _update_kp_label(self, *_):
+        """Keypoints each window size gets with 'auto', as the run computes them."""
+        try:
+            sizes = parse_int_list(self.windows.text(), 'window sizes')
+        except ValueError:
+            self.lbl_kp.setText('')
+            return
+        dens, cap = self.kp_density.value(), self.max_feat.value()
+        parts = []
+        for w in sizes:
+            want = int(dens * w * w / 1e6)
+            n = max(1000, min(want, cap))
+            parts.append(f'{w} px: {n:,}' + (f' (capped; {want:,} at this density)' if want > cap else ''))
+        self.lbl_kp.setText('auto gives ' + ' · '.join(parts) if parts else '')
+
+    def pack_dialog(self, run=True):
+        """Pack the current job for the GPU server (automatch_pack) from a
+        dialog; run=False returns the dialog without showing it (tests)."""
+        try:
+            job = self.get_job()
+        except ValueError as e:
+            QtWidgets.QMessageBox.warning(self, 'Pack', str(e))
+            return None
+        dlg = PackDialog(self.settings, job, self)
+        dlg.accepted.connect(lambda: self._start_pack(dlg))
+        if run:
+            dlg.exec() if hasattr(dlg, 'exec') else dlg.exec_()
+        return dlg
+
+    def _start_pack(self, dlg):
+        args, job = dlg.args()
+        fd, path = tempfile.mkstemp(prefix='automatch_pack_', suffix='.json')
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump(job, f, indent=2)
+        self._pack_job_file = path
+        self._pack_dest = dlg.local.text()
+        self._pack_dry = dlg.dry.isChecked()
+        self._pack_lines = []
+        self.log.appendPlainText(f'--- pack to {self._pack_dest}')
+        self._start(['pack', path] + args, 'pack')
+
+    def _pack_finished(self, code):
+        if getattr(self, '_pack_job_file', None):
+            try:
+                os.remove(self._pack_job_file)
+            except OSError:
+                pass
+            self._pack_job_file = None
+        report = os.path.join(getattr(self, '_pack_dest', ''), 'PACK_REPORT.txt')
+        if not self._pack_dry and os.path.exists(report):
+            text = open(report, encoding='utf-8').read()
+        else:
+            text = '\n'.join(getattr(self, '_pack_lines', []))
+        self.lbl_status.setText('Pack ' + ('listed (nothing copied)' if self._pack_dry else
+                                           'finished' if code == 0 else f'stopped (exit code {code}) — see Log'))
+        box = ReportDialog('Pack for the GPU server', text, self)
+        box.show()
+        self._last_pack_report = box
 
     def check_weights(self, scope='selected', load=False):
         """Run the weights check (automatch_weights) for the selected

@@ -770,6 +770,25 @@ def test_gui_dialog():
               (dlg.table.rowCount(), w.det_table.item(w._row_of('sift'), 4).text(),
                'x.pth\thttp://h/x.pth' in dlg.missing_text()), (2, '1 missing', True))
         dlg.close()
+        w.windows.setText('1024, 3072')
+        w.max_feat.setValue(32000)
+        check('gui: keypoints per window shown, capped sizes flagged',
+              ('1024 px: 9,437' in w.lbl_kp.text(), '3072 px: 32,000 (capped; 84,934' in w.lbl_kp.text()), (True, True))
+        w.max_feat.setValue(90000)
+        check('gui: max keypoints reaches the job', w.get_job()['max_num_features'], 90000)
+        w.settings = G.QtCore.QSettings(os.path.join(tempfile.mkdtemp(), 'gui_test.ini'), G.QtCore.QSettings.IniFormat
+                                        if G.QT_API == 'PyQt5' else G.QtCore.QSettings.Format.IniFormat)
+        pd_ = w.pack_dialog(run=False)
+        pd_.local.setText('V:\\ICIGDev\\GPUPOC\\input\\dqe\\g1a\\set9')
+        pd_.windows.setText('3072')
+        pd_.all_det.setChecked(True)
+        a, job = pd_.args()
+        check('gui pack: server folder from the share mapping, remembered defaults, overrides',
+              (pd_.server.text(), a[a.index('--server-weights') + 1], a[a.index('--gpu-mb') + 1],
+               'window_sizes=[3072]' in a, 'detectors=all' in a),
+              ('/maintenance/ICIGDev/GPUPOC/input/dqe/g1a/set9',
+               '/maintenance/ICIGDev/GPUPOC/input/dqe/imw_runtime/imw_cache', '40000', True, True))
+        pd_.close()
         w._show_truth({'event': 'truth', 'n_truth': 3, 'files': {}, 'top': [
             {'rank': 1, 'channel': 'band1', 'detector': 'sift', 'matcher_family': 'lgm',
              'best_matcher_setting': 'lgm', 'ransac': 'magsac2', 'truth_rmse_m': 12.5,
@@ -1229,6 +1248,64 @@ def test_warmup_and_padding():
     check('imcui padding: multiples of 32; a square when imcui will shrink it', (shp, shp_big), ((128, 96), (128, 128)))
 
 
+def test_sliced_matching():
+    """Matching in slices (for keypoint counts whose full distance table
+    would not fit in memory) gives kornia's matches; the keypoint cap is a
+    setting."""
+    import numpy as np
+    import torch as th
+    import kornia.feature as KF
+    import automatch_engine as E
+    import automatch_job as J
+    th.manual_seed(0)
+    n = 2000
+    d1 = th.nn.functional.normalize(th.randn(n, 128), dim=1)
+    perm = th.randperm(n)
+    d2 = th.nn.functional.normalize(d1[perm][:1700] + 0.08 * th.randn(1700, 128), dim=1)
+    old = E.MATCH_SLICE_ELEMS
+    E.MATCH_SLICE_ELEMS = 1700 * 97          # ~20 slices
+    try:
+        same = {}
+        for name, ref in (('nn', KF.match_nn(d1, d2)), ('mnn', KF.match_mnn(d1, d2)),
+                          ('snn', KF.match_snn(d1, d2, 0.8)), ('smnn', KF.match_smnn(d1, d2, 0.95))):
+            got = E.match_sliced(name, d1, d2, 0.8 if name == 'snn' else 0.95)
+            same[name] = ({tuple(r) for r in ref[1].tolist()} == {tuple(r) for r in got[1].tolist()}
+                          and len(ref[1]) > 0)
+        check('slices: nn / mnn / snn / smnn give kornia\'s matches', same, {k: True for k in same})
+        img, img2 = _texture(384)
+        n1, n2 = E.BaseMatcher._norm_img(img, 0.0), E.BaseMatcher._norm_img(img2, 0.0)
+        t1, t2 = th.from_numpy(n1)[None, None].float(), th.from_numpy(n2)[None, None].float()
+        m = E.build_detector('sift', E.PipelineConfig(num_features=1500, use_amp=False))
+        with th.inference_mode():
+            l1, f1, l2, f2 = m.detect_and_describe(t1, t2)
+        f1, f2, hw = f1.squeeze(0), f2.squeeze(0), th.tensor(t1.shape[2:])
+        th.manual_seed(3)
+        ref = KF.match_adalam(f1, f2, l1, l2, config=dict(m.adalam_config), hw1=hw, hw2=hw)
+        E.MATCH_SLICE_ELEMS = f2.shape[0] * 61
+        th.manual_seed(3)
+        got = E.match_adalam_sliced(f1, f2, l1, l2, dict(m.adalam_config), hw, hw)
+        check('slices: AdaLAM gives kornia\'s matches', ({tuple(r) for r in ref[1].tolist()}
+                                                        == {tuple(r) for r in got[1].tolist()}, len(ref[1]) > 50),
+              (True, True))
+        fg = E.match_fginn_sliced(f1, f2, l2, 0.8, 10.0, False)
+        c1, c2 = KF.get_laf_center(l1)[0], KF.get_laf_center(l2)[0]
+        d = (c1[fg[1][:, 0]] - c2[fg[1][:, 1]]).numpy()
+        check('slices: FGINN (row by row) finds the shift',
+              (len(d) > 50, float(np.mean((np.abs(d[:, 0] + 7) < 1.5) & (np.abs(d[:, 1] - 4) < 1.5))) > 0.85),
+              (True, True))
+    finally:
+        E.MATCH_SLICE_ELEMS = old
+    big = E.PipelineConfig(num_features=40000, use_amp=False)
+    m = E.build_detector('sift', big)
+    a = th.zeros(1, 40000, 128)
+    check('slices: used above the table limit only', (E._needs_slices(a[0], a[0]),
+                                                      E._needs_slices(a[0, :3000], a[0, :3000])), (True, False))
+    cfg = J._config_for(J.normalize({'max_num_features': 90000}), 3072, None, 45.0, '/tmp/x')
+    cfg2 = J._config_for(J.normalize({}), 3072, None, 45.0, '/tmp/x')
+    check('keypoints: the cap is a job setting (density kept at 3072 px when raised)',
+          (cfg.num_features, cfg2.num_features), (int(9000 * 3072 * 3072 / 1e6), 32000))
+
+
 def test_kornia_catalogue():
     """The matchers on a synthetic pair shifted by (7, -4) px: every kornia
     matcher recovers it, and LightGlue gets matches for SIFT / DoG-HardNet
@@ -1397,6 +1474,7 @@ def main():
         test_gpuaas_args(tmp)
         test_kornia_versions(tmp)
         test_warmup_and_padding()
+        test_sliced_matching()
         test_kornia_catalogue()
         if a.gui:
             test_gui_dialog()
