@@ -319,8 +319,8 @@ class IMWMatcher(E.DenseWindowMatcher):
             free = self._gpu_free_gb()
             if free is not None and free < need:
                 raise RuntimeError(f'only {free:.1f} GB GPU memory free (< {need} GB)')
-        u1 = (img1 * 255.0).clip(0, 255).astype(np.uint8)
-        u2 = (img2 * 255.0).clip(0, 255).astype(np.uint8)
+        u1 = _pad_for_model((img1 * 255.0).clip(0, 255).astype(np.uint8))
+        u2 = _pad_for_model((img2 * 255.0).clip(0, 255).astype(np.uint8))
         with th.inference_mode(), _imcui_hub():
             pred = self.api(cv2.cvtColor(u1, cv2.COLOR_GRAY2RGB), cv2.cvtColor(u2, cv2.COLOR_GRAY2RGB))
         # imcui's own geometric check first, raw matches if it rejected all
@@ -346,6 +346,22 @@ class IMWMatcher(E.DenseWindowMatcher):
             E.safe_cuda_empty_cache()
             gc.collect()
             print(f'[{self.get_detector_name()}] Model unloaded.')
+
+
+def _pad_for_model(a: np.ndarray, multiple: int = 32) -> np.ndarray:
+    """Pad a window (bottom / right, repeating the edge) so the model sees
+    sides that are a multiple of 32: some (TopicFM) fail on others, which is
+    every window cut at the image edge. A window larger than the resize cap is
+    padded to a square, so both sides stay multiples of 32 after imcui shrinks
+    it. Matches in the padding are dropped by the caller's bounds check."""
+    import imw_configs
+    h, w = a.shape[:2]
+    H, W = (max(h, w),) * 2 if max(h, w) > imw_configs.RESIZE_MAX else (h, w)
+    H += (-H) % multiple
+    W += (-W) % multiple
+    if (H, W) == (h, w):
+        return a
+    return np.pad(a, ((0, H - h), (0, W - w)), mode='edge')
 
 
 def save_match_image(out_root, tag, img1, img2, mkp1, mkp2, pair_id, wx, wy, max_lines=300):

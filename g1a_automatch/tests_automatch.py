@@ -379,6 +379,11 @@ def test_e2e_truth(tmp):
     check('truth e2e: manifest carries the run\'s truth RMSE',
           bool(man) and man[0].get('truth_rmse_m') not in (None, '') and float(man[0]['truth_rmse_m']) < 15.0)
     check('truth e2e: ranking printed', '[Truth]' in stdout and 'Best detector + matcher' in stdout)
+    tb = os.path.join(out, 'RIVAL_TRUTH_BEST_band1.csv')
+    rb = os.path.join(out, 'RIVAL_BEST_G1A_SYNTH_L1_band1.csv')
+    check('truth e2e: RIVAL_BEST is the configuration that agrees best with the truth; consensus pick kept aside',
+          (os.path.exists(tb), os.path.exists(rb) and open(rb, 'rb').read() == open(tb, 'rb').read(),
+           os.path.exists(os.path.join(out, 'RIVAL_CONSENSUS_BEST_G1A_SYNTH_L1_band1.csv'))), (True, True, True))
     # the same results against a truth that is 400 m off: re-scored without matching again
     res = subprocess.run([sys.executable, os.path.join(HERE, 'automatch_job.py'), 'compare', out, '--truth',
                           truth_file('truth_off.csv', 4413.0, -2487.0)], capture_output=True, text=True)
@@ -826,14 +831,14 @@ def test_imcui_mock():
         for row in res['not_offered']:
             by_kind.setdefault(row['kind'], {})[row['tag']] = row
         check('imcui: kornia-covered rows refused', sorted(by_kind.get('kornia', {})),
-              ['aliked-adalam', 'aliked-lg', 'dedode-nn', 'disk-adalam', 'disk-lg', 'hardnet-nn', 'loftr',
+              ['aliked-lg', 'dedode-nn', 'disk-adalam', 'disk-lg', 'hardnet-nn', 'loftr',
                'rootsift-nn', 'sift-lg', 'xfeat-dense'])
         use = {t: r['use'] for t, r in by_kind.get('kornia', {}).items()}
         check('imcui: refusals name the kornia replacement',
-              (use['hardnet-nn'], use['rootsift-nn'], use['disk-lg'], use['sift-lg'], use['aliked-adalam'],
+              (use['hardnet-nn'], use['rootsift-nn'], use['disk-lg'], use['sift-lg'], use['disk-adalam'],
                use['xfeat-dense']),
               ("'dog' (descriptor hardnet) with mnn", "'sift' (RootSIFT on) with mnn", "'disk' with lgm",
-               "'sift' with lgm", "'aliked' with ada", "'xfeatstar'"))
+               "'sift' with lgm", "'disk' with ada", "'xfeatstar'"))
         unavailable = by_kind.get('unavailable', {})
         check('imcui: rows the installed imcui lacks are reported',
               ('rord-nn' in unavailable and 'omniglue' in unavailable
@@ -942,6 +947,18 @@ def test_truth_helpers(tmp):
     truth2 = truth.assign(dE=truth['dE'] + 300.0)
     summ2, _ = T.score_config({'points': pts}, truth2, 5000.0)
     check('truth: a 300 m disagreement is measured', round(summ2['truth_rmse_m'] / 10) * 10, 300)
+    # a steep east-west gradient (60 m/km, as on G1A scenes) and a truth point at
+    # the edge of the matches: the median of the neighbours is pulled by the
+    # gradient, a plane through them is not
+    ge, gn = rng.uniform(0, 5000, 400), rng.uniform(-2500, 2500, 400)
+    steep = pd.DataFrame({'E': ge, 'N': gn, 'dE': 4000 + 0.06 * ge + rng.normal(0, 3, 400),
+                          'dN': -2500 + 0.01 * gn + rng.normal(0, 3, 400), 'chip': 0})
+    med = T.estimate(steep, None, 0.0, 0.0, 5000.0, local='median')
+    pla = T.estimate(steep, None, 0.0, 0.0, 5000.0, local='plane')
+    check('truth: with a steep gradient the plane removes the median\'s bias',
+          (abs(med[0] - 4000) > 100, abs(pla[0] - 4000) < 5, abs(pla[1] + 2500) < 5), (True, True, True))
+    line = steep.assign(N=0.0)
+    check('truth: neighbours on a line -> slope along it only', abs(T.estimate(line, None, 0.0, 0.0, 5000.0)[0] - 4000) < 5)
     ranked = T.rank(pd.DataFrame([{**summ, 'detector': 'a'}, {**summ2, 'detector': 'b'},
                                   {**summ, 'truth_reached': 0, 'truth_rmse_m': None, 'detector': 'c'}]))
     check('truth: ranking by coverage then RMSE', ranked['detector'].tolist(), ['a', 'b', 'c'])
@@ -1154,6 +1171,50 @@ def test_kornia_versions(tmp):
           order, {m: 'rasterio' for m in order})
 
 
+def test_warmup_and_padding():
+    """A model failing on the synthetic warm-up pair no longer stops its
+    detector (imcui SuperPoint found no keypoints in noise and was lost);
+    missing weights still do. imcui windows are padded to multiples of 32."""
+    import numpy as np
+    import automatch_engine as E
+    import automatch_imcui as IM
+    import imw_configs
+
+    class NoiseHater(E.DenseWindowMatcher):
+        def match_images(self, a, b):
+            raise IndexError('max(): Expected reduction dim 1 to have non-zero size.')
+
+        def get_detector_name(self):
+            return 'noisehater'
+
+    class NoWeights(NoiseHater):
+        def _build_models(self):
+            self._load_model('nowhere', lambda: (_ for _ in ()).throw(OSError('offline')))
+    cfg = E.PipelineConfig(num_features=100, use_amp=False)
+    try:
+        NoiseHater(cfg).warmup()
+        check('warmup: a failure on the synthetic pair is reported, not fatal', True)
+    except Exception as e:
+        check('warmup: a failure on the synthetic pair is reported, not fatal', f'{type(e).__name__}: {e}')
+    E.FAILED_MODELS.pop('nowhere', None)
+    try:
+        NoWeights(cfg).warmup()
+        check('warmup: missing weights still stop the detector', False)
+    except E.ModelLoadError:
+        check('warmup: missing weights still stop the detector', True)
+    finally:
+        E.FAILED_MODELS.pop('nowhere', None)
+    a = np.zeros((100, 70), np.uint8)
+    old = imw_configs.RESIZE_MAX
+    try:
+        shp = IM._pad_for_model(a).shape
+        imw_configs.RESIZE_MAX = 64
+        shp_big = IM._pad_for_model(a).shape
+    finally:
+        imw_configs.RESIZE_MAX = old
+    check('imcui padding: multiples of 32; a square when imcui will shrink it', (shp, shp_big), ((128, 96), (128, 128)))
+
+
 def test_kornia_catalogue():
     """The matchers on a synthetic pair shifted by (7, -4) px: every kornia
     matcher recovers it, and LightGlue gets matches for SIFT / DoG-HardNet
@@ -1321,6 +1382,7 @@ def main():
         test_server(tmp)
         test_gpuaas_args(tmp)
         test_kornia_versions(tmp)
+        test_warmup_and_padding()
         test_kornia_catalogue()
         if a.gui:
             test_gui_dialog()

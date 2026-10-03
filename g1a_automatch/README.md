@@ -238,17 +238,27 @@ After the run, **every configuration each detector ran** -- detector variant ×
 matcher × matcher setting × RANSAC setting, not only the one the consensus
 picked -- is scored against it:
 
-- at each truth point the configuration's own error is estimated: the median
-  of its matches within `truth_radius_m` (5 km), else its robust error
-  surface; points outside its coverage are listed as extrapolated and not
-  scored. Truth errors are recomputed from the lon/lat columns in the working
-  CRS, so the truth file's own X/Y grid does not matter;
+- at each truth point the configuration's own error is estimated from its
+  matches within `truth_radius_m` (5 km): a robust plane through them,
+  evaluated at the truth point, so the error gradient of a distorted scene
+  does not bias it (the median of the neighbours did: on a synthetic scene
+  with a 60 m/km east-west gradient it scored points that are accurate to
+  17 m at 82 m RMSE, the plane at 8 m; `compare --local median` gives the
+  earlier rule). Without neighbours, its robust error surface; points outside
+  its coverage are listed as extrapolated and not scored. Truth errors are
+  recomputed from the lon/lat columns in the working CRS, so the truth file's
+  own X/Y grid does not matter;
 - `TRUTH_BY_DETECTOR_MATCHER.csv`: each detector + matcher at its best setting,
   ranked by truth points reached, then RMSE of (tool − truth), with the bias
   (mean dE, dN) and the largest disagreement. `TRUTH_RANKING.csv` has every
   configuration, `TRUTH_POINTS.csv` every configuration × truth point;
 - the GUI shows the ranking when the run ends and adds `truth_rmse_m` to each
-  result row; `RUN_MANIFEST.csv` gets the same columns.
+  result row; `RUN_MANIFEST.csv` gets the same columns;
+- `RIVAL_TRUTH_BEST_<channel>.csv`: the points of the configuration ranked
+  first, for RIVAL. With ground truth, `RIVAL_BEST_*` is that file; the pick
+  of the chip consensus is kept as `RIVAL_CONSENSUS_BEST_*` (on the first G1A
+  scene the consensus picked a DeDoDe set 13 km off the truth: many
+  consistent but wrong matches outvote the right ones).
 
 Existing results can be scored again, e.g. with more truth points, without
 matching again:

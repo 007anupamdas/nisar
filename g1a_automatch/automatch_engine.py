@@ -2154,10 +2154,23 @@ class DiskBasedMatcher(BaseMatcher):
                 self._lightglue(self._lightglue_feature_name(), param)
 
     def warmup(self) -> None:
-        """Load every network this variant will use (its detector, and one
-        LightGlue per parameter set) on a tiny synthetic pair before any real
-        work, so missing weights stop the detector in seconds, not hours.
-        Raises ModelLoadError."""
+        """Build every network this variant will use (its detector, and one
+        LightGlue per parameter set) before any real work, so missing weights
+        stop the detector in seconds, not hours (ModelLoadError). The networks
+        then run once on a small synthetic pair; a failure there -- e.g. a model
+        that finds no keypoints in noise -- is only reported, since it said
+        nothing about the real windows (it used to stop the whole detector)."""
+        self.load_models()
+        try:
+            self._warmup_pass()
+        except ModelLoadError:
+            raise
+        except Exception as e:
+            print(f'[{self.get_filename_prefix()}] warm-up on a synthetic pair failed '
+                  f'({type(e).__name__}: {e}) -- carrying on with the real windows')
+        self._window_errors = 0
+
+    def _warmup_pass(self) -> None:
         rng = np.random.default_rng(0)
         img = (rng.random((256, 256)) * 1000.0 + 1.0).astype(np.float32)
         meta = {'x01': 0.0, 'y01': 0.0, 'xres1': 1.0, 'yres1': -1.0, 'x02': 0.0, 'y02': 0.0,
@@ -2171,7 +2184,6 @@ class DiskBasedMatcher(BaseMatcher):
             done.add(key)
             self._process_single_window(img, img.copy(), 0, 0, 0, 0, meta, name, param,
                                         nisar_nodata=0.0, s1_nodata=0.0)
-        self._window_errors = 0
 
     def _pass_label(self, matcher_name: str, param) -> str:
         """The matcher label the file names (and the truth ranking) use."""
@@ -2567,6 +2579,8 @@ class DiskBasedMatcher(BaseMatcher):
             if self.config.debug_mode or self._window_errors <= 3:
                 print(f'[{self.get_filename_prefix()}] window ({nisar_x},{nisar_y}) error: '
                       f'{type(e).__name__}: {e}')
+            if 'out of memory' in str(e).lower():
+                safe_cuda_empty_cache()   # or the next windows fail on the fragments
             return None
 
     # def _process_single_window(

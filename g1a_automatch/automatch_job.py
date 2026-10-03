@@ -648,6 +648,7 @@ def _compare_with_truth(job: Dict, out_root: str, working_crs: str, manifest: Li
     by = res['by_detector_matcher']
     emit({'event': 'truth', 'files': files, 'n_truth': len(res['truth']),
           'top': json.loads(by.head(30).to_json(orient='records')) if not by.empty else []})
+    files['best'] = res.get('best') or {}
     return files
 
 
@@ -761,6 +762,7 @@ def run_job(job: Dict) -> Dict:
         print(f'[Job] performance table not written: {type(e).__name__}: {e}')
 
     best_files = {}
+    truth_best = (truth_files or {}).get('best') or {}
     if not man.empty and 'rival_csv' in man.columns:
         ok = man[man['rival_csv'].notna()].copy()
         if not ok.empty:
@@ -768,12 +770,22 @@ def run_job(job: Dict) -> Dict:
             ok['_v'] = ok.get('validated_by_consensus', True).fillna(False).astype(bool)
             for ch, g in ok.groupby('channel'):
                 best = g.sort_values(['_v', '_rank', 'n_points'], ascending=False).iloc[0]
-                dst = os.path.join(out_root, f'RIVAL_BEST_{scene.name}_{ch}.csv')
+                # with ground truth, the consensus pick is only kept for reference:
+                # many consistent but wrong matches can win it
+                name = 'RIVAL_CONSENSUS_BEST' if str(ch) in truth_best else 'RIVAL_BEST'
+                dst = os.path.join(out_root, f'{name}_{scene.name}_{ch}.csv')
                 shutil.copyfile(best['rival_csv'], dst)
-                best_files[ch] = dst
-                print(f'[Job] best for {ch}: {best["detector"]} {best["sweep"]} '
-                      f'(mean dE {best["mean_dx_m"]:.1f} m, dN {best["mean_dy_m"]:.1f} m, '
-                      f'CE90 {best["ce90_m"]:.1f} m) -> {dst}')
+                if name == 'RIVAL_BEST':
+                    best_files[ch] = dst
+                print(f'[Job] {"best" if name == "RIVAL_BEST" else "consensus pick"} for {ch}: '
+                      f'{best["detector"]} {best["sweep"]} (mean dE {best["mean_dx_m"]:.1f} m, '
+                      f'dN {best["mean_dy_m"]:.1f} m, CE90 {best["ce90_m"]:.1f} m) -> {dst}')
+    for ch, b in truth_best.items():
+        dst = os.path.join(out_root, f'RIVAL_BEST_{scene.name}_{ch}.csv')
+        shutil.copyfile(b['csv'], dst)
+        best_files[ch] = dst
+        print(f"[Job] best for {ch} by ground truth: {b['detector']} + {b['matcher']} {b['ransac']} "
+              f"{b['sweep']} (truth RMSE {b['truth_rmse_m']:.1f} m) -> {dst}")
     emit({'event': 'done', 'manifest': man_path, 'best': best_files, 'truth': truth_files,
           'minutes': round((time.time() - t_job) / 60.0, 2)})
     print(f'[Job] done in {(time.time() - t_job) / 60.0:.1f} min; manifest {man_path}')

@@ -72,7 +72,8 @@ SPARSE_SPECS: List[Tuple[str, str, str]] = [
     ('hardnet-nn',   'hardnet',        'NN-mutual'),
 
     # ---- geometry-aware (AdaLAM) --------------------------------------------
-    ('aliked-adalam', 'aliked-n16',    'adalam'),
+    # ('aliked-adalam', 'aliked-n16', 'adalam'),  # imcui's AdaLAM needs keypoint scales,
+    #                                             # which ALIKED does not give ("Missing key scales0")
     ('disk-adalam',   'disk',          'adalam'),
 ]
 

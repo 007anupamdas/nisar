@@ -143,6 +143,7 @@ def config_points(run_dir_filtered: str, final_dir: str, chips: str = 'consensus
             continue
         p = E.MatchStatistics._parse_filename(files[0]) or {}
         out[key] = {
+            'files': files,
             'detector': _variant(files[0]), 'matcher': _matcher_label(p),
             'ransac': f"{p.get('ransac_method')}{float(p.get('ransac_threshold', 0)):g}",
             'channel': p.get('nisar_pol'),
@@ -205,12 +206,55 @@ def surface_at(surf: Dict, E0: float, N0: float) -> Tuple[float, float]:
     return float((A @ surf['ca'])[0]), float((A @ surf['cc'])[0])
 
 
+def local_plane(e: np.ndarray, n: np.ndarray, dE: np.ndarray, dN: np.ndarray, radius_m: float,
+                min_points: int = 12) -> Optional[Tuple[float, float]]:
+    """(dE, dN) at offset (0, 0) from a robust plane through the neighbours
+    (e, n = their offsets from the truth point). A median of the neighbours
+    is off by the error gradient times the distance between the truth point
+    and their centroid -- 40 m per km east-west on the G1A scenes, so up to
+    ~200 m within 5 km. The plane removes that. Along one axis only when the
+    neighbours lie on a line; None when they are too few or bunched."""
+    if len(dE) < min_points:
+        return None
+    X = np.column_stack([e, n])
+    cov = np.cov(X.T)
+    evals, evecs = np.linalg.eigh(cov)
+    spread = np.sqrt(np.clip(evals, 0, None))
+    if spread[1] < 0.1 * radius_m:
+        return None                                  # bunched: nothing to fit a slope to
+    if spread[0] < 0.1 * radius_m:                   # on a line: slope along it only
+        A = np.column_stack([np.ones(len(e)), X @ evecs[:, 1]])
+    else:
+        A = np.column_stack([np.ones(len(e)), e, n])
+    keep = np.ones(len(e), bool)
+    ca = cn = None
+    for _ in range(4):
+        if keep.sum() < A.shape[1] + 3:
+            return None
+        ca, *_ = np.linalg.lstsq(A[keep], dE[keep], rcond=None)
+        cn, *_ = np.linalg.lstsq(A[keep], dN[keep], rcond=None)
+        r = np.hypot(dE - A @ ca, dN - A @ cn)
+        mad = 1.4826 * np.median(np.abs(r[keep] - np.median(r[keep])))
+        new = r <= max(np.median(r[keep]) + 3.0 * mad, 1.0)
+        if new.sum() == keep.sum():
+            break
+        keep = new
+    return float(ca[0]), float(cn[0])
+
+
 def estimate(points: pd.DataFrame, surf: Optional[Dict], E0: float, N0: float, radius_m: float,
-             min_points: int = 5) -> Tuple[Optional[float], Optional[float], str, int]:
-    """(dE, dN, method, n used): local median, else surface, else nothing."""
+             min_points: int = 5, local: str = 'plane') -> Tuple[Optional[float], Optional[float], str, int]:
+    """(dE, dN, method, n used): from the neighbours within radius_m (a local
+    plane, or their median when local='median' or no plane fits), else the
+    surface, else nothing."""
     d = np.hypot(points['E'].values - E0, points['N'].values - N0)
     near = d <= radius_m
     if near.sum() >= min_points:
+        if local == 'plane':
+            fit = local_plane(points['E'].values[near] - E0, points['N'].values[near] - N0,
+                              points['dE'].values[near], points['dN'].values[near], radius_m)
+            if fit is not None:
+                return fit[0], fit[1], 'local', int(near.sum())
         return (float(np.median(points['dE'].values[near])), float(np.median(points['dN'].values[near])),
                 'local', int(near.sum()))
     if surf is None:
@@ -223,13 +267,13 @@ def estimate(points: pd.DataFrame, surf: Optional[Dict], E0: float, N0: float, r
     return dE, dN, ('surface' if inside else 'extrapolated'), 0
 
 
-def score_config(cfg: Dict, truth: pd.DataFrame, radius_m: float) -> Tuple[Dict, List[Dict]]:
+def score_config(cfg: Dict, truth: pd.DataFrame, radius_m: float, local: str = 'plane') -> Tuple[Dict, List[Dict]]:
     pts = cfg['points']
     surf = fit_surface(pts)
     rows, diffs = [], []
     counts = {'local': 0, 'surface': 0, 'extrapolated': 0, 'none': 0}
     for t in truth.itertuples():
-        dE, dN, how, n = estimate(pts, surf, t.E, t.N, radius_m)
+        dE, dN, how, n = estimate(pts, surf, t.E, t.N, radius_m, local=local)
         counts[how] += 1
         row = {'truth_id': t.truth_id, 'truth_E': t.E, 'truth_N': t.N, 'truth_dE_m': t.dE,
                'truth_dN_m': t.dN, 'tool_dE_m': dE, 'tool_dN_m': dN, 'method': how, 'n_points_used': n}
@@ -325,16 +369,19 @@ def working_crs_of(output_dir: str) -> Optional[str]:
 
 def compare(output_dir: str, truth_csv: str, radius_m: float = 5000.0, chips: str = 'consensus',
             working_crs: Optional[str] = None, write: bool = True, quiet: bool = False,
-            runs: Optional[List[Dict]] = None) -> Dict:
+            runs: Optional[List[Dict]] = None, local: str = 'plane',
+            max_points_per_chip: int = 200) -> Dict:
     """Score every configuration of the given runs ({'filtered_dir',
-    'final_dir', 'sweep'}; default: every run found under output_dir) and
-    write the TRUTH_* files. Returns {'by_detector_matcher', 'ranking',
-    'points', 'truth', 'crs'}."""
+    'final_dir', 'sweep'}; default: every run found under output_dir), write
+    the TRUTH_* files and, per channel, the RIVAL CSV of the configuration that
+    agrees best with the truth (RIVAL_TRUTH_BEST_<channel>.csv). Returns
+    {'by_detector_matcher', 'ranking', 'points', 'truth', 'crs', 'best'}."""
     crs = working_crs or working_crs_of(output_dir)
     if not crs:
         raise ValueError('working CRS unknown: pass working_crs (e.g. EPSG:32640)')
     truth = truth_in_crs(load_truth(truth_csv), crs)
     rows, point_rows = [], []
+    chip_files: Dict[Tuple, Tuple[str, List[str]]] = {}
     settings = consensus_settings(output_dir)
     for run in (runs if runs is not None else find_runs(output_dir)):
         timing = {}
@@ -342,7 +389,7 @@ def compare(output_dir: str, truth_csv: str, radius_m: float = 5000.0, chips: st
         if os.path.exists(tpath):
             timing = {r['matcher']: r for r in pd.read_csv(tpath).to_dict('records')}
         for key, cfg in config_points(run['filtered_dir'], run['final_dir'], chips, settings).items():
-            summary, prow = score_config(cfg, truth, radius_m)
+            summary, prow = score_config(cfg, truth, radius_m, local)
             t = timing.get(cfg['matcher'], {})
             summary['pass_seconds'] = t.get('seconds')
             summary['sec_per_window'] = t.get('sec_per_window')
@@ -350,6 +397,8 @@ def compare(output_dir: str, truth_csv: str, radius_m: float = 5000.0, chips: st
                     'matcher': cfg['matcher'], 'ransac': cfg['ransac'], 'chips': chips}
             rows.append({**base, **summary, 'filtered_dir': run['filtered_dir']})
             point_rows += [{**base, **r} for r in prow]
+            chip_files[(base['channel'], base['sweep'], base['detector'], base['matcher'], base['ransac'])] = \
+                (run['filtered_dir'], cfg['files'])
     ranking = rank(pd.DataFrame(rows))
     if not ranking.empty:
         ranking = ranking[[c for c in RANK_COLS if c in ranking.columns]
@@ -364,16 +413,49 @@ def compare(output_dir: str, truth_csv: str, radius_m: float = 5000.0, chips: st
     else:
         by = ranking
     points = pd.DataFrame(point_rows)
+    best: Dict[str, Dict] = {}
     if write:
         by.to_csv(os.path.join(output_dir, 'TRUTH_BY_DETECTOR_MATCHER.csv'), index=False)
         ranking.to_csv(os.path.join(output_dir, 'TRUTH_RANKING.csv'), index=False)
         points.to_csv(os.path.join(output_dir, 'TRUTH_POINTS.csv'), index=False)
+        best = write_truth_best(by, chip_files, crs, output_dir, max_points_per_chip)
     if not quiet:
-        print(format_ranking(by, len(truth), radius_m, chips))
-    return {'by_detector_matcher': by, 'ranking': ranking, 'points': points, 'truth': truth, 'crs': crs}
+        print(format_ranking(by, len(truth), radius_m, chips, local))
+        for ch, b in best.items():
+            print(f"[Truth] best for {ch}: {b['detector']} + {b['matcher']} {b['ransac']} -> {b['csv']}")
+    return {'by_detector_matcher': by, 'ranking': ranking, 'points': points, 'truth': truth, 'crs': crs,
+            'best': best}
 
 
-def score_detail_csv(detail_csv: str, truth: pd.DataFrame, radius_m: float = 5000.0) -> Dict:
+def write_truth_best(by: pd.DataFrame, chip_files: Dict, crs: str, output_dir: str,
+                     max_points_per_chip: int = 200) -> Dict[str, Dict]:
+    """RIVAL_TRUTH_BEST_<channel>.csv (+ _detail.csv): the points of the
+    configuration ranked first against the truth, for DPQED_rival.py."""
+    import automatch_rival as R
+    out: Dict[str, Dict] = {}
+    if by.empty:
+        return out
+    for ch, g in by.groupby('channel', sort=False):
+        top = g.sort_values('rank').iloc[0]
+        if pd.isna(top.get('truth_rmse_m')):
+            continue
+        key = (top['channel'], top['sweep'], top['detector'], top['best_matcher_setting'], top['ransac'])
+        if key not in chip_files:
+            continue
+        filtered_dir, files = chip_files[key]
+        pts = R.thin_per_chip(R.collect_points(filtered_dir, files), max_points_per_chip)
+        if pts.empty:
+            continue
+        path = os.path.join(output_dir, f'RIVAL_TRUTH_BEST_{ch}.csv')
+        R.write_rival_csv(pts, crs, path, path[:-4] + '_detail.csv')
+        out[str(ch)] = {'csv': path, 'detector': top['detector'], 'matcher': top['best_matcher_setting'],
+                        'ransac': top['ransac'], 'sweep': top['sweep'],
+                        'truth_rmse_m': float(top['truth_rmse_m'])}
+    return out
+
+
+def score_detail_csv(detail_csv: str, truth: pd.DataFrame, radius_m: float = 5000.0,
+                     local: str = 'plane') -> Dict:
     """Truth metrics of one exported point set (a run's RIVAL _detail.csv:
     In/Ref in the working CRS, one chip per source_file)."""
     d = pd.read_csv(detail_csv, encoding='utf-8-sig')
@@ -383,15 +465,17 @@ def score_detail_csv(detail_csv: str, truth: pd.DataFrame, radius_m: float = 500
                         'dE': d['In_X'].astype(float) - d['Ref_X'].astype(float),
                         'dN': d['In_Y'].astype(float) - d['Ref_Y'].astype(float),
                         'chip': d['source_file'] if 'source_file' in d.columns else 0})
-    summary, _ = score_config({'points': pts}, truth, radius_m)
+    summary, _ = score_config({'points': pts}, truth, radius_m, local)
     return summary
 
 
-def format_ranking(by: pd.DataFrame, n_truth: int, radius_m: float, chips: str, top: int = 20) -> str:
+def format_ranking(by: pd.DataFrame, n_truth: int, radius_m: float, chips: str, local: str = 'plane',
+                   top: int = 20) -> str:
     if by.empty:
         return '[Truth] no configuration to score'
-    lines = [f'[Truth] {n_truth} ground-truth point(s); tool error estimated within {radius_m / 1000:g} km '
-             f'(else from its error surface); {chips} chips. Best detector + matcher:',
+    how = 'a local plane through' if local == 'plane' else 'the median of'
+    lines = [f'[Truth] {n_truth} ground-truth point(s); tool error from {how} its matches within '
+             f'{radius_m / 1000:g} km (else its error surface); {chips} chips. Best detector + matcher:',
              f"  {'#':>3} {'channel':<8} {'detector':<26} {'matcher':<7} {'setting':<14} {'RMSE m':>8} "
              f"{'bias dE':>8} {'bias dN':>8} {'max m':>8} {'reached':>8} {'s/window':>9}"]
     for r in by.head(top).itertuples():
@@ -413,8 +497,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help='truth point to tool points: local neighbourhood (default 5 km)')
     ap.add_argument('--chips', choices=['consensus', 'all'], default='consensus')
     ap.add_argument('--crs', default='', help="working CRS if the folder does not record it (EPSG:326xx)")
+    ap.add_argument('--local', choices=['plane', 'median'], default='plane',
+                    help='tool error at a truth point: plane through its neighbours (default; follows the '
+                         'error gradient) or their median (the earlier rule)')
     a = ap.parse_args(argv)
-    res = compare(a.output_dir, a.truth, a.radius_km * 1000.0, a.chips, a.crs or None)
+    res = compare(a.output_dir, a.truth, a.radius_km * 1000.0, a.chips, a.crs or None, local=a.local)
     print(f"\n[Truth] written: {os.path.join(a.output_dir, 'TRUTH_BY_DETECTOR_MATCHER.csv')}, "
           f"TRUTH_RANKING.csv, TRUTH_POINTS.csv")
     return 0 if not res['ranking'].empty else 1
