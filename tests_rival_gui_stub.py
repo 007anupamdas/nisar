@@ -1621,6 +1621,120 @@ print("a writer that leaves no '.prj' gets one re-export in lon/lat, and the "
       "stale sidecar does not vouch for it")
 shutil.rmtree(shp_dir, ignore_errors=True)
 
+# ── 21. a reference pick drives the input, and Clear Rows asks first ─────────
+# Requested from use: marking on the input already brings the reference to the
+# point; a pick on the reference should bring the input to it as well, so a
+# row can be started from either side.
+for name in ("follow_input_point", "follow_reference_point",
+             "sync_canvas_extents", "draw_marker"):
+    setattr(win, name, getattr(R.QCDashboard, name).__get__(win))
+win.draw_marker        = MagicMock()
+win.show_reference_for = MagicMock(return_value=True)
+win.show_ref_at        = MagicMock()
+win._syncing           = False
+win._sync_tile_timer   = MagicMock()
+win.cb_sync.isChecked  = MagicMock(return_value=True)
+win.canvas_left.extent = MagicMock(return_value=_Rect(0.0, 0.0, 1000.0, 500.0))
+# QgsMapCanvas.setExtent emits extentsChanged before it returns, and that is
+# wired to sync_canvas_extents -- so the stub does the same, to prove the guard
+win.canvas_left.setExtent = MagicMock(
+    side_effect=lambda r: win.sync_canvas_extents())
+win.canvas_right.setExtent.reset_mock()
+
+def _centre(rect):
+    return ((rect.xMinimum() + rect.xMaximum()) / 2.0,
+            (rect.yMinimum() + rect.yMaximum()) / 2.0)
+
+# row 0 is complete: its reference sat 30 m west and 10 m north of its input,
+# so dx = +30, dy = -10. Row 1 is started from the RIGHT: reference only.
+done = ["1000.000", "1000.000", "970.000", "1010.000"]
+win.table = _SelTable([done, ["0.000", "0.000", "1970.000", "2010.000"]],
+                      current=1)
+win.follow_reference_point(_PointXY(1970.0, 2010.0))
+# In = Ref + (dx, dy): 30 m east, 10 m south of the reference pick
+rect = win.canvas_left.setExtent.call_args[0][0]
+assert _centre(rect) == (2000.0, 2000.0), _centre(rect)
+assert (rect.xMaximum() - rect.xMinimum(), rect.yMaximum() - rect.yMinimum()) \
+    == (1000.0, 500.0), "the input's zoom was not kept"
+marked, canvas, colour = win.draw_marker.call_args[0]
+assert (marked.x(), marked.y()) == (2000.0, 2000.0), marked
+assert canvas is win.canvas_left and colour == R.MARKER_COLOR_REF, colour
+assert win.table.written == [], "the predicted input reached the table"
+print("\na reference pick puts the input at Ref + (dx, dy), keeps its zoom, "
+      "marks it in the reference colour, and writes NOTHING")
+
+# the guard: the input moved, extentsChanged fired inside the move, and the
+# reference must not have been re-centred on the input's new centre -- that
+# would pull it off the pick by exactly the offset
+assert not win.canvas_right.setExtent.called, \
+    "Sync Maps moved the reference off the pick just made"
+assert not win._sync_tile_timer.start.called, "a tile swap was queued"
+assert win._syncing is False, "the guard was left set"
+print("Sync Maps does not answer that move by dragging the reference away")
+
+# a row whose input is already recorded goes to that pick, not a guess
+win.draw_marker.reset_mock()
+win.table = _SelTable([done, ["2500.000", "2600.000", "1970.000", "2010.000"]],
+                      current=1)
+win.follow_reference_point(_PointXY(1970.0, 2010.0))
+assert _centre(win.canvas_left.setExtent.call_args[0][0]) == (2500.0, 2600.0)
+assert not win.draw_marker.called, "a provisional cross was drawn over a pick"
+print("with an input already recorded, the input goes to it unmarked-over")
+
+# nothing measured yet: the input mirrors the reference exactly
+win.draw_marker.reset_mock()
+win.table = _SelTable([["0.000", "0.000", "500.000", "600.000"]], current=0)
+win.follow_reference_point(_PointXY(500.0, 600.0))
+assert _centre(win.canvas_left.setExtent.call_args[0][0]) == (500.0, 600.0)
+print("the first pick has nothing to go on and mirrors the reference")
+
+# and the other direction no longer paints a guess over a recorded reference:
+# started from the right, the first click on the left must leave it showing
+win.show_ref_at.reset_mock()
+win.table = _SelTable([done, ["2000.000", "2000.000", "1972.000", "2011.000"]],
+                      current=1)
+win.follow_input_point(_PointXY(2000.0, 2000.0))
+shown, colour = win.show_ref_at.call_args[0]
+assert (shown.x(), shown.y()) == (1972.0, 2011.0), shown
+assert colour == R.MARKER_COLOR_REF, colour
+print("an input pick on a row with a reference shows THAT reference, in its "
+      "own colour, not a predicted one")
+
+# the mark tool routes each canvas to its own follower
+win.follow_input_point     = MagicMock()
+win.follow_reference_point = MagicMock()
+win.calculate_error        = MagicMock()
+win._from_ref_canvas       = lambda pt: pt
+win.table = _SelTable([["0.000", "0.000", "0.000", "0.000"]], current=0)
+ref_tool = R.DragMapTool(win.canvas_right, win, False)
+ref_tool.toMapCoordinates = MagicMock(return_value=_PointXY(10.0, 20.0))
+ref_tool.canvasPressEvent(MagicMock())
+assert win.table.written == [(0, 2), (0, 3)], win.table.written
+assert win.follow_reference_point.called and not win.follow_input_point.called
+print("a press on the reference writes Ref X/Y and follows to the input")
+
+# Clear Rows: everything goes, so it asks, and No is the default
+class _Clearable(_SelTable):
+    def setRowCount(self, n): self._rows = self._rows[:n]
+win.clear_markers, win.update_stats = MagicMock(), MagicMock()
+win.table = _Clearable([done, ["5.000", "5.000", "0.000", "0.000"]], current=0)
+asked = []
+qw.QMessageBox.question = lambda *a, **k: asked.append(a) or qw.QMessageBox.No
+win.clear_rows()
+assert win.table.rowCount() == 2, "rows went without a yes"
+assert asked and "2 row(s)" in asked[0][2] and "1 of them" in asked[0][2], asked
+assert asked[0][4] == qw.QMessageBox.No, "No is not the default button"
+qw.QMessageBox.question = lambda *a, **k: qw.QMessageBox.Yes
+win.clear_rows()
+assert win.table.rowCount() == 0
+assert win.clear_markers.called and win.update_stats.called
+asked.clear()
+qw.QMessageBox.question = lambda *a, **k: asked.append(a) or qw.QMessageBox.Yes
+win.clear_rows()
+assert asked == [], "an empty table still asked"
+print("Clear Rows asks with No as default, counts the marked rows, and "
+      "clears the table, the crosses and the statistics on yes")
+
 for d in (d1, d2, d3, d4, d5, d6):
     shutil.rmtree(d, ignore_errors=True)
 print("\nstubbed integration OK")

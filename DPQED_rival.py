@@ -1186,6 +1186,8 @@ class DragMapTool(QgsMapTool):
         self.parent.calculate_error(row)
         if self.is_left_map:
             self.parent.follow_input_point(QgsPointXY(sx, sy))
+        else:
+            self.parent.follow_reference_point(QgsPointXY(sx, sy))
 
 
 # ── GCP NUMBER LABEL ──────────────────────────────────────────────────────────
@@ -1423,6 +1425,10 @@ class QCDashboard(QMainWindow):
             "bearing, so two scenes over one area overlay as quiver plots.")
         self.btn_del   = QPushButton("Delete Row")
         self.btn_del.setToolTip("Delete Row  (Ctrl+Delete)")
+        self.btn_clear = QPushButton("Clear Rows")
+        self.btn_clear.setToolTip(
+            "Remove every row from the table  (Ctrl+Shift+Delete).\n"
+            "Asks first: it cannot be undone, so export before if needed.")
         self.cb_sync      = QCheckBox("Sync Maps")
         self.cb_sync.setChecked(True)
         # One exclusive row of map tools, applied to both canvases at once.
@@ -1478,7 +1484,7 @@ class QCDashboard(QMainWindow):
         btn_layout = QHBoxLayout()
         for w in ([self.btn_input_tif, self.btn_reference_folder,
                    self.btn_load, self.btn_add, self.btn_save, self.btn_shp,
-                   self.btn_del]
+                   self.btn_del, self.btn_clear]
                   + [self.tool_buttons[m] for m in MAP_TOOLS]
                   + [self.cb_sync]):
             btn_layout.addWidget(w)
@@ -1500,6 +1506,7 @@ class QCDashboard(QMainWindow):
         self.btn_save.clicked.connect(self.save_csv)
         self.btn_shp.clicked.connect(self.save_shapefile)
         self.btn_del.clicked.connect(self.delete_row)
+        self.btn_clear.clicked.connect(self.clear_rows)
         self.table.itemChanged.connect(self.handle_manual_typing)
         self.table.itemSelectionChanged.connect(self.sync_view_to_row)
         self.canvas_left.extentsChanged.connect(self.sync_canvas_extents)
@@ -1518,6 +1525,8 @@ class QCDashboard(QMainWindow):
             self.save_shapefile)
         QShortcut(QKeySequence("Ctrl+O"),      self).activated.connect(self.load_csv_smart)
         QShortcut(QKeySequence("Ctrl+Delete"), self).activated.connect(self.delete_row)
+        QShortcut(QKeySequence("Ctrl+Shift+Delete"), self).activated.connect(
+            self.clear_rows)
         QShortcut(QKeySequence("F5"),          self).activated.connect(self.sync_view_to_row)
         QShortcut(QKeySequence("Escape"),      self).activated.connect(self.clear_markers)
         for i, mode in enumerate(MAP_TOOLS, start=1):
@@ -2034,17 +2043,61 @@ class QCDashboard(QMainWindow):
         Nothing here writes to the table. The mark is where to LOOK; the row's
         Ref X/Y stay empty until the reference canvas is actually clicked.
         """
-        if not PREDICT_REF_MARK:
+        off, n = self._predicted_offset_now()
+        if off is None:
             return pt, None, 0
+        return QgsPointXY(pt.x() - off[0], pt.y() - off[1]), off, n
+
+    def predicted_input_point(self, pt):
+        """Where a feature picked on the reference is expected on the input.
+
+        The inverse of predicted_reference_point: Ref = In - (dx, dy), so
+        In = Ref + (dx, dy). Same offset, same rows, same switch, and the same
+        rule that nothing is written -- the input's In X/Y stay empty until the
+        input canvas is clicked.
+        """
+        off, n = self._predicted_offset_now()
+        if off is None:
+            return pt, None, 0
+        return QgsPointXY(pt.x() + off[0], pt.y() + off[1]), off, n
+
+    def _predicted_offset_now(self):
+        """(offset, n) from the rows measured so far, the current row left out.
+
+        (None, 0) when PREDICT_REF_MARK is off or nothing has been measured.
+        """
+        if not PREDICT_REF_MARK:
+            return None, 0
         try:
             errs = self._measured_errors(skip_row=self.table.currentRow())
             off = predicted_offset(errs, PREDICT_FROM)
         except Exception as e:
             print(f"[PREDICT] {e}")
-            return pt, None, 0
-        if off is None:
-            return pt, None, 0
-        return QgsPointXY(pt.x() - off[0], pt.y() - off[1]), off, len(errs)
+            return None, 0
+        return (off, len(errs)) if off is not None else (None, 0)
+
+    def _row_point(self, row, col):
+        """The (col, col+1) pair of a row as a point, or None if it is unset.
+
+        (0, 0) is how a new row starts, not a position, so it reads as unset.
+        """
+        try:
+            x = float(self._cell_text(row, col))
+            y = float(self._cell_text(row, col + 1))
+        except (TypeError, ValueError, AttributeError):
+            return None
+        if x == 0.0 and y == 0.0:
+            return None
+        return QgsPointXY(x, y)
+
+    def _centre_input_on(self, pt):
+        """Centre the input canvas on a working-CRS point, keeping its zoom."""
+        extent = self.canvas_left.extent()
+        hw = (float(extent.xMaximum()) - float(extent.xMinimum())) / 2.0
+        hh = (float(extent.yMaximum()) - float(extent.yMinimum())) / 2.0
+        self.canvas_left.setExtent(QgsRectangle(
+            pt.x() - hw, pt.y() - hh, pt.x() + hw, pt.y() + hh))
+        self.canvas_left.refresh()
 
     def show_ref_at(self, pt, colour):
         """Put the reference canvas over a working-CRS point and mark it."""
@@ -2709,6 +2762,13 @@ class QCDashboard(QMainWindow):
             return
         self._syncing = True
         try:
+            # A row that already has its reference -- started from the right,
+            # or being re-marked -- shows that pick, not a guess drawn over it.
+            recorded = self._row_point(self.table.currentRow(), 2)
+            if recorded is not None:
+                if self.show_reference_for(recorded):
+                    self.show_ref_at(recorded, MARKER_COLOR_REF)
+                return
             guess, off, n = self.predicted_reference_point(pt)
             if not self.show_reference_for(guess):
                 return
@@ -2719,6 +2779,42 @@ class QCDashboard(QMainWindow):
                       f"{n} measured error(s) -- click the feature to record it")
         except Exception as e:
             print(f"[FOLLOW] {e}")
+        finally:
+            self._syncing = False
+
+    def follow_reference_point(self, pt):
+        """Point the input canvas at a position picked on the reference.
+
+        The mirror of follow_input_point, so a row can be started from either
+        canvas. If the row already has an input pick, the input view goes to it
+        -- that is the measurement this reference belongs to. If not, it goes
+        where the errors measured so far say the feature sits on the input,
+        In = Ref + (dx, dy), and a provisional cross is drawn there in the
+        reference's colour, because it mirrors the reference pick; clicking the
+        feature on the left records it and redraws it magenta. Nothing is
+        written to the table here.
+
+        The input moves under the _syncing guard. Without it, 'Sync Maps' would
+        answer the move by re-centring the reference on the input's new centre
+        -- pulling it off the pick that was just made by exactly the offset.
+        """
+        if self._syncing:
+            return
+        self._syncing = True
+        try:
+            recorded = self._row_point(self.table.currentRow(), 0)
+            if recorded is not None:
+                self._centre_input_on(recorded)
+                return
+            guess, off, n = self.predicted_input_point(pt)
+            self._centre_input_on(guess)
+            self.draw_marker(guess, self.canvas_left, MARKER_COLOR_REF)
+            if off is not None:
+                print(f"[PREDICT] input mark put {off[0]:+.3f} E "
+                      f"{off[1]:+.3f} N of the reference, the {PREDICT_FROM} of "
+                      f"{n} measured error(s) -- click the feature to record it")
+        except Exception as e:
+            print(f"[FOLLOW REF] {e}")
         finally:
             self._syncing = False
 
@@ -3325,6 +3421,30 @@ class QCDashboard(QMainWindow):
         ):
             self.table.removeRow(row)
         self.update_stats()
+
+    def clear_rows(self):
+        """Empty the table, after asking.
+
+        Delete Row takes the selected rows; this takes every one, and every
+        measurement with it, so it asks -- with No as the default -- and says
+        how many of the rows are fully marked, which is what an export would
+        have kept.
+        """
+        n = self.table.rowCount()
+        if n == 0:
+            return
+        marked = len(self._measured_errors())
+        answer = QMessageBox.question(
+            self, "Clear Rows",
+            f"Remove all {n} row(s)? {marked} of them are fully marked.\n\n"
+            f"This cannot be undone -- export first if you need them.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if answer != QMessageBox.Yes:
+            return
+        self.table.setRowCount(0)
+        self.clear_markers()
+        self.update_stats()
+        print(f"[TABLE] cleared {n} row(s), {marked} fully marked")
 
     # ── TIF LOADING & INIT ────────────────────────────────────────────────────
     def manual_load_tif(self, is_input):
