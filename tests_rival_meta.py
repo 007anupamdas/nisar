@@ -656,6 +656,29 @@ check("the override always writes lon/lat", f("wgs84", True, "EPSG:32644")[0], T
 check("and names itself as the reason", f("wgs84", True, "EPSG:32644")[1],
       "SHP_EXPORT_CRS='wgs84'")
 
+# ── 20. when a press on a canvas starts a new row ────────────────────────────
+print("\n-- starting rows by marking --")
+f = H["pick_starts_new_row"]
+#       on_input has_row has_in has_ref near  keep
+check("no row selected: a press on the input starts one",
+      f(True,  False, False, False, False), True)
+check("no row selected: so does a press on the reference",
+      f(False, False, False, False, False), True)
+check("an empty selected row is filled, not skipped",
+      f(True,  True,  False, False, False), False)
+check("a row with only its input is still open",
+      f(True,  True,  True,  False, False), False)
+check("a row started from the reference takes its input",
+      f(True,  True,  False, True,  False), False)
+check("a complete row: the next input press is the next point",
+      f(True,  True,  True,  True,  False), True)
+check("but a press on its own input mark refines it",
+      f(True,  True,  True,  True,  True),  False)
+check("and Shift always marks the selected row",
+      f(True,  True,  True,  True,  False, True), False)
+check("a complete row's reference is corrected, never a new row",
+      f(False, True,  True,  True,  False), False)
+
 print()
 if failures:
     print(f"{len(failures)} FAILURE(S)")

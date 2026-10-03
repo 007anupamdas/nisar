@@ -1735,6 +1735,128 @@ assert asked == [], "an empty table still asked"
 print("Clear Rows asks with No as default, counts the marked rows, and "
       "clears the table, the crosses and the statistics on yes")
 
+# ── 22. rows start by marking; 'Add Row' is no longer needed ────────────────
+# Requested from use: clicking Add Row before every point was the slowest part
+# of a session. A press starts a row when the selected one is complete.
+class _Item:
+    def __init__(self, t): self._t = str(t)
+    def text(self): return self._t
+
+class _LiveTable:
+    """A table that keeps what is written, and records the signal state."""
+    def __init__(self):
+        self.rows, self._cur, self.blocked = [], -1, False
+        self.selected_while_blocked = []
+    def rowCount(self): return len(self.rows)
+    def currentRow(self): return self._cur
+    def insertRow(self, r): self.rows.insert(r, [_Item("0.000")] * 6)
+    def setItem(self, r, c, item):
+        self.rows[r] = list(self.rows[r]); self.rows[r][c] = item
+    def item(self, r, c): return self.rows[r][c]
+    def setCurrentCell(self, r, c):
+        self._cur = r
+        self.selected_while_blocked.append(self.blocked)
+    def blockSignals(self, b): self.blocked = b
+    def scrollToItem(self, _): pass
+    def state(self): return 0
+    def cells(self, r): return [self.rows[r][c].text() for c in range(4)]
+
+R.QTableWidgetItem = _Item
+R.Qt.ShiftModifier = 0x02000000
+for name in ("row_for_pick", "_append_row", "focus_canvas", "select_gcp_at"):
+    setattr(win, name, getattr(R.QCDashboard, name).__get__(win))
+win.draw_marker = win.calculate_error = MagicMock()
+win.follow_input_point = win.follow_reference_point = MagicMock()
+win._from_ref_canvas = lambda pt: pt
+win.canvas_left.mapUnitsPerPixel = MagicMock(return_value=2.0)  # reach 20 m
+win.table = _LiveTable()
+left  = R.DragMapTool(win.canvas_left,  win, True)
+right = R.DragMapTool(win.canvas_right, win, False)
+
+def press(tool, x, y, shift=False):
+    tool.toMapCoordinates = MagicMock(return_value=_PointXY(x, y))
+    ev = MagicMock(modifiers=lambda: R.Qt.ShiftModifier if shift else 0)
+    tool.canvasPressEvent(ev)
+    tool.canvasReleaseEvent(ev)
+
+press(left, 1000.0, 1000.0)
+assert win.table.rowCount() == 1 and win.table.currentRow() == 0
+assert win.table.cells(0) == ["1000.000", "1000.000", "0.000", "0.000"]
+assert win.table.selected_while_blocked == [True], \
+    "the new row was selected with signals live -- the canvases would snap to (0, 0)"
+print("\nthe first press on an empty table starts row 1 and marks it, "
+      "without the selection snapping the canvases")
+
+press(right, 970.0, 1010.0)
+assert win.table.rowCount() == 1
+assert win.table.cells(0) == ["1000.000", "1000.000", "970.000", "1010.000"]
+press(right, 972.0, 1011.0)                  # a correction to that reference
+assert win.table.rowCount() == 1 and win.table.cells(0)[2:] == ["972.000",
+                                                                  "1011.000"]
+print("the reference fills the same row, and a second click corrects it")
+
+press(left, 1005.0, 1000.0)                  # 5 m from its own mark: refine
+assert win.table.rowCount() == 1 and win.table.cells(0)[:2] == ["1005.000",
+                                                                  "1000.000"]
+print("a press on the complete row's own input mark refines it")
+
+press(left, 2000.0, 2000.0)                  # open ground: the next point
+assert win.table.rowCount() == 2 and win.table.currentRow() == 1
+assert win.table.cells(1) == ["2000.000", "2000.000", "0.000", "0.000"]
+assert win.table.cells(0) == ["1005.000", "1000.000", "972.000", "1011.000"], \
+    "the finished row was overwritten"
+print("once a row is complete, a press elsewhere on the input starts row 2 "
+      "and leaves row 1 alone")
+
+press(left, 2500.0, 2500.0)                  # row 2 still open: moved, not added
+assert win.table.rowCount() == 2 and win.table.cells(1)[:2] == ["2500.000",
+                                                                  "2500.000"]
+print("a row still waiting for its reference is re-marked, not abandoned")
+
+press(right, 2470.0, 2510.0)
+win.table._cur = 0                           # back on the finished row 1
+press(left, 3000.0, 3000.0, shift=True)
+assert win.table.rowCount() == 2 and win.table.cells(0)[:2] == ["3000.000",
+                                                                  "3000.000"]
+print("Shift marks the selected row wherever the press is")
+
+# a press on another row's GCP still selects it, writing nothing
+win.table._cur = 1
+press(left, 3005.0, 3000.0)                  # 5 m from row 1's input
+assert win.table.rowCount() == 2 and win.table.currentRow() == 0
+print("a press on another row's GCP still selects that row")
+
+# the reference can start the very first row too
+win.table = _LiveTable()
+press(right, 500.0, 600.0)
+assert win.table.rowCount() == 1 and win.table.cells(0) == [
+    "0.000", "0.000", "500.000", "600.000"]
+print("with nothing selected, a press on the reference starts a row from there")
+
+# switched off: no row selected means nothing is marked, as before
+R.AUTO_ADD_ROWS = False
+win.table = _LiveTable()
+press(left, 1.0, 2.0)
+assert win.table.rowCount() == 0 and left.dragging is False
+R.AUTO_ADD_ROWS = True
+print("AUTO_ADD_ROWS=False restores 'Add Row first'")
+
+# hovering a canvas gives it the keyboard, unless a cell is being typed in
+win.canvas_left.setFocus.reset_mock()
+# real Qt's QObject.eventFilter returns False: "not handled, pass it on"
+qc.QObject.eventFilter = lambda self, obj, event: False
+nudge = R.ArrowNudgeFilter.__new__(R.ArrowNudgeFilter)
+nudge.dashboard, nudge.is_left_map = win, True
+R.QEvent.Enter, R.QEvent.KeyPress = "enter", "keypress"
+nudge.eventFilter(win.canvas_left, MagicMock(type=lambda: "enter"))
+assert win.canvas_left.setFocus.called, "hover did not give the canvas focus"
+win.canvas_left.setFocus.reset_mock()
+win.table.state = lambda: R.QTableWidget.EditingState
+nudge.eventFilter(win.canvas_left, MagicMock(type=lambda: "enter"))
+assert not win.canvas_left.setFocus.called, "hover stole focus from a cell edit"
+print("hovering a canvas gives it the arrow keys, but not mid-way through "
+      "typing a cell")
+
 for d in (d1, d2, d3, d4, d5, d6):
     shutil.rmtree(d, ignore_errors=True)
 print("\nstubbed integration OK")

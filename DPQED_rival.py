@@ -303,6 +303,19 @@ GCP_LABEL_FONT_PT   = 9
 GCP_CLICK_SELECTS_ROW = True
 GCP_PICK_RADIUS_PX    = 10
 
+# Rows are started by marking, not by 'Add Row'. A press on the input canvas
+# starts a new row when the selected one is already complete (input AND
+# reference) -- unless it lands on that row's own input mark, which refines it,
+# or Shift is held, which always marks the selected row. A row still missing
+# either pick is filled in rather than abandoned. The reference canvas never
+# starts a row while one is selected: a second click there is a correction to
+# the reference just picked, far more often than the start of a new point.
+AUTO_ADD_ROWS = True
+
+# Give a canvas the keyboard as soon as the cursor is over it, so the arrow-key
+# nudge works without clicking first. A table cell being typed into keeps it.
+CANVAS_FOCUS_ON_HOVER = True
+
 # An index states one box per image, nodata corners included, so a point can
 # sit inside two or three boxes and be in the fill of one of them -- and the
 # smallest box is as likely to be the empty one as any other. Before a tile is
@@ -607,6 +620,23 @@ def is_data_value(value, nodata, fill_values):
     except (TypeError, ValueError):
         pass
     return not any(v == float(f) for f in fill_values)
+
+
+def pick_starts_new_row(on_input, has_row, has_in, has_ref, near_own_input,
+                        keep_row=False):
+    """Whether a press on a canvas starts a new table row.
+
+    No row selected: always -- there is nowhere else for the pick to go.
+    Otherwise the selected row is marked, except in one case: it is already
+    complete, the press is on the input canvas, and it is not on that row's own
+    input mark. That is the next point being measured. keep_row (Shift) forces
+    the selected row whatever else holds.
+    """
+    if not has_row:
+        return True
+    if keep_row or not (has_in and has_ref):
+        return False
+    return bool(on_input and not near_own_input)
 
 
 def nearest_gcp(points, x, y, radius):
@@ -1144,8 +1174,17 @@ class DragMapTool(QgsMapTool):
         # A click on a GCP already recorded selects its row instead of writing
         # over it. Decided on the press: update_data runs on press, move AND
         # release, so anything later would already have overwritten the row.
-        if self.is_left_map and self.parent.select_gcp_at(
-                self.toMapCoordinates(e.pos())):
+        point = self.toMapCoordinates(e.pos())
+        if self.is_left_map and self.parent.select_gcp_at(point):
+            self.dragging = False
+            return
+        # Which row this pick belongs to -- starting one if it is a new point --
+        # is settled here too, once, so a drag keeps writing to the same row.
+        try:
+            keep = bool(e.modifiers() & Qt.ShiftModifier)
+        except Exception:
+            keep = False
+        if self.parent.row_for_pick(self.is_left_map, point, keep) < 0:
             self.dragging = False
             return
         self.dragging = True
@@ -1273,7 +1312,9 @@ class ArrowNudgeFilter(QObject):
 
     def eventFilter(self, obj, event):
         try:
-            if event.type() == QEvent.KeyPress:
+            if event.type() == QEvent.Enter:
+                self.dashboard.focus_canvas(self.is_left_map)
+            elif event.type() == QEvent.KeyPress:
                 delta = self._deltas().get(event.key())
                 if delta is not None:
                     step = NUDGE_PIXELS
@@ -1415,7 +1456,9 @@ class QCDashboard(QMainWindow):
         self.btn_load  = QPushButton("Load CSV")
         self.btn_load.setToolTip("Load CSV  (Ctrl+O)")
         self.btn_add   = QPushButton("Add Row")
-        self.btn_add.setToolTip("Add Row  (Ctrl+N)")
+        self.btn_add.setToolTip(
+            "Add Row  (Ctrl+N)\nNot needed to measure: marking on the input "
+            "starts a new row\nonce the selected one has both picks.")
         self.btn_save  = QPushButton("Export CSV")
         self.btn_save.setToolTip("Export CSV  (Ctrl+S)")
         self.btn_shp   = QPushButton("Export SHP")
@@ -3081,6 +3124,76 @@ class QCDashboard(QMainWindow):
         print(f"[GCP] {n} selected at ({x:.3f}, {y:.3f})")
         self.table.setCurrentCell(n - 1, 0)
         return True
+
+    def row_for_pick(self, on_input, point, keep_row=False):
+        """The row a press on a canvas marks, starting a new one if it should.
+
+        -1 means nothing is to be marked (no row, and AUTO_ADD_ROWS is off). See
+        pick_starts_new_row for the rule; the one thing measured here is
+        whether an input press lands on the selected row's own mark, which is
+        GCP_PICK_RADIUS_PX screen pixels -- the same reach a click on any other
+        GCP has.
+        """
+        row = self.table.currentRow()
+        if not AUTO_ADD_ROWS:
+            return row
+        has_row = row >= 0
+        inp = self._row_point(row, 0) if has_row else None
+        ref = self._row_point(row, 2) if has_row else None
+        near = False
+        if on_input and inp is not None:
+            try:
+                reach = self.canvas_left.mapUnitsPerPixel() * GCP_PICK_RADIUS_PX
+                near = math.hypot(point.x() - inp.x(),
+                                  point.y() - inp.y()) <= reach
+            except Exception as e:
+                print(f"[ROW] {e}")
+        if pick_starts_new_row(on_input, has_row, inp is not None,
+                               ref is not None, near, keep_row):
+            return self._append_row(on_input)
+        return row
+
+    def _append_row(self, on_input=True):
+        """Add an empty row at the end and make it the selected one.
+
+        Selected with the table's signals blocked. Selecting a row normally
+        snaps both canvases to it, and a new row is all zeros -- which would
+        blank the reference canvas at the very moment it is about to be used.
+        """
+        r = self.table.rowCount()
+        try:
+            self.table.blockSignals(True)
+            self.table.insertRow(r)
+            for i in range(6):
+                self.table.setItem(r, i, QTableWidgetItem("0.000"))
+            self.table.setCurrentCell(r, 0)
+        finally:
+            self.table.blockSignals(False)
+        try:
+            self.table.scrollToItem(self.table.item(r, 0))
+        except Exception:
+            pass
+        print(f"[ROW] {r + 1} started by a pick on the "
+              f"{'input' if on_input else 'reference'}")
+        return r
+
+    def focus_canvas(self, is_left_map):
+        """Give a canvas the keyboard as soon as the cursor is over it.
+
+        The arrow-key nudge only reaches a canvas with focus, and focus
+        otherwise stays where the last click was -- usually the table or a
+        button -- so the keys moved the table's cell instead of the mark. A cell
+        being typed into keeps it: taking focus away would commit a half-typed
+        value.
+        """
+        if not CANVAS_FOCUS_ON_HOVER:
+            return
+        try:
+            if self.table.state() == QTableWidget.EditingState:
+                return
+        except Exception:
+            pass
+        (self.canvas_left if is_left_map else self.canvas_right).setFocus()
 
     def clear_markers(self):
         for key, canvas in [("left", self.canvas_left), ("right", self.canvas_right)]:
