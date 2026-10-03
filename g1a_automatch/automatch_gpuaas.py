@@ -31,6 +31,11 @@ A job file may hold "mode":
                every weight choice of every detector is checked
     preflight  validate inputs, references and settings, no matching
                (PREFLIGHT.json)
+    compare    rank the configurations of a finished run against the job's
+               truth_csv again, without matching: the mode file names the run,
+               {"mode": "compare", "compare_dir": "/maintenance/.../output297"};
+               TRUTH_*.csv and RIVAL_TRUTH_BEST_*.csv go into that folder and
+               into this job's output folder
 A job file may also hold "env": {"NAME": "value"}: environment variables set
 before anything is imported (e.g. NISAR_IMW_RESIZE_MAX, NISAR_IMW_ONLY).
 The output folder of the request replaces the job file's output_dir.
@@ -51,7 +56,7 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 import automatch_native  # noqa: F401,E402  (rasterio's C++ runtime before any other)
 
-MODES = ('run', 'preflight', 'weights', 'env')
+MODES = ('run', 'preflight', 'weights', 'env', 'compare')
 
 
 def _value(text: str):
@@ -79,6 +84,7 @@ def build_job(argv: List[str]) -> Tuple[str, Dict]:
     job: Dict = {}
     mode = 'run'
     paths, overrides = [], {}
+    compare_dir = ""
     for t in tokens:
         if t.lower() in MODES:
             mode = t.lower()
@@ -86,6 +92,7 @@ def build_job(argv: List[str]) -> Tuple[str, Dict]:
             with open(t, encoding='utf-8-sig') as f:
                 d = json.load(f)
             mode = str(d.pop('mode', mode)).lower()
+            compare_dir = str(d.pop('compare_dir', '') or compare_dir)
             for k, v in (d.pop('env', None) or {}).items():
                 os.environ[str(k)] = str(v)
             job.update(d)
@@ -112,7 +119,10 @@ def build_job(argv: List[str]) -> Tuple[str, Dict]:
         job['output_dir'] = out_dir
         if not job.get('temp_dir'):
             job['temp_dir'] = os.path.join(out_dir, '_cache')
-    return mode, J.normalize(job)
+    job = J.normalize(job)
+    if mode == 'compare':
+        job['_compare_dir'] = compare_dir
+    return mode, job
 
 
 def environment_report(job: Dict) -> str:
@@ -187,6 +197,30 @@ def environment_report(job: Dict) -> str:
     return '\n'.join(lines)
 
 
+def compare_run(job: Dict) -> int:
+    """Rank a finished run's configurations against the truth again (e.g.
+    with a newer scoring rule or more truth points); nothing is matched."""
+    import shutil
+    import automatch_truth as T
+    src = job.get('_compare_dir') or ''
+    if not src or not os.path.isdir(src):
+        print(f"[GPUaaS] compare: 'compare_dir' in the mode file must be a finished run's output folder "
+              f"(got {src!r})")
+        return 2
+    if not job['truth_csv']:
+        print('[GPUaaS] compare: the settings have no truth_csv')
+        return 2
+    res = T.compare(src, job['truth_csv'], float(job['truth_radius_m']), 'consensus')
+    names = ['TRUTH_BY_DETECTOR_MATCHER.csv', 'TRUTH_RANKING.csv', 'TRUTH_POINTS.csv']
+    names += [os.path.basename(b['csv']) for b in res['best'].values()]
+    names += [n[:-4] + '_detail.csv' for n in names if n.startswith('RIVAL_TRUTH_BEST_')]
+    for n in names:
+        if os.path.exists(os.path.join(src, n)):
+            shutil.copyfile(os.path.join(src, n), os.path.join(job['output_dir'], n))
+    print(f"[GPUaaS] compare: results in {src} and {job['output_dir']}")
+    return 0 if not res['ranking'].empty else 1
+
+
 def main(argv: List[str] = None) -> int:
     argv = list(sys.argv if argv is None else argv)
     print(f'[GPUaaS] arguments: {argv[1:]}', flush=True)
@@ -203,6 +237,8 @@ def main(argv: List[str] = None) -> int:
           f"truth {job['truth_csv'] or '-'}, output {job['output_dir']}", flush=True)
 
     import automatch_job as J
+    if mode == 'compare':
+        return compare_run(job)
     if mode == 'env':
         text = environment_report(job)
         print(text)

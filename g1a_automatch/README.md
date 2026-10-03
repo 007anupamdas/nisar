@@ -350,6 +350,11 @@ GPU memory. `TRUTH_BY_DETECTOR_MATCHER.csv`: the accuracy ranking alone.
 
 Notes:
 - All paths in the settings are server paths (`/maintenance/...`), never `V:\`.
+- To rank a finished run again on the server (newer scoring rule, more truth
+  points), make a mode file `{"mode": "compare", "compare_dir": "/maintenance/.../output297"}`
+  and submit settings + that file (`max_gpu_mem_required` can be small: no
+  GPU is used). The truth comes from the settings' `truth_csv`; the TRUTH files
+  and `RIVAL_TRUTH_BEST_*.csv` go into that run's folder and the job's own.
 - To change a setting, edit `automatch_settings.json` on the server share (or
   re-run pack with other `--set` values: files already copied are kept).
 - `"env": {"NISAR_IMW_RESIZE_MAX": "3072"}` in the settings sets environment

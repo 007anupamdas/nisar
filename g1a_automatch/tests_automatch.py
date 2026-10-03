@@ -390,6 +390,20 @@ def test_e2e_truth(tmp):
     by2 = pd.read_csv(by_path)
     check('truth e2e: compare on existing results measures a 400 m disagreement',
           (res.returncode, round(float(by2.iloc[0]['truth_rmse_m']) / 50) * 50), (0, 400))
+    # the GPU service's compare mode re-scores a finished run, nothing matched again
+    st = os.path.join(tmp, 'cmp_settings.json')
+    md = os.path.join(tmp, 'mode_compare.json')
+    with open(st, 'w') as f:
+        json.dump({'truth_csv': job['truth_csv']}, f)
+    with open(md, 'w') as f:
+        json.dump({'mode': 'compare', 'compare_dir': out}, f)
+    o2 = os.path.join(tmp, 'o_compare')
+    res = subprocess.run([sys.executable, os.path.join(HERE, 'automatch_gpuaas.py'), 'id', o2, f'{st},{md}'],
+                         capture_output=True, text=True)
+    check('truth e2e: GPU-service compare mode re-scores a finished run into its output folder',
+          (res.returncode, os.path.exists(os.path.join(o2, 'TRUTH_BY_DETECTOR_MATCHER.csv')),
+           os.path.exists(os.path.join(o2, 'RIVAL_TRUTH_BEST_band1.csv')), 'Processing pair' in res.stdout),
+          (0, True, True, False))
     # a run whose consensus never ran (e.g. stopped by an unusable GCP file):
     # compare rebuilds it from the saved matches instead of matching again
     import glob as _glob
