@@ -778,6 +778,20 @@ def test_gui_dialog():
         check('gui: max keypoints reaches the job', w.get_job()['max_num_features'], 90000)
         w.settings = G.QtCore.QSettings(os.path.join(tempfile.mkdtemp(), 'gui_test.ini'), G.QtCore.QSettings.IniFormat
                                         if G.QT_API == 'PyQt5' else G.QtCore.QSettings.Format.IniFormat)
+        # the real button: its clicked signal passes checked=False, which once
+        # silently stopped the dialog from opening
+        opened = []
+        cls = G.PackDialog
+        name = 'exec' if hasattr(cls, 'exec') else 'exec_'
+        orig = getattr(cls, name)
+        setattr(cls, name, lambda self_: opened.append(self_) or 0)
+        try:
+            w.btn_pack.click()
+        finally:
+            setattr(cls, name, orig)
+        check('gui pack: the button opens the dialog', len(opened), 1)
+        for d_ in opened:
+            d_.close()
         pd_ = w.pack_dialog(run=False)
         pd_.local.setText('V:\\ICIGDev\\GPUPOC\\input\\dqe\\g1a\\set9')
         pd_.windows.setText('3072')

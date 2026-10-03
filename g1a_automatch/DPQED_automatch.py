@@ -1499,9 +1499,11 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             parts.append(f'{w} px: {n:,}' + (f' (capped; {want:,} at this density)' if want > cap else ''))
         self.lbl_kp.setText('auto gives ' + ' · '.join(parts) if parts else '')
 
-    def pack_dialog(self, run=True):
+    def pack_dialog(self, *_, run=True):
         """Pack the current job for the GPU server (automatch_pack) from a
-        dialog; run=False returns the dialog without showing it (tests)."""
+        dialog; run=False returns the dialog without showing it (tests).
+        run is keyword-only: a button's clicked signal passes checked=False
+        positionally, which used to land in run and the dialog never opened."""
         try:
             job = self.get_job()
         except ValueError as e:
