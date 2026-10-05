@@ -1065,6 +1065,14 @@ def test_truth_helpers(tmp):
     ranked = T.rank(pd.DataFrame([{**summ, 'detector': 'a'}, {**summ2, 'detector': 'b'},
                                   {**summ, 'truth_reached': 0, 'truth_rmse_m': None, 'detector': 'c'}]))
     check('truth: ranking by coverage then RMSE', ranked['detector'].tolist(), ['a', 'b', 'c'])
+    job315 = pd.DataFrame([
+        {'detector': 'gftt+nn', 'truth_total': 8, 'truth_reached': 8, 'truth_rmse_m': 63522.7},
+        {'detector': 'dkm', 'truth_total': 8, 'truth_reached': 6, 'truth_rmse_m': 237.6},
+        {'detector': 'few', 'truth_total': 8, 'truth_reached': 3, 'truth_rmse_m': 50.0},
+        {'detector': 'dkm-all', 'truth_total': 8, 'truth_reached': 8, 'truth_rmse_m': 237.6}])
+    check('truth: within the configurations reaching half the points, RMSE ranks before points reached '
+          '(job 315 picked a 63 km configuration that reached 8 of 8)',
+          T.rank(job315)['detector'].tolist(), ['dkm-all', 'dkm', 'gftt+nn', 'few'])
     # a RIVAL truth file: errors recomputed in the working CRS from lon/lat
     from pyproj import Transformer
     to_ll = Transformer.from_crs('EPSG:32640', 'EPSG:4326', always_xy=True)
@@ -1398,6 +1406,59 @@ def test_gpu_windows(tmp):
     check('gpu windows: the next channel / sweep point of the job starts at the size found',
           (E.GPU_WINDOWS.get(('sift', 1024)), s3.gpu_window), (512, 512))
     E.GPU_WINDOWS.clear()
+
+
+
+def test_jobs_312_317(tmp):
+    """From jobs 312-317: an empty CSV no longer loses PERFORMANCE.csv, a
+    narrow image still gets windows, DeDoDe's keypoints fit small windows, and
+    the warm-up uses a small keypoint budget."""
+    import numpy as np
+    import pandas as pd
+    import rasterio
+    import torch as th
+    import automatch_engine as E
+    import automatch_job as J
+    out = os.path.join(tmp, 'perf312')
+    fd = os.path.join(out, 'final_x')
+    os.makedirs(fd, exist_ok=True)
+    open(os.path.join(fd, 'PASS_TIMING.csv'), 'w').close()                 # empty, as in job 313
+    open(os.path.join(fd, 'CONSENSUS_SCORES_x.csv'), 'w').close()
+    open(os.path.join(out, 'TRUTH_RANKING.csv'), 'w').close()
+    try:
+        J._performance_table(out, [{'final_dir': fd, 'channel': 'band1', 'sweep': 's', 'detector': 'sift'}])
+        survived = True
+    except Exception as e:
+        survived = f'{type(e).__name__}: {e}'
+    check('performance table: empty CSV files are skipped (job 313 lost the whole table)', survived, True)
+
+    narrow = os.path.join(tmp, 'narrow.tif')
+    img, _ = _texture(1000, seed=11)
+    _write_tif(narrow, img[:300, :1000], 500000.0, 1600000.0, res=180.0)   # 54 x 180 km at 180 m
+    m = E.build_detector('sift', E.PipelineConfig(window_size=3072))
+    with rasterio.open(narrow) as src:
+        wins = m._determine_window_strategy(src, src)['windows']
+    check('window grid: a 300 px wide image (54 km at 180 m) gets a window (job 313 got none)',
+          wins, [(0, 0, 300, 1000)])
+
+    d = E.build_detector('dedode', E.PipelineConfig(num_features=32000))
+    check("dedode: keypoints capped at one per 16 pixels of the window (job 315: 'selected index k out "
+          "of range')", (d._keypoints_for(th.zeros(1, 1, 150, 150)), d._keypoints_for(th.zeros(1, 1, 2048, 2048))),
+          (1406, 32000))
+
+    class Probe(E.SIFTMatcher):
+        seen = []
+
+        def matcher_runs(self):
+            return [('smnn', 0.95)]
+
+        def _process_single_window(self, *a, **k):
+            Probe.seen.append(self.config.num_features)
+    cfg = E.PipelineConfig(num_features=32000)
+    p = Probe(cfg)
+    p._warmup_pass()
+    check('warm-up: a small keypoint budget for the 256 px pair, the window budget restored after '
+          '(job 316: DeDoDe + LightGlue asked for 3.6 GB)', (Probe.seen, cfg.num_features), ([2048], 32000))
 
 
 
@@ -1757,6 +1818,7 @@ def main():
         test_gpuaas_args(tmp)
         test_version_skew_and_coarse(tmp)
         test_gpu_windows(tmp)
+        test_jobs_312_317(tmp)
         test_kornia_versions(tmp)
         test_warmup_and_padding()
         test_sliced_matching()

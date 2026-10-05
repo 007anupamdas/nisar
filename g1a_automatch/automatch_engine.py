@@ -203,6 +203,12 @@ def safe_cuda_empty_cache():
         pass
 
 
+# The smallest window side matched (the smallest window_sizes a job may ask
+# for). It was 500 px: at 180 m a 54 km wide image is 300 px across, and job
+# 313 got no window at all on any of its 15 reference pairs.
+MIN_WINDOW_SIDE = 256
+
+
 class GpuOutOfMemory(RuntimeError):
     """A window ran out of GPU memory; raised on so that the window is
     matched again in smaller tiles."""
@@ -2361,13 +2367,27 @@ class DiskBasedMatcher(BaseMatcher):
                 'xres2': 1.0, 'yres2': -1.0, 'nisar_crop_row_offset': 0, 'nisar_crop_col_offset': 0,
                 'pair_id': 0, 'nisar_pol': 'warmup', 's1_ref_tag': 'warmup'}
         done = set()
-        for name, param in self.matcher_runs():
-            key = (name, repr(param)) if name == 'lgm' else (name,)
-            if key in done:
-                continue
-            done.add(key)
-            self._process_single_window(img, img.copy(), 0, 0, 0, 0, meta, name, param,
-                                        nisar_nodata=0.0, s1_nodata=0.0)
+        # a 256 px pair needs no more keypoints than this; with the window's
+        # 32000, DeDoDe + LightGlue asked for 3.6 GB on a 16 GB GPU (job 316)
+        n0 = self.config.num_features
+        self.config.num_features = min(int(n0), 2048)
+        try:
+            for name, param in self.matcher_runs():
+                key = (name, repr(param)) if name == 'lgm' else (name,)
+                if key in done:
+                    continue
+                done.add(key)
+                self._process_single_window(img, img.copy(), 0, 0, 0, 0, meta, name, param,
+                                            nisar_nodata=0.0, s1_nodata=0.0)
+        finally:
+            self.config.num_features = n0
+
+    def _keypoints_for(self, t: th.Tensor) -> int:
+        """The keypoint budget, but at most one keypoint per 16 pixels of this
+        image: DeDoDe takes the top n of its score map and fails on a window
+        with fewer pixels than n ('selected index k out of range', job 315)."""
+        h, w = int(t.shape[-2]), int(t.shape[-1])
+        return max(1, min(int(self.config.num_features), h * w // 16))
 
     def _pass_label(self, matcher_name: str, param) -> str:
         """The matcher label the file names (and the truth ranking) use."""
@@ -2491,7 +2511,7 @@ class DiskBasedMatcher(BaseMatcher):
             for y in range(0, nisar_src.width, base):
                 sx = min(base, nisar_src.height - x)
                 sy = min(base, nisar_src.width - y)
-                if sx < 500 or sy < 500:
+                if sx < MIN_WINDOW_SIDE or sy < MIN_WINDOW_SIDE:
                     continue
 
                 # Map window coords to overview space
@@ -3147,12 +3167,12 @@ class DeDoDeMatcher(DiskBasedMatcher):
 
         if img1.shape[2:] == img2.shape[2:]:
             inp = th.cat([img1_rgb, img2_rgb], dim=0)
-            keypoints, scores, descriptors = self.dedode(inp, n=self.config.num_features)
+            keypoints, scores, descriptors = self.dedode(inp, n=self._keypoints_for(img1))
             kps1, descs1 = keypoints[0], descriptors[0]
             kps2, descs2 = keypoints[1], descriptors[1]
         else:
-            kps1, _, descs1 = self.dedode(img1_rgb, n=self.config.num_features)
-            kps2, _, descs2 = self.dedode(img2_rgb, n=self.config.num_features)
+            kps1, _, descs1 = self.dedode(img1_rgb, n=self._keypoints_for(img1))
+            kps2, _, descs2 = self.dedode(img2_rgb, n=self._keypoints_for(img2))
             kps1 = kps1[0]
             descs1 = descs1[0]
             kps2 = kps2[0]

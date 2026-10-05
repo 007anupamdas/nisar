@@ -650,12 +650,17 @@ def _performance_table(out_root: str, manifest: List[Dict]) -> Optional[str]:
     there is one. Sorted by truth RMSE, else by chips kept."""
     import glob as _glob
     import pandas as pd
+    def read(path):         # an empty or cut-off file is skipped, not fatal (job 313)
+        try:
+            return pd.read_csv(path)
+        except Exception:
+            return pd.DataFrame()
     truth = {}
     tr = os.path.join(out_root, 'TRUTH_RANKING.csv')
     if os.path.exists(tr):
-        t = pd.read_csv(tr)
-        if not t.empty:
-            t = t.sort_values('truth_rmse_m', na_position='last')
+        t = read(tr)
+        if not t.empty:     # each detector + matcher at its best-ranked RANSAC setting
+            t = t.sort_values('rank') if 'rank' in t.columns else t.sort_values('truth_rmse_m', na_position='last')
             for key, g in t.groupby(['channel', 'sweep', 'detector', 'matcher'], sort=False):
                 truth[tuple(str(k) for k in key)] = g.iloc[0]
     rows = []
@@ -664,10 +669,10 @@ def _performance_table(out_root: str, manifest: List[Dict]) -> Optional[str]:
         if not isinstance(fd, str) or not os.path.isdir(fd):
             continue
         tp = os.path.join(fd, 'PASS_TIMING.csv')
-        timing = pd.read_csv(tp).to_dict('records') if os.path.exists(tp) else []
+        timing = read(tp).to_dict('records') if os.path.exists(tp) else []
         best = {}
         for sp in _glob.glob(os.path.join(fd, 'CONSENSUS_SCORES*.csv')):
-            sc = pd.read_csv(sp)
+            sc = read(sp)
             for r in sc.to_dict('records'):
                 lab = _matcher_label(r.get('match_method'), r.get('match_parameter'))
                 cur = best.get(lab)
@@ -687,27 +692,32 @@ def _performance_table(out_root: str, manifest: List[Dict]) -> Optional[str]:
                 'surface_rmse_m': b.get('surface_rmse_m'),
                 'best_ransac': (f"{b.get('ransac_method')}{float(b['ransac_threshold']):g}"
                                 if b.get('ransac_threshold') is not None else None),
+                'truth_rank': None if tru is None else tru.get('rank'),
                 'truth_rmse_m': None if tru is None else tru.get('truth_rmse_m'),
                 'truth_reached': None if tru is None else tru.get('truth_reached'),
+                'truth_total': None if tru is None else tru.get('truth_total'),
                 'truth_ransac': None if tru is None else tru.get('ransac'),
                 'detector_seconds': row.get('detector_seconds'), 'gpu_peak_gb': row.get('gpu_peak_gb'),
                 'gpu_window_px': row.get('gpu_window_px')})
     if not rows:
         return None
     df = pd.DataFrame(rows)
-    if df['truth_rmse_m'].notna().any():
-        df = df.sort_values(['truth_rmse_m', 'sec_per_window'], na_position='last')
+    if df['truth_rank'].notna().any():     # the order of TRUTH_RANKING.csv
+        df = df.sort_values(['truth_rank', 'sec_per_window'], na_position='last')
     else:
         df = df.sort_values(['chips_kept', 'sec_per_window'], ascending=[False, True], na_position='last')
     path = os.path.join(out_root, 'PERFORMANCE.csv')
     df.to_csv(path, index=False)
     print('[Job] detector + matcher performance (PERFORMANCE.csv):')
     print(f"  {'channel':<8} {'detector':<26} {'matcher':<12} {'s/window':>9} {'chips':>6} {'inliers':>8} "
-          f"{'truth RMSE m':>13} {'GPU GB':>7}")
+          f"{'truth RMSE m':>13} {'reached':>8} {'GPU GB':>7}")
     for r in df.head(40).itertuples():
         f = (lambda v, w, p=1: f'{v:{w}.{p}f}' if v is not None and not pd.isna(v) else f"{'-':>{w}}")
+        reached = ('-' if r.truth_reached is None or pd.isna(r.truth_reached)
+                   else f'{int(r.truth_reached)}/{int(r.truth_total)}')
         print(f"  {str(r.channel):<8} {str(r.detector):<26} {str(r.matcher):<12} {f(r.sec_per_window, 9, 2)} "
-              f"{f(r.chips_kept, 6, 0)} {f(r.inliers, 8, 0)} {f(r.truth_rmse_m, 13)} {f(r.gpu_peak_gb, 7, 1)}")
+              f"{f(r.chips_kept, 6, 0)} {f(r.inliers, 8, 0)} {f(r.truth_rmse_m, 13)} {reached:>8} "
+              f"{f(r.gpu_peak_gb, 7, 1)}")
     return path
 
 

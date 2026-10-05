@@ -295,14 +295,17 @@ def score_config(cfg: Dict, truth: pd.DataFrame, radius_m: float, local: str = '
 
 
 def rank(df: pd.DataFrame) -> pd.DataFrame:
-    """Most truth points reached first (at least half of them), then lowest RMSE."""
+    """Configurations that reach at least half of the truth points first; among
+    them the lowest RMSE, then the most points reached. (The number reached
+    used to come before the RMSE: in job 315 GFTT + NN, 63 km off at all 8
+    points, ranked above configurations within 250 m at 6 of 8.)"""
     if df.empty:
         return df
     df = df.copy()
     half = df['truth_total'] / 2.0
     df['_cover'] = (df['truth_reached'] >= half) & df['truth_rmse_m'].notna()
     df['_rmse'] = df['truth_rmse_m'].fillna(np.inf)
-    df = df.sort_values(['_cover', 'truth_reached', '_rmse'], ascending=[False, False, True])
+    df = df.sort_values(['_cover', '_rmse', 'truth_reached'], ascending=[False, True, False])
     df.insert(0, 'rank', range(1, len(df) + 1))
     return df.drop(columns=['_cover', '_rmse'])
 

@@ -256,9 +256,13 @@ picked -- is scored against it:
   recomputed from the lon/lat columns in the working CRS, so the truth file's
   own X/Y grid does not matter;
 - `TRUTH_BY_DETECTOR_MATCHER.csv`: each detector + matcher at its best setting,
-  ranked by truth points reached, then RMSE of (tool − truth), with the bias
-  (mean dE, dN) and the largest disagreement. `TRUTH_RANKING.csv` has every
-  configuration, `TRUTH_POINTS.csv` every configuration × truth point;
+  with the bias (mean dE, dN) and the largest disagreement. Ranked: the
+  configurations that reach at least half of the truth points first, among
+  them the lowest RMSE of (tool − truth), then the most points reached. (The
+  number reached used to come before the RMSE, and on job 315 a GFTT + NN
+  set 63 km off at all 8 points ranked above sets within 250 m at 6 of 8.)
+  `TRUTH_RANKING.csv` has every configuration, `TRUTH_POINTS.csv` every
+  configuration × truth point; `PERFORMANCE.csv` follows the same order;
 - the GUI shows the ranking when the run ends and adds `truth_rmse_m` to each
   result row; `RUN_MANIFEST.csv` gets the same columns;
 - `RIVAL_TRUTH_BEST_<channel>.csv`: the points of the configuration ranked
@@ -524,9 +528,12 @@ git push <new-repo-url> g1a-automatch:main
   by more than half of `max_expected_error_m`.
 - **Input pixel size:** with 315 m pixels (run 300) the coarse stage worked
   at 630 m, about 250 px across a scene of roughly 160 km, and 2048 px
-  windows were 645 km across: 4–6 chips, results tens of km off. Match the image at its native pixel size (G1A MX-VNIR is
-  45 m) with windows no larger than about a third of the scene; preflight
-  warns otherwise.
+  windows were 645 km across: 4–6 chips, results tens of km off. Jobs 312–317
+  read COGs at 180 m and 315 m: most reference pairs gave no window or one
+  (windows under 500 px a side were skipped; now under 256 px), and on job
+  313 (3072 px windows) no detector reached a consensus. Match the image at
+  its native pixel size (G1A MX-VNIR is 45 m) with windows no larger than
+  about a third of the scene; preflight warns otherwise.
 
 - **Mixed conda / pip environments (Linux):** if a pip wheel (pandas, torch)
   loads the system C++ runtime before conda-forge GDAL, rasterio fails with
