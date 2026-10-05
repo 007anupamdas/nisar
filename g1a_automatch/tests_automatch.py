@@ -447,6 +447,11 @@ def test_pack(tmp):
         check(f'pack {ref}: settings point at the server folder',
               (st['input_path'], st['reference_dir'], st['weights_cache_dir']),
               (f'{dest}/input/G1A_SYNTH_L1.tif', f'{dest}/reference/{ref}', '/srv/weights'))
+        report = open(os.path.join(dest, 'PACK_REPORT.txt')).read()
+        check(f'pack {ref}: only non-default settings written; the report names the code version',
+              ('max_num_features' in st, st['detectors'], J.AUTOMATCH_VERSION in report,
+               'channels, detectors, max_expected_error_m' in report),
+              (False, ['sift'], True, True))
         again = P.pack(job, dest, dest)
         check(f'pack {ref}: a second pack copies nothing again', (again['copied'], again['skipped'] > 0), (0, True))
     sh = open(os.path.join(dest, 'submit_gpuaas.sh')).read()
@@ -1132,6 +1137,131 @@ def test_gpuaas_args(tmp):
     check('selection: a job without "all" is left as it is', J.expand_selection(plain) is plain)
 
 
+def test_version_skew_and_coarse(tmp):
+    """From the uploaded runs: settings files that work across code versions
+    (jobs 304-307), the coarse stage on a 315 m image (run 300), preflight
+    warnings for scale, and the once-only GeoTIFF-keys CRS notice."""
+    import contextlib
+    import io
+    import logging
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_origin
+    import automatch_engine as E
+    import automatch_gpuaas as G
+    import automatch_job as J
+    import automatch_native as N
+    import automatch_pack as P
+
+    # settings from another version
+    J._WARNED_KEYS.discard('future_setting')
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        j1 = J.normalize({'detectors': ['sift'], 'future_setting': 3, '_note': 'x'})
+        J.normalize({'future_setting': 4})
+    check('settings: an unknown setting is ignored with one warning; "_" keys are dropped',
+          ('future_setting' in j1, '_note' in j1, j1['detectors'], buf.getvalue().count("'future_setting'")),
+          (False, False, ['sift'], 1))
+    check('settings: a near miss names the setting it resembles',
+          "did you mean 'window_sizes'" in J.unknown_key_note('window_size'))
+    jp = os.path.join(tmp, 'skew_job.json')
+    with open(jp, 'w') as f:
+        json.dump({'detectors': ['sift'], 'future_setting': 1}, f)
+    with contextlib.redirect_stdout(io.StringIO()):
+        loaded = J.load_job(jp)
+    try:
+        J.load_job(jp, ['window_size=[1024]'])
+        strict = False
+    except ValueError:
+        strict = True
+    check('settings: a job file with a newer setting loads; a mistyped --set is refused',
+          (loaded['detectors'], strict), (['sift'], True))
+    vl = J.version_line()
+    check('settings: version line names the version and an 8-hex code fingerprint',
+          (J.AUTOMATCH_VERSION in vl, len(J.code_fingerprint()), J.code_fingerprint() == J.code_fingerprint()),
+          (True, 8, True))
+    job = J.normalize({'input_path': '/a.tif', 'reference_dir': '/r', 'output_dir': '/o', 'window_sizes': [2048]})
+    st = P.server_settings(job)
+    old_keys = set(J.DEFAULT_JOB) - {'max_num_features'}       # the server's code behind jobs 304-307
+    check('pack: settings file holds the paths and only the settings that differ from the defaults',
+          (sorted(st), set(st) <= old_keys),
+          (['input_path', 'output_dir', 'reference_dir', 'temp_dir', 'window_sizes'], True))
+    sj = os.path.join(tmp, 'skew_settings.json')
+    with open(sj, 'w') as f:
+        json.dump({'detectors': ['sift'], 'future_setting': 1}, f)
+    with contextlib.redirect_stdout(io.StringIO()):
+        mode, gj = G.build_job(['s.py', 'id', '/out/z', f'/in/scene.tif,{sj}'])
+    check('gpuaas: a settings file with a newer setting runs, the setting noted for preflight',
+          (mode, gj['detectors'], gj.get('_ignored_keys')), ('run', ['sift'], ['future_setting']))
+
+    # coarse stage
+    al = E.CoarseAligner(E.PipelineConfig())
+    check('coarse: resolution no coarser than the pixels (315 m image: 315 m, not 630 m; 10 m: 60 m)',
+          (al._resolution({'xres1': 315.0, 'xres2': 315.0, 'bounds': [0, 0, 160000, 120000]}),
+           al._resolution({'xres1': 10.0, 'xres2': 10.0, 'bounds': [0, 0, 20000, 20000]})), (315.0, 60.0))
+    cfg = E.PipelineConfig()
+    km = 1000.0
+    pairs = [{'pair_id': i, 'bounds': [i * 20 * km, 0, i * 20 * km + 10 * km, 10 * km]} for i in range(1, 8)]
+    ests = {1: {'method': 'matcher@315m', 'dx': -1500.0, 'dy': 7100.0, 'field': None},
+            2: {'method': 'matcher@315m', 'dx': -1200.0, 'dy': 6900.0, 'field': None},
+            3: {'method': 'phasecorr@315m', 'dx': -1000.0, 'dy': 7500.0, 'field': None, 'peak': 0.2},
+            4: {'method': 'phasecorr@315m', 'dx': -27300.0, 'dy': -6600.0, 'field': None, 'peak': 0.1},
+            5: {'method': 'phasecorr@315m', 'dx': 3000.0, 'dy': -2500.0, 'field': None, 'peak': 0.1},
+            6: {'method': 'phasecorr@315m', 'dx': -76800.0, 'dy': -11600.0, 'field': None, 'peak': 0.1},
+            7: {'method': 'failed', 'dx': 0.0, 'dy': 0.0}}
+    before = E.AutoMatchPipeline._coarse_spread(ests)
+    with contextlib.redirect_stdout(io.StringIO()):
+        rep = E.AutoMatchPipeline._check_phasecorr_offsets(pairs, ests, cfg)
+    E.AutoMatchPipeline._borrow_failed_offsets(pairs, ests)
+    check('coarse: phase-correlation offsets far from every matcher offset are replaced (run 300)',
+          (rep, ests[3]['method'], ests[4]['method'], (ests[4]['dx'], ests[4]['dy']),
+           ests[7]['method'], before > 25 * km, E.AutoMatchPipeline._coarse_spread(ests) < km),
+          ([4, 5, 6], 'phasecorr@315m', 'from-pair-2 (phasecorr disagreed)', (-1200.0, 6900.0),
+           'from-pair-6', True, True))
+    grad = {i + 1: {'method': 'matcher@60m', 'dx': v * km, 'dy': 5 * km, 'field': None}
+            for i, v in enumerate((3.9, 1.1, -4.5, -6.0, -10.2))}
+    grad[6] = {'method': 'phasecorr@60m', 'dx': -7.2 * km, 'dy': 5.2 * km, 'field': None}
+    grad[7] = {'method': 'phasecorr@60m', 'dx': -12.5 * km, 'dy': 5.5 * km, 'field': None}
+    with contextlib.redirect_stdout(io.StringIO()):
+        rep = E.AutoMatchPipeline._check_phasecorr_offsets(pairs, grad, cfg)
+    check('coarse: offsets that vary across a distorted scene (run 297) are kept', rep, [])
+
+    # preflight: scale
+    p315 = os.path.join(tmp, 'coarse315.tif')
+    p45 = os.path.join(tmp, 'fine45.tif')
+    for path, res in ((p315, 315.0), (p45, 45.0)):
+        with rasterio.open(path, 'w', driver='GTiff', width=500, height=400, count=1, dtype='uint8',
+                           crs='EPSG:32643', transform=from_origin(500000, 1600000, res, res)) as dst:
+            dst.write(np.ones((1, 400, 500), dtype='uint8'))
+    w315 = J._scale_warnings(J.normalize({'window_sizes': [256, 2048]}), E.InputScene(p315, cfg), 315.0, E)
+    w45 = J._scale_warnings(J.normalize({'window_sizes': [256]}), E.InputScene(p45, cfg), 45.0, E)
+    check('preflight: coarse pixels, and windows larger than the image, are flagged (run 300)',
+          (len(w315), 'Pixel Size' in w315[0], w315[1].startswith('2048 px windows are 645 km'),
+           'here 256 px' in w315[1], w45), (2, True, True, True, []))
+    refd = os.path.join(tmp, 'skew_refs')
+    os.makedirs(refd, exist_ok=True)
+    with contextlib.redirect_stdout(io.StringIO()):
+        pf = J.preflight({'input_path': p315, 'reference_dir': refd, 'output_dir': os.path.join(tmp, 'skew_out'),
+                          'window_sizes': [2048], 'future_setting': 1}, check_weights=False)
+    check('preflight: lists ignored settings and the scale warnings',
+          (any("'future_setting'" in w for w in pf['warnings']), any('645 km' in w for w in pf['warnings'])),
+          (True, True))
+
+    # log: the GeoTIFF-keys CRS notice
+    N._OnceGeoKeysNotice.seen = False
+    flt = N._OnceGeoKeysNotice()
+
+    def rec(msg):
+        return logging.LogRecord('rasterio._env', logging.WARNING, '', 0, msg, None, None)
+    notice = ('CPLE_AppDefined in The definition of geographic CRS EPSG:4326 got from GeoTIFF keys is not '
+              'the same as the one from the EPSG registry')
+    check('log: the GeoTIFF-keys CRS notice is shown once, other warnings always',
+          (flt.filter(rec(notice)), flt.filter(rec(notice)), flt.filter(rec('something else')),
+           any(isinstance(f, N._OnceGeoKeysNotice) for f in logging.getLogger('rasterio._env').filters)),
+          (True, False, True, True))
+
+
+
 def test_kornia_versions(tmp):
     """A kornia without ALIKED / XFeat (the GPU node has 0.8.1): those detectors
     are not offered, imcui's ALIKED / XFeat are; native libraries load in the
@@ -1486,6 +1616,7 @@ def main():
         test_truth_helpers(tmp)
         test_server(tmp)
         test_gpuaas_args(tmp)
+        test_version_skew_and_coarse(tmp)
         test_kornia_versions(tmp)
         test_warmup_and_padding()
         test_sliced_matching()

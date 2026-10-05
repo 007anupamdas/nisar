@@ -21,7 +21,10 @@ It copies into --to:
                             shapefile, or each raster's sidecar), keeping
                             the folder layout -- not the whole collection
     truth/                  the ground-truth CSV (and manual GCP CSV), if set
-    automatch_settings.json the job, every path rewritten for the server
+    automatch_settings.json the paths, rewritten for the server, and only the
+                            settings that differ from the defaults (a server
+                            with older code still reads it unless a newer
+                            setting is actually used)
     mode_env.json, mode_weights.json, mode_preflight.json
                             one-line files that pick the check to run: the GPU
                             service accepts only existing paths in input_path,
@@ -253,6 +256,25 @@ def curl_command(input_path: str, code_path: str, url: str, conda_env: str, gpu_
             f'-H "X-User-Name: $(whoami)" -d \'{body}\'')
 
 
+PATH_KEYS = ('input_path', 'reference_dir', 'output_dir', 'temp_dir', 'weights_cache_dir',
+             'truth_csv', 'manual_gcp_csv')
+
+
+def server_settings(settings: Dict) -> Dict:
+    """What goes into automatch_settings.json: input, reference and output
+    paths, the other paths when set, and the settings that differ from the
+    defaults. Jobs 304-307 failed on a server whose older code rejected a
+    setting it did not know although it held the default value."""
+    import automatch_job as J
+    base = J.normalize({})
+    always = ('input_path', 'reference_dir', 'output_dir')
+    return {k: v for k, v in settings.items()
+            if not str(k).startswith('_') and
+            (k in always or (k in PATH_KEYS and v not in ('', None)) or
+             (k not in PATH_KEYS and json.dumps(v, sort_keys=True, default=str)
+              != json.dumps(base.get(k), sort_keys=True, default=str)))}
+
+
 def mode_inputs(server_dir: str) -> Dict[str, str]:
     """input_path for each mode: the settings file, plus a mode file for the
     checks (every item must be an existing path for the GPU service)."""
@@ -322,6 +344,7 @@ def pack(job: Dict, dest: str, server_dir: str, server_weights: str = '', server
     settings['output_dir'] = posixpath.join(server_dir, 'output')   # the GPU service replaces it
     settings['temp_dir'] = server_cache or ''
     settings['weights_cache_dir'] = server_weights or ''
+    settings = server_settings(settings)
     inputs = mode_inputs(server_dir)
 
     # de-duplicate (a sidecar can be both a companion and the footprint source)
@@ -351,7 +374,13 @@ def pack(job: Dict, dest: str, server_dir: str, server_weights: str = '', server
     copied, skipped = _run_plan(sized, dry_run)
 
     cmds = {m: curl_command(inputs[m], code_path, url, conda_env, gpu_mb) for m in MODES + ('run',)}
+    import automatch_job as J
+    changed = sorted(k for k in settings if k not in PATH_KEYS)
     report = [f"Packed for the server: {name}",
+              f"  packed with  : {J.version_line()}",
+              f"  the server must run the same code: copy this g1a_automatch folder to "
+              f"{posixpath.dirname(code_path)}; every log starts with the code it ran",
+              f"  settings that differ from the defaults: {', '.join(changed) or 'none'}",
               f"  image footprint from: {foot_src}",
               f"  reference collection: {ref_root} ({cat['mode']}, {len(cat['footprints'])} footprints)",
               f"  references within {float(job['max_expected_error_m']) / 1000:g} km "

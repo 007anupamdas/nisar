@@ -119,7 +119,10 @@ def build_job(argv: List[str]) -> Tuple[str, Dict]:
         job['output_dir'] = out_dir
         if not job.get('temp_dir'):
             job['temp_dir'] = os.path.join(out_dir, '_cache')
+    ignored = J.unknown_keys(job)
     job = J.normalize(job)
+    if ignored:              # for PREFLIGHT.json and job_gpuaas.json
+        job['_ignored_keys'] = ignored
     if mode == 'compare':
         job['_compare_dir'] = compare_dir
     return mode, job
@@ -130,7 +133,9 @@ def environment_report(job: Dict) -> str:
     raises (each part reports its own failure)."""
     import importlib
     import platform
-    lines = ['== Python',
+    import automatch_job as J
+    lines = ['== Code', f'  {J.version_line()}',
+             '== Python',
              f'  {sys.executable}  {platform.python_version()}  on {platform.platform()}',
              f"  conda env: {os.environ.get('CONDA_DEFAULT_ENV', '-')}  ({os.environ.get('CONDA_PREFIX', '-')})",
              f"  user: {os.environ.get('USER') or os.environ.get('USERNAME') or '-'}  "
@@ -224,6 +229,8 @@ def compare_run(job: Dict) -> int:
 def main(argv: List[str] = None) -> int:
     argv = list(sys.argv if argv is None else argv)
     print(f'[GPUaaS] arguments: {argv[1:]}', flush=True)
+    import automatch_job as J
+    print(f'[GPUaaS] {J.version_line()}', flush=True)
     os.environ.setdefault('AUTOMATCH_EVENTS', '0')    # no GUI progress lines in the service log
     mode, job = build_job(argv)
     if not job['output_dir']:
@@ -236,7 +243,6 @@ def main(argv: List[str] = None) -> int:
     print(f"[GPUaaS] mode {mode}: input {job['input_path']}, reference {job['reference_dir']}, "
           f"truth {job['truth_csv'] or '-'}, output {job['output_dir']}", flush=True)
 
-    import automatch_job as J
     if mode == 'compare':
         return compare_run(job)
     if mode == 'env':

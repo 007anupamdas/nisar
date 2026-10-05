@@ -29,6 +29,7 @@ Progress is printed as lines starting with '@@AUTOMATCH ' followed by JSON.
 
 import argparse
 import copy
+import difflib
 import hashlib
 import json
 import math
@@ -44,6 +45,32 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
 PROGRESS_PREFIX = '@@AUTOMATCH '
+
+# Printed at the start of every run log and in PACK_REPORT.txt, so a log says
+# which code made it. Not a job key: settings files stay readable by other
+# versions.
+AUTOMATCH_VERSION = '2026.10.05'
+CODE_FILES = ('automatch_engine.py', 'automatch_job.py', 'automatch_imcui.py', 'automatch_refs.py',
+              'automatch_rival.py', 'automatch_truth.py', 'automatch_weights.py', 'automatch_gpuaas.py',
+              'automatch_native.py', 'imw_configs.py')
+
+
+def code_fingerprint() -> str:
+    """Short hash of the modules a run uses (line endings ignored): the same
+    on the workstation and the server only when both have the same code."""
+    h = hashlib.sha1()
+    for name in CODE_FILES:
+        try:
+            with open(os.path.join(HERE, name), 'rb') as f:
+                data = f.read().replace(b'\r\n', b'\n')
+        except OSError:
+            data = b'missing'
+        h.update(name.encode() + b'\0' + data + b'\0')
+    return h.hexdigest()[:8]
+
+
+def version_line() -> str:
+    return f'automatch {AUTOMATCH_VERSION}, code {code_fingerprint()} ({HERE})'
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Job specification
@@ -141,12 +168,31 @@ JOB_HELP = {
 }
 
 
+_WARNED_KEYS = set()
+
+
+def unknown_keys(job: Dict) -> List[str]:
+    """Settings this version does not have ('_' keys are internal notes)."""
+    return sorted(k for k in job if k not in DEFAULT_JOB and not str(k).startswith('_'))
+
+
+def unknown_key_note(key: str) -> str:
+    near = difflib.get_close_matches(key, list(DEFAULT_JOB), n=1, cutoff=0.75)
+    why = (f'did you mean {near[0]!r}?' if near else
+           'written by a newer version? copy the current g1a_automatch folder here')
+    return f'setting {key!r} is not used by this version (automatch {AUTOMATCH_VERSION}), ignored -- {why}'
+
+
 def normalize(job: Dict) -> Dict:
+    """The job with every default filled in. Settings this version does not
+    know are ignored with a warning (once per setting), so a settings file
+    from another version still runs; '_' keys are dropped silently."""
     out = copy.deepcopy(DEFAULT_JOB)
-    unknown = sorted(set(job) - set(DEFAULT_JOB))
-    if unknown:
-        raise ValueError(f'Unknown job key(s): {unknown}')
-    out.update(copy.deepcopy(job))
+    for k in unknown_keys(job):
+        if k not in _WARNED_KEYS:
+            _WARNED_KEYS.add(k)
+            print(f'[Job] WARNING: {unknown_key_note(k)}', flush=True)
+    out.update(copy.deepcopy({k: v for k, v in job.items() if k in DEFAULT_JOB}))
     if not out['temp_dir'] and out['output_dir']:
         out['temp_dir'] = os.path.join(out['output_dir'], '_cache')
     for k in ('window_sizes', 'num_features', 'detectors', 'smnn_thresholds',
@@ -171,6 +217,8 @@ def load_job(path: str, overrides: Optional[List[str]] = None) -> Dict:
         if '=' not in ov:
             raise ValueError(f'--set expects key=value, got {ov!r}')
         k, v = ov.split('=', 1)
+        if k.strip() not in DEFAULT_JOB:     # typed just now, for this version: a typo
+            raise ValueError(f'--set {k.strip()}: {unknown_key_note(k.strip())}')
         try:
             job[k.strip()] = json.loads(v)
         except ValueError:
@@ -292,11 +340,39 @@ def _check_gcp_file(path: str) -> List[str]:
     return [f'manual_gcp_csv lacks the columns {sorted(missing)} (needs {sorted(GCP_COLUMNS)})']
 
 
+COARSE_INPUT_M = 100.0     # G1A MX-VNIR is 45 m; coarser than this is worth a second look
+
+
+def _scale_warnings(job: Dict, scene, res: float, E) -> List[str]:
+    """Settings that cannot work at this image's scale (run 300: a 315 m
+    image matched in 2048 px windows, each 645 km across, on a scene about
+    160 km wide: one chip per reference, one model for the whole scene)."""
+    out = []
+    if res > COARSE_INPUT_M:
+        out.append(f'working resolution {res:g} m is coarse (G1A MX-VNIR is 45 m): if this image should be '
+                   f'finer, check its pixel size (gdalinfo: "Pixel Size") and leave Target resolution empty')
+    if scene.kind != 'raster' or not scene.native_res:
+        return out
+    with E.rt.open(scene.raster_path) as src:
+        w_km = src.width * abs(src.transform.a) / 1000.0
+        h_km = src.height * abs(src.transform.e) / 1000.0
+    short_px = min(w_km, h_km) * 1000.0 / res
+    suggest = max(256, int(short_px / 3) // 64 * 64)
+    for w in sorted(set(int(v) for v in job['window_sizes'])):
+        if w > short_px:
+            out.append(f'{w} px windows are {w * res / 1000:.0f} km across at {res:g} m, larger than the image '
+                       f'({w_km:.0f} x {h_km:.0f} km): each reference gives at most one chip and one model '
+                       f'covers the whole scene. Use about a third of the image, here {suggest} px')
+    return out
+
+
 def preflight(job: Dict, check_weights: bool = True) -> Dict:
     """Validate a job without matching. {'errors', 'warnings', 'info'}.
     check_weights: also look for every model weight file the job will load
     (missing ones are warnings: they download on first use when online)."""
     errors, warnings, info = [], [], {}
+    warnings += [unknown_key_note(k) for k in
+                 dict.fromkeys(list(job.get('_ignored_keys') or []) + unknown_keys(job))]
     job = normalize(job)
 
     if not job['input_path'] or not os.path.exists(job['input_path']):
@@ -355,6 +431,8 @@ def preflight(job: Dict, check_weights: bool = True) -> Dict:
         if res is None and scene.kind == 'raster':
             warnings.append('input is in lon/lat; set target_resolution (metres) explicitly')
         info['working_resolution_m'] = res
+        if res:
+            warnings += _scale_warnings(job, scene, float(res), E)
     except Exception as e:
         errors.append(f'input unreadable: {type(e).__name__}: {e}')
         scene = None
@@ -681,6 +759,7 @@ def run_job(job: Dict) -> Dict:
 
     out_root = job['output_dir']
     E.setup_logging(out_root, 'automatch.log')
+    print(f'[Job] {version_line()}')
     with open(os.path.join(out_root, 'job_used.json'), 'w', encoding='utf-8') as f:
         json.dump(job, f, indent=2)
     E.set_device(job['device'])

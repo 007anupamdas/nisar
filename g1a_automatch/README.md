@@ -84,10 +84,17 @@ Windows compared at the same map position cannot match when the error is
 
 1. References are searched, and cropped, **`max_expected_error_m` beyond** the
    declared overlap.
-2. Per image/reference pair, a **coarse offset** is estimated at ~60 m:
-   the selected matcher first (robust 2-D mode of all match offsets), then
-   phase correlation of gradient magnitude, then `initial_offset_m` if given.
-   Every estimate is written to `raw_matches_*/COARSE_OFFSETS.csv`.
+2. Per image/reference pair, a **coarse offset** is estimated at ~60 m (at
+   the image's own pixel size when that is coarser, and coarser still for
+   very large pairs): the selected matcher first (robust 2-D mode of all
+   match offsets), then phase correlation of gradient magnitude, then
+   `initial_offset_m` if given. All pairs share one image, so the estimates
+   are then checked against each other: a phase-correlation offset more
+   than 5 km (or 3 x `search_margin_m`) from every offset the matcher
+   measured in the scene is replaced by the nearest matcher pair's offset,
+   as a failed pair is (`from-pair-N (phasecorr disagreed)` in the log).
+   When the pairs still differ by more than half of `max_expected_error_m`,
+   the log warns. Every estimate is written to `raw_matches_*/COARSE_OFFSETS.csv`.
 3. Fine windows read the reference **shifted by that offset and padded by
    `search_margin_m`**. The final errors are measured from the matched
    coordinates themselves, so they contain the full offset.
@@ -286,7 +293,14 @@ the workstation; the server is only reached through the GPU service.
 
 **1. Copy the code once.** Copy this folder to the server's exe folder, e.g.
 `V:\ICIGDev\GPUPOC\exe\g1a_automatch` (= `/maintenance/ICIGDev/GPUPOC/exe/g1a_automatch`).
-Copy it again after updating the code.
+Copy it again after updating the code, **into the folder the curl's
+`code_path` names** (pack's default is `/maintenance/ICIGDev/GPUPOC/exe/anup/nisar/g1a_automatch/`).
+Every log starts with the code it ran, `automatch 2026.10.05, code 1a2b3c4d (<folder>)`,
+and `PACK_REPORT.txt` shows the workstation's: the two fingerprints match
+only when the server runs the same code. A settings file holds the paths and
+only the settings that differ from the defaults, and a setting the server's
+code does not know is ignored with a warning (`PREFLIGHT.json` lists it) --
+code older than 2026.10.05 refuses it instead: `Unknown job key(s)` (jobs 304–307).
 
 **2. Make a job in the GUI on the workstation**, as for a local run (input,
 reference folder, Ground truth CSV, Manual GCP CSV empty, detectors,
@@ -341,7 +355,7 @@ then the same with `mode_weights.json`, `mode_preflight.json`, and finally
 |---|---|---|
 | settings + `mode_env.json` | packages and versions, GPU and free memory, internet, weight folders, detector list on the node | `ENVIRONMENT.txt` |
 | settings + `mode_weights.json` | every weight file the selection needs, found or missing (nothing downloaded) | `WEIGHTS_REPORT.txt` |
-| settings + `mode_preflight.json` | image, references, truth, settings; number of matching passes | `PREFLIGHT.json` |
+| settings + `mode_preflight.json` | image, references, truth, settings; number of matching passes; warns about pixels coarser than 100 m, windows larger than the image and settings the code does not know | `PREFLIGHT.json` |
 | settings alone | the run | `PERFORMANCE.csv`, `TRUTH_BY_DETECTOR_MATCHER.csv`, `RUN_MANIFEST.csv`, `rival/`, `automatch.log` |
 
 If `weights` lists missing files (a detector the NISAR runs never used),
@@ -480,6 +494,18 @@ git push <new-repo-url> g1a-automatch:main
 (or simply copy this folder).
 
 ## Known limits
+
+- **Coarse offsets of dense matchers:** RoMa, DKM, GIM, XoFTR and similar
+  sometimes return a confident but wrong coarse offset for a few pairs (run
+  297: 3 of 22 pairs for MINIMA-RoMa, which still scored 326 m because the
+  chip consensus dropped those chips). Only phase-correlation offsets are
+  checked against the matcher pairs; the log warns when the pairs disagree
+  by more than half of `max_expected_error_m`.
+- **Input pixel size:** with 315 m pixels (run 300) the coarse stage worked
+  at 630 m, about 250 px across a scene of roughly 160 km, and 2048 px
+  windows were 645 km across: 4–6 chips, results tens of km off. Match the image at its native pixel size (G1A MX-VNIR is
+  45 m) with windows no larger than about a third of the scene; preflight
+  warns otherwise.
 
 - **Mixed conda / pip environments (Linux):** if a pip wheel (pandas, torch)
   loads the system C++ runtime before conda-forge GDAL, rasterio fails with

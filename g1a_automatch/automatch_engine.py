@@ -1539,8 +1539,10 @@ class CoarseAligner:
         return data, tfm
 
     def _resolution(self, pair: Dict) -> float:
+        # never coarser than the images themselves need: at 2x a 315 m pixel
+        # (run 300) a 160 km scene was ~250 px and phase correlation went wrong
         base = max(abs(pair['xres1']), abs(pair['xres2']))
-        res = max(self.config.coarse_resolution_m, 2.0 * base)
+        res = max(self.config.coarse_resolution_m, base)
         # keep the larger image under coarse_max_px on its long side
         longest = max(abs(pair['bounds'][2] - pair['bounds'][0]),
                       abs(pair['bounds'][3] - pair['bounds'][1])) + 2 * self.config.max_expected_error_m
@@ -4800,7 +4802,14 @@ class AutoMatchPipeline:
                         ests[pid] = aligner.estimate(pair, None if matcher_free else matcher)
                         if matcher_free:
                             shared_coarse[pid] = ests[pid]
+                self._check_phasecorr_offsets(disk_pairs, ests, cfg)
                 self._borrow_failed_offsets(disk_pairs, ests)
+                spread = self._coarse_spread(ests)
+                if spread > 0.5 * cfg.max_expected_error_m:
+                    print(f'[Coarse] WARNING: {tag}: the pairs\' coarse offsets differ by up to '
+                          f'{spread / 1000:.0f} km, more than one image moves from place to place. Pairs with '
+                          f'a wrong offset match the wrong ground (the chip consensus drops them when they '
+                          f'are few); if most pairs disagree, check the input\'s pixel size and window size.')
                 for pair in disk_pairs:
                     pid = pair['pair_id']
                     est = ests[pid]
@@ -4901,6 +4910,62 @@ class AutoMatchPipeline:
         if cfg.cleanup_after_pair and disk_pairs:
             shutil.rmtree(os.path.dirname(disk_pairs[0]['nisar_path']), ignore_errors=True)
         return run_records
+
+    @staticmethod
+    def _centre(p: Dict) -> Tuple[float, float]:
+        b = p['bounds']
+        return (b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0
+
+    @staticmethod
+    def _check_phasecorr_offsets(pairs: List[Dict], ests: Dict[int, Dict], cfg) -> List[int]:
+        """Phase correlation can lock onto a wrong peak (run 300: 22 of 25
+        pairs 10-90 km off, while the pairs the matcher measured agreed with
+        the ground truth). All pairs share one input image, so a phase-
+        correlation offset further than max(5 km, 3 x search_margin_m) from
+        every offset the matcher measured in this scene (each pair's value
+        and its field cells, which carry the scene's own distortion) is
+        replaced the way a failed pair borrows: the nearest matcher pair's
+        field at this pair's centre. Returns the replaced pair ids."""
+        mats = [p for p in pairs if str(ests[p['pair_id']]['method']).startswith('matcher')]
+        if not mats:
+            return []
+        seen = []
+        for p in mats:
+            e = ests[p['pair_id']]
+            seen.append((e['dx'], e['dy']))
+            if e.get('field'):
+                seen += list(zip(np.ravel(e['field']['dx']), np.ravel(e['field']['dy'])))
+        seen = np.asarray(seen, dtype=float)
+        tol = max(5000.0, 3.0 * float(cfg.search_margin_m or 0.0))
+        replaced = []
+        for p in pairs:
+            pid = p['pair_id']
+            e = ests[pid]
+            if not str(e['method']).startswith('phasecorr'):
+                continue
+            gap = float(np.nanmin(np.hypot(seen[:, 0] - e['dx'], seen[:, 1] - e['dy'])))
+            if gap <= tol:
+                continue
+            cx, cy = AutoMatchPipeline._centre(p)
+            src = min(mats, key=lambda q: math.hypot(AutoMatchPipeline._centre(q)[0] - cx,
+                                                     AutoMatchPipeline._centre(q)[1] - cy))
+            g = ests[src['pair_id']]
+            dx, dy = field_offset(g['field'], cx, cy) if g.get('field') else (g['dx'], g['dy'])
+            print(f'[Coarse] pair {pid}: phase correlation gave dE={e["dx"]:.0f} m dN={e["dy"]:.0f} m, '
+                  f'{gap / 1000:.1f} km from every offset the matcher measured; using pair {src["pair_id"]}\'s '
+                  f'(dE={dx:.0f} m dN={dy:.0f} m)')
+            ests[pid] = {'dx': float(dx), 'dy': float(dy), 'support': None, 'n': None,
+                         'peak': e.get('peak'), 'field': None, 'margin_scale': 2.0,
+                         'method': f'from-pair-{src["pair_id"]} (phasecorr disagreed)'}
+            replaced.append(pid)
+        return replaced
+
+    @staticmethod
+    def _coarse_spread(ests: Dict[int, Dict]) -> float:
+        """Largest difference between the pairs' coarse offsets, in either axis."""
+        v = np.asarray([(e['dx'], e['dy']) for e in ests.values()
+                        if e['method'] not in ('failed', 'none')], dtype=float)
+        return float(np.ptp(v, axis=0).max()) if len(v) > 1 else 0.0
 
     @staticmethod
     def _borrow_failed_offsets(pairs: List[Dict], ests: Dict[int, Dict]) -> None:
