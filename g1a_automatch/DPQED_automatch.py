@@ -810,6 +810,14 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
                                  '(e.g. 90000 for 3072 px on a 40 GB GPU); matching is done in slices, so '
                                  'memory stays bounded, but time grows with the count.')
         f.addRow('Max keypoints per window', self.max_feat)
+        self.gpu_win = QtWidgets.QSpinBox()
+        self.gpu_win.setRange(0, 16384)
+        self.gpu_win.setSingleStep(256)
+        self.gpu_win.setSpecialValueText('automatic: each detector finds what fits the GPU')
+        self.gpu_win.setToolTip('Largest piece of a window a detector matches at once. A larger window is '
+                                'matched in tiles whose matches are pooled into the window. Automatic: start '
+                                'whole and cut into smaller tiles whenever the GPU runs out of memory.')
+        f.addRow('GPU window (px)', self.gpu_win)
         self.lbl_kp = QtWidgets.QLabel('')
         self.lbl_kp.setWordWrap(True)
         f.addRow('', self.lbl_kp)
@@ -953,6 +961,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.nfeat.setText(fmt_list(j['num_features']))
         self.kp_density.setValue(int(j['keypoint_density']))
         self.max_feat.setValue(int(j.get('max_num_features') or 32000))
+        self.gpu_win.setValue(int(j.get('gpu_window_px') or 0))
         self._update_kp_label()
         self.target_res.setText('' if j['target_resolution'] is None else f"{j['target_resolution']:g}")
         self.max_err.setValue(float(j['max_expected_error_m']) / 1000.0)
@@ -1020,6 +1029,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             'num_features': parse_int_list(self.nfeat.text(), 'keypoints', allow_auto=True) or [None],
             'keypoint_density': self.kp_density.value(),
             'max_num_features': self.max_feat.value(),
+            'gpu_window_px': self.gpu_win.value(),
             'target_resolution': float(tr) if tr else None,
             'max_expected_error_m': self.max_err.value() * 1000.0,
             'coarse_method': self.coarse.currentText(),

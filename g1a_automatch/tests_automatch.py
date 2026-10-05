@@ -501,6 +501,20 @@ def test_e2e(tmp):
         print(f'      {ref}: {len(pts)} points, mean dE {mdx:.1f} m (true {dE}), dN {mdy:.1f} m (true {dN})')
         check(f'{ref}: dE within half a pixel', abs(mdx - dE) < 10.0)
         check(f'{ref}: dN within half a pixel', abs(mdy - dN) < 10.0)
+    # as on a GPU that cannot hold 1024 px: every window matched in 512 px tiles
+    out = os.path.join(tmp, 'out_C1_tiles')
+    rc = _run_job({'input_path': data['input'], 'reference_dir': data['C1'], 'output_dir': out,
+                   'channels': ['band1'], 'detectors': ['sift'], 'window_sizes': [1024], 'gpu_window_px': 512,
+                   'max_expected_error_m': 10000, 'smnn_thresholds': [0.95], 'use_amp': False}, tmp)
+    best = os.path.join(out, 'RIVAL_BEST_G1A_SYNTH_L1_band1.csv')
+    got = None
+    if rc == 0 and os.path.exists(best):
+        import pandas as pd
+        pts = AR.read_rival_csv(best)
+        man = pd.read_csv(os.path.join(out, 'RUN_MANIFEST.csv'))
+        got = (abs(float((pts.ix - pts.rx).mean()) - dE) < 10.0, abs(float((pts.iy - pts.ry).mean()) - dN) < 10.0,
+               int(man['gpu_window_px'].iloc[0]))
+    check('C1 in 512 px tiles: dE, dN within half a pixel; manifest records the GPU window', got, (True, True, 512))
 
 
 def test_nisar_h5(tmp):
@@ -781,6 +795,10 @@ def test_gui_dialog():
               ('1024 px: 9,437' in w.lbl_kp.text(), '3072 px: 32,000 (capped; 84,934' in w.lbl_kp.text()), (True, True))
         w.max_feat.setValue(90000)
         check('gui: max keypoints reaches the job', w.get_job()['max_num_features'], 90000)
+        w.gpu_win.setValue(1024)
+        check('gui: GPU window reaches the job (0 = automatic)',
+              (w.get_job()['gpu_window_px'], w.gpu_win.minimum()), (1024, 0))
+        w.gpu_win.setValue(0)
         w.settings = G.QtCore.QSettings(os.path.join(tempfile.mkdtemp(), 'gui_test.ini'), G.QtCore.QSettings.IniFormat
                                         if G.QT_API == 'PyQt5' else G.QtCore.QSettings.Format.IniFormat)
         # the real button: its clicked signal passes checked=False, which once
@@ -853,7 +871,7 @@ def test_imcui_mock():
 
     class API:
         def __init__(self, conf, device, detect_threshold, max_keypoints, match_threshold):
-            pass
+            self.max_keypoints = max_keypoints
 
         def __call__(self, a, b):
             ys, xs = np.mgrid[20:a.shape[0] - 20:25, 20:a.shape[1] - 20:25]
@@ -911,6 +929,39 @@ def test_imcui_mock():
             check('imcui: map offset from pixel shift', (round(dx, 3), round(dy, 3)), (930.0, -40.0))
             check('imcui: file id parses', E.MatchStatistics._parse_filename(
                 rec['file_id'] + '_aff_magsac_2_0.99_.csv')['detector'], 'imw-sp-lg')
+
+        class OOMOnLarge:     # a model that runs out of GPU memory above 400 px
+            def __init__(self, inner):
+                self.inner, self.sizes = inner, []
+
+            def __call__(self, a, b):
+                self.sizes.append(a.shape[0])
+                if a.shape[0] > 400:
+                    raise E.th.cuda.OutOfMemoryError('CUDA out of memory. Tried to allocate 12.88 GiB')
+                return self.inner(a, b)
+        import rasterio
+        tmpd = tempfile.mkdtemp(prefix='imcui_tiles_')
+        try:
+            timg, _ = _texture(600, seed=7)
+            pin, pref = os.path.join(tmpd, 'in.tif'), os.path.join(tmpd, 'ref.tif')
+            _write_tif(pin, timg, 500000.0, 1600000.0)
+            _write_tif(pref, timg, 500000.0, 1600000.0)
+            m2 = E.build_detector('imw-sp-lg', E.PipelineConfig(window_size=600, num_features=2000))
+            m2._ensure_api()
+            m2.api = first = OOMOnLarge(m2.api)
+            with rasterio.open(pin) as a, rasterio.open(pref) as b:
+                recs = m2._process_windows_from_disk(a, b, _pair_meta(a, b), {'windows': [(0, 0, 600, 600)]},
+                                                     'internal', None)
+            pooled = recs[0] if len(recs) == 1 else None
+            check('imcui: out of memory at 600 px -> 300 px tiles, the model rebuilt with a quarter of '
+                  'the keypoints, matches pooled into the window',
+                  (first.sizes[:1], m2.gpu_window, getattr(m2.api, 'max_keypoints', None),
+                   pooled is not None and min(pooled['x1']) < 300 < max(pooled['x1'])
+                   and min(pooled['y1']) < 300 < max(pooled['y1'])),
+                  ([608], 300, 1000, True))
+        finally:
+            shutil.rmtree(tmpd, ignore_errors=True)
+            E.GPU_WINDOWS.clear()
         # per-model parameters come from the registry conf; overridden keys hidden
         names = [p.name for p in E.detector_param_specs('imw-sp-lg')]
         check('imcui params: thresholds + registry keys, API-owned keys hidden',
@@ -1259,6 +1310,94 @@ def test_version_skew_and_coarse(tmp):
           (flt.filter(rec(notice)), flt.filter(rec(notice)), flt.filter(rec('something else')),
            any(isinstance(f, N._OnceGeoKeysNotice) for f in logging.getLogger('rasterio._env').filters)),
           (True, False, True, True))
+
+
+
+def _write_tif(path, arr, x0, y0, res=10.0):
+    import rasterio
+    from rasterio.transform import from_origin
+    with rasterio.open(path, 'w', driver='GTiff', width=arr.shape[1], height=arr.shape[0], count=1,
+                       dtype='float32', crs='EPSG:32643', transform=from_origin(x0, y0, res, res)) as d:
+        d.write(arr.astype('float32'), 1)
+
+
+def _pair_meta(a, b):
+    return {'x01': a.transform.c, 'y01': a.transform.f, 'xres1': a.transform.a, 'yres1': a.transform.e,
+            'x02': b.transform.c, 'y02': b.transform.f, 'xres2': b.transform.a, 'yres2': b.transform.e,
+            'nisar_crop_row_offset': 0, 'nisar_crop_col_offset': 0, 'pair_id': 1, 'nisar_pol': 'band1',
+            's1_ref_tag': 'T', 'coarse_dx': 0.0, 'coarse_dy': 0.0, 'search_margin_m': 200.0}
+
+
+def test_gpu_windows(tmp):
+    """GPU windows (runs 297 / 299 lost 217 / 190 windows to out-of-memory): a
+    window too big for the GPU is matched in tiles, each detector stepping
+    down until its tiles fit; the tiles share the window's keypoints and
+    their matches are pooled into the window."""
+    import numpy as np
+    import rasterio
+    import automatch_engine as E
+    check('gpu windows: tile sides tried for 2048 / 3072 / 600 px windows',
+          (E.gpu_window_steps(2048), E.gpu_window_steps(3072), E.gpu_window_steps(600)),
+          ([2048, 1024, 683, 512, 342, 256], [3072, 1536, 1024, 768, 512, 384], [600, 300]))
+    cfg = E.PipelineConfig(window_size=2048, num_features=32000)
+    m = E.build_detector('sift', cfg)
+    other = E.build_detector('disk', cfg)
+    m.gpu_window = 683
+    check('gpu windows: an edge window cut into an even grid',
+          m._tiles(0, 0, 600, 2048), [(0, 0, 600, 683), (0, 683, 600, 682), (0, 1365, 600, 683)])
+    m.gpu_window = None
+    check('gpu windows: a window that fits stays whole', m._tiles(10, 20, 2048, 2048), [(10, 20, 2048, 2048)])
+    m._use_gpu_window(1024)
+    n1024 = m.config.num_features
+    m._use_gpu_window(256)
+    check("gpu windows: tiles share the window's keypoints by area (at least min_num_features); "
+          "the other detectors keep theirs",
+          (n1024, m.config.num_features, other.config.num_features, cfg.num_features), (8000, 1000, 32000, 32000))
+
+    img, _ = _texture(1024, seed=5)
+    pin, pref = os.path.join(tmp, 'gw_in.tif'), os.path.join(tmp, 'gw_ref.tif')
+    _write_tif(pin, img, 500000.0, 1600000.0)
+    _write_tif(pref, img, 500000.0 - 70.0, 1600000.0 + 40.0)     # same pixels: dE 70 m, dN -40 m
+    s = E.build_detector('sift', E.PipelineConfig(window_size=1024, num_features=4000, min_num_features=500,
+                                                  use_amp=False))
+    real, sizes = s.detect_and_describe, []
+
+    def limited(t1, t2):           # a GPU that holds 600 px but not 1024 px
+        sizes.append(int(t1.shape[-1]))
+        if t1.shape[-1] > 600:
+            raise E.th.cuda.OutOfMemoryError('CUDA out of memory. Tried to allocate 12.88 GiB')
+        return real(t1, t2)
+    s.detect_and_describe = limited
+    with rasterio.open(pin) as a, rasterio.open(pref) as b:
+        recs = s._process_windows_from_disk(a, b, _pair_meta(a, b), {'windows': [(0, 0, 1024, 1024)]},
+                                            'smnn', 0.95)
+    rec = recs[0] if len(recs) == 1 else None
+    got = None
+    if rec:
+        got = (round(float(np.median(np.array(rec['X1']) - np.array(rec['X2'])))),
+               round(float(np.median(np.array(rec['Y1']) - np.array(rec['Y2'])))),
+               min(rec['x1']) < 512 < max(rec['x1']), min(rec['y1']) < 512 < max(rec['y1']),
+               '_scan0_pix0_' in rec['file_id'])
+    check('gpu windows: out of memory at 1024 px -> four 512 px tiles with a quarter of the keypoints '
+          'each, pooled into one record for the window, offset unchanged',
+          (sizes, s.gpu_window, s.config.num_features, got),
+          ([1024, 512, 512, 512, 512], 512, 1000, (70, -40, True, True, True)))
+
+    def never(t1, t2):
+        raise E.th.cuda.OutOfMemoryError('CUDA out of memory.')
+    s2 = E.build_detector('sift', E.PipelineConfig(window_size=600))
+    s2.detect_and_describe = never
+    with rasterio.open(pin) as a, rasterio.open(pref) as b:
+        recs2 = s2._process_windows_from_disk(a, b, _pair_meta(a, b), {'windows': [(0, 0, 600, 600)]},
+                                              'smnn', 0.95)
+    check('gpu windows: out of memory even in the smallest tiles drops the window, not the run',
+          (recs2, s2.gpu_window), ([], 300))
+    s3 = E.build_detector('sift', E.PipelineConfig(window_size=1024, num_features=4000, min_num_features=500))
+    with rasterio.open(pin) as a, rasterio.open(pref) as b:
+        s3._process_windows_from_disk(a, b, _pair_meta(a, b), {'windows': [(0, 0, 1024, 1024)]}, 'smnn', 0.95)
+    check('gpu windows: the next channel / sweep point of the job starts at the size found',
+          (E.GPU_WINDOWS.get(('sift', 1024)), s3.gpu_window), (512, 512))
+    E.GPU_WINDOWS.clear()
 
 
 
@@ -1617,6 +1756,7 @@ def main():
         test_server(tmp)
         test_gpuaas_args(tmp)
         test_version_skew_and_coarse(tmp)
+        test_gpu_windows(tmp)
         test_kornia_versions(tmp)
         test_warmup_and_padding()
         test_sliced_matching()

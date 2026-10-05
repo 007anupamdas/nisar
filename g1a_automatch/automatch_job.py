@@ -111,6 +111,8 @@ DEFAULT_JOB: Dict = {
     'keypoint_density': 9000,    # keypoints per megapixel of window
     'max_num_features': 32000,   # cap per window; raise it to keep the density at large windows
                                  # (e.g. 90000 for 3072 px on a 40 GB GPU)
+    'gpu_window_px': 0,          # largest window a detector matches at once; larger windows are
+                                 # matched in tiles, pooled. 0 = each detector finds it on this GPU
     'target_resolution': None,   # None = input's native resolution (metres)
 
     # large offsets (coarse-to-fine)
@@ -571,6 +573,7 @@ def _config_for(job: Dict, win: int, nf: Optional[int], res: float, out_dir: str
     tol = job['consensus_tolerance_m'] or job['consensus_tolerance_px'] * res
     cfg = E.PipelineConfig(
         window_size=win, window_size_small=max(256, win // 2), loftr_max_window=win,
+        gpu_window_px=int(job['gpu_window_px'] or 0),
         keypoint_density=job['keypoint_density'], max_num_features=int(job['max_num_features']),
         target_resolution=job['target_resolution'],
         use_disk_cache=True, check_existing_pairs=True, cleanup_after_pair=False,
@@ -687,7 +690,8 @@ def _performance_table(out_root: str, manifest: List[Dict]) -> Optional[str]:
                 'truth_rmse_m': None if tru is None else tru.get('truth_rmse_m'),
                 'truth_reached': None if tru is None else tru.get('truth_reached'),
                 'truth_ransac': None if tru is None else tru.get('ransac'),
-                'detector_seconds': row.get('detector_seconds'), 'gpu_peak_gb': row.get('gpu_peak_gb')})
+                'detector_seconds': row.get('detector_seconds'), 'gpu_peak_gb': row.get('gpu_peak_gb'),
+                'gpu_window_px': row.get('gpu_window_px')})
     if not rows:
         return None
     df = pd.DataFrame(rows)
@@ -818,6 +822,7 @@ def run_job(job: Dict) -> Dict:
                    'coarse_offsets': rec.get('coarse_offsets'), 'consensus_score': _best_score(rec),
                    'minutes': round((time.time() - t0) / 60.0, 2), 'working_crs': scene.working_crs,
                    'detector_seconds': rec.get('seconds'), 'gpu_peak_gb': rec.get('gpu_peak_gb'),
+                   'gpu_window_px': rec.get('gpu_window_px'),
                    'filtered_dir': rec.get('filtered_dir'), 'final_dir': rec.get('final_dir')}
             try:
                 exp = R.export_run(rec, scene.working_crs, rival_dir, f'{scene.name}_{tag}',
@@ -848,6 +853,13 @@ def run_job(job: Dict) -> Dict:
     man = pd.DataFrame(manifest)
     man_path = os.path.join(out_root, 'RUN_MANIFEST.csv')
     man.to_csv(man_path, index=False)
+    if 'gpu_window_px' in man.columns:      # what fitted the GPU, detector by detector
+        gw = pd.to_numeric(man['gpu_window_px'], errors='coerce')
+        tiled = man[gw < pd.to_numeric(man['window_size'], errors='coerce')]
+        if len(tiled):
+            print('[Job] matched in tiles to fit the GPU: ' + ', '.join(
+                f'{r.detector} {int(r.window_size)} px in {int(r.gpu_window_px)} px tiles'
+                for r in tiled.drop_duplicates(['detector', 'window_size']).itertuples()))
     try:
         _performance_table(out_root, manifest)
     except Exception as e:

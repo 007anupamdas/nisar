@@ -243,6 +243,10 @@ class IMWMatcher(E.DenseWindowMatcher):
 
     matcher_token = 'internal'
 
+    @property
+    def uses_keypoint_budget(self) -> bool:
+        return not self.dense   # sparse: max_keypoints at model build; dense: their own match count
+
     def __init__(self, config: E.PipelineConfig, imw_tag: str, imw_conf: Dict, dense: bool,
                  overrides: Optional[Dict] = None):
         super().__init__(config)

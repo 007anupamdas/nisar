@@ -365,7 +365,10 @@ on a connected machine and copy `D:\w\torch\hub\checkpoints\*` into
 
 **5. Read the result.** `PERFORMANCE.csv`: one row per detector + matcher,
 best first -- truth RMSE, seconds per window, chips and inliers kept, peak
-GPU memory. `TRUTH_BY_DETECTOR_MATCHER.csv`: the accuracy ranking alone.
+GPU memory, and `gpu_window_px`: the largest piece of a window the detector
+could match on that GPU (smaller than the window size when it had to work
+in tiles, see *GPU windows*). `TRUTH_BY_DETECTOR_MATCHER.csv`: the accuracy
+ranking alone.
 
 Notes:
 - All paths in the settings are server paths (`/maintenance/...`), never `V:\`.
@@ -435,11 +438,29 @@ detectors' time still grow with the count. FGINN follows the method row by
 row (kornia's version compares every row with the first row's candidates).
 The log prints each detector's time and peak GPU memory when it finishes.
 
-## 16 GB GPU
+## GPU memory (16 GB workstation, GPU windows)
 
 Defaults: 1024 px windows, one model resident at a time (unloaded after its
 run), windows skipped rather than crashing when less than `min_gpu_free_gb`
-is free. Dense imcui models (RoMa, DKM) are the heaviest; keep them at 1024 px.
+is free. Dense imcui models (RoMa, DKM, the LoFTR family) are the heaviest;
+they now find their own tile size (below).
+
+**GPU windows.** A window that does not fit in the GPU is matched in tiles.
+Each detector starts with whole windows; when it runs out of GPU memory it
+cuts every window into 2 x 2 tiles, then 3 x 3, 4 x 4, 6 x 6, 8 x 8 (never
+below 256 px) until its tiles fit, and keeps that size for the rest of its
+run. So each detector finds the window size that fits this GPU, whatever
+`window_sizes` says. The tiles share the window's keypoint budget by area,
+and their matches are pooled into the window: every detector still gives one
+result per window, comparable with the others. The log says when a detector
+steps down (`out of GPU memory in 2048 px (...): 2048 px windows now matched
+in 1024 px tiles on NVIDIA A100-SXM4-40GB (40 GB), 8000 keypoints per tile`),
+and `RUN_MANIFEST.csv` and `PERFORMANCE.csv` give each detector's
+`gpu_window_px`. Setting `gpu_window_px` forces a tile size (0 = find it).
+Before this, runs 297 (A4500, 20 GB, 2048 px) and 299 (A100, 40 GB, 3072 px)
+lost 217 and 190 windows to out-of-memory, 178 and 169 of them in RDD, XoFTR,
+ELoFTR, ASpanFormer, MINIMA-LoFTR and TopicFM, whose match matrix grows with
+the fourth power of the window side.
 
 ## Offline weights
 

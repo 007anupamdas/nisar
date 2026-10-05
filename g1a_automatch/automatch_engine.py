@@ -203,6 +203,46 @@ def safe_cuda_empty_cache():
         pass
 
 
+class GpuOutOfMemory(RuntimeError):
+    """A window ran out of GPU memory; raised on so that the window is
+    matched again in smaller tiles."""
+
+
+def is_gpu_oom(e: BaseException) -> bool:
+    oom = getattr(th.cuda, 'OutOfMemoryError', None)
+    return (isinstance(e, GpuOutOfMemory) or (oom is not None and isinstance(e, oom))
+            or 'out of memory' in str(e).lower())
+
+
+def gpu_name() -> str:
+    try:
+        if th.cuda.is_available():
+            p = th.cuda.get_device_properties(th.cuda.current_device())
+            return f'{p.name} ({p.total_memory / 1024 ** 3:.0f} GB)'
+    except Exception:
+        pass
+    return 'CPU'
+
+
+# (detector variant, window px) -> tile side found in this process, so the
+# next channel or sweep point starts there instead of running out again
+GPU_WINDOWS: Dict[Tuple[str, int], int] = {}
+
+
+def gpu_window_steps(window: int, smallest: int = 256) -> List[int]:
+    """Tile sides tried for a window of `window` px, largest first: the
+    window cut into k x k tiles, k = 1, 2, 3, 4, 6, 8, while a tile keeps at
+    least `smallest` px (2048 -> 2048, 1024, 683, 512, 342, 256)."""
+    out = []
+    for k in (1, 2, 3, 4, 6, 8):
+        side = int(math.ceil(window / k))
+        if side < smallest:
+            break
+        if not out or side < out[-1]:
+            out.append(side)
+    return out
+
+
 # =============================================================================
 # MODEL WEIGHTS
 # =============================================================================
@@ -355,6 +395,12 @@ class PipelineConfig:
     max_num_features: int = 32000
     target_resolution: Optional[int] = 10
     loftr_max_window: int = 1024
+    # Largest window (px) a detector matches at once. A window larger than
+    # that is matched as a grid of tiles whose matches are pooled into the
+    # window, so every detector still gives one result per window. 0: start
+    # at window_size and step down whenever the GPU runs out of memory -- each
+    # detector finds the size that fits this GPU.
+    gpu_window_px: int = 0
 
     use_disk_cache: bool = True
     cleanup_after_pair: bool = False
@@ -2535,54 +2581,8 @@ class DiskBasedMatcher(BaseMatcher):
 
         for idx, (wx, wy, sx, sy) in enumerate(windows):
             try:
-                nisar_win = rt.windows.Window(wy, wx, sy, sx)
-                nisar_data = nisar_src.read(1, window=nisar_win)
-
-                field = metadata.get('coarse_field')
-                margin = metadata.get('search_margin_m', 0.0)
-                if field:
-                    xc, yc = nisar_src.transform * (wy + sy / 2.0, wx + sx / 2.0)
-                    wdx, wdy = field_offset(field, xc, yc)
-                    # the offset varies inside the window too (scale / warp):
-                    # widen the search by how far the corners' offsets depart
-                    # from the centre's
-                    spread = 0.0
-                    for cc, rr in ((wy, wx), (wy + sy, wx), (wy, wx + sx), (wy + sy, wx + sx)):
-                        ox, oy = field_offset(field, *(nisar_src.transform * (cc, rr)))
-                        spread = max(spread, abs(ox - wdx), abs(oy - wdy))
-                    margin += spread
-                else:
-                    wdx, wdy = metadata.get('coarse_dx', 0.0), metadata.get('coarse_dy', 0.0)
-                s1_win = self._s1_window_for(
-                    nisar_src, s1_src, wx, wy, sx, sy, wdx, wdy, margin)
-                if s1_win is None:
-                    continue
-                s1wy, s1wx = int(s1_win.col_off), int(s1_win.row_off)
-                s1_data = s1_src.read(1, window=s1_win)
-
-                s1_data = self._calibrate_s1_dn(s1_data, nodata=s1_nodata,
-                                                factor=self.config.s1_calibration_factor)
-
-                if nisar_data.size == 0 or s1_data.size == 0:
-                    continue
-                if nisar_data.shape[0] < 100 or nisar_data.shape[1] < 100:
-                    continue
-                if s1_data.shape[0] < 50 or s1_data.shape[1] < 50:
-                    continue
-
-                match_data = self._process_single_window(
-                    nisar_data,
-                    s1_data,
-                    wx,
-                    wy,
-                    s1wx,
-                    s1wy,
-                    metadata,
-                    matcher_name,
-                    matcher_param,
-                    nisar_nodata=nisar_nodata,
-                    s1_nodata=s1_nodata
-                )
+                match_data = self._match_chip(nisar_src, s1_src, metadata, wx, wy, sx, sy,
+                                              matcher_name, matcher_param, nisar_nodata, s1_nodata)
                 if match_data:
                     matches.append(match_data)
 
@@ -2608,6 +2608,153 @@ class DiskBasedMatcher(BaseMatcher):
             print(f'[{label}] {n_err} windows failed in pair {metadata.get("pair_id")} '
                   f'(first 3 shown; set debug_mode for all)')
         return matches
+
+    # ── GPU windows: a window matched in tiles that fit the GPU ─────────────
+    gpu_window: Optional[int] = None   # tile side this detector matches at once; None: whole windows
+    uses_keypoint_budget = True        # its keypoint count is a budget shared out over the tiles
+    _TILE_LIST_KEYS = ('x1', 'y1', 'x2', 'y2', 'X1', 'Y1', 'X2', 'Y2', 'distance', 'along', 'across')
+
+    def _use_gpu_window(self, side: Optional[int], why: str = '') -> None:
+        """Match windows in tiles of at most `side` px from now on (None:
+        whole). The tiles share the window's keypoint budget by area (at
+        least min_num_features each), so a window gets about as many
+        keypoints however it is cut."""
+        window = int(self.config.window_size)
+        if getattr(self, '_window_num_features', None) is None:
+            self._window_num_features = int(self.config.num_features)
+        budget = self._window_num_features
+        if side is not None and side >= window:
+            side = None
+        self.gpu_window = side
+        n = budget if side is None else max(int(self.config.min_num_features),
+                                            int(round(budget * (side / window) ** 2)))
+        if self.uses_keypoint_budget and n != int(self.config.num_features):
+            if not getattr(self, '_own_config', False):
+                self.config = copy.copy(self.config)   # the variants share one config
+                self._own_config = True
+            self.config.num_features = n
+            self.unload_model()                        # rebuilt with the new budget at first use
+        if why:
+            print(f'[{self.get_filename_prefix()}] {why}: {window} px windows now matched '
+                  + ('whole' if side is None else f'in {side} px tiles') + f' on {gpu_name()}'
+                  + (f', {self.config.num_features} keypoints per tile'
+                     if side is not None and self.uses_keypoint_budget else ''), flush=True)
+
+    def _shrink_gpu_window(self, err: str) -> bool:
+        """Next smaller tile after running out of GPU memory; False when the
+        tiles are already the smallest."""
+        window = int(self.config.window_size)
+        cur = self.gpu_window or window
+        smaller = [s for s in gpu_window_steps(window) if s < cur]
+        if not smaller:
+            return False
+        GPU_WINDOWS[(self.get_filename_prefix(), window)] = smaller[0]
+        self._use_gpu_window(smaller[0], f'out of GPU memory in {cur} px ({err[:90]})')
+        return True
+
+    def _tiles(self, wx: int, wy: int, sx: int, sy: int) -> List[Tuple[int, int, int, int]]:
+        """The window (wx = first row, wy = first column, sx rows, sy columns)
+        as an even grid of tiles of at most gpu_window px, without overlap
+        (each tile is matched against its own reference window, margin
+        included, so features at a seam still find their counterparts)."""
+        side = self.gpu_window
+        if not side or (sx <= side and sy <= side):
+            return [(wx, wy, sx, sy)]
+        nr, nc = int(math.ceil(sx / side)), int(math.ceil(sy / side))
+        rows = [int(round(i * sx / nr)) for i in range(nr + 1)]
+        cols = [int(round(j * sy / nc)) for j in range(nc + 1)]
+        return [(wx + rows[i], wy + cols[j], rows[i + 1] - rows[i], cols[j + 1] - cols[j])
+                for i in range(nr) for j in range(nc)]
+
+    def _read_window_pair(self, nisar_src, s1_src, metadata, wx, wy, sx, sy, s1_nodata):
+        """(input data, reference data, reference row offset, reference column
+        offset) for the input window, or None when there is nothing to match:
+        the reference is read where the coarse offset puts the same ground,
+        grown by the search margin."""
+        nisar_data = nisar_src.read(1, window=rt.windows.Window(wy, wx, sy, sx))
+        field = metadata.get('coarse_field')
+        margin = metadata.get('search_margin_m', 0.0)
+        if field:
+            xc, yc = nisar_src.transform * (wy + sy / 2.0, wx + sx / 2.0)
+            wdx, wdy = field_offset(field, xc, yc)
+            # the offset varies inside the window too (scale / warp):
+            # widen the search by how far the corners' offsets depart
+            # from the centre's
+            spread = 0.0
+            for cc, rr in ((wy, wx), (wy + sy, wx), (wy, wx + sx), (wy + sy, wx + sx)):
+                ox, oy = field_offset(field, *(nisar_src.transform * (cc, rr)))
+                spread = max(spread, abs(ox - wdx), abs(oy - wdy))
+            margin += spread
+        else:
+            wdx, wdy = metadata.get('coarse_dx', 0.0), metadata.get('coarse_dy', 0.0)
+        s1_win = self._s1_window_for(nisar_src, s1_src, wx, wy, sx, sy, wdx, wdy, margin)
+        if s1_win is None:
+            return None
+        s1wy, s1wx = int(s1_win.col_off), int(s1_win.row_off)
+        s1_data = s1_src.read(1, window=s1_win)
+        s1_data = self._calibrate_s1_dn(s1_data, nodata=s1_nodata, factor=self.config.s1_calibration_factor)
+        if nisar_data.size == 0 or s1_data.size == 0:
+            return None
+        if nisar_data.shape[0] < 100 or nisar_data.shape[1] < 100:
+            return None
+        if s1_data.shape[0] < 50 or s1_data.shape[1] < 50:
+            return None
+        return nisar_data, s1_data, s1wx, s1wy
+
+    def _match_chip(self, nisar_src, s1_src, metadata, wx, wy, sx, sy, matcher_name, matcher_param,
+                    nisar_nodata, s1_nodata) -> Optional[Dict]:
+        """One window, whole or in tiles of at most gpu_window px, the tiles'
+        matches pooled into the window's record. A tile that runs out of GPU
+        memory makes this detector's tiles smaller from then on, and the
+        window starts again. gpu_window_px, or a size found earlier in the
+        job, applies from the first window (the coarse stage keeps the
+        window's keypoints either way)."""
+        if not getattr(self, '_window_checked', False):
+            self._window_checked = True
+            forced = int(getattr(self.config, 'gpu_window_px', 0) or 0)
+            known = GPU_WINDOWS.get((self.get_filename_prefix(), int(self.config.window_size)))
+            if forced:
+                self._use_gpu_window(max(256, forced), f'gpu_window_px {forced}')
+            elif known:
+                self._use_gpu_window(known, 'as found earlier in this job')
+        while True:
+            try:
+                recs = []
+                for tx, ty, tsx, tsy in self._tiles(wx, wy, sx, sy):
+                    got = self._read_window_pair(nisar_src, s1_src, metadata, tx, ty, tsx, tsy, s1_nodata)
+                    if got is None:
+                        continue
+                    nisar_data, s1_data, s1wx, s1wy = got
+                    rec = self._process_single_window(nisar_data, s1_data, tx, ty, s1wx, s1wy, metadata,
+                                                      matcher_name, matcher_param,
+                                                      nisar_nodata=nisar_nodata, s1_nodata=s1_nodata)
+                    if rec:
+                        recs.append(rec)
+                return self._merge_tiles(recs, metadata, wx, wy)
+            except ModelLoadError:
+                raise
+            except Exception as e:
+                if not is_gpu_oom(e):
+                    raise
+                err = str(e) if isinstance(e, GpuOutOfMemory) else f'{type(e).__name__}: {e}'
+            safe_cuda_empty_cache()      # the failed attempt's tensors were released with the exception
+            if not self._shrink_gpu_window(err):
+                raise GpuOutOfMemory(f'out of GPU memory even in {self.gpu_window or max(sx, sy)} px tiles '
+                                     f'({err[:200]})')
+
+    def _merge_tiles(self, recs: List[Dict], metadata: Dict, wx: int, wy: int) -> Optional[Dict]:
+        """The tiles' match records as one record for the window at (wx, wy)."""
+        if not recs:
+            return None
+        if self.gpu_window is None and len(recs) == 1:
+            return recs[0]
+        out = dict(recs[0])
+        for k in self._TILE_LIST_KEYS:
+            out[k] = [v for r in recs for v in r[k]]
+        row, col = self._global_scan_pix(metadata, wx, wy)
+        out.update(global_scan=row, global_pix=col, local_init_x=wx, local_init_y=wy,
+                   file_id=self._build_file_id(metadata, row, col, out['matcher'], out['match_param']))
+        return out
 
     @staticmethod
     def _s1_window_for(nisar_src, s1_src, wx, wy, sx, sy,
@@ -2713,12 +2860,12 @@ class DiskBasedMatcher(BaseMatcher):
         except ModelLoadError:
             raise
         except Exception as e:
+            if is_gpu_oom(e):            # matched again in smaller tiles (_match_chip)
+                raise GpuOutOfMemory(f'{type(e).__name__}: {e}') from None
             self._window_errors = getattr(self, '_window_errors', 0) + 1
             if self.config.debug_mode or self._window_errors <= 3:
                 print(f'[{self.get_filename_prefix()}] window ({nisar_x},{nisar_y}) error: '
                       f'{type(e).__name__}: {e}')
-            if 'out of memory' in str(e).lower():
-                safe_cuda_empty_cache()   # or the next windows fail on the fragments
             return None
 
     # def _process_single_window(
@@ -3044,6 +3191,8 @@ class LoFTRMatcher(DiskBasedMatcher):
     Sinkhorn with an untrained dustbin score and a threshold of 1; with the
     released weights that finds no matches at all, so it is not used."""
 
+    uses_keypoint_budget = False        # no keypoints: every coarse cell is a candidate
+
     def __init__(self, config: PipelineConfig, pretrained: str = 'outdoor', coarse_threshold: float = 0.2):
         super().__init__(config)
         self.pretrained = pretrained
@@ -3173,6 +3322,8 @@ class LoFTRMatcher(DiskBasedMatcher):
         except ModelLoadError:
             raise
         except Exception as e:
+            if is_gpu_oom(e):            # matched again in smaller tiles (_match_chip)
+                raise GpuOutOfMemory(f'{type(e).__name__}: {e}') from None
             # Always print LoFTR errors — not gated by debug_mode
             print(f'[LoFTR] Exception at window ({nisar_x},{nisar_y}): {type(e).__name__}: {e}')
             return None
@@ -4897,6 +5048,10 @@ class AutoMatchPipeline:
                         mem = f", peak GPU memory {rec['gpu_peak_gb']:.1f} of {total:.1f} GB"
                     except Exception:
                         pass
+                gw = getattr(matcher, 'gpu_window', None)
+                rec['gpu_window_px'] = int(gw or cfg.window_size)
+                if gw:
+                    mem += f', {cfg.window_size} px windows matched in {gw} px tiles'
                 print(f"[{pol}] {tag} {rec['status']} in {rec['seconds'] / 60:.1f} min{mem}")
                 unload = getattr(matcher, 'unload_model', None)
                 if callable(unload):
