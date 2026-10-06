@@ -337,7 +337,7 @@ class PackDialog(QtWidgets.QDialog):
                 'pack/share_server': '/maintenance/',
                 'pack/weights': '/maintenance/ICIGDev/GPUPOC/input/dqe/imw_runtime/imw_cache',
                 'pack/cache': '', 'pack/code': '/maintenance/ICIGDev/GPUPOC/exe/anup/nisar/g1a_automatch/automatch_gpuaas.py',
-                'pack/gpu_mb': 40000, 'pack/windows': '', 'pack/max_feat': 0,
+                'pack/gpu_mb': 40000,
                 'pack/all_det': False, 'pack/all_match': False}
 
     def __init__(self, settings, job, parent=None):
@@ -382,17 +382,12 @@ class PackDialog(QtWidgets.QDialog):
         self.gpu_mb.setValue(int(get('pack/gpu_mb')))
         self.gpu_mb.setToolTip('max_gpu_mem_required: 40000 for the A100, ~19000 for the A4500')
         f.addRow('GPU memory to request', self.gpu_mb)
-        self.windows = QtWidgets.QLineEdit(get('pack/windows'))
-        self.windows.setPlaceholderText(f"as in the job ({fmt_list(job['window_sizes'])}); e.g. 3072 on the A100")
-        self.windows.setToolTip('Replaces the job\'s window sizes for the server. The field remembers its last '
-                                'value: clear it to use the job\'s list. Several sizes: 256, 384, 512')
-        f.addRow('Window sizes on the server', self.windows)
-        self.max_feat = QtWidgets.QSpinBox()
-        self.max_feat.setRange(0, 1000000)
-        self.max_feat.setSingleStep(1000)
-        self.max_feat.setSpecialValueText(f"as in the job ({job['max_num_features']})")
-        self.max_feat.setValue(int(get('pack/max_feat')))
-        f.addRow('Max keypoints per window', self.max_feat)
+        # one place for the window sizes: the main window (a second, remembered
+        # field here once replaced a job's [256, ..., 1024] with [2048])
+        self.windows_info = QtWidgets.QLabel(
+            f"{fmt_list(job['window_sizes'])} px, at most {job['max_num_features']} keypoints per window "
+            f"(from the main window)")
+        f.addRow('Window sizes', self.windows_info)
         self.all_det = QtWidgets.QCheckBox('every detector the server offers (kornia + imcui)')
         self.all_det.setChecked(str(get('pack/all_det')).lower() == 'true')
         self.all_match = QtWidgets.QCheckBox('every matcher each detector offers')
@@ -422,10 +417,6 @@ class PackDialog(QtWidgets.QDialog):
              '--gpu-mb', str(self.gpu_mb.value())]
         if self.cache.text().strip():
             a += ['--server-cache', self.cache.text().strip()]
-        if self.windows.text().strip():
-            a += ['--set', f'window_sizes={json.dumps(parse_int_list(self.windows.text(), "window sizes"))}']
-        if self.max_feat.value():
-            a += ['--set', f'max_num_features={self.max_feat.value()}']
         if self.all_det.isChecked():
             a += ['--set', 'detectors=all']
         if self.all_match.isChecked():
@@ -448,7 +439,6 @@ class PackDialog(QtWidgets.QDialog):
                          ('pack/share_local', self.share_local.text()), ('pack/share_server', self.share_server.text()),
                          ('pack/weights', self.weights.text().strip()), ('pack/cache', self.cache.text().strip()),
                          ('pack/code', self.code.text().strip()), ('pack/gpu_mb', self.gpu_mb.value()),
-                         ('pack/windows', self.windows.text().strip()), ('pack/max_feat', self.max_feat.value()),
                          ('pack/all_det', self.all_det.isChecked()), ('pack/all_match', self.all_match.isChecked())):
             self.settings.setValue(key, val)
         self.accept()

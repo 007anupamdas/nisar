@@ -321,9 +321,9 @@ settings and paths; nothing needs to run locally.
 **3. Pack the scene for the server.** In the GUI: *Pack for server…* (bottom
 row). It remembers the folders that stay the same (server weights folder,
 code path, the `V:\` = `/maintenance/` share mapping, GPU memory to request),
-fills the server folder from the share folder, takes optional window sizes and
-keypoint cap for the server, shows the copying in the Log and the curl
-requests at the end. Or from the conda prompt:
+fills the server folder from the share folder, and shows the copying in the
+Log and the curl requests at the end. Window sizes and the keypoint cap come
+from the main window only (the dialog shows them). Or from the conda prompt:
 ```bat
 python automatch_job.py pack D:\jobs\set1.json ^
    --to V:\ICIGDev\GPUPOC\input\g1a\set1 ^

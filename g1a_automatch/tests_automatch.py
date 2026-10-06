@@ -836,14 +836,14 @@ def test_gui_dialog():
             d_.close()
         pd_ = w.pack_dialog(run=False)
         pd_.local.setText('V:\\ICIGDev\\GPUPOC\\input\\dqe\\g1a\\set9')
-        pd_.windows.setText('3072')
         pd_.all_det.setChecked(True)
         a, job = pd_.args()
-        check('gui pack: server folder from the share mapping, remembered defaults, overrides',
-              (pd_.server.text(), a[a.index('--server-weights') + 1], a[a.index('--gpu-mb') + 1],
-               'window_sizes=[3072]' in a, 'detectors=all' in a),
+        check('gui pack: server folder from the share mapping, remembered defaults; window sizes only from the '
+              'main window', (pd_.server.text(), a[a.index('--server-weights') + 1], a[a.index('--gpu-mb') + 1],
+                              any(x.startswith('window_sizes=') for x in a), 'detectors=all' in a,
+                              '1024, 3072 px' in pd_.windows_info.text()),
               ('/maintenance/ICIGDev/GPUPOC/input/dqe/g1a/set9',
-               '/maintenance/ICIGDev/GPUPOC/input/dqe/imw_runtime/imw_cache', '40000', True, True))
+               '/maintenance/ICIGDev/GPUPOC/input/dqe/imw_runtime/imw_cache', '40000', False, True, True))
         pd_.close()
         w._show_truth({'event': 'truth', 'n_truth': 3, 'files': {}, 'top': [
             {'rank': 1, 'channel': 'band1', 'detector': 'sift', 'matcher_family': 'lgm',
