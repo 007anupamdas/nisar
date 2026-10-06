@@ -216,7 +216,10 @@ def compare_run(job: Dict) -> int:
         print('[GPUaaS] compare: the settings have no truth_csv')
         return 2
     res = T.compare(src, job['truth_csv'], float(job['truth_radius_m']), 'consensus')
+    import automatch_job as J
+    more = J.refresh_after_compare(src, res)        # PERFORMANCE.csv, RIVAL_BEST_* in the new order
     names = ['TRUTH_BY_DETECTOR_MATCHER.csv', 'TRUTH_RANKING.csv', 'TRUTH_POINTS.csv']
+    names += [os.path.basename(p) for p in more]
     names += [os.path.basename(b['csv']) for b in res['best'].values()]
     names += [n[:-4] + '_detail.csv' for n in names if n.startswith('RIVAL_TRUTH_BEST_')]
     for n in names:

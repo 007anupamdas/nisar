@@ -724,6 +724,30 @@ def _performance_table(out_root: str, manifest: List[Dict]) -> Optional[str]:
     return path
 
 
+def refresh_after_compare(output_dir: str, res: Dict) -> List[str]:
+    """After a finished run is ranked again (compare, e.g. a run made by an
+    older version): PERFORMANCE.csv and RIVAL_BEST_* follow the new ranking,
+    as a run writes them. Returns the files rewritten."""
+    import glob as _glob
+    import pandas as pd
+    written = []
+    man = os.path.join(output_dir, 'RUN_MANIFEST.csv')
+    if os.path.exists(man):
+        try:
+            p = _performance_table(output_dir, pd.read_csv(man).to_dict('records'))
+            if p:
+                written.append(p)
+        except Exception as e:
+            print(f'[Job] performance table not rewritten: {type(e).__name__}: {e}')
+    for ch, b in (res.get('best') or {}).items():
+        for dst in _glob.glob(os.path.join(output_dir, f'RIVAL_BEST_*_{ch}.csv')):
+            shutil.copyfile(b['csv'], dst)
+            written.append(dst)
+            print(f"[Job] {os.path.basename(dst)} is now {b['detector']} + {b['matcher']} {b['ransac']} "
+                  f"(truth RMSE {b['truth_rmse_m']:.1f} m)")
+    return written
+
+
 def _compare_with_truth(job: Dict, out_root: str, working_crs: str, manifest: List[Dict]) -> Dict:
     """Rank every detector + matcher configuration against the ground truth;
     add each run's own truth metrics to its manifest row."""

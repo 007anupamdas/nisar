@@ -505,8 +505,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                          'error gradient) or their median (the earlier rule)')
     a = ap.parse_args(argv)
     res = compare(a.output_dir, a.truth, a.radius_km * 1000.0, a.chips, a.crs or None, local=a.local)
+    import automatch_job as J
+    more = J.refresh_after_compare(a.output_dir, res)
     print(f"\n[Truth] written: {os.path.join(a.output_dir, 'TRUTH_BY_DETECTOR_MATCHER.csv')}, "
-          f"TRUTH_RANKING.csv, TRUTH_POINTS.csv")
+          f"TRUTH_RANKING.csv, TRUTH_POINTS.csv" + ''.join(f', {os.path.basename(p)}' for p in more))
     return 0 if not res['ranking'].empty else 1
 
 

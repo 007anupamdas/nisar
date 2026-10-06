@@ -404,6 +404,9 @@ def test_e2e_truth(tmp):
           (res.returncode, os.path.exists(os.path.join(o2, 'TRUTH_BY_DETECTOR_MATCHER.csv')),
            os.path.exists(os.path.join(o2, 'RIVAL_TRUTH_BEST_band1.csv')), 'Processing pair' in res.stdout),
           (0, True, True, False))
+    check('truth e2e: compare mode also rewrites PERFORMANCE.csv and RIVAL_BEST in the new order',
+          (os.path.exists(os.path.join(o2, 'PERFORMANCE.csv')),
+           len(_glob_rival_best(o2)) == 1), (True, True))
     # a run whose consensus never ran (e.g. stopped by an unusable GCP file):
     # compare rebuilds it from the saved matches instead of matching again
     import glob as _glob
@@ -1442,6 +1445,11 @@ def test_gpu_windows(tmp):
 
 
 
+def _glob_rival_best(folder):
+    import glob as _glob
+    return _glob.glob(os.path.join(folder, 'RIVAL_BEST_*_band1.csv'))
+
+
 def test_jobs_312_317(tmp):
     """From jobs 312-317: an empty CSV no longer loses PERFORMANCE.csv, a
     narrow image still gets windows, DeDoDe's keypoints fit small windows, and
@@ -1492,6 +1500,35 @@ def test_jobs_312_317(tmp):
     p._warmup_pass()
     check('warm-up: a small keypoint budget for the 256 px pair, the window budget restored after '
           '(job 316: DeDoDe + LightGlue asked for 3.6 GB)', (Probe.seen, cfg.num_features), ([2048], 32000))
+
+    # a run made by an older version, ranked again: PERFORMANCE.csv and RIVAL_BEST follow
+    old = os.path.join(tmp, 'old_run')
+    fd2 = os.path.join(old, 'final_same-res_sift')
+    os.makedirs(fd2, exist_ok=True)
+    pd.DataFrame([{'matcher': 'smnn0.95', 'seconds': 10.0, 'windows': 5, 'sec_per_window': 2.0}]).to_csv(
+        os.path.join(fd2, 'PASS_TIMING.csv'), index=False)
+    pd.DataFrame([{'final_dir': fd2, 'channel': 'band1', 'sweep': 'win512_nfauto', 'detector': 'sift',
+                   'detector_seconds': 10.0, 'gpu_peak_gb': 1.0}]).to_csv(os.path.join(old, 'RUN_MANIFEST.csv'),
+                                                                         index=False)
+    pd.DataFrame([{'rank': 1, 'channel': 'band1', 'sweep': 'win512_nfauto', 'detector': 'sift',
+                   'matcher': 'smnn0.95', 'ransac': 'lmeds360', 'truth_rmse_m': 120.0, 'truth_reached': 6,
+                   'truth_total': 8}]).to_csv(os.path.join(old, 'TRUTH_RANKING.csv'), index=False)
+    with open(os.path.join(old, 'RIVAL_BEST_scene_band1.csv'), 'w') as f:
+        f.write('old pick')
+    new_best = os.path.join(old, 'RIVAL_TRUTH_BEST_band1.csv')
+    with open(new_best, 'w') as f:
+        f.write('new pick')
+    import contextlib
+    import io
+    with contextlib.redirect_stdout(io.StringIO()):
+        written = J.refresh_after_compare(old, {'best': {'band1': {
+            'csv': new_best, 'detector': 'sift', 'matcher': 'smnn0.95', 'ransac': 'lmeds360',
+            'truth_rmse_m': 120.0}}})
+    perf = pd.read_csv(os.path.join(old, 'PERFORMANCE.csv'))
+    check('compare: a re-ranked older run gets PERFORMANCE.csv and RIVAL_BEST in the new order',
+          (sorted(os.path.basename(w) for w in written), perf.iloc[0]['truth_rank'], perf.iloc[0]['truth_reached'],
+           open(os.path.join(old, 'RIVAL_BEST_scene_band1.csv')).read()),
+          (['PERFORMANCE.csv', 'RIVAL_BEST_scene_band1.csv'], 1, 6, 'new pick'))
 
 
 
