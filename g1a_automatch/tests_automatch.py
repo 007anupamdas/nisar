@@ -1532,6 +1532,60 @@ def test_jobs_312_317(tmp):
 
 
 
+def test_jobs_318_323(tmp):
+    """From jobs 318-323: kornia LightGlue survives imcui's XFeat + LighterGlue
+    replacing its defaults; a 39 km wide HS strip (216 px at 180 m) gets
+    windows; preflight measures 'larger than the image' on the long side."""
+    import contextlib
+    import io
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_origin
+    from kornia.feature.lightglue import LightGlue
+    import automatch_engine as E
+    import automatch_job as J
+    xfeat = {'name': 'lighterglue', 'input_dim': 64, 'descriptor_dim': 96, 'add_scale_ori': False,
+             'add_laf': False, 'scale_coef': 1.0, 'n_layers': 6, 'num_heads': 1, 'flash': True, 'mp': False,
+             'depth_confidence': 0.95, 'width_confidence': 0.95, 'filter_threshold': 0.1, 'weights': None}
+    kept = LightGlue.default_conf
+    LightGlue.default_conf = dict(xfeat)        # what XFeat's LighterGlue does
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            back = E.restore_lightglue_defaults()
+        check("lightglue: kornia's defaults put back after XFeat + LighterGlue replaced them",
+              (back, LightGlue.default_conf['descriptor_dim'], LightGlue.default_conf['num_heads']), (True, 256, 4))
+        LightGlue.default_conf = dict(xfeat)
+        m = E.build_detector('sift', E.PipelineConfig())
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                m._lightglue('sift', None)
+            built = True
+        except E.ModelLoadError as e:
+            built = 'no weights here' if 'offline' in str(e) or 'URLError' in str(e) else str(e)[:200]
+        if built == 'no weights here':
+            print('SKIP  lightglue: SIFT LightGlue weights not on this machine')
+        else:
+            check('lightglue: SIFT LightGlue builds after XFeat + LighterGlue (job 318 second sweep: size '
+                  'mismatch for SIFT, DISK, KeyNet, DoG, DeDoDe)', built, True)
+    finally:
+        LightGlue.default_conf = kept
+
+    strip = os.path.join(tmp, 'hs_strip.tif')            # 39 x 225 km at 180 m
+    img, _ = _texture(1250, seed=13)
+    _write_tif(strip, img[:, :216], 500000.0, 1600000.0, res=180.0)
+    m = E.build_detector('sift', E.PipelineConfig(window_size=512))
+    with rasterio.open(strip) as src:
+        wins = m._determine_window_strategy(src, src)['windows']
+    check('window grid: a 216 px wide HS strip (39 km at 180 m) gets windows along it (job 320 got none)',
+          (len(wins), all(w[3] == 216 for w in wins)), (3, True))
+    cfg = E.PipelineConfig()
+    w = J._scale_warnings(J.normalize({'window_sizes': [512, 2048]}), E.InputScene(strip, cfg), 180.0, E)
+    check('preflight: on a strip, windows longer than the strip are flagged with a third of its length; '
+          '512 px windows are not', (len(w), w[0].startswith('2048 px windows are 369 km'), 'here 384 px' in w[0]),
+          (1, True, True))
+
+
+
 def test_kornia_versions(tmp):
     """A kornia without ALIKED / XFeat (the GPU node has 0.8.1): those detectors
     are not offered, imcui's ALIKED / XFeat are; native libraries load in the
@@ -1889,6 +1943,7 @@ def main():
         test_version_skew_and_coarse(tmp)
         test_gpu_windows(tmp)
         test_jobs_312_317(tmp)
+        test_jobs_318_323(tmp)
         test_kornia_versions(tmp)
         test_warmup_and_padding()
         test_sliced_matching()

@@ -356,14 +356,17 @@ def _scale_warnings(job: Dict, scene, res: float, E) -> List[str]:
     with E.rt.open(scene.raster_path) as src:
         w_km = src.width * abs(src.transform.a) / 1000.0
         h_km = src.height * abs(src.transform.e) / 1000.0
-    short_px = min(w_km, h_km) * 1000.0 / res
-    suggest = max(256, int(short_px / 3) // 64 * 64)
+    # a window larger than the image's long side is the whole scene: one chip
+    # per reference. One larger than a narrow strip's width only (a 39 km wide
+    # HS strip) still tiles along it
+    long_px = max(w_km, h_km) * 1000.0 / res
+    suggest = max(256, int(long_px / 3) // 64 * 64)
     ground = max(256, int(round(WINDOW_KM * 1000.0 / res / 64.0)) * 64)
     for w in sorted(set(int(v) for v in job['window_sizes'])):
-        if w > short_px:
+        if w > long_px:
             out.append(f'{w} px windows are {w * res / 1000:.0f} km across at {res:g} m, larger than the image '
                        f'({w_km:.0f} x {h_km:.0f} km): each reference gives at most one chip and one model '
-                       f'covers the whole scene. Use about a third of the image, here {suggest} px')
+                       f'covers the whole scene. Use about a third of its length, here {suggest} px')
         elif w * res / 1000.0 > 2 * WINDOW_KM:
             out.append(f'{w} px windows are {w * res / 1000:.0f} km across at {res:g} m: few chips per scene. '
                        f'About {WINDOW_KM:.0f} km, here {ground} px, gives as many chips as 2048 px windows on '

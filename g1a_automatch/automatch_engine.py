@@ -203,10 +203,35 @@ def safe_cuda_empty_cache():
         pass
 
 
-# The smallest window side matched (the smallest window_sizes a job may ask
-# for). It was 500 px: at 180 m a 54 km wide image is 300 px across, and job
-# 313 got no window at all on any of its 15 reference pairs.
-MIN_WINDOW_SIDE = 256
+# The smallest window side matched. It was 500 px: at 180 m a 54 km wide
+# image is 300 px across, and job 313 got no window on any of its 15
+# reference pairs; then 256 px, and a 39 km wide G1A HS strip, 216 px at
+# 180 m, still got none (job 320). Windows go down to 128 px across; a
+# window is read only if it has 100 px a side.
+MIN_WINDOW_SIDE = 128
+
+# kornia's LightGlue keeps its default settings in a class attribute. imcui's
+# XFeat + LighterGlue replaces it with its own (96 dimensions, 1 head), and
+# every kornia LightGlue built after that in the process fails to load its
+# weights (job 318, second sweep: "size mismatch for input_proj.weight ...
+# [256, 128] from checkpoint, ... [96, 128] in current model" for SIFT,
+# DISK, KeyNet, DoG and DeDoDe). The defaults are kept here and put back
+# before each build.
+try:
+    from kornia.feature.lightglue import LightGlue as _KorniaLightGlue
+    _LIGHTGLUE_DEFAULTS = copy.deepcopy(_KorniaLightGlue.default_conf)
+except Exception:   # a kornia without LightGlue
+    _KorniaLightGlue, _LIGHTGLUE_DEFAULTS = None, None
+
+
+def restore_lightglue_defaults() -> bool:
+    """Put kornia's LightGlue defaults back if another model replaced them."""
+    if _KorniaLightGlue is None or _KorniaLightGlue.default_conf == _LIGHTGLUE_DEFAULTS:
+        return False
+    _KorniaLightGlue.default_conf = copy.deepcopy(_LIGHTGLUE_DEFAULTS)
+    print('[LightGlue] kornia defaults put back (another model, e.g. imcui XFeat + LighterGlue, '
+          'had replaced them)', flush=True)
+    return True
 
 
 class GpuOutOfMemory(RuntimeError):
@@ -2257,6 +2282,7 @@ class BaseMatcher(ABC):
         model = self._lgm_models.get(key)
         if model is None:
             print(f'{self.get_detector_name()}: Initializing LightGlue {dict(params or {}) or "(defaults)"}...')
+            restore_lightglue_defaults()
             model = self._load_model(
                 f'LightGlue ({feature_name})',
                 lambda: KF.LightGlueMatcher(feature_name=feature_name,

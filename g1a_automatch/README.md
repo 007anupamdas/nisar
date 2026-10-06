@@ -533,6 +533,13 @@ git push <new-repo-url> g1a-automatch:main
 
 ## Known limits
 
+- **imcui XFeat + LighterGlue and kornia LightGlue in one process:**
+  LighterGlue replaces kornia's LightGlue defaults (a class attribute) with
+  its own 96-dimension settings, and every kornia LightGlue built after it
+  failed to load its weights (job 318, second sweep: SIFT, DISK, KeyNet, DoG,
+  DeDoDe). automatch keeps kornia's defaults and puts them back before each
+  kornia LightGlue it builds.
+
 - **Coarse offsets of dense matchers:** RoMa, DKM, GIM, XoFTR and similar
   sometimes return a confident but wrong coarse offset for a few pairs (run
   297: 3 of 22 pairs for MINIMA-RoMa, which still scored 326 m because the
@@ -543,7 +550,8 @@ git push <new-repo-url> g1a-automatch:main
   but 369 km at 180 m (G1A HS) and 645 km at 315 m. Run 300 (315 m, 2048 px)
   got 4–6 chips and results tens of km off; on jobs 312–317 (180 m and 315 m)
   most reference pairs gave no window or one (windows under 500 px a side were
-  skipped, now under 256 px), and on job 313 (3072 px) no detector reached a
+  skipped; now windows go down to 128 px, for strips like a 39 km wide HS
+  scene, 216 px at 180 m), and on job 313 (3072 px) no detector reached a
   consensus. Choose windows of about 90 km: 2048 px at 45 m, 512 px at 180 m,
   about 300 px at 315 m. Preflight warns when a window is more than twice
   that, or larger than the image.
