@@ -1586,6 +1586,64 @@ def test_jobs_318_323(tmp):
 
 
 
+def test_coarse_outliers():
+    """Wrong coarse offsets from a matcher on a handful of matches (job 325,
+    XoFTR) are replaced; offsets that vary across a distorted scene (run
+    297) and two groups of similar weight are left alone."""
+    import contextlib
+    import io
+    import automatch_engine as E
+    cfg = E.PipelineConfig()
+    km = 1000.0
+
+    def pair(pid, e_km, n_km):
+        return {'pair_id': pid, 'bounds': [e_km * km - 5 * km, n_km * km - 5 * km, e_km * km + 5 * km, n_km * km + 5 * km]}
+
+    def m(dx, dy, sup):
+        return {'method': 'matcher@180m', 'dx': dx * km, 'dy': dy * km, 'support': sup, 'field': None}
+
+    def pc(dx, dy):
+        return {'method': 'phasecorr@180m', 'dx': dx * km, 'dy': dy * km, 'support': None, 'field': None}
+    # job 325, XoFTR: WRS-2 tiles along a 55 x 225 km HS strip (rows 44/45/46 north to south, paths 149/150)
+    where = {1: (0, 80), 2: (0, 80), 3: (0, 80), 4: (0, 0), 5: (0, 0), 6: (0, 0), 7: (0, -90), 8: (0, -90),
+             9: (-5, 80), 10: (-5, 80), 11: (-5, 80), 12: (-5, 0), 13: (-5, 0), 14: (-5, 0), 15: (-5, -90)}
+    ests = {1: m(-34.8, -27.0, 13), 2: m(-35.0, -28.9, 10), 3: {'method': 'failed', 'dx': 0.0, 'dy': 0.0},
+            4: m(-9.3, 4.9, 57), 5: m(-22.6, 18.6, 9), 6: m(-33.7, 18.6, 8), 7: m(-10.0, 4.8, 33),
+            8: pc(-9.95, 4.78), 9: m(-9.1, 4.87, 115), 10: m(-9.1, 4.87, 78), 11: m(-9.1, 4.88, 59),
+            12: m(30.6, 29.5, 9), 13: pc(-9.23, 4.83), 14: pc(-9.31, 4.82), 15: m(-10.0, 4.85, 20)}
+    pairs = [pair(i, *where[i]) for i in range(1, 16)]
+    with contextlib.redirect_stdout(io.StringIO()):
+        out = E.AutoMatchPipeline._drop_matcher_outliers(pairs, ests, cfg)
+    check('coarse: matcher offsets 19-51 km off on 8-13 matches are replaced (job 325, XoFTR)',
+          (out, round(ests[1]['dx'] / km, 1), ests[1]['method'], ests[8]['method']),
+          ([1, 2, 5, 6, 12], -9.1, 'from-pair-9 (matcher outlier)', 'phasecorr@180m'))
+    # run 297: dE grows 46 m per km eastwards; pairs on both sides of a 100 km gap
+    grad = {}
+    xs = [-135, -120, -100, -80, -60, 60, 80, 100, 120, 135]
+    for i, x in enumerate(xs):
+        for j, y in enumerate((-100, 100)):
+            grad[2 * i + j + 1] = (x, y)
+    ests = {pid: m(-2.0 + 0.046 * x, 5.0 + 0.3 * (pid % 3), 30 + 5 * pid) for pid, (x, y) in grad.items()}
+    pairs = [pair(pid, *grad[pid]) for pid in grad]
+    with contextlib.redirect_stdout(io.StringIO()):
+        out = E.AutoMatchPipeline._drop_matcher_outliers(pairs, ests, cfg)
+    check('coarse: offsets that grow across a distorted scene, with a 120 km gap between pairs, are kept '
+          '(run 297)', out, [])
+    # two groups of similar weight: nothing to decide on
+    ests = {1: m(0, 0, 50), 2: m(0.2, 0.1, 50), 3: m(30, 30, 45), 4: m(30.1, 29.9, 45)}
+    pairs = [pair(1, 0, 0), pair(2, 0, 10), pair(3, 0, 20), pair(4, 0, 30)]
+    with contextlib.redirect_stdout(io.StringIO()):
+        out = E.AutoMatchPipeline._drop_matcher_outliers(pairs, ests, cfg)
+    check('coarse: two groups of similar weight are left alone', out, [])
+    # consistent phase-correlation offsets alone never overrule a matcher
+    ests = {1: m(-1.5, 7.1, 12), 2: pc(24.5, -25.4), 3: pc(25.0, -25.7), 4: pc(24.8, -25.5), 5: pc(25.2, -25.6)}
+    pairs = [pair(i, 0, 10 * i) for i in range(1, 6)]
+    with contextlib.redirect_stdout(io.StringIO()):
+        out = E.AutoMatchPipeline._drop_matcher_outliers(pairs, ests, cfg)
+    check('coarse: a group of phase-correlation offsets does not overrule the matcher', out, [])
+
+
+
 def test_kornia_versions(tmp):
     """A kornia without ALIKED / XFeat (the GPU node has 0.8.1): those detectors
     are not offered, imcui's ALIKED / XFeat are; native libraries load in the
@@ -1944,6 +2002,7 @@ def main():
         test_gpu_windows(tmp)
         test_jobs_312_317(tmp)
         test_jobs_318_323(tmp)
+        test_coarse_outliers()
         test_kornia_versions(tmp)
         test_warmup_and_padding()
         test_sliced_matching()

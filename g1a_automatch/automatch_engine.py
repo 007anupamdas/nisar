@@ -5026,6 +5026,7 @@ class AutoMatchPipeline:
                         ests[pid] = aligner.estimate(pair, None if matcher_free else matcher)
                         if matcher_free:
                             shared_coarse[pid] = ests[pid]
+                self._drop_matcher_outliers(disk_pairs, ests, cfg)
                 self._check_phasecorr_offsets(disk_pairs, ests, cfg)
                 self._borrow_failed_offsets(disk_pairs, ests)
                 spread = self._coarse_spread(ests)
@@ -5143,6 +5144,76 @@ class AutoMatchPipeline:
     def _centre(p: Dict) -> Tuple[float, float]:
         b = p['bounds']
         return (b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0
+
+    @staticmethod
+    def _drop_matcher_outliers(pairs: List[Dict], ests: Dict[int, Dict], cfg,
+                               per_km: float = 50.0) -> List[int]:
+        """A matcher's coarse offset can be wrong on a handful of matches (job
+        325, XoFTR: pairs 1, 2, 5, 6 and 12 were 19-51 km off on 8-13 matches,
+        while ten pairs agreed on (-9.5, +4.85) km on 33-115). Offsets are
+        grouped with their neighbours: two pairs belong together when their
+        offsets differ by at most max(5 km, 3 x search_margin_m) plus per_km
+        metres per km between the pairs (the scene's own distortion: 46 m/km
+        on run 297). Groups weigh their matches (a phase-correlation offset
+        counts as coarse_min_support). When the heaviest group outweighs every
+        other at least twice, the matcher offsets outside it are replaced the
+        way a failed pair borrows. Returns the replaced pair ids."""
+        items = [p for p in pairs if str(ests[p['pair_id']]['method']).startswith(('matcher', 'phasecorr'))]
+        if len(items) < 3:
+            return []
+        tol = max(5000.0, 3.0 * float(cfg.search_margin_m or 0.0))
+        floor = float(cfg.coarse_min_support)
+        cen = {p['pair_id']: AutoMatchPipeline._centre(p) for p in items}
+
+        def weight(p):
+            e = ests[p['pair_id']]
+            return float(e.get('support') or floor) if str(e['method']).startswith('matcher') else floor
+        group = {p['pair_id']: p['pair_id'] for p in items}
+
+        def root(a):
+            while group[a] != a:
+                group[a] = group[group[a]]
+                a = group[a]
+            return a
+        for i, p in enumerate(items):
+            for q in items[i + 1:]:
+                a, b = ests[p['pair_id']], ests[q['pair_id']]
+                apart = math.hypot(cen[p['pair_id']][0] - cen[q['pair_id']][0],
+                                   cen[p['pair_id']][1] - cen[q['pair_id']][1])
+                if math.hypot(a['dx'] - b['dx'], a['dy'] - b['dy']) <= tol + per_km * apart / 1000.0:
+                    group[root(p['pair_id'])] = root(q['pair_id'])
+        weights: Dict[int, float] = {}
+        for p in items:
+            r = root(p['pair_id'])
+            weights[r] = weights.get(r, 0.0) + weight(p)
+        if len(weights) < 2:
+            return []
+        ranked = sorted(weights.values(), reverse=True)
+        main = max(weights, key=weights.get)
+        if ranked[0] < 2.0 * ranked[1]:
+            return []                 # no clear majority: leave the offsets as they are
+        members = [p for p in items if root(p['pair_id']) == main]
+        sources = [p for p in members if str(ests[p['pair_id']]['method']).startswith('matcher')]
+        if not any(weight(p) >= 2 * floor for p in sources):
+            return []                 # the main group must rest on a well-supported matcher offset
+        replaced = []
+        for p in items:
+            pid = p['pair_id']
+            e = ests[pid]
+            if root(pid) == main or not str(e['method']).startswith('matcher'):
+                continue
+            cx, cy = cen[pid]
+            src = min(sources, key=lambda q: math.hypot(cen[q['pair_id']][0] - cx, cen[q['pair_id']][1] - cy))
+            g = ests[src['pair_id']]
+            dx, dy = field_offset(g['field'], cx, cy) if g.get('field') else (g['dx'], g['dy'])
+            print(f'[Coarse] pair {pid}: the matcher gave dE={e["dx"]:.0f} m dN={e["dy"]:.0f} m on '
+                  f'{e.get("support")} matches, apart from the {len(members)} pairs that agree; using pair '
+                  f'{src["pair_id"]}\'s (dE={dx:.0f} m dN={dy:.0f} m)')
+            ests[pid] = {'dx': float(dx), 'dy': float(dy), 'support': None, 'n': None, 'peak': None,
+                         'field': None, 'margin_scale': 2.0,
+                         'method': f'from-pair-{src["pair_id"]} (matcher outlier)'}
+            replaced.append(pid)
+        return replaced
 
     @staticmethod
     def _check_phasecorr_offsets(pairs: List[Dict], ests: Dict[int, Dict], cfg) -> List[int]:

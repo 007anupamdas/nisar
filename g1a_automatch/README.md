@@ -89,10 +89,17 @@ Windows compared at the same map position cannot match when the error is
    very large pairs): the selected matcher first (robust 2-D mode of all
    match offsets), then phase correlation of gradient magnitude, then
    `initial_offset_m` if given. All pairs share one image, so the estimates
-   are then checked against each other: a phase-correlation offset more
-   than 5 km (or 3 x `search_margin_m`) from every offset the matcher
-   measured in the scene is replaced by the nearest matcher pair's offset,
-   as a failed pair is (`from-pair-N (phasecorr disagreed)` in the log).
+   are then checked against each other. First the matcher's own: offsets
+   are grouped with their neighbours (within 5 km, plus 50 m per km between
+   the pairs, which the scene's own distortion needs), each group weighing
+   its matches. When the heaviest group outweighs every other at least
+   twice and rests on a well-supported matcher offset, matcher offsets
+   outside it are replaced by the nearest group member's (`from-pair-N
+   (matcher outlier)`; job 325: XoFTR had five pairs 19–51 km off on 8–13
+   matches). Then a phase-correlation offset more than 5 km (or 3 x
+   `search_margin_m`) from every offset the matcher measured is replaced by
+   the nearest matcher pair's offset, as a failed pair is
+   (`from-pair-N (phasecorr disagreed)` in the log).
    When the pairs still differ by more than half of `max_expected_error_m`,
    the log warns. Every estimate is written to `raw_matches_*/COARSE_OFFSETS.csv`.
 3. Fine windows read the reference **shifted by that offset and padded by
@@ -541,11 +548,11 @@ git push <new-repo-url> g1a-automatch:main
   kornia LightGlue it builds.
 
 - **Coarse offsets of dense matchers:** RoMa, DKM, GIM, XoFTR and similar
-  sometimes return a confident but wrong coarse offset for a few pairs (run
-  297: 3 of 22 pairs for MINIMA-RoMa, which still scored 326 m because the
-  chip consensus dropped those chips). Only phase-correlation offsets are
-  checked against the matcher pairs; the log warns when the pairs disagree
-  by more than half of `max_expected_error_m`.
+  sometimes return a wrong coarse offset for a few pairs (run 297: 3 of 22
+  pairs for MINIMA-RoMa; job 325: 5 of 15 for XoFTR). Offsets outside the
+  clearly heaviest group are replaced (see *Errors of kilometres*); when no
+  group clearly outweighs the others they are kept, and the log warns when
+  the pairs disagree by more than half of `max_expected_error_m`.
 - **Window size is a ground size.** 2048 px is 92 km at 45 m (G1A MX-VNIR)
   but 369 km at 180 m (G1A HS) and 645 km at 315 m. Run 300 (315 m, 2048 px)
   got 4–6 chips and results tens of km off; on jobs 312–317 (180 m and 315 m)
