@@ -459,6 +459,22 @@ def test_pack(tmp):
         check(f'pack {ref}: a second pack copies nothing again', (again['copied'], again['skipped'] > 0), (0, True))
     sh = open(os.path.join(dest, 'submit_gpuaas.sh')).read()
     check('pack: curl script for env / weights / preflight / run', 'submit_job' in sh and 'mode_$1.json' in sh)
+    # the Pack dialog's window field (remembered) overriding the job's list must be visible
+    jf = os.path.join(tmp, 'pack_windows_job.json')
+    with open(jf, 'w') as f:
+        json.dump({**{k: v for k, v in job.items() if not str(k).startswith('_')},
+                   'window_sizes': [256, 384, 512]}, f)
+    import contextlib
+    import io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        P.main([jf, '--to', os.path.join(tmp, 'bundle_win'), '--server-dir', os.path.join(tmp, 'bundle_win'),
+                '--dry-run', '--set', 'window_sizes=[2048]'])
+    out = buf.getvalue()
+    check('pack: the report names the window sizes the server will run, and a dialog / --set override of the '
+          "job's list", ('window sizes the server will run: 2048 px' in out,
+                         'window_sizes for the server: [2048] (the job file has [256, 384, 512]' in out),
+          (True, True))
     inputs = again['inputs']
     check('pack: input_path holds only existing files (the service checks each item)',
           all(os.path.exists(p) for m in ('env', 'weights', 'preflight', 'run') for p in inputs[m].split(',')))

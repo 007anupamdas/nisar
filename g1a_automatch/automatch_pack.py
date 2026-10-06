@@ -287,7 +287,7 @@ def mode_inputs(server_dir: str) -> Dict[str, str]:
 # ─────────────────────────────────────────────────────────────────────────────
 def pack(job: Dict, dest: str, server_dir: str, server_weights: str = '', server_cache: str = '',
          dry_run: bool = False, code_path: str = GPUAAS_CODE, url: str = GPUAAS_URL,
-         conda_env: str = 'mpad', gpu_mb: int = 40000) -> Dict:
+         conda_env: str = 'mpad', gpu_mb: int = 40000, notes: Optional[List[str]] = None) -> Dict:
     import automatch_refs as refs
     if not job['input_path'] or not os.path.exists(job['input_path']):
         raise FileNotFoundError(f"input_path not found here: {job['input_path']!r}")
@@ -381,6 +381,9 @@ def pack(job: Dict, dest: str, server_dir: str, server_weights: str = '', server
               f"  the server must run the same code: copy this g1a_automatch folder to "
               f"{posixpath.dirname(code_path)}; every log starts with the code it ran",
               f"  settings that differ from the defaults: {', '.join(changed) or 'none'}",
+              f"  window sizes the server will run: {', '.join(str(int(w)) for w in job['window_sizes'])} px "
+              f"(keypoints per window at most {int(job['max_num_features'])})",
+              *[f'  {n}' for n in (notes or [])],
               f"  image footprint from: {foot_src}",
               f"  reference collection: {ref_root} ({cat['mode']}, {len(cat['footprints'])} footprints)",
               f"  references within {float(job['max_expected_error_m']) / 1000:g} km "
@@ -466,8 +469,20 @@ def main(argv: Optional[List[str]] = None) -> int:
     a = ap.parse_args(argv)
     import automatch_job as J
     job = J.load_job(a.job, a.set)
+    # a setting changed for the server only (--set, or the GUI Pack dialog's
+    # fields, which remember their last value): say so, with the job's value
+    notes = []
+    if a.set:
+        own = J.load_job(a.job)
+        for ov in a.set:
+            k = ov.split('=', 1)[0].strip()
+            if own.get(k) != job.get(k):
+                notes.append(f'{k} for the server: {job.get(k)} (the job file has {own.get(k)}; set with '
+                             f'--set / the Pack dialog)')
+    for n in notes:
+        log(f'NOTE: {n}')
     res = pack(job, a.to, a.server_dir.rstrip('/') or '/', a.server_weights, a.server_cache, a.dry_run,
-               a.code_path, a.url, a.conda_env, a.gpu_mb)
+               a.code_path, a.url, a.conda_env, a.gpu_mb, notes=notes)
     print()
     print(res['text'])
     bad = res['check'] and (res['check'].get('lost') or res['check'].get('error'))

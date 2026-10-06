@@ -384,6 +384,8 @@ class PackDialog(QtWidgets.QDialog):
         f.addRow('GPU memory to request', self.gpu_mb)
         self.windows = QtWidgets.QLineEdit(get('pack/windows'))
         self.windows.setPlaceholderText(f"as in the job ({fmt_list(job['window_sizes'])}); e.g. 3072 on the A100")
+        self.windows.setToolTip('Replaces the job\'s window sizes for the server. The field remembers its last '
+                                'value: clear it to use the job\'s list. Several sizes: 256, 384, 512')
         f.addRow('Window sizes on the server', self.windows)
         self.max_feat = QtWidgets.QSpinBox()
         self.max_feat.setRange(0, 1000000)
