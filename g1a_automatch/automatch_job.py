@@ -342,17 +342,15 @@ def _check_gcp_file(path: str) -> List[str]:
     return [f'manual_gcp_csv lacks the columns {sorted(missing)} (needs {sorted(GCP_COLUMNS)})']
 
 
-COARSE_INPUT_M = 100.0     # G1A MX-VNIR is 45 m; coarser than this is worth a second look
+WINDOW_KM = 92.0     # 2048 px at 45 m (G1A MX-VNIR): the window size the ranking runs were made with
 
 
 def _scale_warnings(job: Dict, scene, res: float, E) -> List[str]:
-    """Settings that cannot work at this image's scale (run 300: a 315 m
-    image matched in 2048 px windows, each 645 km across, on a scene about
-    160 km wide: one chip per reference, one model for the whole scene)."""
+    """Window sizes that do not suit this image's pixel size. A window is
+    best judged on the ground: 2048 px is 92 km at 45 m (MX-VNIR) but 369 km
+    at 180 m (HS) and 645 km at 315 m, where a scene gives one chip per
+    reference (run 300, jobs 312-317)."""
     out = []
-    if res > COARSE_INPUT_M:
-        out.append(f'working resolution {res:g} m is coarse (G1A MX-VNIR is 45 m): if this image should be '
-                   f'finer, check its pixel size (gdalinfo: "Pixel Size") and leave Target resolution empty')
     if scene.kind != 'raster' or not scene.native_res:
         return out
     with E.rt.open(scene.raster_path) as src:
@@ -360,11 +358,16 @@ def _scale_warnings(job: Dict, scene, res: float, E) -> List[str]:
         h_km = src.height * abs(src.transform.e) / 1000.0
     short_px = min(w_km, h_km) * 1000.0 / res
     suggest = max(256, int(short_px / 3) // 64 * 64)
+    ground = max(256, int(round(WINDOW_KM * 1000.0 / res / 64.0)) * 64)
     for w in sorted(set(int(v) for v in job['window_sizes'])):
         if w > short_px:
             out.append(f'{w} px windows are {w * res / 1000:.0f} km across at {res:g} m, larger than the image '
                        f'({w_km:.0f} x {h_km:.0f} km): each reference gives at most one chip and one model '
                        f'covers the whole scene. Use about a third of the image, here {suggest} px')
+        elif w * res / 1000.0 > 2 * WINDOW_KM:
+            out.append(f'{w} px windows are {w * res / 1000:.0f} km across at {res:g} m: few chips per scene. '
+                       f'About {WINDOW_KM:.0f} km, here {ground} px, gives as many chips as 2048 px windows on '
+                       f'45 m images')
     return out
 
 

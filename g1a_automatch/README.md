@@ -359,7 +359,7 @@ then the same with `mode_weights.json`, `mode_preflight.json`, and finally
 |---|---|---|
 | settings + `mode_env.json` | packages and versions, GPU and free memory, internet, weight folders, detector list on the node | `ENVIRONMENT.txt` |
 | settings + `mode_weights.json` | every weight file the selection needs, found or missing (nothing downloaded) | `WEIGHTS_REPORT.txt` |
-| settings + `mode_preflight.json` | image, references, truth, settings; number of matching passes; warns about pixels coarser than 100 m, windows larger than the image and settings the code does not know | `PREFLIGHT.json` |
+| settings + `mode_preflight.json` | image, references, truth, settings; number of matching passes; warns about windows too large on the ground for the pixel size or larger than the image, and settings the code does not know | `PREFLIGHT.json` |
 | settings alone | the run | `PERFORMANCE.csv`, `TRUTH_BY_DETECTOR_MATCHER.csv`, `RUN_MANIFEST.csv`, `rival/`, `automatch.log` |
 
 If `weights` lists missing files (a detector the NISAR runs never used),
@@ -466,6 +466,15 @@ lost 217 and 190 windows to out-of-memory, 178 and 169 of them in RDD, XoFTR,
 ELoFTR, ASpanFormer, MINIMA-LoFTR and TopicFM, whose match matrix grows with
 the fourth power of the window side.
 
+On Windows the NVIDIA driver can hand out more memory than the card has,
+spilling into system RAM ("CUDA - Sysmem Fallback Policy"): nothing runs out,
+everything slows down. On the 16 GB RTX 5000 DeDoDe reached 25–27 GB and took
+14–30 min per variant (0.5–2 min on the A100). A detector whose memory spills
+is treated as out of memory: smaller tiles from the next window on, and the
+log names the setting. NVIDIA Control Panel > Manage 3D settings > CUDA -
+Sysmem Fallback Policy > *Prefer No Sysmem Fallback* (for python.exe) makes
+it a plain out-of-memory, handled at the first window.
+
 ## Offline weights
 
 Weights are looked for, before any download, in kornia's default folder
@@ -526,14 +535,14 @@ git push <new-repo-url> g1a-automatch:main
   chip consensus dropped those chips). Only phase-correlation offsets are
   checked against the matcher pairs; the log warns when the pairs disagree
   by more than half of `max_expected_error_m`.
-- **Input pixel size:** with 315 m pixels (run 300) the coarse stage worked
-  at 630 m, about 250 px across a scene of roughly 160 km, and 2048 px
-  windows were 645 km across: 4–6 chips, results tens of km off. Jobs 312–317
-  read COGs at 180 m and 315 m: most reference pairs gave no window or one
-  (windows under 500 px a side were skipped; now under 256 px), and on job
-  313 (3072 px windows) no detector reached a consensus. Match the image at
-  its native pixel size (G1A MX-VNIR is 45 m) with windows no larger than
-  about a third of the scene; preflight warns otherwise.
+- **Window size is a ground size.** 2048 px is 92 km at 45 m (G1A MX-VNIR)
+  but 369 km at 180 m (G1A HS) and 645 km at 315 m. Run 300 (315 m, 2048 px)
+  got 4–6 chips and results tens of km off; on jobs 312–317 (180 m and 315 m)
+  most reference pairs gave no window or one (windows under 500 px a side were
+  skipped, now under 256 px), and on job 313 (3072 px) no detector reached a
+  consensus. Choose windows of about 90 km: 2048 px at 45 m, 512 px at 180 m,
+  about 300 px at 315 m. Preflight warns when a window is more than twice
+  that, or larger than the image.
 
 - **Mixed conda / pip environments (Linux):** if a pip wheel (pandas, torch)
   loads the system C++ runtime before conda-forge GDAL, rasterio fails with

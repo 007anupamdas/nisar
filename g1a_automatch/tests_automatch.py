@@ -1294,9 +1294,16 @@ def test_version_skew_and_coarse(tmp):
             dst.write(np.ones((1, 400, 500), dtype='uint8'))
     w315 = J._scale_warnings(J.normalize({'window_sizes': [256, 2048]}), E.InputScene(p315, cfg), 315.0, E)
     w45 = J._scale_warnings(J.normalize({'window_sizes': [256]}), E.InputScene(p45, cfg), 45.0, E)
-    check('preflight: coarse pixels, and windows larger than the image, are flagged (run 300)',
-          (len(w315), 'Pixel Size' in w315[0], w315[1].startswith('2048 px windows are 645 km'),
-           'here 256 px' in w315[1], w45), (2, True, True, True, []))
+    check('preflight: windows larger than the image are flagged (run 300)',
+          (len(w315), w315[0].startswith('2048 px windows are 645 km'), 'here 256 px' in w315[0], w45),
+          (1, True, True, []))
+    p180 = os.path.join(tmp, 'hs180.tif')               # a G1A HS scene: 180 m pixels, natively
+    with rasterio.open(p180, 'w', driver='GTiff', width=3000, height=3000, count=1, dtype='uint8',
+                       crs='EPSG:32643', transform=from_origin(500000, 1600000, 180.0, 180.0)) as dst:
+        dst.write(np.ones((1, 3000, 3000), dtype='uint8'))
+    w180 = J._scale_warnings(J.normalize({'window_sizes': [512, 2048]}), E.InputScene(p180, cfg), 180.0, E)
+    check('preflight: 2048 px windows at 180 m (369 km) -> about 92 km, 512 px, suggested; 512 px passes',
+          (len(w180), w180[0].startswith('2048 px windows are 369 km'), 'here 512 px' in w180[0]), (1, True, True))
     refd = os.path.join(tmp, 'skew_refs')
     os.makedirs(refd, exist_ok=True)
     with contextlib.redirect_stdout(io.StringIO()):
@@ -1406,6 +1413,32 @@ def test_gpu_windows(tmp):
     check('gpu windows: the next channel / sweep point of the job starts at the size found',
           (E.GPU_WINDOWS.get(('sift', 1024)), s3.gpu_window), (512, 512))
     E.GPU_WINDOWS.clear()
+
+    import contextlib
+    import io
+
+    class Props:
+        name, total_memory = 'Quadro RTX 5000', 16 * 1024 ** 3
+    cuda = E.th.cuda
+    saved = (cuda.is_available, cuda.get_device_properties, cuda.current_device, cuda.memory_reserved)
+    reserved = [10 * 1024 ** 3]
+    cuda.is_available, cuda.get_device_properties = (lambda: True), (lambda i=0: Props)
+    cuda.current_device, cuda.memory_reserved = (lambda: 0), (lambda *a: reserved[0])
+    try:
+        sp = E.build_detector('sift', E.PipelineConfig(window_size=2048, num_features=32000))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            sp._check_spill()                       # 10 GB on a 16 GB card: nothing to do
+            fits = sp.gpu_window
+            reserved[0] = int(27.1 * 1024 ** 3)     # as DeDoDe on the RTX 5000 (Windows)
+            sp._check_spill()
+    finally:
+        cuda.is_available, cuda.get_device_properties, cuda.current_device, cuda.memory_reserved = saved
+        E.GPU_WINDOWS.clear()
+    check('gpu windows: memory spilled into system RAM (Windows sysmem fallback) counts as running out, '
+          'with the NVIDIA setting named',
+          (fits, sp.gpu_window, 'Sysmem Fallback' in buf.getvalue(), 'spilled into system RAM' in buf.getvalue()),
+          (None, 1024, True, True))
 
 
 

@@ -2672,6 +2672,31 @@ class DiskBasedMatcher(BaseMatcher):
         self._use_gpu_window(smaller[0], f'out of GPU memory in {cur} px ({err[:90]})')
         return True
 
+    def _check_spill(self) -> None:
+        """On Windows the NVIDIA driver can hand out more memory than the card
+        has, spilling into system RAM ('CUDA - Sysmem Fallback Policy'):
+        nothing runs out, everything slows down (DeDoDe at 25-27 GB on a 16
+        GB RTX 5000 took 14-30 min per variant, 0.5-2 min on the A100).
+        Treated as running out: smaller tiles from the next window on."""
+        if not th.cuda.is_available():
+            return
+        try:
+            total = th.cuda.get_device_properties(th.cuda.current_device()).total_memory
+            used = th.cuda.memory_reserved()
+        except Exception:
+            return
+        if used <= total:
+            return
+        safe_cuda_empty_cache()
+        if not getattr(self, '_spill_noted', False):
+            self._spill_noted = True
+            print(f'[{self.get_filename_prefix()}] GPU memory spilled into system RAM ({used / 1024 ** 3:.1f} GB '
+                  f'on a {total / 1024 ** 3:.0f} GB card), which is many times slower. NVIDIA Control Panel > '
+                  f'Manage 3D settings > CUDA - Sysmem Fallback Policy > Prefer No Sysmem Fallback makes it an '
+                  f'out-of-memory instead, handled at once.', flush=True)
+        self._shrink_gpu_window(f'spilled into system RAM ({used / 1024 ** 3:.1f} GB on a '
+                                f'{total / 1024 ** 3:.0f} GB card)')
+
     def _tiles(self, wx: int, wy: int, sx: int, sy: int) -> List[Tuple[int, int, int, int]]:
         """The window (wx = first row, wy = first column, sx rows, sy columns)
         as an even grid of tiles of at most gpu_window px, without overlap
@@ -2750,7 +2775,9 @@ class DiskBasedMatcher(BaseMatcher):
                                                       nisar_nodata=nisar_nodata, s1_nodata=s1_nodata)
                     if rec:
                         recs.append(rec)
-                return self._merge_tiles(recs, metadata, wx, wy)
+                out = self._merge_tiles(recs, metadata, wx, wy)
+                self._check_spill()
+                return out
             except ModelLoadError:
                 raise
             except Exception as e:
