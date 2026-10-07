@@ -1,0 +1,230 @@
+{
+  "input_path": "/maintenance/ICIGDev/GPUPOC/input/dqe/g1a/267403461/input/cog.tif",
+  "channels": [
+    "band1"
+  ],
+  "reference_dir": "/maintenance/ICIGDev/GPUPOC/input/dqe/g1a/267403461/reference/L8Ref",
+  "reference_fill_values": [
+    0.0,
+    3.0
+  ],
+  "output_dir": "/maintenance/ICIGDev/GPUPOC/input/dqe/g1a/267403461/output",
+  "detectors": [
+    "all"
+  ],
+  "matchers": "all",
+  "detector_params": {
+    "disk": {
+      "checkpoint": [
+        "depth",
+        "epipolar"
+      ],
+      "fginn.mutual": [
+        true
+      ]
+    },
+    "dedode": {
+      "detector_weights": [
+        "L-upright",
+        "L-C4",
+        "L-C4-v2"
+      ],
+      "descriptor_weights": [
+        "B-upright",
+        "B-C4",
+        "G-C4"
+      ],
+      "fginn.mutual": [
+        true
+      ]
+    },
+    "aliked": {
+      "model_name": [
+        "aliked-t16",
+        "aliked-n16",
+        "aliked-n16rot",
+        "aliked-n32"
+      ]
+    },
+    "loftr": {
+      "pretrained": [
+        "outdoor",
+        "indoor",
+        "indoor_new"
+      ]
+    },
+    "sift": {
+      "fginn.mutual": [
+        true
+      ]
+    },
+    "keynet": {
+      "fginn.mutual": [
+        true
+      ]
+    },
+    "dog": {
+      "descriptor": [
+        "hardnet",
+        "hardnet8",
+        "sosnet",
+        "hynet",
+        "tfeat"
+      ],
+      "fginn.mutual": [
+        true
+      ]
+    },
+    "gftt": {
+      "fginn.mutual": [
+        true
+      ]
+    },
+    "hessian": {
+      "fginn.mutual": [
+        true
+      ]
+    },
+    "imw-sp-lg": {
+      "api.detect_threshold": [
+        0.2
+      ]
+    },
+    "imw-aliked-lg": {
+      "api.detect_threshold": [
+        0.2
+      ]
+    },
+    "imw-sp-sg": {
+      "api.detect_threshold": [
+        0.2
+      ]
+    },
+    "imw-sp-nn": {
+      "api.detect_threshold": [
+        0.2
+      ]
+    },
+    "imw-r2d2-nn": {
+      "api.detect_threshold": [
+        0.2
+      ]
+    },
+    "imw-rord-nn": {
+      "api.detect_threshold": [
+        0.2
+      ],
+      "feature.multiscale": [
+        true,
+        false
+      ]
+    },
+    "imw-d2net-nn": {
+      "api.detect_threshold": [
+        0.2
+      ],
+      "feature.multiscale": [
+        true,
+        false
+      ]
+    },
+    "imw-alike-nn": {
+      "api.detect_threshold": [
+        0.2
+      ],
+      "feature.multiscale": [
+        true,
+        false
+      ],
+      "feature.sub_pixel": [
+        true,
+        false
+      ]
+    },
+    "imw-sfd2-nn": {
+      "api.detect_threshold": [
+        0.2
+      ]
+    },
+    "imw-rdd-nn": {
+      "api.detect_threshold": [
+        0.2
+      ]
+    },
+    "imw-liftfeat-nn": {
+      "api.detect_threshold": [
+        0.2
+      ]
+    },
+    "imw-ripe-nn": {
+      "api.detect_threshold": [
+        0.2
+      ]
+    },
+    "imw-darkfeat-nn": {
+      "api.detect_threshold": [
+        0.2
+      ]
+    },
+    "imw-lanet-nn": {
+      "api.detect_threshold": [
+        0.2
+      ]
+    }
+  },
+  "smnn_thresholds": [
+    0.9
+  ],
+  "weights_cache_dir": "/maintenance/ICIGDev/GPUPOC/input/dqe/imw_runtime/imw_cache",
+  "window_sizes": [
+    256,
+    384,
+    512,
+    640,
+    768,
+    896,
+    1024,
+    1152,
+    1280,
+    1408,
+    1536,
+    1664,
+    1792,
+    1920,
+    2048,
+    2176,
+    2304,
+    2432,
+    2560,
+    2688,
+    2816,
+    2944,
+    3072,
+    3200,
+    3328,
+    3456,
+    3584,
+    3712,
+    3840,
+    3968,
+    4096
+  ],
+  "max_expected_error_m": 20000.0,
+  "coarse_resolution_m": 60.0,
+  "search_margin_m": 1500.0,
+  "coarse_local": false,
+  "coarse_cell_km": 0.0,
+  "ransac_methods": [
+    "magsac",
+    "lmeds"
+  ],
+  "ransac_thresholds_px": [
+    2.0
+  ],
+  "consensus_tolerance_px": 100.0,
+  "consensus_model": "constant",
+  "truth_csv": "/maintenance/ICIGDev/GPUPOC/input/dqe/g1a/267403461/truth/267403461.csv",
+  "truth_radius_m": 5000.0,
+  "device": "cuda",
+  "save_match_images": true
+}
