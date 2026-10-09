@@ -113,6 +113,174 @@ def fmt_list(vals):
                      for v in vals)
 
 
+class CheckCombo(QtWidgets.QComboBox):
+    """A drop-down of check boxes: a click ticks or unticks an item and the
+    list stays open; a click outside closes it. Row 0 is the summary."""
+
+    toggled = QtCore.Signal() if hasattr(QtCore, 'Signal') else QtCore.pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setModel(QtGui.QStandardItemModel(self))
+        self.setMaxVisibleItems(25)
+        self.view().pressed.connect(self._pressed)
+        self._keep_open = False
+
+    def _pressed(self, index):
+        item = self.model().itemFromIndex(index)
+        if item is None or index.row() == 0:
+            return
+        item.setCheckState(UNCHECKED if item.checkState() == CHECKED else CHECKED)
+        self._keep_open = True
+        self.toggled.emit()
+
+    def hidePopup(self):
+        if self._keep_open:
+            self._keep_open = False
+            return
+        super().hidePopup()
+        self.setCurrentIndex(0)
+
+    def set_items(self, names, checked=()):
+        m = self.model()
+        m.clear()
+        m.appendRow(QtGui.QStandardItem(''))
+        for n in names:
+            it = QtGui.QStandardItem(n)
+            it.setFlags(USER_CHECKABLE | ITEM_ENABLED)
+            it.setCheckState(CHECKED if n in checked else UNCHECKED)
+            m.appendRow(it)
+        self.setCurrentIndex(0)
+
+    def checked_items(self):
+        m = self.model()
+        return [m.item(r).text() for r in range(1, m.rowCount()) if m.item(r).checkState() == CHECKED]
+
+    def set_summary(self, text):
+        if self.model().rowCount():
+            self.model().item(0).setText(text)
+
+
+class ChannelPicker(QtWidgets.QWidget):
+    """Channels to run: a drop-down of check boxes (band1..band180, HH..)
+    and a field that takes typed lists and ranges ("47, 50-55", "band47",
+    "HH HV"); each follows the other. Empty = all channels."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        lay = QtWidgets.QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self.combo = CheckCombo()
+        self.combo.setMinimumWidth(150)
+        self.combo.set_items([])
+        self.combo.toggled.connect(self._from_checks)
+        lay.addWidget(self.combo)
+        self.edit = QtWidgets.QLineEdit()
+        self.edit.setPlaceholderText('all channels (or e.g. 47, 50-55)')
+        self.edit.setToolTip('Channels to run, comma separated: band numbers (47), ranges (50-55), '
+                             'band names (band47) or polarisations (HH, HV). Empty = all.')
+        lay.addWidget(self.edit, 1)
+        b = QtWidgets.QPushButton('All')
+        b.setToolTip('Clear the list: run every channel')
+        b.clicked.connect(self.edit.clear)
+        lay.addWidget(b)
+        self.edit.textChanged.connect(self._from_text)
+        self.names = []
+        self._syncing = False
+        self._from_text()
+
+    def set_names(self, names):
+        """The input's channels, from Inspect input; the typed list is kept."""
+        self.names = list(names or [])
+        try:
+            cur = self.checked()
+        except ValueError:
+            cur = []
+        self.combo.set_items(self.names, cur)
+        self._summary(cur)
+
+    def _summary(self, cur):
+        if not self.names:
+            self.combo.set_summary('Inspect input first' if not cur else f'{len(cur)} typed')
+        else:
+            self.combo.set_summary('all channels' if not cur else f'{len(cur)} of {len(self.names)} ticked')
+
+    def _from_checks(self):
+        """A box ticked in the drop-down: the field follows, in input order."""
+        if self._syncing:
+            return
+        self._syncing = True
+        try:
+            self.set_checked(self.combo.checked_items())
+        finally:
+            self._syncing = False
+        self._summary(self.combo.checked_items())
+
+    def _from_text(self):
+        """Typed: the boxes follow (an unknown channel leaves them as they are)."""
+        if self._syncing:
+            return
+        try:
+            cur = self.checked()
+        except ValueError:
+            return
+        m = self.combo.model()
+        self._syncing = True
+        try:
+            for r in range(1, m.rowCount()):
+                m.item(r).setCheckState(CHECKED if m.item(r).text() in cur else UNCHECKED)
+        finally:
+            self._syncing = False
+        self._summary(cur)
+
+    def set_checked(self, chans):
+        """Shows the channels, runs of bands as ranges (band50-55)."""
+        out, run = [], []
+
+        def flush():
+            if run:
+                out.append(f'band{run[0]}' if len(run) == 1 else f'band{run[0]}-{run[-1]}')
+                run.clear()
+        for c in chans or []:
+            m = re.fullmatch(r'band(\d+)', str(c))
+            if m and run and int(m.group(1)) == run[-1] + 1:
+                run.append(int(m.group(1)))
+            elif m:
+                flush()
+                run.append(int(m.group(1)))
+            else:
+                flush()
+                out.append(str(c))
+        flush()
+        self.edit.setText(', '.join(out))
+
+    def checked(self):
+        """The typed channels as names, in order, without repeats. Raises
+        ValueError for a channel the inspected input does not have."""
+        text = re.sub(r'\s*-\s*', '-', self.edit.text().strip())
+        out = []
+        for tok in [t for t in re.split(r'[,;\s]+', text) if t]:
+            m = re.fullmatch(r'(?i)(?:band)?(\d+)-(?:band)?(\d+)', tok)
+            if m:
+                a, b = int(m.group(1)), int(m.group(2))
+                if b < a:
+                    raise ValueError(f'Channels: {tok!r} runs backwards.')
+                names = [f'band{i}' for i in range(a, b + 1)]
+            else:
+                m = re.fullmatch(r'(?i)(?:band)?(\d+)', tok)
+                names = [f'band{int(m.group(1))}'] if m else [tok]
+            for n in names:
+                if self.names and n not in self.names:
+                    hit = next((x for x in self.names if x.lower() == n.lower()), None)
+                    if hit is None:
+                        raise ValueError(f'Channels: {n} is not in the input '
+                                         f'({self.names[0]} … {self.names[-1]}).')
+                    n = hit
+                if n not in out:
+                    out.append(n)
+        return out
+
+
 class PathRow(QtWidgets.QWidget):
     """Line edit + browse button(s)."""
 
@@ -683,9 +851,8 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.lbl_input.setWordWrap(True)
         row.addWidget(self.lbl_input, 1)
         f.addRow(row)
-        self.channels = QtWidgets.QListWidget()
-        self.channels.setMaximumHeight(90)
-        f.addRow('Channels (none checked = all)', self.channels)
+        self.channels = ChannelPicker()
+        f.addRow('Channels', self.channels)
         self.auto_bands = QtWidgets.QSpinBox()
         self.auto_bands.setRange(0, 50)
         self.auto_bands.setSpecialValueText('off: every channel above')
@@ -955,9 +1122,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.gcp_path.setText(j['manual_gcp_csv'])
         self.truth_path.setText(j.get('truth_csv') or '')
         self.truth_radius.setValue(float(j.get('truth_radius_m') or 5000) / 1000.0)
-        self._pending_channels = list(j['channels'] or [])
-        self._set_channels([self.channels.item(i).text() for i in range(self.channels.count())]
-                           or self._pending_channels)
+        self.channels.set_checked(list(j['channels'] or []))
         self.detector_params = {k: {p: list(v) for p, v in d.items()}
                                 for k, d in (j.get('detector_params') or {}).items()}
         self._pending_detectors = (list(j['detectors']), dict(j['matchers'] or {}))
@@ -1026,8 +1191,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         job = dict(DEFAULT_JOB)
         job.update({
             'input_path': self.in_path.text(),
-            'channels': [self.channels.item(i).text() for i in range(self.channels.count())
-                         if self.channels.item(i).checkState() == CHECKED],
+            'channels': self.channels.checked(),
             'reference_dir': self.ref_path.text(),
             'reference_label': self.ref_label.text().strip(),
             'reference_mode': self.ref_mode.currentText(),
@@ -1085,15 +1249,6 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         return job
 
     # ── channels ─────────────────────────────────────────────────────────────
-    def _set_channels(self, names):
-        checked = set(self._pending_channels or [])
-        self.channels.clear()
-        for n in names:
-            it = QtWidgets.QListWidgetItem(n)
-            it.setFlags(USER_CHECKABLE | ITEM_ENABLED)
-            it.setCheckState(CHECKED if n in checked else UNCHECKED)
-            self.channels.addItem(it)
-
     # ── detectors ────────────────────────────────────────────────────────────
     def _selectable(self, r):
         """False for the greyed catalogue rows that are not offered."""
@@ -1348,7 +1503,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         elif kind == 'inspect':
             ev = next((e for e in events if e.get('event') == 'inspect'), None)
             if ev:
-                self._set_channels(ev['channels'])
+                self.channels.set_names(ev['channels'])
                 res = ev.get('native_res')
                 self.lbl_input.setText(
                     f"{ev['kind']} · {ev['name']} · {len(ev['channels'])} channel(s) · "
@@ -1511,8 +1666,6 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         if not self.in_path.text():
             QtWidgets.QMessageBox.warning(self, 'Input', 'Choose an input image first.')
             return
-        self._pending_channels = [self.channels.item(i).text() for i in range(self.channels.count())
-                                  if self.channels.item(i).checkState() == CHECKED]
         self._start(['inspect', self.in_path.text()], 'inspect')
 
     def preflight(self):

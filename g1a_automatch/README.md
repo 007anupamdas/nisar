@@ -41,8 +41,10 @@ pip install -e /path/to/image-matching-webui
 ## Use
 
 **GUI:** `python DPQED_automatch.py`
-1. *Data*: input image → **Inspect input** (lists band1…bandN or HH/HV…; tick
-   the ones to run, none = all). Reference folder (mode is detected like RIVAL).
+1. *Data*: input image → **Inspect input** (fills the Channels drop-down
+   with band1…bandN or HH/HV…). Tick channels in the drop-down or type
+   them: `47, 50-55`, `band47`, `HH, HV`. Empty = all; *Auto bands* picks
+   the cleanest bands of a hyperspectral cube. Reference folder (mode is detected like RIVAL).
    Output folder.
 2. *Detectors & matchers*: tick detectors and their matchers. **Check weights**
    shows which weight files they need and whether they are on this machine.

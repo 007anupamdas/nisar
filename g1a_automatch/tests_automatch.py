@@ -820,6 +820,43 @@ def test_gui_dialog():
         w.gpu_win.setValue(0)
         w.auto_bands.setValue(2)
         check('gui: auto bands reaches the job (0 = off)', (w.get_job()['auto_bands'], w.auto_bands.minimum()), (2, 0))
+        cp = w.channels
+        cp.set_names([f'band{i}' for i in range(1, 181)])
+        cp.edit.setText('47, 50 - 52; band60 HH')
+        try:
+            cp.checked()
+            bad = False
+        except ValueError:
+            bad = True
+        check('gui channels: a channel the input lacks is refused', bad, True)
+        cp.edit.setText('47, 50 - 52; band60 47')
+        check('gui channels: numbers, ranges and names, no repeats', cp.checked(),
+              ['band47', 'band50', 'band51', 'band52', 'band60'])
+        check('gui channels: shown with runs as ranges', (cp.set_checked(cp.checked()), cp.edit.text())[1],
+              'band47, band50-52, band60')
+        check('gui channels: typed channels tick their boxes', cp.combo.checked_items(),
+              ['band47', 'band50', 'band51', 'band52', 'band60'])
+        cp.edit.clear()
+        check('gui channels: clearing the field unticks every box', cp.combo.checked_items(), [])
+        cp.combo._pressed(cp.combo.model().index(47, 0))
+        check('gui channels: ticking band47 in the drop-down fills the field and keeps the list open',
+              (cp.checked(), cp.combo._keep_open, cp.combo.itemText(0)), (['band47'], True, '1 of 180 ticked'))
+        cp.combo._pressed(cp.combo.model().index(47, 0))
+        check('gui channels: unticking it empties the field', (cp.checked(), cp.combo.itemText(0)), ([], 'all channels'))
+        cp.combo._pressed(cp.combo.model().index(0, 0))
+        check('gui channels: the summary row is not a channel', cp.checked(), [])
+        cp.combo._keep_open = False
+        cp.combo._pressed(cp.combo.model().index(47, 0))
+        check('gui channels: reach the job; empty = all', (w.get_job()['channels'], (cp.edit.clear(), w.get_job()['channels'])[1]),
+              (['band47'], []))
+        cp.set_names([])
+        cp.edit.setText('HH, hv')
+        check('gui channels: before Inspect, typed names are kept as typed', cp.checked(), ['HH', 'hv'])
+        cp.set_names(['HH', 'HV'])
+        check('gui channels: after Inspect, names match the input and are ticked', (cp.checked(), cp.combo.checked_items()),
+              (['HH', 'HV'], ['HH', 'HV']))
+        cp.edit.clear()
+        cp.set_names([])
         w.auto_range.setText('1-70')
         check('gui: auto bands range reaches the job', w.get_job()['auto_bands_range'], [1, 70])
         w.auto_range.setText('70-1')
