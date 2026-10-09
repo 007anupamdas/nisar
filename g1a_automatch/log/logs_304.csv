@@ -1,0 +1,23 @@
+timestamp,message
+
+----- Remote SSH Command Start (2026-10-03 17:08:13) -----
+Target: gpuworker@10.1.4.48:22
+Executing: bash -lc "export CUDA_VISIBLE_DEVICES=GPU-4569af9b-9485-2d27-fd0f-1ad675b22cfa; source "/home/gpuworker/anaconda3/etc/profile.d/conda.sh" && conda activate "mpad" && python -u "/maintenance/ICIGDev/GPUPOC/exe/anup/nisar/g1a_automatch/automatch_gpuaas.py" "." "/maintenance/ICIGDev/GPUPOC/output/output304" "/maintenance/ICIGDev/GPUPOC/input/dqe/g1a/267422511/automatch_settings.json" 2>&1 | stdbuf -oL -eL tee -a \"/maintenance/ICIGDev/GPUPOC/output/output304/logs.csv\""
+2026-10-03 17:08:15.562379,"[GPUaaS] arguments: ['.', '/maintenance/ICIGDev/GPUPOC/output/output304', '/maintenance/ICIGDev/GPUPOC/input/dqe/g1a/267422511/automatch_settings.json']"
+2026-10-03 17:08:15.586328,"Traceback (most recent call last):"
+2026-10-03 17:08:15.586429,"  File '/maintenance/ICIGDev/GPUPOC/exe/anup/nisar/g1a_automatch/automatch_gpuaas.py', line 240, in <module>"
+2026-10-03 17:08:15.586445,"    sys.exit(main())"
+2026-10-03 17:08:15.586461,"             ^^^^^^"
+2026-10-03 17:08:15.586471,"  File '/maintenance/ICIGDev/GPUPOC/exe/anup/nisar/g1a_automatch/automatch_gpuaas.py', line 193, in main"
+2026-10-03 17:08:15.586635,"    mode, job = build_job(argv)"
+2026-10-03 17:08:15.586768,"                ^^^^^^^^^^^^^^^"
+2026-10-03 17:08:15.586830,"  File '/maintenance/ICIGDev/GPUPOC/exe/anup/nisar/g1a_automatch/automatch_gpuaas.py', line 114, in build_job"
+2026-10-03 17:08:15.586960,"    return mode, J.normalize(job)"
+2026-10-03 17:08:15.587128,"                 ^^^^^^^^^^^^^^^^"
+2026-10-03 17:08:15.587193,"  File '/maintenance/ICIGDev/GPUPOC/exe/anup/nisar/g1a_automatch/automatch_job.py', line 146, in normalize"
+2026-10-03 17:08:15.587312,"    raise ValueError(f'Unknown job key(s): {unknown}')"
+2026-10-03 17:08:15.587410,"ValueError: Unknown job key(s): ['max_num_features']"
+
+Return code: 0
+----- Remote SSH Command End (2026-10-03 17:08:15) -----
+

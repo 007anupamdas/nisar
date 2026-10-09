@@ -1,0 +1,529 @@
+[Coarse] imw-dkm pair 21: dE=-17764.3 m dN=-302.3 m (from-pair-25 (matcher outlier), support=None, peak=None) 
+imw-dkm: Processing pair 21 from disk...
+imw-dkm: 0 match-sets in 0.00s
+[Coarse] imw-dkm pair 22: dE=-17757.6 m dN=-241.4 m (matcher@315m, support=3121, peak=None) 
+imw-dkm: Processing pair 22 from disk...
+imw-dkm: 1 match-sets in 0.65s
+[Coarse] imw-dkm pair 23: dE=-17911.9 m dN=-326.6 m (phasecorr@315m, support=None, peak=0.12881409482955933) 
+imw-dkm: Processing pair 23 from disk...
+imw-dkm: 1 match-sets in 0.64s
+[Coarse] imw-dkm pair 24: dE=-17762.5 m dN=-234.2 m (matcher@315m, support=2201, peak=None) 
+imw-dkm: Processing pair 24 from disk...
+imw-dkm: 1 match-sets in 0.62s
+[Coarse] imw-dkm pair 25: dE=-17764.3 m dN=-302.3 m (matcher@315m, support=3572, peak=None) 
+imw-dkm: Processing pair 25 from disk...
+imw-dkm: 1 match-sets in 0.63s
+[Coarse] imw-dkm pair 26: dE=-17762.5 m dN=-234.2 m (from-pair-24 (matcher outlier), support=None, peak=None) 
+imw-dkm: Processing pair 26 from disk...
+imw-dkm: 1 match-sets in 0.61s
+[Coarse] imw-dkm pair 27: dE=-17762.5 m dN=-234.2 m (from-pair-24 (phasecorr disagreed), support=None, peak=0.05064041456057702) 
+imw-dkm: Processing pair 27 from disk...
+imw-dkm: 1 match-sets in 0.57s
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+[band1] imw-dkm ok in 0.7 min, peak GPU memory 33.8 of 39.4 GB
+[imw-dkm] Model unloaded.
+--------------------------------------------------------------------------------
+[band1] Running imw-dad-roma
+[imw-dad-roma] Loading model...
+[Coarse] pair 5: no reliable coarse offset (matcher: no matches; phasecorr: {'dx': 3156.3479216096807, 'dy': 18300.67805989782, 'support': None, 'n': None, 'peak': 0.020832994549224774}); windows compared in place
+[Coarse] pair 7: no reliable coarse offset (matcher: no matches; phasecorr: {'dx': -17660.72648465004, 'dy': -478.5174601560547, 'support': None, 'n': None, 'peak': 0.0218074359204816}); windows compared in place
+[Coarse] pair 8: no reliable coarse offset (matcher: no matches; phasecorr: {'dx': -18002.059573769864, 'dy': -489.60497923140906, 'support': None, 'n': None, 'peak': 0.011968647486368816}); windows compared in place
+[Coarse] pair 20: no reliable coarse offset (matcher: no matches; phasecorr: {'dx': -28903.23193639674, 'dy': -12953.216285335406, 'support': None, 'n': None, 'peak': 0.008737401829825507}); windows compared in place
+[Coarse] pair 26: no reliable coarse offset (matcher: no matches; phasecorr: {'dx': -96306.08142606622, 'dy': -17142.367293993742, 'support': None, 'n': None, 'peak': 0.02253384519977334}); windows compared in place
+[Coarse] pair 10: phase correlation gave dE=43169 m dN=-4147 m, 61.1 km from every offset the matcher measured; using pair 11's (dE=-18036 m dN=-238 m)
+[Coarse] pair 12: phase correlation gave dE=-1877 m dN=10017 m, 17.3 km from every offset the matcher measured; using pair 11's (dE=-18036 m dN=-238 m)
+[Coarse] pair 13: phase correlation gave dE=7584 m dN=8567 m, 25.8 km from every offset the matcher measured; using pair 11's (dE=-18036 m dN=-238 m)
+[Coarse] pair 18: phase correlation gave dE=744 m dN=-16615 m, 24.7 km from every offset the matcher measured; using pair 15's (dE=-17918 m dN=-189 m)
+[Coarse] pair 19: phase correlation gave dE=11920 m dN=-17918 m, 34.6 km from every offset the matcher measured; using pair 15's (dE=-17918 m dN=-189 m)
+[Coarse] pair 21: phase correlation gave dE=-11414 m dN=-17047 m, 17.8 km from every offset the matcher measured; using pair 15's (dE=-17918 m dN=-189 m)
+[Coarse] pair 27: phase correlation gave dE=-97898 m dN=-6012 m, 77.9 km from every offset the matcher measured; using pair 17's (dE=-17982 m dN=-148 m)
+[Coarse] imw-dad-roma pair 1: dE=-17941.3 m dN=-422.9 m (matcher@315m, support=15, peak=None) 
+imw-dad-roma: Processing pair 1 from disk...
+imw-dad-roma: 1 match-sets in 3.28s
+[Coarse] imw-dad-roma pair 2: dE=-20210.0 m dN=74.6 m (matcher@315m, support=8, peak=None) 
+imw-dad-roma: Processing pair 2 from disk...
+imw-dad-roma: 1 match-sets in 0.52s
+[Coarse] imw-dad-roma pair 3: dE=-19731.3 m dN=1126.8 m (matcher@315m, support=11, peak=None) 
+imw-dad-roma: Processing pair 3 from disk...
+imw-dad-roma: 1 match-sets in 0.54s
+[Coarse] imw-dad-roma pair 4: dE=-18070.5 m dN=-486.2 m (matcher@315m, support=36, peak=None) 
+imw-dad-roma: Processing pair 4 from disk...
+imw-dad-roma: 1 match-sets in 3.55s
+[Coarse] imw-dad-roma pair 5: dE=-17562.4 m dN=2734.9 m (from-pair-6, support=None, peak=None) 
+imw-dad-roma: Processing pair 5 from disk...
+imw-dad-roma: 1 match-sets in 3.65s
+[Coarse] imw-dad-roma pair 6: dE=-17562.4 m dN=2734.9 m (matcher@315m, support=9, peak=None) 
+imw-dad-roma: Processing pair 6 from disk...
+imw-dad-roma: 1 match-sets in 0.57s
+[Coarse] imw-dad-roma pair 7: dE=-17790.5 m dN=-428.0 m (from-pair-9, support=None, peak=None) 
+imw-dad-roma: Processing pair 7 from disk...
+imw-dad-roma: 1 match-sets in 3.90s
+[Coarse] imw-dad-roma pair 8: dE=-17790.5 m dN=-428.0 m (from-pair-9, support=None, peak=None) 
+imw-dad-roma: Processing pair 8 from disk...
+imw-dad-roma: 1 match-sets in 3.87s
+[Coarse] imw-dad-roma pair 9: dE=-17790.5 m dN=-428.0 m (phasecorr@315m, support=None, peak=0.031066529352914596) 
+imw-dad-roma: Processing pair 9 from disk...
+imw-dad-roma: 1 match-sets in 3.82s
+[Coarse] imw-dad-roma pair 10: dE=-18035.9 m dN=-238.2 m (from-pair-11 (phasecorr disagreed), support=None, peak=0.04791493653487985) 
+imw-dad-roma: Processing pair 10 from disk...
+imw-dad-roma: 1 match-sets in 3.60s
+[Coarse] imw-dad-roma pair 11: dE=-18035.9 m dN=-238.2 m (matcher@315m, support=135, peak=None) 
+imw-dad-roma: Processing pair 11 from disk...
+imw-dad-roma: 1 match-sets in 0.79s
+[Coarse] imw-dad-roma pair 12: dE=-18035.9 m dN=-238.2 m (from-pair-11 (phasecorr disagreed), support=None, peak=0.1047012765466431) 
+imw-dad-roma: Processing pair 12 from disk...
+imw-dad-roma: 0 match-sets in 0.00s
+[Coarse] imw-dad-roma pair 13: dE=-18035.9 m dN=-238.2 m (from-pair-11 (phasecorr disagreed), support=None, peak=0.09384612739086151) 
+imw-dad-roma: Processing pair 13 from disk...
+imw-dad-roma: 0 match-sets in 0.00s
+[Coarse] imw-dad-roma pair 14: dE=-17864.5 m dN=-245.3 m (matcher@315m, support=118, peak=None) 
+imw-dad-roma: Processing pair 14 from disk...
+imw-dad-roma: 1 match-sets in 3.90s
+[Coarse] imw-dad-roma pair 15: dE=-17917.6 m dN=-188.9 m (matcher@315m, support=728, peak=None) 
+imw-dad-roma: Processing pair 15 from disk...
+imw-dad-roma: 1 match-sets in 0.98s
+[Coarse] imw-dad-roma pair 16: dE=-17976.2 m dN=-139.2 m (matcher@315m, support=747, peak=None) 
+imw-dad-roma: Processing pair 16 from disk...
+imw-dad-roma: 1 match-sets in 0.81s
+[Coarse] imw-dad-roma pair 17: dE=-17981.7 m dN=-147.6 m (matcher@315m, support=822, peak=None) 
+imw-dad-roma: Processing pair 17 from disk...
+imw-dad-roma: 1 match-sets in 0.79s
+[Coarse] imw-dad-roma pair 18: dE=-17917.6 m dN=-188.9 m (from-pair-15 (phasecorr disagreed), support=None, peak=0.06863816733713503) 
+imw-dad-roma: Processing pair 18 from disk...
+imw-dad-roma: 0 match-sets in 0.00s
+[Coarse] imw-dad-roma pair 19: dE=-17917.6 m dN=-188.9 m (from-pair-15 (phasecorr disagreed), support=None, peak=0.15104582491848204) 
+imw-dad-roma: Processing pair 19 from disk...
+imw-dad-roma: 0 match-sets in 0.00s
+[Coarse] imw-dad-roma pair 20: dE=-17917.6 m dN=-188.9 m (from-pair-19, support=None, peak=None) 
+imw-dad-roma: Processing pair 20 from disk...
+imw-dad-roma: 0 match-sets in 0.00s
+[Coarse] imw-dad-roma pair 21: dE=-17917.6 m dN=-188.9 m (from-pair-15 (phasecorr disagreed), support=None, peak=0.036990950946454645) 
+imw-dad-roma: Processing pair 21 from disk...
+imw-dad-roma: 0 match-sets in 0.00s
+[Coarse] imw-dad-roma pair 22: dE=-17882.3 m dN=-311.5 m (phasecorr@315m, support=None, peak=0.12721613845825194) 
+imw-dad-roma: Processing pair 22 from disk...
+imw-dad-roma: 1 match-sets in 4.05s
+[Coarse] imw-dad-roma pair 23: dE=-17911.9 m dN=-326.6 m (phasecorr@315m, support=None, peak=0.12881409482955933) 
+imw-dad-roma: Processing pair 23 from disk...
+imw-dad-roma: 1 match-sets in 0.88s
+[Coarse] imw-dad-roma pair 24: dE=-17928.8 m dN=-415.6 m (phasecorr@315m, support=None, peak=0.035175936365127565) 
+imw-dad-roma: Processing pair 24 from disk...
+imw-dad-roma: 1 match-sets in 0.89s
+[Coarse] imw-dad-roma pair 25: dE=-17844.2 m dN=-348.0 m (phasecorr@315m, support=None, peak=0.15328786741892497) 
+imw-dad-roma: Processing pair 25 from disk...
+imw-dad-roma: 1 match-sets in 0.91s
+[Coarse] imw-dad-roma pair 26: dE=-17981.7 m dN=-147.6 m (from-pair-27, support=None, peak=None) 
+imw-dad-roma: Processing pair 26 from disk...
+imw-dad-roma: 1 match-sets in 0.74s
+[Coarse] imw-dad-roma pair 27: dE=-17981.7 m dN=-147.6 m (from-pair-17 (phasecorr disagreed), support=None, peak=0.05064041456057702) 
+imw-dad-roma: Processing pair 27 from disk...
+imw-dad-roma: 1 match-sets in 0.71s
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+[band1] imw-dad-roma ok in 2.2 min, peak GPU memory 33.9 of 39.4 GB
+[imw-dad-roma] Model unloaded.
+--------------------------------------------------------------------------------
+[band1] Running imw-rdd-dense
+[imw-rdd-dense] Loading model...
+config {'activation': 'relu', 'block_dims': [8, 16, 32, 64], 'd_model': 256, 'detection_threshold': 0.1, 'device': device(type='cuda'), 'dim_feedforward': 1024, 'dropout': 0.1, 'enc_n_points': 8, 'hidden_dim': 256, 'lr_backbone': 2e-05, 'nhead': 8, 'num_encoder_layers': 4, 'num_feature_levels': 5, 'top_k': 4096, 'train_detector': False, 'weights': '/maintenance/ICIGDev/GPUPOC/input/dqe/imw_runtime/imw_cache/huggingface/hub/models--Realcat--imcui_checkpoints/snapshots/e72b489e927e7a8202f505c1b4db1474fd22b8b7/rdd/RDD-v2.pth'}
+[Coarse] pair 3: no reliable coarse offset (matcher: no matches; phasecorr: {'dx': -16147.443677524008, 'dy': -26751.975000537102, 'support': None, 'n': None, 'peak': 0.00032880983234923565}); windows compared in place
+[Coarse] pair 4: no reliable coarse offset (matcher: no matches; phasecorr: {'dx': 12882.472481301173, 'dy': 92621.70938170607, 'support': None, 'n': None, 'peak': -0.00012715039429841217}); windows compared in place
+[Coarse] pair 5: no reliable coarse offset (matcher: no matches; phasecorr: {'dx': 3156.3479216096807, 'dy': 18300.67805989782, 'support': None, 'n': None, 'peak': 0.020832994549224774}); windows compared in place
+[Coarse] pair 6: no reliable coarse offset (matcher: no matches; phasecorr: {'dx': -15852.800158210905, 'dy': 18737.59796077822, 'support': None, 'n': None, 'peak': -0.0027571213742097218}); windows compared in place
+[Coarse] pair 7: no reliable coarse offset (matcher: no matches; phasecorr: {'dx': -17660.72648465004, 'dy': -478.5174601560547, 'support': None, 'n': None, 'peak': 0.0218074359204816}); windows compared in place
+[Coarse] pair 8: no reliable coarse offset (matcher: no matches; phasecorr: {'dx': -18002.059573769864, 'dy': -489.60497923140906, 'support': None, 'n': None, 'peak': 0.011968647486368816}); windows compared in place
+[Coarse] pair 11: no reliable coarse offset (matcher: no matches; phasecorr: {'dx': -18107.733154651494, 'dy': -332.5590928480355, 'support': None, 'n': None, 'peak': 0.020898853179031604}); windows compared in place
+[Coarse] pair 20: no reliable coarse offset (matcher: RuntimeError: selected index k out of range; phasecorr: {'dx': -28903.23193639674, 'dy': -12953.216285335406, 'support': None, 'n': None, 'peak': 0.008737401829825507}); windows compared in place
+[Coarse] pair 26: no reliable coarse offset (matcher: no matches; phasecorr: {'dx': -96306.08142606622, 'dy': -17142.367293993742, 'support': None, 'n': None, 'peak': 0.02253384519977334}); windows compared in place
+[Coarse] pair 2: phase correlation gave dE=-8934 m dN=5487 m, 10.5 km from every offset the matcher measured; using pair 14's (dE=-17864 m dN=-113 m)
+[Coarse] pair 10: phase correlation gave dE=43169 m dN=-4147 m, 61.1 km from every offset the matcher measured; using pair 14's (dE=-17864 m dN=-113 m)
+[Coarse] pair 12: phase correlation gave dE=-1877 m dN=10017 m, 18.9 km from every offset the matcher measured; using pair 14's (dE=-17864 m dN=-113 m)
+[Coarse] pair 13: phase correlation gave dE=7584 m dN=8567 m, 26.9 km from every offset the matcher measured; using pair 14's (dE=-17864 m dN=-113 m)
+[Coarse] pair 18: phase correlation gave dE=744 m dN=-16615 m, 24.7 km from every offset the matcher measured; using pair 25's (dE=-17909 m dN=-258 m)
+[Coarse] pair 19: phase correlation gave dE=11920 m dN=-17918 m, 34.6 km from every offset the matcher measured; using pair 25's (dE=-17909 m dN=-258 m)
+[Coarse] pair 21: phase correlation gave dE=-11414 m dN=-17047 m, 17.9 km from every offset the matcher measured; using pair 25's (dE=-17909 m dN=-258 m)
+[Coarse] pair 27: phase correlation gave dE=-97898 m dN=-6012 m, 80.1 km from every offset the matcher measured; using pair 23's (dE=-17822 m dN=-229 m)
+[Coarse] imw-rdd-dense pair 1: dE=-18062.2 m dN=-904.8 m (phasecorr@315m, support=None, peak=0.03257782713572184) 
+imw-rdd-dense: Processing pair 1 from disk...
+imw-rdd-dense: 0 match-sets in 0.14s
+[Coarse] imw-rdd-dense pair 2: dE=-17863.8 m dN=-113.3 m (from-pair-14 (phasecorr disagreed), support=None, peak=0.03413578109976686) 
+imw-rdd-dense: Processing pair 2 from disk...
+imw-rdd-dense: 0 match-sets in 0.12s
+[Coarse] imw-rdd-dense pair 3: dE=-18062.2 m dN=-904.8 m (from-pair-1, support=None, peak=None) 
+imw-rdd-dense: Processing pair 3 from disk...
+imw-rdd-dense: 0 match-sets in 0.12s
+[Coarse] imw-rdd-dense pair 4: dE=-17863.8 m dN=-113.3 m (from-pair-2, support=None, peak=None) 
+imw-rdd-dense: Processing pair 4 from disk...
+imw-rdd-dense: 1 match-sets in 0.15s
+[Coarse] imw-rdd-dense pair 5: dE=-17863.8 m dN=-113.3 m (from-pair-2, support=None, peak=None) 
+imw-rdd-dense: Processing pair 5 from disk...
+imw-rdd-dense: 0 match-sets in 0.14s
+[Coarse] imw-rdd-dense pair 6: dE=-17863.8 m dN=-113.3 m (from-pair-2, support=None, peak=None) 
+imw-rdd-dense: Processing pair 6 from disk...
+imw-rdd-dense: 0 match-sets in 0.14s
+[Coarse] imw-rdd-dense pair 7: dE=-17790.5 m dN=-428.0 m (from-pair-9, support=None, peak=None) 
+imw-rdd-dense: Processing pair 7 from disk...
+imw-rdd-dense: 0 match-sets in 4.60s
+[Coarse] imw-rdd-dense pair 8: dE=-17790.5 m dN=-428.0 m (from-pair-9, support=None, peak=None) 
+imw-rdd-dense: Processing pair 8 from disk...
+imw-rdd-dense: 0 match-sets in 5.40s
+[Coarse] imw-rdd-dense pair 9: dE=-17790.5 m dN=-428.0 m (phasecorr@315m, support=None, peak=0.031066529352914596) 
+imw-rdd-dense: Processing pair 9 from disk...
+imw-rdd-dense: 0 match-sets in 0.38s
+[Coarse] imw-rdd-dense pair 10: dE=-17863.8 m dN=-113.3 m (from-pair-14 (phasecorr disagreed), support=None, peak=0.04791493653487985) 
+imw-rdd-dense: Processing pair 10 from disk...
+imw-rdd-dense: 0 match-sets in 0.33s
+[Coarse] imw-rdd-dense pair 11: dE=-17863.8 m dN=-113.3 m (from-pair-10, support=None, peak=None) 
+imw-rdd-dense: Processing pair 11 from disk...
+imw-rdd-dense: 0 match-sets in 0.33s
+[Coarse] imw-rdd-dense pair 12: dE=-17863.8 m dN=-113.3 m (from-pair-14 (phasecorr disagreed), support=None, peak=0.1047012765466431) 
+imw-rdd-dense: Processing pair 12 from disk...
+imw-rdd-dense: 0 match-sets in 0.00s
+[Coarse] imw-rdd-dense pair 13: dE=-17863.8 m dN=-113.3 m (from-pair-14 (phasecorr disagreed), support=None, peak=0.09384612739086151) 
+imw-rdd-dense: Processing pair 13 from disk...
+imw-rdd-dense: 0 match-sets in 0.00s
+[Coarse] imw-rdd-dense pair 14: dE=-17863.8 m dN=-113.3 m (matcher@315m, support=100, peak=None) 
+imw-rdd-dense: Processing pair 14 from disk...
+imw-rdd-dense: 1 match-sets in 0.64s
+[Coarse] imw-rdd-dense pair 15: dE=-17903.0 m dN=-268.3 m (matcher@315m, support=257, peak=None) 
+imw-rdd-dense: Processing pair 15 from disk...
+imw-rdd-dense: 1 match-sets in 0.63s
+[Coarse] imw-rdd-dense pair 16: dE=-17974.4 m dN=-374.6 m (matcher@315m, support=147, peak=None) 
+imw-rdd-dense: Processing pair 16 from disk...
+imw-rdd-dense: 1 match-sets in 0.45s
+[Coarse] imw-rdd-dense pair 17: dE=-17997.8 m dN=-363.2 m (matcher@315m, support=285, peak=None) 
+imw-rdd-dense: Processing pair 17 from disk...
+imw-rdd-dense: 1 match-sets in 0.43s
+[Coarse] imw-rdd-dense pair 18: dE=-17908.5 m dN=-257.6 m (from-pair-25 (phasecorr disagreed), support=None, peak=0.06863816733713503) 
+imw-rdd-dense: Processing pair 18 from disk...
+imw-rdd-dense: 0 match-sets in 0.00s
+[Coarse] imw-rdd-dense pair 19: dE=-17908.5 m dN=-257.6 m (from-pair-25 (phasecorr disagreed), support=None, peak=0.15104582491848204) 
+imw-rdd-dense: Processing pair 19 from disk...
+imw-rdd-dense: 0 match-sets in 0.00s
+[Coarse] imw-rdd-dense pair 20: dE=-17908.5 m dN=-257.6 m (from-pair-19, support=None, peak=None) 
+imw-rdd-dense: Processing pair 20 from disk...
+imw-rdd-dense: 0 match-sets in 0.00s
+[Coarse] imw-rdd-dense pair 21: dE=-17908.5 m dN=-257.6 m (from-pair-25 (phasecorr disagreed), support=None, peak=0.036990950946454645) 
+imw-rdd-dense: Processing pair 21 from disk...
+imw-rdd-dense: 0 match-sets in 0.00s
+[Coarse] imw-rdd-dense pair 22: dE=-17782.0 m dN=-243.8 m (matcher@315m, support=12, peak=None) 
+imw-rdd-dense: Processing pair 22 from disk...
+imw-rdd-dense: 1 match-sets in 0.38s
+[Coarse] imw-rdd-dense pair 23: dE=-17821.7 m dN=-229.1 m (matcher@315m, support=20, peak=None) 
+imw-rdd-dense: Processing pair 23 from disk...
+imw-rdd-dense: 1 match-sets in 0.39s
+[Coarse] imw-rdd-dense pair 24: dE=-17868.8 m dN=-215.5 m (matcher@315m, support=49, peak=None) 
+imw-rdd-dense: Processing pair 24 from disk...
+imw-rdd-dense: 1 match-sets in 0.44s
+[Coarse] imw-rdd-dense pair 25: dE=-17908.5 m dN=-257.6 m (matcher@315m, support=39, peak=None) 
+imw-rdd-dense: Processing pair 25 from disk...
+imw-rdd-dense: 1 match-sets in 0.39s
+[Coarse] imw-rdd-dense pair 26: dE=-17821.7 m dN=-229.1 m (from-pair-27, support=None, peak=None) 
+imw-rdd-dense: Processing pair 26 from disk...
+imw-rdd-dense: 0 match-sets in 0.24s
+[Coarse] imw-rdd-dense pair 27: dE=-17821.7 m dN=-229.1 m (from-pair-23 (phasecorr disagreed), support=None, peak=0.05064041456057702) 
+imw-rdd-dense: Processing pair 27 from disk...
+imw-rdd-dense: 0 match-sets in 0.23s
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+[band1] imw-rdd-dense ok in 0.4 min, peak GPU memory 32.6 of 39.4 GB
+[imw-rdd-dense] Model unloaded.
+--------------------------------------------------------------------------------
+[band1] Running imw-xfeat-lg
+[imw-xfeat-lg] Loading model...
+Using cache found in /maintenance/ICIGDev/GPUPOC/input/dqe/imw_runtime/imw_cache/torch/hub/verlab_accelerated_features_main
+Loaded LightGlue model
+[Coarse] pair 6: no reliable coarse offset (matcher: no matches; phasecorr: {'dx': -15852.800158210905, 'dy': 18737.59796077822, 'support': None, 'n': None, 'peak': -0.0027571213742097218}); windows compared in place
+[Coarse] pair 7: no reliable coarse offset (matcher: no matches; phasecorr: {'dx': -17660.72648465004, 'dy': -478.5174601560547, 'support': None, 'n': None, 'peak': 0.0218074359204816}); windows compared in place
+[Coarse] pair 8: no reliable coarse offset (matcher: no matches; phasecorr: {'dx': -18002.059573769864, 'dy': -489.60497923140906, 'support': None, 'n': None, 'peak': 0.011968647486368816}); windows compared in place
+[Coarse] pair 20: no reliable coarse offset (matcher: no matches; phasecorr: {'dx': -28903.23193639674, 'dy': -12953.216285335406, 'support': None, 'n': None, 'peak': 0.008737401829825507}); windows compared in place
+[Coarse] pair 26: no reliable coarse offset (matcher: no matches; phasecorr: {'dx': -96306.08142606622, 'dy': -17142.367293993742, 'support': None, 'n': None, 'peak': 0.02253384519977334}); windows compared in place
+[Coarse] pair 10: phase correlation gave dE=43169 m dN=-4147 m, 60.9 km from every offset the matcher measured; using pair 11's (dE=-18270 m dN=0 m)
+[Coarse] pair 12: phase correlation gave dE=-1877 m dN=10017 m, 18.7 km from every offset the matcher measured; using pair 11's (dE=-18270 m dN=0 m)
+[Coarse] pair 13: phase correlation gave dE=7584 m dN=8567 m, 26.6 km from every offset the matcher measured; using pair 11's (dE=-18270 m dN=0 m)
+[Coarse] pair 18: phase correlation gave dE=744 m dN=-16615 m, 24.6 km from every offset the matcher measured; using pair 25's (dE=-17955 m dN=-315 m)
+[Coarse] pair 19: phase correlation gave dE=11920 m dN=-17918 m, 34.4 km from every offset the matcher measured; using pair 25's (dE=-17955 m dN=-315 m)
+[Coarse] pair 21: phase correlation gave dE=-11414 m dN=-17047 m, 17.7 km from every offset the matcher measured; using pair 25's (dE=-17955 m dN=-315 m)
+[Coarse] pair 27: phase correlation gave dE=-97898 m dN=-6012 m, 79.5 km from every offset the matcher measured; using pair 23's (dE=-17640 m dN=-315 m)
+[Coarse] imw-xfeat-lg pair 1: dE=-18270.0 m dN=-630.0 m (matcher@315m, support=95, peak=None) 
+imw-xfeat-lg: Processing pair 1 from disk...
+imw-xfeat-lg: 1 match-sets in 0.12s
+[Coarse] imw-xfeat-lg pair 2: dE=-17955.0 m dN=-630.0 m (matcher@315m, support=83, peak=None) 
+imw-xfeat-lg: Processing pair 2 from disk...
+imw-xfeat-lg: 1 match-sets in 0.07s
+[Coarse] imw-xfeat-lg pair 3: dE=-18585.0 m dN=-630.0 m (matcher@315m, support=15, peak=None) 
+imw-xfeat-lg: Processing pair 3 from disk...
+imw-xfeat-lg: 1 match-sets in 0.07s
+[Coarse] imw-xfeat-lg pair 4: dE=-17640.0 m dN=0.0 m (matcher@315m, support=11, peak=None) 
+imw-xfeat-lg: Processing pair 4 from disk...
+imw-xfeat-lg: 1 match-sets in 0.13s
+[Coarse] imw-xfeat-lg pair 5: dE=-17955.0 m dN=0.0 m (matcher@315m, support=68, peak=None) 
+imw-xfeat-lg: Processing pair 5 from disk...
+imw-xfeat-lg: 1 match-sets in 0.08s
+[Coarse] imw-xfeat-lg pair 6: dE=-17955.0 m dN=0.0 m (from-pair-5, support=None, peak=None) 
+imw-xfeat-lg: Processing pair 6 from disk...
+imw-xfeat-lg: 1 match-sets in 0.08s
+[Coarse] imw-xfeat-lg pair 7: dE=-17790.5 m dN=-428.0 m (from-pair-9, support=None, peak=None) 
+imw-xfeat-lg: Processing pair 7 from disk...
+imw-xfeat-lg: 1 match-sets in 0.29s
+[Coarse] imw-xfeat-lg pair 8: dE=-17790.5 m dN=-428.0 m (from-pair-9, support=None, peak=None) 
+imw-xfeat-lg: Processing pair 8 from disk...
+imw-xfeat-lg: 0 match-sets in 0.24s
+[Coarse] imw-xfeat-lg pair 9: dE=-17790.5 m dN=-428.0 m (phasecorr@315m, support=None, peak=0.031066529352914596) 
+imw-xfeat-lg: Processing pair 9 from disk...
+imw-xfeat-lg: 1 match-sets in 0.27s
+[Coarse] imw-xfeat-lg pair 10: dE=-18270.0 m dN=0.0 m (from-pair-11 (phasecorr disagreed), support=None, peak=0.04791493653487985) 
+imw-xfeat-lg: Processing pair 10 from disk...
+imw-xfeat-lg: 1 match-sets in 0.25s
+[Coarse] imw-xfeat-lg pair 11: dE=-18270.0 m dN=0.0 m (matcher@315m, support=17, peak=None) 
+imw-xfeat-lg: Processing pair 11 from disk...
+imw-xfeat-lg: 1 match-sets in 0.18s
+[Coarse] imw-xfeat-lg pair 12: dE=-18270.0 m dN=0.0 m (from-pair-11 (phasecorr disagreed), support=None, peak=0.1047012765466431) 
+imw-xfeat-lg: Processing pair 12 from disk...
+imw-xfeat-lg: 0 match-sets in 0.00s
+[Coarse] imw-xfeat-lg pair 13: dE=-18270.0 m dN=0.0 m (from-pair-11 (phasecorr disagreed), support=None, peak=0.09384612739086151) 
+imw-xfeat-lg: Processing pair 13 from disk...
+imw-xfeat-lg: 0 match-sets in 0.00s
+[Coarse] imw-xfeat-lg pair 14: dE=-17955.0 m dN=-315.0 m (matcher@315m, support=407, peak=None) 
+imw-xfeat-lg: Processing pair 14 from disk...
+imw-xfeat-lg: 1 match-sets in 0.34s
+[Coarse] imw-xfeat-lg pair 15: dE=-17955.0 m dN=-315.0 m (matcher@315m, support=815, peak=None) 
+imw-xfeat-lg: Processing pair 15 from disk...
+imw-xfeat-lg: 1 match-sets in 0.27s
+[Coarse] imw-xfeat-lg pair 16: dE=-17955.0 m dN=-315.0 m (matcher@315m, support=714, peak=None) 
+imw-xfeat-lg: Processing pair 16 from disk...
+imw-xfeat-lg: 1 match-sets in 0.21s
+[Coarse] imw-xfeat-lg pair 17: dE=-17955.0 m dN=-315.0 m (matcher@315m, support=888, peak=None) 
+imw-xfeat-lg: Processing pair 17 from disk...
+imw-xfeat-lg: 1 match-sets in 0.21s
+[Coarse] imw-xfeat-lg pair 18: dE=-17955.0 m dN=-315.0 m (from-pair-25 (phasecorr disagreed), support=None, peak=0.06863816733713503) 
+imw-xfeat-lg: Processing pair 18 from disk...
+imw-xfeat-lg: 0 match-sets in 0.00s
+[Coarse] imw-xfeat-lg pair 19: dE=-17955.0 m dN=-315.0 m (from-pair-25 (phasecorr disagreed), support=None, peak=0.15104582491848204) 
+imw-xfeat-lg: Processing pair 19 from disk...
+imw-xfeat-lg: 0 match-sets in 0.00s
+[Coarse] imw-xfeat-lg pair 20: dE=-17955.0 m dN=-315.0 m (from-pair-19, support=None, peak=None) 
+imw-xfeat-lg: Processing pair 20 from disk...
+imw-xfeat-lg: 0 match-sets in 0.00s
+[Coarse] imw-xfeat-lg pair 21: dE=-17955.0 m dN=-315.0 m (from-pair-25 (phasecorr disagreed), support=None, peak=0.036990950946454645) 
+imw-xfeat-lg: Processing pair 21 from disk...
+imw-xfeat-lg: 0 match-sets in 0.00s
+[Coarse] imw-xfeat-lg pair 22: dE=-17640.0 m dN=-315.0 m (matcher@315m, support=395, peak=None) 
+imw-xfeat-lg: Processing pair 22 from disk...
+imw-xfeat-lg: 1 match-sets in 0.27s
+[Coarse] imw-xfeat-lg pair 23: dE=-17640.0 m dN=-315.0 m (matcher@315m, support=387, peak=None) 
+imw-xfeat-lg: Processing pair 23 from disk...
+imw-xfeat-lg: 1 match-sets in 0.20s
+[Coarse] imw-xfeat-lg pair 24: dE=-17955.0 m dN=-315.0 m (matcher@315m, support=337, peak=None) 
+imw-xfeat-lg: Processing pair 24 from disk...
+imw-xfeat-lg: 1 match-sets in 0.20s
+[Coarse] imw-xfeat-lg pair 25: dE=-17955.0 m dN=-315.0 m (matcher@315m, support=476, peak=None) 
+imw-xfeat-lg: Processing pair 25 from disk...
+imw-xfeat-lg: 1 match-sets in 0.21s
+[Coarse] imw-xfeat-lg pair 26: dE=-17640.0 m dN=-315.0 m (from-pair-27, support=None, peak=None) 
+imw-xfeat-lg: Processing pair 26 from disk...
+imw-xfeat-lg: 0 match-sets in 0.18s
+[Coarse] imw-xfeat-lg pair 27: dE=-17640.0 m dN=-315.0 m (from-pair-23 (phasecorr disagreed), support=None, peak=0.05064041456057702) 
+imw-xfeat-lg: Processing pair 27 from disk...
+imw-xfeat-lg: 0 match-sets in 0.12s
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+[band1] imw-xfeat-lg ok in 0.2 min, peak GPU memory 0.6 of 39.4 GB
+[imw-xfeat-lg] Model unloaded.
+--------------------------------------------------------------------------------
+[band1] Running imw-xfeat-dense
+[imw-xfeat-dense] Loading model...
+Using cache found in /maintenance/ICIGDev/GPUPOC/input/dqe/imw_runtime/imw_cache/torch/hub/verlab_accelerated_features_main
+[Coarse] pair 6: no reliable coarse offset (matcher: no matches; phasecorr: {'dx': -15852.800158210905, 'dy': 18737.59796077822, 'support': None, 'n': None, 'peak': -0.0027571213742097218}); windows compared in place
+[Coarse] pair 11: no reliable coarse offset (matcher: {'dx': -19093.515243530273, 'dy': 137.5096893310547, 'support': 5, 'n': 7, 'peak': None}; phasecorr: {'dx': -18107.733154651494, 'dy': -332.5590928480355, 'support': None, 'n': None, 'peak': 0.020898853179031604}); windows compared in place
+[Coarse] pair 20: no reliable coarse offset (matcher: no matches; phasecorr: {'dx': -28903.23193639674, 'dy': -12953.216285335406, 'support': None, 'n': None, 'peak': 0.008737401829825507}); windows compared in place
+[Coarse] pair 26: no reliable coarse offset (matcher: no matches; phasecorr: {'dx': -96306.08142606622, 'dy': -17142.367293993742, 'support': None, 'n': None, 'peak': 0.02253384519977334}); windows compared in place
+[Coarse] pair 10: phase correlation gave dE=43169 m dN=-4147 m, 61.2 km from every offset the matcher measured; using pair 8's (dE=-17905 m dN=118 m)
+[Coarse] pair 12: phase correlation gave dE=-1877 m dN=10017 m, 18.8 km from every offset the matcher measured; using pair 8's (dE=-17905 m dN=118 m)
+[Coarse] pair 13: phase correlation gave dE=7584 m dN=8567 m, 26.9 km from every offset the matcher measured; using pair 8's (dE=-17905 m dN=118 m)
+[Coarse] pair 18: phase correlation gave dE=744 m dN=-16615 m, 24.7 km from every offset the matcher measured; using pair 25's (dE=-18090 m dN=-348 m)
+[Coarse] pair 19: phase correlation gave dE=11920 m dN=-17918 m, 34.6 km from every offset the matcher measured; using pair 25's (dE=-18090 m dN=-348 m)
+[Coarse] pair 21: phase correlation gave dE=-11414 m dN=-17047 m, 17.9 km from every offset the matcher measured; using pair 25's (dE=-18090 m dN=-348 m)
+[Coarse] pair 27: phase correlation gave dE=-97898 m dN=-6012 m, 79.6 km from every offset the matcher measured; using pair 23's (dE=-18069 m dN=-412 m)
+[Coarse] imw-xfeat-dense pair 1: dE=-18338.9 m dN=-352.5 m (matcher@315m, support=45, peak=None) 
+imw-xfeat-dense: Processing pair 1 from disk...
+imw-xfeat-dense: 1 match-sets in 0.12s
+[Coarse] imw-xfeat-dense pair 2: dE=-18220.7 m dN=257.5 m (matcher@315m, support=18, peak=None) 
+imw-xfeat-dense: Processing pair 2 from disk...
+imw-xfeat-dense: 1 match-sets in 0.06s
+[Coarse] imw-xfeat-dense pair 3: dE=-18291.4 m dN=-533.6 m (matcher@315m, support=11, peak=None) 
+imw-xfeat-dense: Processing pair 3 from disk...
+imw-xfeat-dense: 1 match-sets in 0.06s
+[Coarse] imw-xfeat-dense pair 4: dE=-18489.2 m dN=45.7 m (matcher@315m, support=8, peak=None) 
+imw-xfeat-dense: Processing pair 4 from disk...
+imw-xfeat-dense: 1 match-sets in 0.19s
+[Coarse] imw-xfeat-dense pair 5: dE=-18497.2 m dN=104.2 m (matcher@315m, support=10, peak=None) 
+imw-xfeat-dense: Processing pair 5 from disk...
+imw-xfeat-dense: 1 match-sets in 0.08s
+[Coarse] imw-xfeat-dense pair 6: dE=-18497.2 m dN=104.2 m (from-pair-5, support=None, peak=None) 
+imw-xfeat-dense: Processing pair 6 from disk...
+imw-xfeat-dense: 1 match-sets in 0.07s
+[Coarse] imw-xfeat-dense pair 7: dE=-18153.3 m dN=-167.7 m (matcher@315m, support=44, peak=None) 
+imw-xfeat-dense: Processing pair 7 from disk...
+imw-xfeat-dense: 1 match-sets in 0.35s
+[Coarse] imw-xfeat-dense pair 8: dE=-17904.9 m dN=118.5 m (matcher@315m, support=8, peak=None) 
+imw-xfeat-dense: Processing pair 8 from disk...
+imw-xfeat-dense: 1 match-sets in 0.35s
+[Coarse] imw-xfeat-dense pair 9: dE=-17790.5 m dN=-428.0 m (phasecorr@315m, support=None, peak=0.031066529352914596) 
+imw-xfeat-dense: Processing pair 9 from disk...
+imw-xfeat-dense: 1 match-sets in 0.22s
+[Coarse] imw-xfeat-dense pair 10: dE=-17904.9 m dN=118.5 m (from-pair-8 (phasecorr disagreed), support=None, peak=0.04791493653487985) 
+imw-xfeat-dense: Processing pair 10 from disk...
+imw-xfeat-dense: 1 match-sets in 0.32s
+[Coarse] imw-xfeat-dense pair 11: dE=-17904.9 m dN=118.5 m (from-pair-10, support=None, peak=None) 
+imw-xfeat-dense: Processing pair 11 from disk...
+imw-xfeat-dense: 1 match-sets in 0.19s
+[Coarse] imw-xfeat-dense pair 12: dE=-17904.9 m dN=118.5 m (from-pair-8 (phasecorr disagreed), support=None, peak=0.1047012765466431) 
+imw-xfeat-dense: Processing pair 12 from disk...
+imw-xfeat-dense: 0 match-sets in 0.00s
+[Coarse] imw-xfeat-dense pair 13: dE=-17904.9 m dN=118.5 m (from-pair-8 (phasecorr disagreed), support=None, peak=0.09384612739086151) 
+imw-xfeat-dense: Processing pair 13 from disk...
+imw-xfeat-dense: 0 match-sets in 0.00s
+[Coarse] imw-xfeat-dense pair 14: dE=-18166.8 m dN=301.0 m (matcher@315m, support=100, peak=None) 
+imw-xfeat-dense: Processing pair 14 from disk...
+imw-xfeat-dense: 1 match-sets in 0.35s
+[Coarse] imw-xfeat-dense pair 15: dE=-18218.3 m dN=304.4 m (matcher@315m, support=251, peak=None) 
+imw-xfeat-dense: Processing pair 15 from disk...
+imw-xfeat-dense: 1 match-sets in 0.27s
+[Coarse] imw-xfeat-dense pair 16: dE=-18293.9 m dN=-59.0 m (matcher@315m, support=161, peak=None) 
+imw-xfeat-dense: Processing pair 16 from disk...
+imw-xfeat-dense: 1 match-sets in 0.19s
+[Coarse] imw-xfeat-dense pair 17: dE=-18315.7 m dN=-22.2 m (matcher@315m, support=310, peak=None) 
+imw-xfeat-dense: Processing pair 17 from disk...
+imw-xfeat-dense: 1 match-sets in 0.19s
+[Coarse] imw-xfeat-dense pair 18: dE=-18089.9 m dN=-348.3 m (from-pair-25 (phasecorr disagreed), support=None, peak=0.06863816733713503) 
+imw-xfeat-dense: Processing pair 18 from disk...
+imw-xfeat-dense: 0 match-sets in 0.00s
+[Coarse] imw-xfeat-dense pair 19: dE=-18089.9 m dN=-348.3 m (from-pair-25 (phasecorr disagreed), support=None, peak=0.15104582491848204) 
+imw-xfeat-dense: Processing pair 19 from disk...
+imw-xfeat-dense: 0 match-sets in 0.00s
+[Coarse] imw-xfeat-dense pair 20: dE=-18089.9 m dN=-348.3 m (from-pair-19, support=None, peak=None) 
+imw-xfeat-dense: Processing pair 20 from disk...
+imw-xfeat-dense: 0 match-sets in 0.00s
+[Coarse] imw-xfeat-dense pair 21: dE=-18089.9 m dN=-348.3 m (from-pair-25 (phasecorr disagreed), support=None, peak=0.036990950946454645) 
+imw-xfeat-dense: Processing pair 21 from disk...
+imw-xfeat-dense: 0 match-sets in 0.00s
+[Coarse] imw-xfeat-dense pair 22: dE=-17958.0 m dN=-405.8 m (matcher@315m, support=36, peak=None) 
+imw-xfeat-dense: Processing pair 22 from disk...
+imw-xfeat-dense: 1 match-sets in 0.35s
+[Coarse] imw-xfeat-dense pair 23: dE=-18068.8 m dN=-411.7 m (matcher@315m, support=28, peak=None) 
+imw-xfeat-dense: Processing pair 23 from disk...
+imw-xfeat-dense: 1 match-sets in 0.20s
+[Coarse] imw-xfeat-dense pair 24: dE=-18167.6 m dN=-377.7 m (matcher@315m, support=27, peak=None) 
+imw-xfeat-dense: Processing pair 24 from disk...
+imw-xfeat-dense: 1 match-sets in 0.19s
+[Coarse] imw-xfeat-dense pair 25: dE=-18089.9 m dN=-348.3 m (matcher@315m, support=52, peak=None) 
+imw-xfeat-dense: Processing pair 25 from disk...
+imw-xfeat-dense: 1 match-sets in 0.19s
+[Coarse] imw-xfeat-dense pair 26: dE=-18068.8 m dN=-411.7 m (from-pair-27, support=None, peak=None) 
+imw-xfeat-dense: Processing pair 26 from disk...
+imw-xfeat-dense: 1 match-sets in 0.28s
+[Coarse] imw-xfeat-dense pair 27: dE=-18068.8 m dN=-411.7 m (from-pair-23 (phasecorr disagreed), support=None, peak=0.05064041456057702) 
+imw-xfeat-dense: Processing pair 27 from disk...
+imw-xfeat-dense: 1 match-sets in 0.15s
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+[band1] imw-xfeat-dense ok in 0.2 min, peak GPU memory 2.2 of 39.4 GB
+[imw-xfeat-dense] Model unloaded.
+================================================================================
+ALL CHANNELS COMPLETE
+================================================================================
+[Truth] 8 ground-truth point(s); tool error from a local plane through its matches within 5 km (else its error surface); consensus chips. Best detector + matcher:
+    # channel  detector                   matcher setting          RMSE m  bias dE  bias dN    max m  reached  s/window
+    1 band1    imw-aliked-lg-kt0p2        internal internal lmeds630    152.7     58.1     -1.9    251.9    4/8        0.4
+    2 band1    disk_depth                 nn      nn magsac630      195.2     17.9    -48.9    226.3    5/8        0.1
+    3 band1    disk_depth                 mnn     mnn lmeds630      202.9     88.7    -37.8    324.0    4/8        0.1
+    4 band1    imw-minima-roma            internal internal lmeds630    203.5     92.8    -42.1    298.1    8/8        0.6
+    5 band1    imw-dkm                    internal internal magsac630    212.0    102.0    -26.7    296.8    8/8        0.6
+    6 band1    imw-lanet-nn-kt0p2         internal internal magsac630    233.3     86.0    -67.6    308.5    4/8        0.2
+    7 band1    keynet                     lgm     lgm magsac630     235.9     11.6     -3.1    323.1    4/8        0.2
+    8 band1    disk_depth                 lgm     lgm magsac630     243.0    126.1    -90.3    341.1    6/8        0.1
+    9 band1    imw-darkfeat-nn-kt0p2      internal internal magsac630    256.1    162.8   -133.3    390.5    4/8        0.2
+   10 band1    imw-roma                   internal internal lmeds630    258.7    127.2    -83.2    410.3    6/8        0.7
+   11 band1    imw-dad-roma               internal internal magsac630    260.4     81.9   -140.0    353.4    4/8        2.4
+   12 band1    disk_epipolar              mnn     mnn magsac630     266.6     66.1    -27.7    410.7    4/8        0.1
+   13 band1    imw-ripe-nn-kt0p2          internal internal magsac630    280.7    174.1    -36.6    481.3    5/8        0.4
+   14 band1    imw-xoftr                  internal internal lmeds630    281.2    161.8    -44.9    414.6    4/8        0.2
+   15 band1    imw-gim-roma               internal internal lmeds630    285.6    173.3   -100.3    466.6    8/8        0.7
+   16 band1    imw-topicfm                internal internal magsac630    288.1    -24.5    122.2    392.5    4/8        0.3
+   17 band1    imw-rdd-nn-kt0p2           internal internal magsac630    290.8    164.2     -0.4    518.6    4/8        0.5
+   18 band1    disk_epipolar              ada     ada magsac630     302.6     83.6    -63.5    467.4    5/8        0.1
+   19 band1    dog_hynet                  ada     ada magsac630     309.1    121.4   -169.7    450.4    4/8        0.2
+   20 band1    imw-aspanformer            internal internal magsac630    310.9     82.0     75.0    516.7    7/8        1.2
+[Truth] best for band1: imw-aliked-lg-kt0p2 + internal lmeds630 -> /maintenance/ICIGDev/GPUPOC/output/output335/RIVAL_TRUTH_BEST_band1.csv
+[Job] detector + matcher performance (PERFORMANCE.csv):
+  channel  detector                   matcher       s/window  chips  inliers  truth RMSE m  reached  GPU GB
+  band1    imw-aliked-lg-kt0p2        internal          0.38     12     3130         152.7      4/8     2.2
+  band1    imw-aliked-lg-kt0p2        internal          0.33     12     3143         153.2      4/8     2.2
+  band1    imw-aliked-lg-kt0p2        internal          0.33     12     3140         153.2      4/8     2.2
+  band1    imw-aliked-lg-kt0p2        internal          0.34     12     3119         153.2      4/8     2.2
+  band1    imw-aliked-lg-kt0p2        internal          0.33     12     3121         153.2      4/8     2.2
+  band1    imw-aliked-lg-kt0p2        internal          0.33     12     3142         153.2      4/8     2.2
+  band1    imw-aliked-lg-kt0p2        internal          0.34     12     3138         153.2      4/8     2.2
+  band1    imw-aliked-lg-kt0p2        internal          0.33     12     3118         153.2      4/8     2.2
+  band1    imw-aliked-lg-kt0p2        internal          0.33     12     3120         153.2      4/8     2.2
+  band1    imw-aliked-lg-kt0p2        internal          0.33     12     3120         153.2      4/8     2.2
+  band1    imw-aliked-lg-kt0p2        internal          0.34     12     3119         153.2      4/8     2.2
+  band1    imw-aliked-lg-kt0p2        internal          0.33     12     3120         153.2      4/8     2.2
+  band1    imw-aliked-lg-kt0p2        internal          0.33     12     3137         153.2      4/8     2.2
+  band1    imw-aliked-lg-kt0p2        internal          0.34     12     3114         153.2      4/8     2.2
+  band1    imw-aliked-lg-kt0p2        internal          0.35     12     3119         153.2      4/8     2.2
+  band1    imw-aliked-lg-kt0p2        internal          0.34     12     3119         153.2      4/8     2.2
+  band1    imw-aliked-lg-kt0p2        internal          0.34     12     3137         153.2      4/8     2.2
+  band1    imw-aliked-lg-kt0p2        internal          0.34     12     3113         153.2      4/8     2.2
+  band1    imw-aliked-lg-kt0p2        internal          0.33     12     3136         153.2      4/8     2.2
+  band1    imw-aliked-lg-kt0p2        internal          0.44     12     3142         153.2      4/8     2.2
+  band1    imw-aliked-lg-kt0p2        internal          0.42     12     3119         153.3      4/8     2.2
+  band1    imw-aliked-lg-kt0p2        internal          0.35     12     3119         153.3      4/8     2.2
+  band1    imw-aliked-lg-kt0p2        internal          0.33     12     3120         153.3      4/8     2.2
+  band1    imw-aliked-lg-kt0p2        internal          0.33     12     3122         153.3      4/8     2.2
+  band1    imw-aliked-lg-kt0p2        internal          0.36     12     3139         153.3      4/8     2.2
+  band1    imw-aliked-lg-kt0p2        internal          0.34     12     3120         153.3      4/8     2.2
+  band1    imw-aliked-lg-kt0p2        internal          0.35     12     3118         153.3      4/8     2.2
+  band1    disk_depth                 nn                0.13     13     3989         195.2      5/8    12.9
+  band1    disk_depth                 nn                0.13     13     3888         196.5      5/8    12.9
+  band1    disk_depth                 mnn               0.10     17     3873         202.9      4/8    12.9
+  band1    disk_depth                 mnn               0.12     17     4289         203.4      4/8    12.9
+  band1    disk_depth                 mnn               0.12     17     4224         203.5      4/8    12.9
+  band1    disk_depth                 mnn               0.12     17     4250         203.5      4/8    12.9
+  band1    disk_depth                 mnn               0.12     17     4322         203.5      4/8    12.9
+  band1    disk_depth                 mnn               0.12     17     4250         203.5      4/8    12.9
+  band1    disk_depth                 mnn               0.12     17     4250         203.5      4/8    12.9
+  band1    disk_depth                 mnn               0.12     17     4250         203.5      4/8    12.9
+  band1    disk_depth                 mnn               0.12     17     4250         203.5      4/8    12.9
+  band1    disk_depth                 mnn               0.12     17     4205         203.5      4/8    12.9
+  band1    disk_depth                 mnn               0.12     17     4282         203.5      4/8    12.9
+[Job] consensus pick for band1: imw-gim-roma win256_nfauto (mean dE -15448.3 m, dN -270.8 m, CE90 31028.4 m) -> /maintenance/ICIGDev/GPUPOC/output/output335/RIVAL_CONSENSUS_BEST_cog_band1.csv
+[Job] best for band1 by ground truth: imw-aliked-lg-kt0p2 + internal lmeds630 win768_nfauto (truth RMSE 152.7 m) -> /maintenance/ICIGDev/GPUPOC/output/output335/RIVAL_BEST_cog_band1.csv
+[Job] done in 1375.2 min; manifest /maintenance/ICIGDev/GPUPOC/output/output335/RUN_MANIFEST.csv
