@@ -679,6 +679,37 @@ check("and Shift always marks the selected row",
 check("a complete row's reference is corrected, never a new row",
       f(False, True,  True,  True,  False), False)
 
+# ── 21. the statistics file ──────────────────────────────────────────────────
+print("\n-- statistics written with an export --")
+f = H["error_summary"]
+# dx: 3, 5 -> mean 4, sample std sqrt(2), rmse sqrt(17); dy: 4, 0
+st = f([(3.0, 4.0), (5.0, 0.0)])
+near = lambda a, b: abs(a - b) < 1e-9
+check("n", st["n"], 2)
+check("mean is the bias", (st["mean_x"], st["mean_y"]), (4.0, 2.0))
+check("std is the sample std about the mean",
+      near(st["std_x"], 2 ** 0.5) and near(st["std_y"], 8 ** 0.5), True)
+check("rmse is about zero, bias included",
+      near(st["rmse_x"], 17 ** 0.5) and near(st["rmse_y"], 8 ** 0.5), True)
+check("radial: |(3,4)| = 5 and |(5,0)| = 5",
+      (st["mean_r"], st["max_r"], st["rmse_r"]), (5.0, 5.0, 5.0))
+check("CE90 is the same figure the panel shows",
+      st["ce90"], H["accuracy_stats"]([3.0, 5.0], [4.0, 0.0])["ce90"])
+check("one point has no scatter, not a division by zero",
+      f([(1.0, 1.0)])["std_x"], 0.0)
+check("nothing marked writes just the count",
+      H["stats_rows"](f([])), [("n_points", "0", "", "fully marked rows only")])
+names = [r[0] for r in H["stats_rows"](st)]
+check("every figure asked for is in the file",
+      all(k in names for k in ("mean_dx", "std_dx", "rmse_dx", "ce90",
+                               "mean_dy", "std_dy", "rmse_dy")), True)
+uneven = H["stats_rows"](f([(10.0, 1.0), (-10.0, -1.0)]))
+check("uneven axes are flagged beside CE90",
+      "NOT met" in dict((r[0], r[3]) for r in uneven)["axis_ratio"], True)
+check("the file sits beside the export, either kind",
+      (H["stats_path_for"]("/a/picks.csv"), H["stats_path_for"]("/a/picks.shp")),
+      ("/a/picks_stats.csv", "/a/picks_stats.csv"))
+
 print()
 if failures:
     print(f"{len(failures)} FAILURE(S)")

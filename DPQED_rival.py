@@ -145,7 +145,7 @@ from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QFileDialog, QHeaderView, QCheckBox, QComboBox,
                              QMessageBox, QApplication, QShortcut, QLabel,
                              QFrame, QButtonGroup)
-from PyQt5.QtCore import Qt, QObject, QEvent, QTimer, QRectF
+from PyQt5.QtCore import Qt, QObject, QEvent, QTimer, QRectF, QSettings
 from PyQt5.QtGui import QKeySequence, QFont, QColor, QPen
 from qgis.gui import (QgsMapCanvas, QgsMapTool, QgsMapToolPan, QgsMapToolZoom,
                       QgsVertexMarker, QgsMapCanvasItem)
@@ -375,6 +375,15 @@ SHP_FIELDS = [
 # min/max ratio of 0.6, below which the figure is reported with a caveat rather
 # than presented as if the error really were circular.
 CE90_SIGMA = 2.146
+
+# Every export also writes <name>_stats.csv beside it: the accuracy figures for
+# the fully marked rows, so a run's numbers travel with its picks.
+EXPORT_STATS = True
+
+# The reference folder is remembered between sessions and loaded on start-up;
+# 'Select Reference Folder' is then only needed to change it.
+REMEMBER_REF_FOLDER = True
+SETTINGS_ORG, SETTINGS_APP = "NRSC", "RIVAL"
 CE90_MIN_AXIS_RATIO = 0.6
 
 RGB_CLIP_LOW  = 0.02
@@ -1157,6 +1166,82 @@ def accuracy_stats(err_x, err_y):
             "circular": ratio >= CE90_MIN_AXIS_RATIO}
 
 
+def error_summary(errors):
+    """Everything worth reporting about a set of (dx, dy) errors, in metres.
+
+    Per axis: mean (the bias), sample standard deviation (the scatter about
+    that bias), RMSE about zero (bias included -- the accuracy), min and max.
+    Radially: mean, RMSE and max of sqrt(dx^2 + dy^2). Then CE90 and the axis
+    ratio it is judged by, from accuracy_stats, so the file and the panel can
+    never disagree.
+    """
+    xs = [float(e[0]) for e in errors]
+    ys = [float(e[1]) for e in errors]
+    n = len(xs)
+    acc = accuracy_stats(xs, ys)
+    out = {"n": n, "ce90": acc["ce90"], "circular": acc["circular"],
+           "rmse_x": acc["rmse_x"], "rmse_y": acc["rmse_y"]}
+    if n == 0:
+        return out
+
+    def mean(v):
+        return sum(v) / len(v)
+
+    def std(v):
+        if len(v) < 2:
+            return 0.0
+        m = mean(v)
+        return math.sqrt(sum((a - m) ** 2 for a in v) / (len(v) - 1))
+
+    rad = [math.hypot(a, b) for a, b in zip(xs, ys)]
+    hi = max(acc["rmse_x"], acc["rmse_y"])
+    out.update({
+        "mean_x": mean(xs), "mean_y": mean(ys),
+        "std_x": std(xs), "std_y": std(ys),
+        "min_x": min(xs), "max_x": max(xs),
+        "min_y": min(ys), "max_y": max(ys),
+        "mean_r": mean(rad), "rmse_r": math.sqrt(mean([r * r for r in rad])),
+        "max_r": max(rad),
+        "axis_ratio": (min(acc["rmse_x"], acc["rmse_y"]) / hi) if hi else 1.0,
+    })
+    return out
+
+
+def stats_rows(summary):
+    """(statistic, value, unit, note) rows for the stats file, in report order."""
+    n = summary["n"]
+    rows = [("n_points", str(n), "", "fully marked rows only")]
+    if n == 0:
+        return rows
+    f = lambda v: f"{v:.3f}"
+    rows += [
+        ("mean_dx", f(summary["mean_x"]), "m", "bias, In - Ref"),
+        ("mean_dy", f(summary["mean_y"]), "m", "bias, In - Ref"),
+        ("std_dx", f(summary["std_x"]), "m", "sample std (n-1)"),
+        ("std_dy", f(summary["std_y"]), "m", "sample std (n-1)"),
+        ("rmse_dx", f(summary["rmse_x"]), "m", "about zero, bias included"),
+        ("rmse_dy", f(summary["rmse_y"]), "m", "about zero, bias included"),
+        ("min_dx", f(summary["min_x"]), "m", ""),
+        ("max_dx", f(summary["max_x"]), "m", ""),
+        ("min_dy", f(summary["min_y"]), "m", ""),
+        ("max_dy", f(summary["max_y"]), "m", ""),
+        ("mean_radial", f(summary["mean_r"]), "m", "sqrt(dx^2 + dy^2)"),
+        ("rmse_radial", f(summary["rmse_r"]), "m", ""),
+        ("max_radial", f(summary["max_r"]), "m", ""),
+        ("ce90", f(summary["ce90"]), "m",
+         f"{CE90_SIGMA} x sqrt((rmse_dx^2 + rmse_dy^2) / 2)"),
+        ("axis_ratio", f(summary["axis_ratio"]), "",
+         f"min/max rmse; CE90 circular model needs >= {CE90_MIN_AXIS_RATIO}"
+         + ("" if summary["circular"] else " -- NOT met, axes uneven")),
+    ]
+    return rows
+
+
+def stats_path_for(export_path):
+    """<name>_stats.csv beside an export, whatever the export's extension."""
+    return os.path.splitext(export_path)[0] + "_stats.csv"
+
+
 # ── END PURE HELPERS ──────────────────────────────────────────────────────────
 
 
@@ -1578,6 +1663,8 @@ class QCDashboard(QMainWindow):
 
         self.auto_connect_layers()
         self.init_map_tools()
+        # after the window is up, so a large folder scan does not hold it back
+        QTimer.singleShot(0, self.restore_reference_folder)
 
     # ── GDAL CACHE ────────────────────────────────────────────────────────────
     def _configure_gdal_cache(self):
@@ -2278,11 +2365,44 @@ class QCDashboard(QMainWindow):
                   f"first kept (e.g. {', '.join(sorted(set(dupes))[:3])})")
         return rasters, metas, others
 
+    def _settings(self):
+        return QSettings(SETTINGS_ORG, SETTINGS_APP)
+
+    def _saved_ref_folder(self):
+        """The folder remembered from a previous session, if it still exists."""
+        if not REMEMBER_REF_FOLDER:
+            return None
+        try:
+            value = self._settings().value("ref_folder", "")
+        except Exception:
+            return None
+        if isinstance(value, str) and value and os.path.isdir(value):
+            return value
+        return None
+
+    def restore_reference_folder(self):
+        """Load the remembered reference folder, without asking."""
+        folder = self._saved_ref_folder()
+        if folder:
+            print(f"[META] reference folder from last session: {folder}")
+            self.load_reference_folder(folder)
+
     def select_reference_folder(self):
-        folder_path = QFileDialog.getExistingDirectory(self, "Select Reference Folder")
+        """Ask for a reference folder -- only needed to change the remembered one."""
+        start = self.ref_folder_path or self._saved_ref_folder() or ""
+        folder_path = QFileDialog.getExistingDirectory(
+            self, "Select Reference Folder", start)
         if not folder_path:
             return
+        self.load_reference_folder(folder_path)
+
+    def load_reference_folder(self, folder_path):
         self.ref_folder_path = folder_path
+        if REMEMBER_REF_FOLDER:
+            try:
+                self._settings().setValue("ref_folder", folder_path)
+            except Exception as e:
+                print(f"[META] could not remember the folder: {e}")
         self.ref_footprints  = {}
         self.ref_mode        = None
         self._refresh_band_choices()
@@ -3225,17 +3345,13 @@ class QCDashboard(QMainWindow):
         self.update_stats()
 
     def update_stats(self):
-        err_x_list, err_y_list = [], []
-        for r in range(self.table.rowCount()):
-            try:
-                item_x = self.table.item(r, 4)
-                item_y = self.table.item(r, 5)
-                if item_x and item_y:
-                    err_x_list.append(float(item_x.text()))
-                    err_y_list.append(float(item_y.text()))
-            except (ValueError, AttributeError):
-                continue
-        stats = accuracy_stats(err_x_list, err_y_list)
+        # Fully marked rows only. Reading the error columns instead counted a
+        # half-marked row too: one with only its input "erred" by its whole
+        # coordinate, and an empty row added a perfect 0 -- and with rows now
+        # started by marking, the row being measured is half-marked most of
+        # the time.
+        errs = self._measured_errors()
+        stats = accuracy_stats([e[0] for e in errs], [e[1] for e in errs])
         self.lbl_rmse_x.setText(f"RMSE X:  {stats['rmse_x']:.3f} m")
         self.lbl_rmse_y.setText(f"RMSE Y:  {stats['rmse_y']:.3f} m")
         # A CE90 on plainly elliptical errors is still worth showing -- it is
@@ -3374,7 +3490,10 @@ class QCDashboard(QMainWindow):
                 return
 
         crs = out_crs.authid() or out_crs.description()
+        stats_file = self.write_stats(path)
         note = ""
+        if stats_file:
+            note += f"\nStatistics: {os.path.basename(stats_file)}"
         if why:
             note += f"\nGeometry is lon/lat because {why}."
         if skipped:
@@ -3515,6 +3634,34 @@ class QCDashboard(QMainWindow):
                     self._lonlat_for(cells[2], cells[3])))
         print(f"[CSV] {self.table.rowCount()} row(s) -> {os.path.basename(path)}; "
               f"map coordinates in {crs}, lon/lat in EPSG:4326")
+        self.write_stats(path)
+
+    def write_stats(self, export_path):
+        """Write <name>_stats.csv beside an export. Returns its path, or None."""
+        if not EXPORT_STATS:
+            return None
+        out = stats_path_for(export_path)
+        summary = error_summary(self._measured_errors())
+        try:
+            crs = self.proj_crs.authid() or self.proj_crs.description()
+        except Exception:
+            crs = ""
+        try:
+            with open(out, "w", newline="", encoding="utf-8-sig") as f:
+                w = csv.writer(f)
+                w.writerow(["Statistic", "Value", "Unit", "Note"])
+                for row in stats_rows(summary):
+                    w.writerow(row)
+                w.writerow(["working_crs", crs, "", "dx/dy are metres on this grid"])
+                w.writerow(["source", os.path.basename(export_path), "", ""])
+        except OSError as e:
+            QMessageBox.warning(self, "Statistics",
+                                f"Could not write {out}:\n{e}")
+            return None
+        print(f"[STATS] n={summary['n']}"
+              + (f", CE90 {summary['ce90']:.3f} m" if summary["n"] else "")
+              + f" -> {os.path.basename(out)}")
+        return out
 
     def add_manual_row(self):
         r = self.table.rowCount()

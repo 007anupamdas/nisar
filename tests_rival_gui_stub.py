@@ -1857,6 +1857,88 @@ assert not win.canvas_left.setFocus.called, "hover stole focus from a cell edit"
 print("hovering a canvas gives it the arrow keys, but not mid-way through "
       "typing a cell")
 
+# ── 23. statistics on export, honest live stats, a remembered folder ────────
+for name in ("update_stats", "write_stats", "save_csv", "_measured_errors",
+             "restore_reference_folder", "select_reference_folder",
+             "_saved_ref_folder"):
+    setattr(win, name, getattr(R.QCDashboard, name).__get__(win))
+win.refresh_gcp_overlay = MagicMock()
+for lbl in ("lbl_rmse_x", "lbl_rmse_y", "lbl_ce90"):
+    setattr(win, lbl, MagicMock())
+rows23 = [["1003.000", "1004.000", "1000.000", "1000.000", "3.000", "4.000"],
+          ["2005.000", "2000.000", "2000.000", "2000.000", "5.000", "0.000"],
+          # half-marked: its error column holds its whole coordinate
+          ["325010.000", "1900007.000", "0.000", "0.000",
+           "325010.000", "1900007.000"],
+          ["0.000"] * 6]                                   # empty
+win.table = _SelTable(rows23, current=2)
+win.update_stats()
+ce90 = R.accuracy_stats([3.0, 5.0], [4.0, 0.0])["ce90"]
+assert win.lbl_ce90.setText.call_args[0][0].startswith(f"CE90:    {ce90:.3f}"), \
+    win.lbl_ce90.setText.call_args
+print("\nthe live CE90 counts the two finished rows, not the half-marked one "
+      f"({ce90:.3f} m)")
+
+out_dir = tempfile.mkdtemp()
+csv_path = os.path.join(out_dir, "picks.csv")
+qw.QFileDialog.getSaveFileName = MagicMock(return_value=(csv_path, ""))
+win._lonlat_for = lambda a, b: None
+win.proj_crs = _CRS("EPSG:32644")
+win.save_csv()
+stats_csv = os.path.join(out_dir, "picks_stats.csv")
+assert os.path.exists(stats_csv), "Export CSV wrote no statistics file"
+import csv as _csv
+got = {r["Statistic"]: r for r in _csv.DictReader(open(stats_csv, encoding="utf-8-sig"))}
+assert got["n_points"]["Value"] == "2", got["n_points"]
+assert got["mean_dx"]["Value"] == "4.000" and got["mean_dy"]["Value"] == "2.000"
+assert got["ce90"]["Value"] == f"{ce90:.3f}"
+assert got["working_crs"]["Value"] == "EPSG:32644"
+print("Export CSV writes picks_stats.csv beside it: n=2, mean, std, RMSE, CE90")
+
+# and Export SHP writes the same file beside the shapefile
+win.write_stats(os.path.join(out_dir, "quiver.shp"))
+assert os.path.exists(os.path.join(out_dir, "quiver_stats.csv"))
+src = R.QCDashboard.save_shapefile.__code__.co_names
+assert "write_stats" in src, "Export SHP does not write the statistics file"
+print("Export SHP writes quiver_stats.csv beside the shapefile")
+shutil.rmtree(out_dir, ignore_errors=True)
+
+# the reference folder is remembered and loaded without asking
+store = {}
+class _Settings:
+    def __init__(self, *a): pass
+    def value(self, k, d=None): return store.get(k, d)
+    def setValue(self, k, v): store[k] = v
+R.QSettings = _Settings
+win.load_reference_folder = MagicMock()
+ref_dir = tempfile.mkdtemp()
+store["ref_folder"] = ref_dir
+win.ref_folder_path = None
+win.restore_reference_folder()
+win.load_reference_folder.assert_called_once_with(ref_dir)
+print("the folder from the last session is loaded on start-up, no dialog")
+
+store["ref_folder"] = ref_dir + "_gone"
+win.load_reference_folder.reset_mock()
+win.restore_reference_folder()
+assert not win.load_reference_folder.called, "loaded a folder that is gone"
+print("a remembered folder that no longer exists is skipped quietly")
+
+store["ref_folder"] = ref_dir
+qw.QFileDialog.getExistingDirectory = MagicMock(return_value="")
+win.select_reference_folder()
+assert qw.QFileDialog.getExistingDirectory.call_args[0][2] == ref_dir
+assert not win.load_reference_folder.called, "a cancelled dialog changed it"
+print("changing it opens the dialog at the remembered folder; cancel keeps it")
+
+win.load_reference_folder = R.QCDashboard.load_reference_folder.__get__(win)
+win._folder_entries = MagicMock(return_value=([], [], []))
+win._refresh_band_choices = win.filter_reference_tifs = MagicMock()
+win.load_reference_folder("/new/refs")
+assert store["ref_folder"] == "/new/refs"
+print("a newly chosen folder becomes the remembered one")
+shutil.rmtree(ref_dir, ignore_errors=True)
+
 for d in (d1, d2, d3, d4, d5, d6):
     shutil.rmtree(d, ignore_errors=True)
 print("\nstubbed integration OK")
