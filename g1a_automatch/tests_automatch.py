@@ -818,6 +818,9 @@ def test_gui_dialog():
         check('gui: GPU window reaches the job (0 = automatic)',
               (w.get_job()['gpu_window_px'], w.gpu_win.minimum()), (1024, 0))
         w.gpu_win.setValue(0)
+        w.auto_bands.setValue(2)
+        check('gui: auto bands reaches the job (0 = off)', (w.get_job()['auto_bands'], w.auto_bands.minimum()), (2, 0))
+        w.auto_bands.setValue(0)
         w.settings = G.QtCore.QSettings(os.path.join(tempfile.mkdtemp(), 'gui_test.ini'), G.QtCore.QSettings.IniFormat
                                         if G.QT_API == 'PyQt5' else G.QtCore.QSettings.Format.IniFormat)
         # the real button: its clicked signal passes checked=False, which once
@@ -1602,6 +1605,67 @@ def test_jobs_318_323(tmp):
 
 
 
+def test_auto_bands(tmp):
+    """Hyperspectral cubes (G1A HV, 180 bands): the band whose good bands
+    change from image to image is picked by signal-to-noise. A 40-band cube
+    whose scene contrast peaks at band 20, with a striped band, a dead band,
+    noise-only bands and a fill strip."""
+    import contextlib
+    import io
+    import cv2
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_origin
+    import automatch_engine as E
+    import automatch_job as J
+    rng = np.random.default_rng(0)
+    H, W, N = 500, 640, 40
+
+    def tex(s):
+        a = cv2.GaussianBlur(rng.normal(size=(H, W)).astype(np.float32), (0, 0), s)
+        return (a - a.mean()) / a.std()
+    base = tex(3) * 60 + tex(15) * 120
+    cube = np.zeros((N, H, W), np.float32)
+    for b in range(N):
+        cube[b] = 500 + np.exp(-0.5 * ((b - 19) / 6.0) ** 2) * base + rng.normal(scale=8, size=(H, W))
+    cube[29] += rng.normal(scale=60, size=W)[None, :]
+    cube[34] = 0
+    cube[:, :, :100] = 0
+    path = os.path.join(tmp, 'hs_cube.tif')
+    with rasterio.open(path, 'w', driver='GTiff', height=H, width=W, count=N, dtype='uint16', crs='EPSG:32644',
+                       transform=from_origin(500000, 2000000, 180, 180)) as d:
+        d.write(np.clip(cube, 0, 65535).astype('uint16'))
+    rows = E.band_quality(path)
+    db = {r['band']: r['snr_db'] for r in rows}
+    best = max(db, key=db.get)
+    check('bands: the best band is at the contrast peak (19-21)', 19 <= best <= 21, True)
+    check('bands: noise-only bands score at or below 0 dB', max(db[1], db[2], db[40]) <= 0, True)
+    check('bands: the striped band scores below its neighbours by 10 dB', db[30] < min(db[29], db[31]) - 10, True)
+    check('bands: the dead band is unusable', db[35], E.UNUSABLE_DB)
+    check('bands: picks are the top 3 near the peak', all(17 <= int(c[4:]) <= 23 for c in E.pick_bands(rows, 3)), True)
+    sp = E.pick_bands(rows, 3, spacing=5)
+    check('bands: spacing keeps picks apart', min(abs(int(a[4:]) - int(b[4:])) for a in sp for b in sp if a != b) >= 5,
+          True)
+    check('bands: no pick from noise only', E.pick_bands([dict(r, snr_db=-3.0) for r in rows], 2), [])
+
+    out = os.path.join(tmp, 'bands_out')
+    os.makedirs(out, exist_ok=True)
+    scene = E.InputScene(path, E.PipelineConfig())
+    job = J.normalize({'input_path': path, 'auto_bands': 1})
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        picked, note = J.resolve_auto_bands(job, scene, E, out)
+    check('bands: job picks one band and writes BAND_QUALITY.csv',
+          (len(picked), note, os.path.exists(os.path.join(out, 'BAND_QUALITY.csv'))), (1, '', True))
+    check('bands: the log shows the table', 'picked: ' + picked[0] in buf.getvalue(), True)
+    picked, note = J.resolve_auto_bands(dict(job, channels=['band5']), scene, E)
+    check('bands: explicit channels win over auto_bands', (picked, 'ignored' in note), ([], True))
+    picked, note = J.resolve_auto_bands(dict(job, auto_bands=0), scene, E)
+    check('bands: 40 bands, no channels, auto_bands 0 -> a note', (picked, 'auto_bands' in note), ([], True))
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        rc = J.main(['bands', path, '--top', '2'])
+    check('bands: CLI prints the ranking', (rc, 'picked:' in buf.getvalue()), (0, True))
+
+
 def test_partial_cover():
     """Jobs 336 and 343: a warning when the first-ranked configuration is km
     off while one reaching fewer points is close (343, matches on part of the
@@ -2049,6 +2113,7 @@ def main():
         test_jobs_318_323(tmp)
         test_coarse_outliers()
         test_partial_cover()
+        test_auto_bands(tmp)
         test_kornia_versions(tmp)
         test_warmup_and_padding()
         test_sliced_matching()

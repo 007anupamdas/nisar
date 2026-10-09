@@ -79,6 +79,8 @@ DEFAULT_JOB: Dict = {
     # inputs / outputs
     'input_path': '',            # G1A raster (GeoTIFF/VRT/JP2...) or NISAR .h5 / scene dir
     'channels': [],              # [] = all; raster: "band1".., NISAR: "HH"..
+    'auto_bands': 0,             # rasters with channels []: match only the N bands with the best
+                                 # signal-to-noise (hyperspectral cubes); 0 = off
     'reference_dir': '',         # L8_ref / C1 / any RIVAL-readable collection
     'reference_label': '',       # tag in file names; default from folder name
     'reference_mode': 'auto',    # auto | index-shp | sidecar | degree-tile
@@ -162,6 +164,7 @@ DEFAULT_JOB: Dict = {
 JOB_HELP = {
     'input_path': 'Image to assess: G1A raster (any rasterio format) or NISAR .h5 / scene folder',
     'channels': 'Channels to process ([] = all): band1.. for rasters, HH/HV.. for NISAR',
+    'auto_bands': 'Pick the N bands with the best signal-to-noise when channels is [] (hyperspectral); 0 = off',
     'reference_dir': 'Reference collection (L8_ref, C1, ...) - discovered like DPQED_rival.py',
     'max_expected_error_m': 'Worst-case geolocation error; search buffer for references and coarse alignment',
     'coarse_method': 'auto = matcher at coarse resolution, phase correlation if weak',
@@ -432,6 +435,12 @@ def preflight(job: Dict, check_weights: bool = True) -> Dict:
         cfg = E.PipelineConfig(nisar_band=job['nisar_band'], nisar_frequency=job['nisar_frequency'])
         scene = E.InputScene(job['input_path'], cfg)
         info['input'] = scene.describe()
+        if scene.kind == 'raster':
+            picked, note = resolve_auto_bands(job, scene, E)
+            if note:
+                warnings.append(note)
+            if picked:
+                info['auto_bands'] = picked
         bad = [c for c in job['channels'] if c not in scene.channels]
         if bad:
             errors.append(f'channels {bad} not in input; available {scene.channels}')
@@ -786,6 +795,30 @@ def _compare_with_truth(job: Dict, out_root: str, working_crs: str, manifest: Li
     return files
 
 
+def resolve_auto_bands(job: Dict, scene, E, out_dir: str = '') -> Tuple[List[str], str]:
+    """(bands picked by signal-to-noise, note for the log) for a raster job
+    with auto_bands set and no channels; the scores go to BAND_QUALITY.csv
+    in out_dir. A raster with many bands and neither set gets a note."""
+    n = int(job.get('auto_bands') or 0)
+    many = len(scene.channels) > 20
+    if n <= 0:
+        if many and not job['channels']:
+            return [], (f'{len(scene.channels)} bands and channels [] : every band will be matched; '
+                        f'set auto_bands (e.g. 1-3) to match only the cleanest')
+        return [], ''
+    if job['channels']:
+        return [], f'auto_bands {n} ignored: channels {job["channels"]} are set'
+    rows = E.band_quality(scene.raster_path)
+    picked = E.pick_bands(rows, n)
+    print(E.format_band_quality(rows, picked), flush=True)
+    if out_dir:
+        import pandas as pd
+        pd.DataFrame(rows).to_csv(os.path.join(out_dir, 'BAND_QUALITY.csv'), index=False)
+    if not picked:
+        return [], 'auto_bands: no band has more signal than noise; every band will be matched'
+    return picked, ''
+
+
 def run_job(job: Dict) -> Dict:
     job = expand_selection(normalize(job))
     pf = preflight(job, check_weights=False)   # warmup stops a detector whose weights are missing
@@ -811,6 +844,15 @@ def run_job(job: Dict) -> Dict:
 
     scene = E.InputScene(job['input_path'], E.PipelineConfig(nisar_band=job['nisar_band'],
                                                              nisar_frequency=job['nisar_frequency']))
+    if scene.kind == 'raster':
+        picked, note = resolve_auto_bands(job, scene, E, out_root)
+        if note:
+            print(f'[Job] NOTE: {note}')
+        if picked:
+            job = dict(job, channels=picked)
+            print(f'[Job] auto_bands {job["auto_bands"]}: matching {picked}')
+            with open(os.path.join(out_root, 'job_used.json'), 'w', encoding='utf-8') as f:
+                json.dump(job, f, indent=2)
     res = job['target_resolution'] or scene.native_res or 10.0
     detectors = job['detectors']
     sweep = [(w, nf) for w in job['window_sizes'] for nf in job['num_features']]
@@ -951,6 +993,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     d.add_argument('--weights-cache', default='')
     i = sub.add_parser('inspect', help='describe an input image')
     i.add_argument('input')
+    bq = sub.add_parser('bands', help='score every band of a raster by signal-to-noise (BAND_QUALITY.csv)')
+    bq.add_argument('input')
+    bq.add_argument('--top', type=int, default=3, help='bands to pick (default 3)')
+    bq.add_argument('--csv', default='', help='write every band\'s scores here')
     w = sub.add_parser('weights', help='check which model weight files are on this machine '
                                        '(options: python automatch_weights.py -h)')
     w.add_argument('rest', nargs=argparse.REMAINDER)
@@ -991,6 +1037,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         desc = sc.describe()
         print(json.dumps(desc, indent=2, default=str))
         emit({'event': 'inspect', **desc})
+        return 0
+    if a.cmd == 'bands':
+        import automatch_engine as E
+        rows = E.band_quality(a.input)
+        picked = E.pick_bands(rows, a.top)
+        print(E.format_band_quality(rows, picked))
+        if a.csv:
+            import pandas as pd
+            pd.DataFrame(rows).to_csv(a.csv, index=False)
+        emit({'event': 'bands', 'picked': picked, 'rows': rows})
         return 0
     job = load_job(a.job, a.set)
     if a.cmd == 'preflight':

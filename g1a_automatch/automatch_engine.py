@@ -1124,6 +1124,170 @@ def _crs_string(crs) -> str:
     return f'EPSG:{epsg}' if epsg else crs.to_wkt()
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Band quality (hyperspectral inputs: which bands are worth matching)
+# ─────────────────────────────────────────────────────────────────────────────
+UNUSABLE_DB = -99.0
+_NOISE_KERNEL = np.array([[1, -2, 1], [-2, 4, -2], [1, -2, 1]], np.float64)   # Immerkaer 1996
+
+
+def _noise_sigma(block: np.ndarray, valid: np.ndarray) -> float:
+    """Robust pixel-noise sigma of one full-resolution block: the median
+    absolute response of a kernel that cancels flat areas, ramps and most
+    edges (gain 6 for white noise), over the pixels whose 3 x 3 neighbourhood
+    is valid. Edges and texture land in the tail, not the median."""
+    if block.shape[0] < 3 or block.shape[1] < 3:
+        return float('nan')
+    b = block.astype(np.float64)
+    r = sum(_NOISE_KERNEL[i, j] * b[i:i + b.shape[0] - 2, j:j + b.shape[1] - 2]
+            for i in range(3) for j in range(3))
+    ok = np.ones_like(r, bool)
+    for i in range(3):
+        for j in range(3):
+            ok &= valid[i:i + valid.shape[0] - 2, j:j + valid.shape[1] - 2]
+    if ok.sum() < 100:
+        return float('nan')
+    return float(1.4826 * np.median(np.abs(r[ok])) / 6.0)
+
+
+def _stripe_sigma(block: np.ndarray, valid: np.ndarray) -> float:
+    """Column / row striping of one block (pushbroom detector gains): the
+    robust spread of the column means (and row means) about their 9-sample
+    running median. Pixel noise is averaged down by the block side."""
+    out = 0.0
+    b = np.where(valid, block.astype(np.float64), np.nan)
+    for axis in (0, 1):
+        with np.errstate(all='ignore'):
+            m = np.nanmean(b, axis=axis)
+        m = m[np.isfinite(m)]
+        if m.size < 20:
+            continue
+        pad = np.pad(m, 4, mode='edge')
+        run = np.array([np.median(pad[i:i + 9]) for i in range(m.size)])
+        out = max(out, float(1.4826 * np.median(np.abs(m - run))))
+    return out
+
+
+def band_quality(path: str, bands: Optional[List[int]] = None, max_side: int = 1024,
+                 block: int = 256, n_blocks: int = 6, nodata: Optional[float] = None) -> List[Dict]:
+    """Signal-to-noise of every band of a raster, without a reference.
+
+      noise   pixel noise (_noise_sigma) and striping (_stripe_sigma) on
+              n_blocks full-resolution blocks where most bands have data,
+              added in quadrature; at least 0.3 DN for integer data
+      signal  the scene's own variation: the spread of the band's valid
+              pixels (p98 - p2 of an overview read, as a sigma) with the
+              noise taken out
+      snr_db  20 log10(signal / noise); 0 dB = as much noise as scene
+
+    Bands that are dark, flat, noisy or striped (the water-vapour and
+    detector-edge bands of a hyperspectral cube) score low. A band with
+    no signal above its noise, or less than half the data of the
+    best-covered band, gets UNUSABLE_DB."""
+    rows: List[Dict] = []
+    with rt.open(path) as src:
+        idx = list(bands or range(1, src.count + 1))
+        nd = src.nodata if nodata is None else nodata
+        is_int = np.issubdtype(np.dtype(src.dtypes[0]), np.integer)
+        scale = max(1.0, max(src.height, src.width) / float(max_side))
+        oh, ow = max(8, int(round(src.height / scale))), max(8, int(round(src.width / scale)))
+
+        def valid_of(a):
+            v = np.isfinite(a)
+            if nd is not None and not (isinstance(nd, float) and np.isnan(nd)):
+                v &= a != nd
+            else:
+                v &= a != 0           # unflagged G1A fill
+            return v
+
+        # overview pass: signal spread and coverage, a few bands at a time
+        spread, cover, ovalid = {}, {}, np.zeros((oh, ow), np.float32)
+        for k in range(0, len(idx), 16):
+            chunk = idx[k:k + 16]
+            arr = src.read(chunk, out_shape=(len(chunk), oh, ow)).astype(np.float64)
+            for b, a in zip(chunk, arr):
+                v = valid_of(a)
+                cover[b] = float(v.mean())
+                ovalid += v
+                spread[b] = float(np.subtract(*np.percentile(a[v], [98, 2]))) if v.sum() > 50 else 0.0
+        ovalid /= max(1, len(idx))
+
+        # full-resolution blocks where most bands are valid, spread over the image
+        bs = int(min(block, src.height, src.width))
+        cells = []
+        step = max(1, int(bs / scale))
+        for r in range(0, oh - step + 1, step):
+            for c in range(0, ow - step + 1, step):
+                if ovalid[r:r + step, c:c + step].mean() >= 0.9:
+                    cells.append((r, c))
+        if not cells:
+            cells = [(max(0, (oh - step) // 2), max(0, (ow - step) // 2))]
+        pick = [cells[int(i)] for i in np.linspace(0, len(cells) - 1, min(n_blocks, len(cells)))]
+        wins = [rt.windows.Window(min(int(c * scale), src.width - bs), min(int(r * scale), src.height - bs),
+                                  bs, bs) for r, c in pick]
+        noise = {b: [] for b in idx}
+        stripe = {b: [] for b in idx}
+        for w in wins:
+            for k in range(0, len(idx), 16):
+                chunk = idx[k:k + 16]
+                arr = src.read(chunk, window=w).astype(np.float64)
+                for b, a in zip(chunk, arr):
+                    v = valid_of(a)
+                    noise[b].append(_noise_sigma(a, v))
+                    stripe[b].append(_stripe_sigma(a, v))
+        best_cover = max(cover.values()) if cover else 0.0
+        for b in idx:
+            n = [x for x in noise[b] if np.isfinite(x)]
+            sn = float(np.median(n)) if n else float('nan')
+            st = float(np.median(stripe[b])) if stripe[b] else 0.0
+            eff = float(np.hypot(sn, st)) if np.isfinite(sn) else float('nan')
+            if is_int and np.isfinite(eff):
+                eff = max(eff, 0.3)
+            ok = spread[b] > 0 and np.isfinite(eff) and eff > 0 and cover[b] >= 0.5 * best_cover > 0
+            # p98 - p2 is 4.11 sigma for a normal spread; the noise is taken out of it
+            sig = float(np.sqrt(max((spread[b] / 4.11) ** 2 - eff ** 2, 0.0))) if ok else 0.0
+            snr = sig / eff if ok else 0.0
+            rows.append({'channel': f'band{b}', 'band': b, 'valid_fraction': round(cover[b], 4),
+                         'signal': sig, 'noise': sn, 'striping': st, 'snr': snr,
+                         'snr_db': float(round(20 * np.log10(snr), 2)) if snr > 0 else UNUSABLE_DB})
+    return rows
+
+
+def pick_bands(rows: List[Dict], n: int, spacing: Optional[int] = None) -> List[str]:
+    """The n best bands by snr_db, at least `spacing` bands apart (default
+    one 30th of the bands, so a top-3 is not three neighbours of the same
+    peak). Bands at or below 0 dB are never picked."""
+    if n <= 0 or not rows:
+        return []
+    if spacing is None:
+        spacing = max(1, int(round(len(rows) / 30.0)))
+    chosen: List[Dict] = []
+    for r in sorted(rows, key=lambda r: -r['snr_db']):
+        if r['snr_db'] <= 0:
+            break
+        if all(abs(r['band'] - c['band']) >= spacing for c in chosen):
+            chosen.append(r)
+        if len(chosen) == n:
+            break
+    return [c['channel'] for c in chosen]
+
+
+def format_band_quality(rows: List[Dict], picked: List[str], top: int = 15) -> str:
+    """The best bands, then a line per run of bands for the whole profile."""
+    if not rows:
+        return '[Bands] no band scored'
+    best = sorted(rows, key=lambda r: -r['snr_db'])[:top]
+    lines = [f'[Bands] signal-to-noise of {len(rows)} band(s); picked: {", ".join(picked) or "none"}',
+             f"  {'band':<8} {'SNR dB':>7} {'signal':>10} {'noise':>9} {'striping':>9} {'valid':>6}"]
+    for r in best:
+        lines.append(f"  {r['channel']:<8} {r['snr_db']:7.1f} {r['signal']:10.4g} {r['noise']:9.3g} "
+                     f"{r['striping']:9.3g} {r['valid_fraction']:6.2f}{'  <- picked' if r['channel'] in picked else ''}")
+    if len(rows) > top:
+        prof = ' '.join(f"{r['band']}:{r['snr_db']:.0f}" for r in rows[::max(1, len(rows) // 30)])
+        lines.append(f'  profile (band:dB): {prof}')
+    return '\n'.join(lines)
+
+
 class InputScene:
     """The image being assessed, as a set of single-band channels.
 

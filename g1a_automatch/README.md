@@ -59,7 +59,37 @@ python automatch_job.py preflight job.json
 python automatch_job.py run job.json --set window_sizes=[1024,2048]
 python automatch_job.py weights job.json          # weight files that job needs
 python automatch_job.py compare <output> --truth manual_pts_rival.csv
+python automatch_job.py bands G1A_HV.tif --top 3  # band quality of a cube
 ```
+
+## Hyperspectral cubes: which band (auto_bands)
+
+The good bands of a G1A HS/HV cube change from image to image. In one, the
+first bands are poor and those around 50 are crisp. In another, everything
+above 40 is junk. `auto_bands: N` (GUI: *Auto bands*) matches only the N
+bands with the best signal-to-noise. No reference is needed. It applies to
+rasters when `channels` is `[]`; ticked channels win.
+
+How each band is scored:
+- **noise**: the pixel noise on six full-resolution 256 px blocks, measured
+  with a kernel that cancels flat areas, ramps and most edges (Immerkær).
+  Striping (column and row gains) is added to it.
+- **signal**: the spread of the band's own values (p98 − p2), with the noise
+  taken out.
+- **SNR dB** is 20·log10(signal / noise); 0 dB means as much noise as scene.
+- A band with no signal above its noise, or less than half of the best
+  band's data, is unusable (−99).
+- The picks are at least 1/30 of the band count apart (6 bands in a
+  180-band cube), so a top-3 is not three neighbours of one peak.
+
+The scores are written to `BAND_QUALITY.csv` in the output folder and the
+log. Preflight prints them too, so a server preflight shows the pick before
+a long run. With more than 20 bands, `channels` `[]` and `auto_bands` 0,
+preflight warns that every band will be matched.
+
+The score measures image quality, not the spectral match to the reference.
+Among bands of similar SNR, the one closest to the reference's band (e.g.
+Landsat red / NIR) may match better.
 
 ## Output → RIVAL
 

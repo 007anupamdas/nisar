@@ -686,6 +686,14 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.channels = QtWidgets.QListWidget()
         self.channels.setMaximumHeight(90)
         f.addRow('Channels (none checked = all)', self.channels)
+        self.auto_bands = QtWidgets.QSpinBox()
+        self.auto_bands.setRange(0, 50)
+        self.auto_bands.setSpecialValueText('off: every channel above')
+        self.auto_bands.setToolTip('With no channel checked, match only this many bands: those with the best '
+                                   'signal-to-noise (noise, striping and empty bands score low). For '
+                                   'hyperspectral cubes whose good bands change from image to image. '
+                                   'The scores are written to BAND_QUALITY.csv.')
+        f.addRow('Auto bands (best N by SNR)', self.auto_bands)
 
         self.ref_path = PathRow('dir')
         f.addRow('Reference folder (L8_ref / C1 / …)', self.ref_path)
@@ -954,6 +962,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.kp_density.setValue(int(j['keypoint_density']))
         self.max_feat.setValue(int(j.get('max_num_features') or 32000))
         self.gpu_win.setValue(int(j.get('gpu_window_px') or 0))
+        self.auto_bands.setValue(int(j.get('auto_bands') or 0))
         self._update_kp_label()
         self.target_res.setText('' if j['target_resolution'] is None else f"{j['target_resolution']:g}")
         self.max_err.setValue(float(j['max_expected_error_m']) / 1000.0)
@@ -1022,6 +1031,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             'keypoint_density': self.kp_density.value(),
             'max_num_features': self.max_feat.value(),
             'gpu_window_px': self.gpu_win.value(),
+            'auto_bands': self.auto_bands.value(),
             'target_resolution': float(tr) if tr else None,
             'max_expected_error_m': self.max_err.value() * 1000.0,
             'coarse_method': self.coarse.currentText(),
