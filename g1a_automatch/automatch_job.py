@@ -467,13 +467,8 @@ def preflight(job: Dict, check_weights: bool = True) -> Dict:
             errors.append('no reference footprints could be read')
         elif scene is not None:
             from shapely.geometry import Polygon
-            ch = (job['channels'] or scene.channels)[0]
             try:
-                if scene.kind == 'raster':
-                    path, band = scene.channel_raster(ch, '')
-                    foot, src = scene.footprint_lonlat(path, band)
-                else:
-                    foot, src = E.NISARH5Reader.footprint_lonlat(scene.info)
+                foot, src, _ = scene_footprint(job, scene, E, info.get('auto_bands'))
                 grow_deg = job['max_expected_error_m'] / 111000.0
                 grown = foot.buffer(grow_deg)
                 hits = [os.path.basename(p) for p, r in cat['footprints'].items()
@@ -795,6 +790,32 @@ def _compare_with_truth(job: Dict, out_root: str, working_crs: str, manifest: Li
           'top': json.loads(by.head(30).to_json(orient='records')) if not by.empty else []})
     files['best'] = res.get('best') or {}
     return files
+
+
+def scene_footprint(job: Dict, scene, E, picked: Optional[List[str]] = None):
+    """(lon/lat footprint, its source, channel used). For a raster the valid
+    data of a band, tried in order: the job's channels, the auto_bands
+    picks, then every other band, so a corrupt band 1 (no valid pixels)
+    is passed over."""
+    if scene.kind != 'raster':
+        foot, src = E.NISARH5Reader.footprint_lonlat(scene.info)
+        return foot, src, None
+    first = list(job['channels'] or picked or [])
+    tried = []
+    for ch in first + [c for c in scene.channels if c not in first]:
+        try:
+            path, band = scene.channel_raster(ch, '')
+            foot, src = scene.footprint_lonlat(path, band)
+            if foot is not None and not foot.is_empty and foot.area > 0:
+                if tried:
+                    print(f'[Job] footprint from {ch}: {", ".join(tried[:5])} had no usable data', flush=True)
+                return foot, src, ch
+            tried.append(f'{ch} (empty)')
+        except Exception as e:
+            tried.append(f'{ch} ({type(e).__name__})')
+        if len(tried) >= 20:
+            break
+    raise RuntimeError(f'no band gives a footprint: {", ".join(tried[:10])}')
 
 
 def resolve_auto_bands(job: Dict, scene, E, out_dir: str = '') -> Tuple[List[str], str]:

@@ -127,15 +127,35 @@ def input_footprint(job: Dict):
     """(lon/lat footprint of the image, its source, working CRS) -- as preflight
     and the run get it."""
     import automatch_engine as E
+    import automatch_job as J
     cfg = E.PipelineConfig(nisar_band=job['nisar_band'], nisar_frequency=job['nisar_frequency'])
     scene = E.InputScene(job['input_path'], cfg)
-    ch = (job['channels'] or scene.channels)[0]
-    if scene.kind == 'raster':
-        path, band = scene.channel_raster(ch, '')
-        foot, src = scene.footprint_lonlat(path, band)
-    else:
-        foot, src = E.NISARH5Reader.footprint_lonlat(scene.info)
+    foot, src, _ = J.scene_footprint(job, scene, E)
     return foot, src, scene.working_crs
+
+
+def bake_auto_bands(job: Dict, dest: str, dry_run: bool) -> Tuple[Dict, Optional[str]]:
+    """(job, note): with auto_bands and no channels, the bands are picked
+    here and written into the server's settings as channels, so the server
+    runs exactly the bands preflight showed (and the footprint comes from
+    them). BAND_QUALITY.csv goes into the pack."""
+    import automatch_engine as E
+    import automatch_job as J
+    if not int(job.get('auto_bands') or 0) or job['channels']:
+        return job, None
+    scene = E.InputScene(job['input_path'], E.PipelineConfig(nisar_band=job['nisar_band'],
+                                                             nisar_frequency=job['nisar_frequency']))
+    if scene.kind != 'raster':
+        return job, None
+    if not dry_run:
+        os.makedirs(dest, exist_ok=True)
+    picked, note = J.resolve_auto_bands(job, scene, E, '' if dry_run else dest)
+    if not picked:
+        return job, f'auto_bands: {note}'
+    n = job['auto_bands']
+    job = dict(job, channels=picked, auto_bands=0, auto_bands_range=[])
+    return job, (f'auto_bands {n}: the server runs {", ".join(picked)} (picked here by crispness; '
+                 f'scores in BAND_QUALITY.csv)')
 
 
 def select_references(job: Dict) -> Tuple[Dict, List[str], str]:
@@ -298,6 +318,11 @@ def pack(job: Dict, dest: str, server_dir: str, server_weights: str = '', server
                          f'got {server_dir!r}')
     dest = os.path.abspath(dest)
     plan: List[Tuple[str, str]] = []
+    notes = list(notes or [])
+    job, note = bake_auto_bands(job, dest, dry_run)
+    if note:
+        log(note)
+        notes.append(note)
     settings = dict(job)
 
     # input image (a NISAR scene folder is copied whole)

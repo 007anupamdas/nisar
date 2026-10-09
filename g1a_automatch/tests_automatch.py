@@ -735,6 +735,109 @@ def test_weights_and_failfast(tmp):
           ('from-pair-2', 1000.0, 2000.0, 2.0))
 
 
+def test_gui_queue():
+    """Queued runs on one workstation GPU: a run queued while another runs
+    waits, starts when that one finishes, keeps its own copy of the settings,
+    honours a start time, never shares an output folder, pauses on Stop and
+    comes back paused after a restart."""
+    try:
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+        import DPQED_automatch as G
+    except Exception as e:
+        print(f'SKIP  GUI queue ({type(e).__name__}: {e})')
+        return
+    import automatch_engine as E
+    app = G.QtWidgets.QApplication.instance() or G.QtWidgets.QApplication([])
+    ini = os.path.join(tempfile.mkdtemp(), 'queue_test.ini')
+    fmt = G.QtCore.QSettings.IniFormat if G.QT_API == 'PyQt5' else G.QtCore.QSettings.Format.IniFormat
+    w = G.AutoMatchWindow()
+    started, warned = [], []
+
+    class FakeProc:
+        def state(self):
+            return 'running'
+
+        def terminate(self):
+            pass
+
+        def kill(self):
+            pass
+
+    def fake_start(args, kind):
+        if kind != 'run':              # the detector list refreshed at start-up
+            return True
+        started.append((kind, args[-1]))
+        w.proc, w.proc_kind, w._events, w.proc_buffer = FakeProc(), kind, [], ''
+        return True
+    warn = G.QtWidgets.QMessageBox.warning
+    G.QtWidgets.QMessageBox.warning = staticmethod(lambda *a, **k: warned.append(a[-1]))
+    try:
+        w.settings = G.QtCore.QSettings(ini, fmt)
+        w._run_queue = []
+        w._start = fake_start
+        w._fill_detector_table(E.available_detectors())
+        base = tempfile.mkdtemp()
+        out = {k: os.path.join(base, k) for k in 'abc'}
+        w.out_path.setText(out['a'])
+        w.run_job()
+        check('gui queue: Run starts at once', started, [('run', os.path.join(out['a'], 'job_gui.json'))])
+        w.out_path.setText(out['b'])
+        w.windows.setText('512')
+        e = w.queue_run()
+        check('gui queue: a run queued while one runs waits', (len(started), len(w._run_queue)), (1, 1))
+        w.windows.setText('1024')
+        with open(e['path'], encoding='utf-8') as f:
+            check('gui queue: the queued run keeps its own copy of the settings', json.load(f)['window_sizes'], [512])
+        w.queue_run()
+        check('gui queue: a second run into the same folder is refused', (len(w._run_queue), len(warned)), (1, 1))
+        w.out_path.setText(out['a'])
+        w.queue_run()
+        check('gui queue: nor into the running run\'s folder', (len(w._run_queue), len(warned)), (1, 2))
+        w.out_path.setText(out['c'])
+        w.use_not_before.setChecked(True)
+        w.not_before.setDateTime(G.QtCore.QDateTime.currentDateTime().addSecs(3 * 3600))
+        w.queue_run()
+        w.use_not_before.setChecked(False)
+        check('gui queue: listed in order, with the start time', (w.queue_list.count(),
+              'not before' in w.queue_list.item(1).text()), (2, True))
+        w._finished(0)
+        app.processEvents()
+        check('gui queue: the next run starts when the running one finishes',
+              (started[-1], len(w._run_queue)), (('run', e['path']), 1))
+        w._finished(0)
+        app.processEvents()
+        check('gui queue: a run with a later start time waits, even with the GPU free',
+              (len(started), len(w._run_queue), w.proc is None), (2, 1, True))
+        w._run_queue[0]['not_before'] = '2000-01-01 00:00'
+        w._maybe_start_queued()
+        check('gui queue: it starts once due', (len(started), w._run_queue), (3, []))
+        w.out_path.setText(out['b'])
+        w.queue_run()
+        w.stop()
+        check('gui queue: Stop pauses the queue', w.queue_on.isChecked(), False)
+        w._finished(0)
+        app.processEvents()
+        check('gui queue: nothing starts while paused', (len(started), len(w._run_queue)), (3, 1))
+        w2 = G.AutoMatchWindow.__new__(G.AutoMatchWindow)
+        G.QtWidgets.QMainWindow.__init__(w2)
+        w2.settings = G.QtCore.QSettings(ini, fmt)
+        w2.queue_list = G.QtWidgets.QListWidget()
+        w2.queue_on = G.QtWidgets.QCheckBox()
+        w2.queue_on.setChecked(True)
+        w2.lbl_status = G.QtWidgets.QLabel()
+        w2._restore_queue()
+        check('gui queue: queued runs come back after a restart, paused',
+              (len(w2._run_queue), w2.queue_on.isChecked()), (1, False))
+        w.queue_list.setCurrentRow(0)
+        w._queue_remove()
+        check('gui queue: Remove empties the queue (and what is saved)',
+              (w._run_queue, json.loads(G.QtCore.QSettings(ini, fmt).value('run_queue'))), ([], []))
+    finally:
+        G.QtWidgets.QMessageBox.warning = warn
+        w.proc = None
+        w.close()
+
+
 def test_gui_dialog():
     """Configure… dialog, headless: values stored, summary, job round trip."""
     try:
@@ -1677,6 +1780,7 @@ def test_auto_bands(tmp):
         cube[b] = 500 + np.exp(-0.5 * ((b - 19) / 6.0) ** 2) * base + rng.normal(scale=8, size=(H, W))
     cube[29] += rng.normal(scale=60, size=W)[None, :]
     cube[34] = 0
+    cube[0] = 0            # a corrupt band 1: no valid pixel (the HV cube pack crashed on it)
     # band 3: the G1A HV case -- soft and hazy (broad shading, no fine
     # detail) but almost noise-free, so signal-to-noise alone ranked it first
     soft = cv2.GaussianBlur(base.astype(np.float32), (0, 0), 5)
@@ -1731,6 +1835,27 @@ def test_auto_bands(tmp):
     with contextlib.redirect_stdout(io.StringIO()) as buf:
         rc = J.main(['bands', path, '--top', '2'])
     check('bands: CLI prints the ranking', (rc, 'picked:' in buf.getvalue()), (0, True))
+
+    # pack: the picked band is baked into the server settings, and the
+    # footprint passes over the corrupt band 1
+    import automatch_pack as P
+    with contextlib.redirect_stdout(io.StringIO()):
+        foot, src, ch = J.scene_footprint(job, scene, E)
+    check('bands: the footprint passes over a band with no valid pixel', (ch != 'band1', foot.area > 0), (True, True))
+    with contextlib.redirect_stdout(io.StringIO()):
+        foot, src, ch = J.scene_footprint(job, scene, E, ['band20'])
+    check('bands: the footprint comes from the picked band', ch, 'band20')
+    pdest = os.path.join(tmp, 'bands_pack')
+    with contextlib.redirect_stdout(io.StringIO()):
+        baked, note = P.bake_auto_bands(job, pdest, dry_run=False)
+    ss = P.server_settings(baked)
+    check('bands pack: the server gets the picked band as channels, auto_bands off',
+          (len(ss.get('channels') or []) == 1 and 19 <= int(ss['channels'][0][4:]) <= 21, 'auto_bands' in ss),
+          (True, False))
+    check('bands pack: the note names the band; BAND_QUALITY.csv is in the pack',
+          (ss['channels'][0] in (note or ''), os.path.exists(os.path.join(pdest, 'BAND_QUALITY.csv'))), (True, True))
+    same, note = P.bake_auto_bands(dict(job, channels=['band7']), pdest, dry_run=True)
+    check('bands pack: ticked channels are packed as they are', (same['channels'], note), (['band7'], None))
 
 
 def test_partial_cover():
@@ -2187,6 +2312,7 @@ def main():
         test_kornia_catalogue()
         if a.gui:
             test_gui_dialog()
+            test_gui_queue()
         if a.e2e:
             test_e2e(tmp)
             test_e2e_variants(tmp)

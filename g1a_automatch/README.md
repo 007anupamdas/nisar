@@ -53,6 +53,18 @@ pip install -e /path/to/image-matching-webui
 4. **Preflight** (checks paths, bands, reference coverage, detectors, weight
    files, GPU), then **Run**. Results appear in the table; double-click a row
    to open its folder.
+5. **Queue run** adds the job as it stands to a queue (*Output & run* tab)
+   instead: runs go one after another on the GPU, the next starting when
+   the running one finishes.
+   - Each queued run keeps a copy of its settings
+     (`job_queued_<time>.json` in its output folder), so the window can be
+     changed for the next job meanwhile.
+   - *Start no earlier than* holds a run until a set time (e.g. overnight).
+   - Two runs never share an output folder.
+   - **Stop** pauses the queue; tick *Run the queue* to go on. *Up* and
+     *Remove* reorder it.
+   - Runs still queued when the window closes come back, paused, the next
+     time it opens.
 
 **Command line (same job file):**
 ```bash
@@ -100,7 +112,11 @@ In G1A HS/HV cubes the good bands are usually within the first 60–70 of 180,
 and a third of the bands is scored in a third of the time.
 
 The scores are written to `BAND_QUALITY.csv` in the output folder and the
-log. Preflight prints them too, so a server preflight shows the pick before
+log. **Pack for server** picks the bands on the workstation and writes them
+into the server's settings as `channels`. The server then runs exactly the
+bands preflight showed, and `BAND_QUALITY.csv` goes into the pack. The image
+footprint comes from the picked band; a band with no valid pixels (a corrupt
+band 1) is passed over. Preflight prints them too, so a server preflight shows the pick before
 a long run. With more than 20 bands, `channels` `[]` and `auto_bands` 0,
 preflight warns that every band will be matched.
 

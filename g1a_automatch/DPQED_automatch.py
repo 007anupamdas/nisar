@@ -25,6 +25,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 
 try:
     from PyQt5 import QtCore, QtGui, QtWidgets
@@ -761,6 +762,8 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.proc_kind = None
         self.proc_buffer = ''
         self._queue = []              # quick commands waiting for the process
+        self._run_queue = []          # queued runs: {'path','output','name','not_before'}
+        self._running_output = ''
         self._pack_lines, self._pack_dry, self._pack_dest = [], False, ''
         self.detector_info = []       # [{'name','source','matchers','params'}]
         self.detector_specs = {}      # name -> [param spec dicts]
@@ -788,6 +791,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         btns = QtWidgets.QHBoxLayout()
         for label, slot in (('Load job…', self.load_job_dialog), ('Save job…', self.save_job_dialog),
                             ('Preflight', self.preflight), ('Run', self.run_job),
+                            ('Queue run', self.queue_run),
                             ('Stop', self.stop), ('Open output', self.open_output),
                             ('Pack for server…', self.pack_dialog)):
             b = QtWidgets.QPushButton(label)
@@ -830,6 +834,11 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
                 self.set_job({**DEFAULT_JOB, **json.loads(last)})
             except Exception:
                 pass
+        self._restore_queue()
+        self._queue_timer = QtCore.QTimer(self)
+        self._queue_timer.setInterval(30000)
+        self._queue_timer.timeout.connect(self._maybe_start_queued)
+        self._queue_timer.start()
         QtCore.QTimer.singleShot(0, self.refresh_detectors)
 
     # ── tabs ─────────────────────────────────────────────────────────────────
@@ -1105,6 +1114,29 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.debug = QtWidgets.QCheckBox('debug logging')
         for cb in (self.amp, self.resume, self.save_imgs, self.debug):
             f.addRow(cb)
+
+        # queued runs (one GPU, jobs one after another)
+        self.queue_list = QtWidgets.QListWidget()
+        self.queue_list.setMaximumHeight(120)
+        f.addRow('Queued runs', self.queue_list)
+        row = QtWidgets.QHBoxLayout()
+        self.queue_on = QtWidgets.QCheckBox('Run the queue')
+        self.queue_on.setChecked(True)
+        self.queue_on.setToolTip('Start the next queued run when nothing is running. Stop pauses the queue.')
+        self.queue_on.toggled.connect(lambda on: on and self._maybe_start_queued())
+        row.addWidget(self.queue_on)
+        self.use_not_before = QtWidgets.QCheckBox('Queue run: start no earlier than')
+        row.addWidget(self.use_not_before)
+        self.not_before = QtWidgets.QDateTimeEdit(QtCore.QDateTime.currentDateTime())
+        self.not_before.setCalendarPopup(True)
+        self.not_before.setDisplayFormat('yyyy-MM-dd HH:mm')
+        row.addWidget(self.not_before)
+        row.addStretch(1)
+        for label, slot in (('Up', self._queue_up), ('Remove', self._queue_remove)):
+            b = QtWidgets.QPushButton(label)
+            b.clicked.connect(slot)
+            row.addWidget(b)
+        f.addRow(row)
 
     # ── job <-> widgets ──────────────────────────────────────────────────────
     def set_job(self, job):
@@ -1477,8 +1509,11 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             self.log.appendPlainText(self.proc_buffer)
         kind, events = self.proc_kind, list(self._events)
         self.proc = None
+        if kind == 'run':
+            self._running_output = ''
         if self._queue:
             QtCore.QTimer.singleShot(0, lambda: self._start(*self._queue.pop(0)))
+        QtCore.QTimer.singleShot(0, self._maybe_start_queued)
         self.btn_run.setEnabled(True)
         self.btn_preflight.setEnabled(True)
         self.btn_stop.setEnabled(False)
@@ -1784,15 +1819,122 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         path = self._write_job()
         if not path:
             return
+        out = self.out_path.text()
+        if self._output_taken(out):
+            QtWidgets.QMessageBox.warning(self, 'Run', f'{out} is already the output of a queued or running '
+                                                       f'run; choose another output folder.')
+            return
+        self._launch_run(path, out)
+
+    def _launch_run(self, path, out):
+        if not self._start(['run', path], 'run'):
+            return False
+        self._running_output = out
         self.results.setRowCount(0)
         self.bar_sweep.setValue(0)
         self.bar_step.setValue(0)
         self.log.appendPlainText(f'--- run {path}')
-        self._start(['run', path], 'run')
+        return True
+
+    # ── queued runs ──────────────────────────────────────────────────────────
+    @staticmethod
+    def _same_dir(a, b):
+        return bool(a and b) and os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+    def _output_taken(self, out):
+        running = self._running_output if (self.proc is not None and self.proc_kind == 'run') else ''
+        return any(self._same_dir(out, o) for o in [running] + [e['output'] for e in self._run_queue])
+
+    def queue_run(self):
+        """Queue the job as it stands now (a copy of its settings), to run
+        after the runs before it -- at once when nothing is running, or not
+        before the time set beside the queue."""
+        path = self._write_job()
+        if not path:
+            return None
+        with open(path, encoding='utf-8') as f:
+            job = json.load(f)
+        out = job['output_dir']
+        if self._output_taken(out):
+            QtWidgets.QMessageBox.warning(self, 'Queue run', f'{out} is already the output of a queued or running '
+                                                             f'run; two runs in one folder would mix their results.')
+            return None
+        snap = os.path.join(out, f'job_queued_{time.strftime("%Y%m%d_%H%M%S")}.json')
+        with open(snap, 'w', encoding='utf-8') as f:
+            json.dump(job, f, indent=2)
+        nb = self.not_before.dateTime().toString('yyyy-MM-dd HH:mm') if self.use_not_before.isChecked() else ''
+        entry = {'path': snap, 'output': out, 'name': os.path.basename(str(job['input_path']).rstrip('/\\')),
+                 'not_before': nb}
+        self._run_queue.append(entry)
+        self._queue_changed()
+        self.lbl_status.setText(f'Queued: {entry["name"]} -> {out}' + (f' (not before {nb})' if nb else ''))
+        self._maybe_start_queued()
+        return entry
+
+    @staticmethod
+    def _due(entry, now=None):
+        nb = entry.get('not_before') or ''
+        return not nb or (now or time.strftime('%Y-%m-%d %H:%M')) >= nb
+
+    def _maybe_start_queued(self):
+        if not self._run_queue or not self.queue_on.isChecked():
+            return
+        if self.proc is not None and self.proc.state() != PROC_NOT_RUNNING:
+            return
+        entry = next((e for e in self._run_queue if self._due(e)), None)
+        if entry is None:
+            return
+        if not os.path.exists(entry['path']):
+            self.log.appendPlainText(f'--- queued job file gone, skipped: {entry["path"]}')
+            self._run_queue.remove(entry)
+            self._queue_changed()
+            return self._maybe_start_queued()
+        self._run_queue.remove(entry)
+        self._queue_changed()
+        self.log.appendPlainText(f'--- queued run {len(self._run_queue)} left after this one')
+        self._launch_run(entry['path'], entry['output'])
+
+    def _queue_changed(self):
+        self.queue_list.clear()
+        for i, e in enumerate(self._run_queue, 1):
+            self.queue_list.addItem(f'{i}. {e["name"]} -> {e["output"]}'
+                                    + (f'   (not before {e["not_before"]})' if e.get('not_before') else ''))
+        self.settings.setValue('run_queue', json.dumps(self._run_queue))
+
+    def _restore_queue(self):
+        """Runs still queued when the window was closed come back paused."""
+        try:
+            saved = json.loads(self.settings.value('run_queue') or '[]')
+        except (TypeError, ValueError):
+            saved = []
+        self._run_queue = [e for e in saved if isinstance(e, dict) and os.path.exists(e.get('path', ''))]
+        self._queue_changed()
+        if self._run_queue:
+            self.queue_on.setChecked(False)
+            self.lbl_status.setText(f'{len(self._run_queue)} queued run(s) from last time, paused: '
+                                    f'tick "Run the queue" (Output & run) to start them.')
+
+    def _queue_up(self):
+        i = self.queue_list.currentRow()
+        if i > 0:
+            q = self._run_queue
+            q[i - 1], q[i] = q[i], q[i - 1]
+            self._queue_changed()
+            self.queue_list.setCurrentRow(i - 1)
+
+    def _queue_remove(self):
+        i = self.queue_list.currentRow()
+        if 0 <= i < len(self._run_queue):
+            del self._run_queue[i]
+            self._queue_changed()
 
     def stop(self):
         if self.proc is None:
             return
+        if self.proc_kind == 'run' and self._run_queue and self.queue_on.isChecked():
+            self.queue_on.setChecked(False)
+            self.log.appendPlainText(f'--- queue paused ({len(self._run_queue)} waiting): tick "Run the queue" '
+                                     f'to go on')
         self.lbl_status.setText('Stopping …')
         self.proc.terminate()
         QtCore.QTimer.singleShot(5000, lambda: self.proc and self.proc.kill())
@@ -1823,7 +1965,9 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, ev):
         if self.proc is not None:
-            answer = QtWidgets.QMessageBox.question(self, 'Quit', 'A job is running. Stop it and quit?')
+            answer = QtWidgets.QMessageBox.question(
+                self, 'Quit', 'A job is running. Stop it and quit?'
+                + (f' The {len(self._run_queue)} queued run(s) are kept and come back paused.' if self._run_queue else ''))
             if answer != MSG_YES:
                 ev.ignore()
                 return
