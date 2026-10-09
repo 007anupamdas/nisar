@@ -1991,6 +1991,66 @@ assert _ref_centre() == (500000.0, 2000000.0), _ref_centre()
 R.PREDICT_REF_MARK = True
 print("with nothing measured, or PREDICT_REF_MARK off, it is the exact mirror")
 
+# ── 25. a click predicts onto a tile outside the input's footprint ──────────
+# Reported from use: even clicks did not land at the averaged error. Two
+# reasons, both at large offsets: the dropdown only holds tiles overlapping
+# the INPUT footprint, so a point 70 km away usually had no tile in it; and
+# with no tile the click returned without moving the reference at all.
+class _Box:
+    """Axis-aligned footprint geometry: enough for contains/area."""
+    def __init__(self, b): self.b = b
+    def contains(self, g):
+        x, y = g.pt.x(), g.pt.y()
+        return self.b[0] <= x <= self.b[2] and self.b[1] <= y <= self.b[3]
+    def area(self): return (self.b[2] - self.b[0]) * (self.b[3] - self.b[1])
+class _Pt:
+    def __init__(self, pt): self.pt = pt
+saved = (R.QgsGeometry, R.ring_wkt)
+R.QgsGeometry = type("G", (), {"fromWkt": staticmethod(lambda w: _Box(w)),
+                               "fromPointXY": staticmethod(lambda p: _Pt(p))})
+R.ring_wkt = lambda ring: ring
+for name in ("follow_input_point", "show_reference_for", "reference_for_point",
+             "_tiles_containing", "predicted_reference_point",
+             "_predicted_offset_now", "_measured_errors"):
+    setattr(win, name, getattr(R.QCDashboard, name).__get__(win))
+win._syncing = False
+win._band_choice = lambda: None
+win._has_data_at = lambda path, pt: True
+win._label_for = lambda p: os.path.basename(p)
+win.current_ref_layer = None
+win.cleanup_reference_layer = MagicMock()
+win._load_ref_layer = MagicMock()
+win.show_ref_at = MagicMock()
+win.dropdown_ref = MagicMock()
+near_tile, far_tile = "/refs/over_scene.tif", "/refs/70km_west.tif"
+win.ref_footprints = {
+    near_tile: {"ring_proj": (450000.0, 1950000.0, 550000.0, 2050000.0)},
+    far_tile:  {"ring_proj": (360000.0, 1950000.0, 449000.0, 2050000.0)},
+}
+win.ref_tif_list = [near_tile]          # the filter kept only the overlapping one
+# one finished row 70 km out; row 1 being marked at (500000, 2000000)
+win.table = _SelTable([["470000.000", "1500000.000", "400000.000", "1501500.000"],
+                       ["500000.000", "2000000.000", "0.000", "0.000"]], current=1)
+win.follow_input_point(_PointXY(500000.0, 2000000.0))
+loaded = win._load_ref_layer.call_args[0][0]
+assert loaded == far_tile, f"loaded {loaded}, not the tile 70 km away"
+assert far_tile in win.ref_tif_list, "the tile was not added to the dropdown"
+shown = win.show_ref_at.call_args[0][0]
+assert (shown.x(), shown.y()) == (430000.0, 2001500.0), shown
+print("\na click with a 70 km error loads the tile outside the input's "
+      "footprint that covers the predicted point, and marks it there")
+
+# no tile anywhere: the reference still goes to the prediction, not nowhere
+win.ref_footprints = {near_tile: win.ref_footprints[near_tile]}
+win.ref_tif_list = [near_tile]
+win.show_ref_at.reset_mock()
+win.follow_input_point(_PointXY(500000.0, 2000000.0))
+shown = win.show_ref_at.call_args[0][0]
+assert (shown.x(), shown.y()) == (430000.0, 2001500.0), shown
+print("with no tile there at all, the reference still moves to the "
+      "predicted point and marks it, instead of silently staying put")
+R.QgsGeometry, R.ring_wkt = saved
+
 for d in (d1, d2, d3, d4, d5, d6):
     shutil.rmtree(d, ignore_errors=True)
 print("\nstubbed integration OK")

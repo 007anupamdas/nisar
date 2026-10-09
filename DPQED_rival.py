@@ -2865,17 +2865,22 @@ class QCDashboard(QMainWindow):
         under the point is data wins.
         """
         target = QgsGeometry.fromPointXY(pt)
-        inside = []
-        for tif_path in self.ref_tif_list:
-            rec = self.ref_footprints.get(tif_path)
-            if not rec or not rec.get("ring_proj"):
-                continue
-            wkt = ring_wkt(rec["ring_proj"])
-            if not wkt:
-                continue
-            geom = QgsGeometry.fromWkt(wkt)
-            if geom.contains(target):
-                inside.append((geom.area(), tif_path))
+        inside = self._tiles_containing(target, self.ref_tif_list)
+        if not inside:
+            # The dropdown holds tiles overlapping the INPUT's footprint. With a
+            # large error the feature sits on the reference well away from
+            # where the input puts it -- 70 km in the case reported -- and the
+            # tile that has it can lie wholly outside that footprint. Look
+            # through the rest of the folder before giving up.
+            band = self._band_choice()
+            listed = set(self.ref_tif_list)
+            rest = [t for t, rec in self.ref_footprints.items()
+                    if t not in listed
+                    and (band is None or rec.get("band") == band)]
+            inside = self._tiles_containing(target, rest)
+            if inside:
+                print(f"[FOLLOW] {len(inside)} tile(s) outside the input's "
+                      f"footprint cover this point; offering them")
         if not inside:
             return None
         inside.sort()
@@ -2894,6 +2899,21 @@ class QCDashboard(QMainWindow):
                   f"are fill there; showing the smallest")
         return inside[0][1]
 
+    def _tiles_containing(self, target, tif_paths):
+        """(area, path) of every tile among tif_paths whose footprint contains target."""
+        inside = []
+        for tif_path in tif_paths:
+            rec = self.ref_footprints.get(tif_path)
+            if not rec or not rec.get("ring_proj"):
+                continue
+            wkt = ring_wkt(rec["ring_proj"])
+            if not wkt:
+                continue
+            geom = QgsGeometry.fromWkt(wkt)
+            if geom.contains(target):
+                inside.append((geom.area(), tif_path))
+        return inside
+
     def show_reference_for(self, pt):
         """Bring up the reference tile covering a point. True if one is showing."""
         best = self.reference_for_point(pt)
@@ -2908,6 +2928,14 @@ class QCDashboard(QMainWindow):
             return True          # already showing; do not reload on every drag
         try:
             self.dropdown_ref.blockSignals(True)
+            if best not in self.ref_tif_list:
+                # found outside the input's footprint: add it, rather than
+                # failing on .index() and showing nothing. An empty list means
+                # the dropdown holds only a "none overlap" label -- drop it.
+                if not self.ref_tif_list:
+                    self.dropdown_ref.clear()
+                self.ref_tif_list.append(best)
+                self.dropdown_ref.addItem(self._label_for(best))
             self.dropdown_ref.setCurrentIndex(self.ref_tif_list.index(best))
         finally:
             self.dropdown_ref.blockSignals(False)
@@ -2937,7 +2965,11 @@ class QCDashboard(QMainWindow):
                 return
             guess, off, n = self.predicted_reference_point(pt)
             if not self.show_reference_for(guess):
-                return
+                # No tile there at all. Still go to the predicted spot and mark
+                # it: returning silently left the reference where it was, which
+                # looked exactly like the error not being applied.
+                print(f"[FOLLOW] no reference tile covers the predicted point "
+                      f"({guess.x():.1f}, {guess.y():.1f})")
             self.show_ref_at(guess, MARKER_COLOR_INPUT)
             if off is not None:
                 print(f"[PREDICT] reference mark put {-off[0]:+.3f} E "
