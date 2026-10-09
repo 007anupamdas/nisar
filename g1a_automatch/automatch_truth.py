@@ -488,7 +488,37 @@ def format_ranking(by: pd.DataFrame, n_truth: int, radius_m: float, chips: str, 
                      f"{f(r.truth_mean_dE_m)} {f(r.truth_mean_dN_m)} {f(r.truth_max_m)} "
                      f"{r.truth_reached:>4}/{r.truth_total:<3} "
                      f"{f(getattr(r, 'sec_per_window', None))}")
+    lines += coverage_warnings(by)
     return '\n'.join(lines)
+
+
+def coverage_warnings(by: pd.DataFrame, min_points: int = 2, factor: float = 3.0,
+                      floor_m: float = 1000.0) -> List[str]:
+    """A warning per channel whose first-ranked configuration is more than
+    floor_m off while one reaching fewer points (at least min_points) is
+    factor times closer: the matches then cover only part of the scene, and
+    the configurations reaching half of the points do it through wrong chips
+    (job 343: 1.1 km at 5 of 9 points, against 179-480 m at 2-4 of 9)."""
+    out = []
+    if by.empty or 'channel' not in by.columns:
+        return out
+    for ch, g in by.groupby('channel', sort=False):
+        top = g.iloc[0]
+        if pd.isna(top['truth_rmse_m']) or top['truth_rmse_m'] <= floor_m:
+            continue
+        few = g[(g['truth_reached'] >= min_points) & g['truth_rmse_m'].notna()]
+        if few.empty:
+            continue
+        alt = few.loc[few['truth_rmse_m'].idxmin()]
+        if alt['truth_rmse_m'] * factor > top['truth_rmse_m']:
+            continue
+        out.append(f"[Truth] WARNING {ch}: rank 1 ({top['detector']} + {top['matcher_family']}) is "
+                   f"{top['truth_rmse_m']:.0f} m at {top['truth_reached']}/{top['truth_total']} points, "
+                   f"while {alt['detector']} + {alt['matcher_family']} is {alt['truth_rmse_m']:.0f} m at "
+                   f"{alt['truth_reached']}/{alt['truth_total']}. The matches cover only part of the scene "
+                   f"(clouds, water or a narrow overlap); no configuration is reliable across it, and "
+                   f"RIVAL_BEST follows rank 1.")
+    return out
 
 
 def main(argv: Optional[List[str]] = None) -> int:

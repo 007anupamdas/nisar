@@ -1602,6 +1602,35 @@ def test_jobs_318_323(tmp):
 
 
 
+def test_partial_cover():
+    """Jobs 336 and 343: a warning when the first-ranked configuration is km
+    off while one reaching fewer points is close (343, matches on part of the
+    scene only); none when rank 1 is close (336)."""
+    import pandas as pd
+    import automatch_truth as T
+
+    def table(rows):
+        cols = ['channel', 'detector', 'matcher_family', 'truth_rmse_m', 'truth_reached', 'truth_total']
+        return T.rank(pd.DataFrame([dict(zip(cols, r)) for r in rows]))
+    t343 = table([('band3', 'imw-minima-loftr', 'internal', 1112.0, 5, 9),
+                  ('band3', 'disk_epipolar', 'nn', 4864.0, 9, 9),
+                  ('band3', 'imw-topicfm', 'internal', 179.0, 2, 9),
+                  ('band3', 'dog_sosnet', 'mnn', 174.0, 1, 9)])
+    w = T.coverage_warnings(t343)
+    check('truth: job 343 shape warns once', len(w), 1)
+    check('truth: the warning names the close configuration reaching 2+ points',
+          'imw-topicfm' in w[0] and '179 m at 2/9' in w[0])
+    check('truth: the warning is in the printed ranking',
+          'WARNING band3' in T.format_ranking(t343.assign(best_matcher_setting='x', ransac='r',
+                                                          truth_mean_dE_m=0.0, truth_mean_dN_m=0.0,
+                                                          truth_max_m=0.0), 9, 5000.0, 'consensus'))
+    t336 = table([('band1', 'imw-xoftr', 'internal', 385.0, 6, 6),
+                  ('band1', 'imw-d2net', 'internal', 166.0, 2, 6)])
+    check('truth: job 336 shape (rank 1 within 1 km) does not warn', T.coverage_warnings(t336), [])
+    check('truth: one close point alone does not warn',
+          T.coverage_warnings(table([('b', 'a', 'x', 3000.0, 5, 9), ('b', 'c', 'y', 100.0, 1, 9)])), [])
+
+
 def test_coarse_outliers():
     """Wrong coarse offsets from a matcher on a handful of matches (job 325,
     XoFTR) are replaced; offsets that vary across a distorted scene (run
@@ -2019,6 +2048,7 @@ def main():
         test_jobs_312_317(tmp)
         test_jobs_318_323(tmp)
         test_coarse_outliers()
+        test_partial_cover()
         test_kornia_versions(tmp)
         test_warmup_and_padding()
         test_sliced_matching()

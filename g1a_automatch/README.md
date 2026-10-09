@@ -268,6 +268,10 @@ picked -- is scored against it:
   them the lowest RMSE of (tool − truth), then the most points reached. (The
   number reached used to come before the RMSE, and on job 315 a GFTT + NN
   set 63 km off at all 8 points ranked above sets within 250 m at 6 of 8.)
+  A warning follows the ranking when rank 1 is more than 1 km off while a
+  configuration reaching fewer points (at least 2) is three times closer:
+  the matches then cover only part of the scene (job 343: 1.1 km at 5 of 9
+  points against 179 m at 2 of 9), and no configuration is reliable across it;
   `TRUTH_RANKING.csv` has every configuration, `TRUTH_POINTS.csv` every
   configuration × truth point; `PERFORMANCE.csv` follows the same order;
 - the GUI shows the ranking when the run ends and adds `truth_rmse_m` to each
