@@ -1939,6 +1939,58 @@ assert store["ref_folder"] == "/new/refs"
 print("a newly chosen folder becomes the remembered one")
 shutil.rmtree(ref_dir, ignore_errors=True)
 
+# ── 24. Sync Maps carries the measured offset, so a 70 km error is followed ──
+# Reported from use: with errors near 70 km the reference did not follow the
+# points already marked. A click predicted correctly, but every pan of the
+# input re-centred the reference on the raw input centre -- 70 km off the
+# feature, and on another tile -- before the next point was ever clicked.
+for name in ("sync_canvas_extents", "_sync_reference_tile",
+             "_ref_centre_for_input_view", "predicted_reference_point",
+             "_predicted_offset_now", "_measured_errors", "_ref_view_rect"):
+    setattr(win, name, getattr(R.QCDashboard, name).__get__(win))
+win._syncing = False
+win._sync_tile_timer = MagicMock()
+win.cb_sync.isChecked = MagicMock(return_value=True)
+win.canvas_left.center = MagicMock(return_value=_PointXY(500000.0, 2000000.0))
+win.canvas_left.extent = MagicMock(
+    return_value=_Rect(495000.0, 1997500.0, 505000.0, 2002500.0))
+win.canvas_right.size.return_value = MagicMock(width=lambda: 800,
+                                               height=lambda: 400)
+win._to_ref_canvas = lambda pt: pt
+win._ref_canvas_crs = lambda: win.proj_crs
+win.show_reference_for = MagicMock(return_value=True)
+
+def _ref_centre():
+    r = win.canvas_right.setExtent.call_args[0][0]
+    return ((r.xMinimum() + r.xMaximum()) / 2.0, (r.yMinimum() + r.yMaximum()) / 2.0)
+
+# one finished row: dx = +70 000, dy = -1 500 (In - Ref); row 1 is being worked
+win.table = _SelTable([["470000.000", "1500000.000", "400000.000", "1501500.000"],
+                       ["0.000", "0.000", "0.000", "0.000"]], current=1)
+win.canvas_right.setExtent.reset_mock()
+win.sync_canvas_extents()
+assert _ref_centre() == (430000.0, 2001500.0), _ref_centre()
+win.canvas_right.setExtent.reset_mock()
+win._sync_reference_tile()
+looked = win.show_reference_for.call_args[0][0]
+assert (looked.x(), looked.y()) == (430000.0, 2001500.0), looked
+assert _ref_centre() == (430000.0, 2001500.0), _ref_centre()
+print("\na pan with a 70 km offset puts the reference, and its tile, 70 km "
+      "west of the input centre -- where the feature is")
+
+# nothing measured: same coordinates, as before
+win.table = _SelTable([["0.000"] * 4], current=0)
+win.sync_canvas_extents()
+assert _ref_centre() == (500000.0, 2000000.0), _ref_centre()
+# and switched off: same coordinates whatever has been measured
+R.PREDICT_REF_MARK = False
+win.table = _SelTable([["470000.000", "1500000.000", "400000.000", "1501500.000"]],
+                      current=-1)
+win.sync_canvas_extents()
+assert _ref_centre() == (500000.0, 2000000.0), _ref_centre()
+R.PREDICT_REF_MARK = True
+print("with nothing measured, or PREDICT_REF_MARK off, it is the exact mirror")
+
 for d in (d1, d2, d3, d4, d5, d6):
     shutil.rmtree(d, ignore_errors=True)
 print("\nstubbed integration OK")

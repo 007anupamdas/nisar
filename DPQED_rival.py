@@ -332,6 +332,8 @@ CANVAS_FOCUS_ON_HOVER = True
 # actually clicked: a predicted position written as a measurement would feed
 # back into the statistics it came from, and every error after the first would
 # read as exactly the mean, driving RMSE and CE90 towards zero.
+# It also governs 'Sync Maps': panning the input shows the reference where the
+# feature should be, not at the same coordinates. Off, both are exact mirrors.
 PREDICT_REF_MARK = True
 PREDICT_FROM     = "mean"      # "mean" | "median" | "last"
 
@@ -1453,6 +1455,7 @@ class QCDashboard(QMainWindow):
         self.input_tif_layer   = None
         self.current_ref_layer = None
         self._syncing          = False
+        self._last_sync_offset = None
         # Panning moves the reference centre at once and swaps the tile under it
         # once the view settles; see _sync_reference_tile.
         self._sync_tile_timer = QTimer(self)
@@ -3129,7 +3132,7 @@ class QCDashboard(QMainWindow):
         self._syncing = True
         try:
             self.canvas_right.setExtent(
-                self._ref_view_rect(self.canvas_left.center()))
+                self._ref_view_rect(self._ref_centre_for_input_view()))
             self.canvas_right.refresh()
         except Exception as e:
             print(f"[SYNC EXTENTS] {e}")
@@ -3139,6 +3142,24 @@ class QCDashboard(QMainWindow):
             self._sync_tile_timer.start(SYNC_TILE_DEBOUNCE_MS)
         except Exception:
             self._sync_reference_tile()
+
+    def _ref_centre_for_input_view(self, log=False):
+        """Where the reference should be centred for the input's current view.
+
+        The input centre, corrected by the error measured so far -- the same
+        prediction a click uses, so panning and clicking cannot disagree.
+        Following the raw centre instead put the reference off the feature by
+        the whole offset on every pan: invisible at a few metres, 70 km away
+        and on another tile at the offsets seen in use.
+        """
+        centre = self.canvas_left.center()
+        guess, off, n = self.predicted_reference_point(centre)
+        if log:
+            if off is not None and off != getattr(self, "_last_sync_offset", None):
+                print(f"[SYNC] reference follows the input {-off[0]:+.1f} E "
+                      f"{-off[1]:+.1f} N ({PREDICT_FROM} of {n} error(s))")
+            self._last_sync_offset = off
+        return guess
 
     def _sync_reference_tile(self):
         """Bring up the reference tile under the input canvas's centre.
@@ -3154,7 +3175,7 @@ class QCDashboard(QMainWindow):
             return
         self._syncing = True
         try:
-            centre = self.canvas_left.center()
+            centre = self._ref_centre_for_input_view(log=True)
             if self.show_reference_for(centre):
                 self.canvas_right.setExtent(self._ref_view_rect(centre))
                 self.canvas_right.refresh()
