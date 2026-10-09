@@ -80,7 +80,7 @@ DEFAULT_JOB: Dict = {
     'input_path': '',            # G1A raster (GeoTIFF/VRT/JP2...) or NISAR .h5 / scene dir
     'channels': [],              # [] = all; raster: "band1".., NISAR: "HH"..
     'auto_bands': 0,             # rasters with channels []: match only the N bands with the best
-                                 # signal-to-noise (hyperspectral cubes); 0 = off
+                                 # crispness: fine detail above noise (hyperspectral); 0 = off
     'auto_bands_range': [],      # [first, last] band searched by auto_bands, e.g. [1, 70]; [] = all
     'reference_dir': '',         # L8_ref / C1 / any RIVAL-readable collection
     'reference_label': '',       # tag in file names; default from folder name
@@ -165,7 +165,7 @@ DEFAULT_JOB: Dict = {
 JOB_HELP = {
     'input_path': 'Image to assess: G1A raster (any rasterio format) or NISAR .h5 / scene folder',
     'channels': 'Channels to process ([] = all): band1.. for rasters, HH/HV.. for NISAR',
-    'auto_bands': 'Pick the N bands with the best signal-to-noise when channels is [] (hyperspectral); 0 = off',
+    'auto_bands': 'Pick the N bands with the most fine detail above noise when channels is [] (hyperspectral); 0 = off',
     'auto_bands_range': '[first, last] band auto_bands searches, e.g. [1, 70]; [] = all bands',
     'reference_dir': 'Reference collection (L8_ref, C1, ...) - discovered like DPQED_rival.py',
     'max_expected_error_m': 'Worst-case geolocation error; search buffer for references and coarse alignment',
@@ -798,7 +798,7 @@ def _compare_with_truth(job: Dict, out_root: str, working_crs: str, manifest: Li
 
 
 def resolve_auto_bands(job: Dict, scene, E, out_dir: str = '') -> Tuple[List[str], str]:
-    """(bands picked by signal-to-noise, note for the log) for a raster job
+    """(bands picked by crispness, note for the log) for a raster job
     with auto_bands set and no channels; the scores go to BAND_QUALITY.csv
     in out_dir. A raster with many bands and neither set gets a note."""
     n = int(job.get('auto_bands') or 0)
@@ -1003,7 +1003,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     d.add_argument('--weights-cache', default='')
     i = sub.add_parser('inspect', help='describe an input image')
     i.add_argument('input')
-    bq = sub.add_parser('bands', help='score every band of a raster by signal-to-noise (BAND_QUALITY.csv)')
+    bq = sub.add_parser('bands', help='score every band of a raster by crispness: fine detail above noise (BAND_QUALITY.csv)')
     bq.add_argument('input')
     bq.add_argument('--top', type=int, default=3, help='bands to pick (default 3)')
     bq.add_argument('--csv', default='', help='write every band\'s scores here')

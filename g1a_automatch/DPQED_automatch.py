@@ -856,8 +856,8 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.auto_bands = QtWidgets.QSpinBox()
         self.auto_bands.setRange(0, 50)
         self.auto_bands.setSpecialValueText('off: every channel above')
-        self.auto_bands.setToolTip('With no channel checked, match only this many bands: those with the best '
-                                   'signal-to-noise (noise, striping and empty bands score low). For '
+        self.auto_bands.setToolTip('With no channel ticked, match only this many bands: the crispest, with the most '
+                                   'fine detail above their noise (soft, noisy, striped and empty bands score low). For '
                                    'hyperspectral cubes whose good bands change from image to image. '
                                    'The scores are written to BAND_QUALITY.csv.')
         self.auto_range = QtWidgets.QLineEdit()
@@ -868,7 +868,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         hl.addWidget(self.auto_bands, 1)
         hl.addWidget(QtWidgets.QLabel('within bands'))
         hl.addWidget(self.auto_range)
-        f.addRow('Auto bands (best N by SNR)', hl)
+        f.addRow('Auto bands (N crispest)', hl)
 
         self.ref_path = PathRow('dir')
         f.addRow('Reference folder (L8_ref / C1 / …)', self.ref_path)

@@ -1150,6 +1150,49 @@ def _noise_sigma(block: np.ndarray, valid: np.ndarray) -> float:
     return float(1.4826 * np.median(np.abs(r[ok])) / 6.0)
 
 
+_DOG_SIGMAS = (1.0, 2.0)          # fine detail: features 2-6 px across
+
+
+def _dog(a: np.ndarray) -> np.ndarray:
+    a = a.astype(np.float32)
+    return (cv2.GaussianBlur(a, (0, 0), _DOG_SIGMAS[0]) - cv2.GaussianBlur(a, (0, 0), _DOG_SIGMAS[1])).astype(np.float64)
+
+
+def _dog_noise_gain() -> Tuple[float, float]:
+    """Standard deviation of the detail filter's response to unit white noise,
+    and to unit column striping (a value per column, constant down it)."""
+    rng = np.random.default_rng(1)
+    r = _dog(rng.normal(size=(256, 256)))
+    c = _dog(np.repeat(rng.normal(size=(1, 256)), 256, axis=0))
+    return float(r[16:-16, 16:-16].std()), float(c[16:-16, 16:-16].std())
+
+
+_DOG_GAIN = None
+
+
+def _detail_rms(block: np.ndarray, valid: np.ndarray) -> float:
+    """RMS of the fine-detail (difference of Gaussians) response over the
+    pixels at least 7 px from invalid data: edges, field patterns, roads
+    and noise. The noise share is taken out by the caller."""
+    if min(block.shape) < 32:
+        return float('nan')
+    fill = np.where(valid, block, np.median(block[valid]) if valid.any() else 0.0)
+    r = _dog(fill)
+    ok = cv2.erode(valid.astype(np.uint8), np.ones((15, 15), np.uint8)).astype(bool)
+    if ok.sum() < 500:
+        return float('nan')
+    return float(np.sqrt(np.mean(r[ok] ** 2)))
+
+
+def _quant_step(block: np.ndarray, valid: np.ndarray) -> float:
+    """Smallest step between the block's distinct values (1 for plain DN):
+    a band with almost no measurable noise still carries this much."""
+    u = np.unique(block[valid])
+    if u.size < 2:
+        return 0.0
+    return float(np.min(np.diff(u)))
+
+
 def _stripe_sigma(block: np.ndarray, valid: np.ndarray) -> float:
     """Column / row striping of one block (pushbroom detector gains): the
     robust spread of the column means (and row means) about their 9-sample
@@ -1170,20 +1213,33 @@ def _stripe_sigma(block: np.ndarray, valid: np.ndarray) -> float:
 
 def band_quality(path: str, bands: Optional[List[int]] = None, max_side: int = 1024,
                  block: int = 256, n_blocks: int = 6, nodata: Optional[float] = None) -> List[Dict]:
-    """Signal-to-noise of every band of a raster, without a reference.
+    """How crisp and clean every band of a raster is, without a reference.
 
-      noise   pixel noise (_noise_sigma) and striping (_stripe_sigma) on
-              n_blocks full-resolution blocks where most bands have data,
-              added in quadrature; at least 0.3 DN for integer data
-      signal  the scene's own variation: the spread of the band's valid
-              pixels (p98 - p2 of an overview read, as a sigma) with the
-              noise taken out
-      snr_db  20 log10(signal / noise); 0 dB = as much noise as scene
+      noise      pixel noise (_noise_sigma) and striping (_stripe_sigma) on
+                 n_blocks full-resolution blocks where most bands have
+                 data, added in quadrature; at least the value step / sqrt(12)
+      signal     the scene's contrast: the spread of the band's valid
+                 pixels (p98 - p2 of an overview read, as a sigma) with
+                 the noise taken out
+      detail     fine detail (2-6 px features, _detail_rms) on the same
+                 blocks with the noise's and the striping's share taken out
+      sharpness  detail / signal: how much of the band's contrast is in
+                 edges and small features rather than in broad shading
+      detail_db  20 log10(detail / the noise's detail): fine features
+                 above the noise
+      score      100 x sharpness x d^2 / (d^2 + 4), d = detail / the noise's
+                 detail (half weight at 6 dB). The ranking: crisp first,
+                 faded where noise or striping drowns the detail.
+      snr_db     20 log10(signal / noise), for reference
 
-    Bands that are dark, flat, noisy or striped (the water-vapour and
-    detector-edge bands of a hyperspectral cube) score low. A band with
-    no signal above its noise, or less than half the data of the
-    best-covered band, gets UNUSABLE_DB."""
+    Signal-to-noise alone picked a soft, hazy band 3 of a G1A HV cube over
+    a band 30 ten times crisper: smooth bands have almost no measurable
+    noise. Bands that are dark, flat, blurred, noisy or striped score low.
+    A band with no signal above its noise, or less than half the data of
+    the best-covered band, scores 0 (snr_db UNUSABLE_DB)."""
+    global _DOG_GAIN
+    if _DOG_GAIN is None:
+        _DOG_GAIN = _dog_noise_gain()
     rows: List[Dict] = []
     with rt.open(path) as src:
         idx = list(bands or range(1, src.count + 1))
@@ -1227,6 +1283,8 @@ def band_quality(path: str, bands: Optional[List[int]] = None, max_side: int = 1
                                   bs, bs) for r, c in pick]
         noise = {b: [] for b in idx}
         stripe = {b: [] for b in idx}
+        detail = {b: [] for b in idx}
+        qstep = {b: [] for b in idx}
         for w in wins:
             for k in range(0, len(idx), 16):
                 chunk = idx[k:k + 16]
@@ -1235,36 +1293,54 @@ def band_quality(path: str, bands: Optional[List[int]] = None, max_side: int = 1
                     v = valid_of(a)
                     noise[b].append(_noise_sigma(a, v))
                     stripe[b].append(_stripe_sigma(a, v))
+                    detail[b].append(_detail_rms(a, v))
+                    qstep[b].append(_quant_step(a, v))
         best_cover = max(cover.values()) if cover else 0.0
         for b in idx:
             n = [x for x in noise[b] if np.isfinite(x)]
             sn = float(np.median(n)) if n else float('nan')
             st = float(np.median(stripe[b])) if stripe[b] else 0.0
             eff = float(np.hypot(sn, st)) if np.isfinite(sn) else float('nan')
-            if is_int and np.isfinite(eff):
-                eff = max(eff, 0.3)
+            q = [x for x in qstep[b] if x > 0]
+            floor = (float(np.median(q)) if q else (1.0 if is_int else 0.0)) / np.sqrt(12.0)
+            if np.isfinite(eff):
+                eff = max(eff, floor)
             ok = spread[b] > 0 and np.isfinite(eff) and eff > 0 and cover[b] >= 0.5 * best_cover > 0
             # p98 - p2 is 4.11 sigma for a normal spread; the noise is taken out of it
             sig = float(np.sqrt(max((spread[b] / 4.11) ** 2 - eff ** 2, 0.0))) if ok else 0.0
             snr = sig / eff if ok else 0.0
-            rows.append({'channel': f'band{b}', 'band': b, 'valid_fraction': round(cover[b], 4),
-                         'signal': sig, 'noise': sn, 'striping': st, 'snr': snr,
-                         'snr_db': float(round(20 * np.log10(snr), 2)) if snr > 0 else UNUSABLE_DB})
+            d = [x for x in detail[b] if np.isfinite(x)]
+            # the noise's and the striping's share of the detail
+            nd_ = float(np.hypot(_DOG_GAIN[0] * max(sn, floor), _DOG_GAIN[1] * st)) if ok else float('nan')
+            det = float(np.sqrt(max(float(np.median(d)) ** 2 - nd_ ** 2, 0.0))) if (ok and d) else 0.0
+            sharp = det / sig if sig > 0 else 0.0
+            dsnr = det / nd_ if (ok and nd_ > 0) else 0.0
+            # detail must clearly beat the noise: half weight at 6 dB (twice the noise)
+            score = 100.0 * sharp * dsnr ** 2 / (dsnr ** 2 + 4.0) if snr > 0 else 0.0
+            rows.append({'channel': f'band{b}', 'band': b, 'score': float(round(score, 3)),
+                         'sharpness': float(round(sharp, 4)),
+                         'detail_db': float(round(20 * np.log10(dsnr), 2)) if dsnr > 0 else UNUSABLE_DB,
+                         'snr_db': float(round(20 * np.log10(snr), 2)) if snr > 0 else UNUSABLE_DB,
+                         'signal': sig, 'detail': det, 'noise': sn, 'striping': st,
+                         'valid_fraction': round(cover[b], 4)})
     return rows
 
 
 def pick_bands(rows: List[Dict], n: int, spacing: Optional[int] = None) -> List[str]:
-    """The n best bands by snr_db, at least `spacing` bands apart (default
+    """The n best bands by score, at least `spacing` bands apart (default
     one 30th of the bands, so a top-3 is not three neighbours of the same
-    peak). Bands at or below 0 dB are never picked."""
+    peak). Bands without detail above their noise (detail_db <= 0) are
+    never picked."""
     if n <= 0 or not rows:
         return []
     if spacing is None:
         spacing = max(1, int(round(len(rows) / 30.0)))
     chosen: List[Dict] = []
-    for r in sorted(rows, key=lambda r: -r['snr_db']):
-        if r['snr_db'] <= 0:
+    for r in sorted(rows, key=lambda r: -r['score']):
+        if r['score'] <= 0:
             break
+        if r['detail_db'] <= 0:
+            continue
         if all(abs(r['band'] - c['band']) >= spacing for c in chosen):
             chosen.append(r)
         if len(chosen) == n:
@@ -1276,15 +1352,18 @@ def format_band_quality(rows: List[Dict], picked: List[str], top: int = 15) -> s
     """The best bands, then a line per run of bands for the whole profile."""
     if not rows:
         return '[Bands] no band scored'
-    best = sorted(rows, key=lambda r: -r['snr_db'])[:top]
-    lines = [f'[Bands] signal-to-noise of {len(rows)} band(s); picked: {", ".join(picked) or "none"}',
-             f"  {'band':<8} {'SNR dB':>7} {'signal':>10} {'noise':>9} {'striping':>9} {'valid':>6}"]
+    best = sorted(rows, key=lambda r: -r['score'])[:top]
+    lines = [f'[Bands] crispness of {len(rows)} band(s) (score = sharpness x detail above noise); '
+             f'picked: {", ".join(picked) or "none"}',
+             f"  {'band':<8} {'score':>6} {'sharp':>6} {'detail dB':>9} {'SNR dB':>7} {'noise':>9} "
+             f"{'striping':>9} {'valid':>6}"]
     for r in best:
-        lines.append(f"  {r['channel']:<8} {r['snr_db']:7.1f} {r['signal']:10.4g} {r['noise']:9.3g} "
-                     f"{r['striping']:9.3g} {r['valid_fraction']:6.2f}{'  <- picked' if r['channel'] in picked else ''}")
+        lines.append(f"  {r['channel']:<8} {r['score']:6.1f} {r['sharpness']:6.3f} {r['detail_db']:9.1f} "
+                     f"{r['snr_db']:7.1f} {r['noise']:9.3g} {r['striping']:9.3g} {r['valid_fraction']:6.2f}"
+                     f"{'  <- picked' if r['channel'] in picked else ''}")
     if len(rows) > top:
-        prof = ' '.join(f"{r['band']}:{r['snr_db']:.0f}" for r in rows[::max(1, len(rows) // 30)])
-        lines.append(f'  profile (band:dB): {prof}')
+        prof = ' '.join(f"{r['band']}:{r['score']:.0f}" for r in rows[::max(1, len(rows) // 30)])
+        lines.append(f'  profile (band:score): {prof}')
     return '\n'.join(lines)
 
 

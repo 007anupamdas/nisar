@@ -69,7 +69,8 @@ python automatch_job.py bands G1A_HV.tif --top 3  # band quality of a cube
 The good bands of a G1A HS/HV cube change from image to image. In one, the
 first bands are poor and those around 50 are crisp. In another, everything
 above 40 is junk. `auto_bands: N` (GUI: *Auto bands*) matches only the N
-bands with the best signal-to-noise. No reference is needed. It applies to
+crispest bands: those with the most fine detail above their noise. No
+reference is needed. It applies to
 rasters when `channels` is `[]`; ticked channels win.
 
 How each band is scored:
@@ -78,9 +79,19 @@ How each band is scored:
   Striping (column and row gains) is added to it.
 - **signal**: the spread of the band's own values (p98 − p2), with the noise
   taken out.
-- **SNR dB** is 20·log10(signal / noise); 0 dB means as much noise as scene.
+- **detail**: fine features 2–6 px across (a difference of Gaussians), with
+  the share of the noise and the striping taken out.
+- **sharpness** = detail / signal: how much of the band's contrast is in
+  edges and small features rather than in broad shading.
+- **detail dB** = 20·log10(detail / the noise's detail).
+- **score** = 100 × sharpness × d² / (d² + 4), where d is the detail over the
+  noise's detail (half weight at 6 dB). Bands are ranked by this score.
+- **SNR dB** (signal / noise) is shown for reference only. It ranked a
+  soft, hazy band 3 of a G1A HV cube above a band 30 ten times crisper:
+  smooth bands have almost no measurable noise.
 - A band with no signal above its noise, or less than half of the best
-  band's data, is unusable (−99).
+  band's data, scores 0. A band whose detail does not beat its noise
+  (detail dB ≤ 0) is never picked.
 - The picks are at least 1/30 of the band count apart (6 bands in a
   180-band cube), so a top-3 is not three neighbours of one peak.
 
@@ -94,7 +105,7 @@ a long run. With more than 20 bands, `channels` `[]` and `auto_bands` 0,
 preflight warns that every band will be matched.
 
 The score measures image quality, not the spectral match to the reference.
-Among bands of similar SNR, the one closest to the reference's band (e.g.
+Among bands of similar score, the one closest to the reference's band (e.g.
 Landsat red / NIR) may match better.
 
 ## Output → RIVAL

@@ -1677,23 +1677,35 @@ def test_auto_bands(tmp):
         cube[b] = 500 + np.exp(-0.5 * ((b - 19) / 6.0) ** 2) * base + rng.normal(scale=8, size=(H, W))
     cube[29] += rng.normal(scale=60, size=W)[None, :]
     cube[34] = 0
+    # band 3: the G1A HV case -- soft and hazy (broad shading, no fine
+    # detail) but almost noise-free, so signal-to-noise alone ranked it first
+    soft = cv2.GaussianBlur(base.astype(np.float32), (0, 0), 5)
+    cube[2] = 300 + soft / soft.std() * 150 + rng.normal(scale=0.3, size=(H, W))
     cube[:, :, :100] = 0
     path = os.path.join(tmp, 'hs_cube.tif')
     with rasterio.open(path, 'w', driver='GTiff', height=H, width=W, count=N, dtype='uint16', crs='EPSG:32644',
                        transform=from_origin(500000, 2000000, 180, 180)) as d:
         d.write(np.clip(cube, 0, 65535).astype('uint16'))
     rows = E.band_quality(path)
+    sc = {r['band']: r['score'] for r in rows}
     db = {r['band']: r['snr_db'] for r in rows}
-    best = max(db, key=db.get)
-    check('bands: the best band is at the contrast peak (19-21)', 19 <= best <= 21, True)
-    check('bands: noise-only bands score at or below 0 dB', max(db[1], db[2], db[40]) <= 0, True)
-    check('bands: the striped band scores below its neighbours by 10 dB', db[30] < min(db[29], db[31]) - 10, True)
-    check('bands: the dead band is unusable', db[35], E.UNUSABLE_DB)
+    best = max(sc, key=sc.get)
+    check('bands: the best band is at the crisp peak (19-21)', 19 <= best <= 21, True)
+    check('bands: signal-to-noise alone would pick the soft band 3', max(db, key=db.get), 3)
+    check('bands: the soft band 3 scores below the crisp bands 17-23 by 3x',
+          sc[3] * 3 < min(sc[b] for b in range(17, 24)), True)
+    check('bands: noise-only bands score 0 or are never picked',
+          all(sc[b] == 0 or next(r for r in rows if r['band'] == b)['detail_db'] <= 0 for b in (1, 2, 40)), True)
+    r30 = next(r for r in rows if r['band'] == 30)
+    check('bands: the striped band scores below its neighbours, its detail under its noise',
+          (sc[30] < min(sc[29], sc[31]), r30['detail_db'] <= 0), (True, True))
+    check('bands: the striped band is never picked', 'band30' in E.pick_bands(rows, 40, spacing=1), False)
+    check('bands: the dead band is unusable', (db[35], sc[35]), (E.UNUSABLE_DB, 0.0))
     check('bands: picks are the top 3 near the peak', all(17 <= int(c[4:]) <= 23 for c in E.pick_bands(rows, 3)), True)
     sp = E.pick_bands(rows, 3, spacing=5)
     check('bands: spacing keeps picks apart', min(abs(int(a[4:]) - int(b[4:])) for a in sp for b in sp if a != b) >= 5,
           True)
-    check('bands: no pick from noise only', E.pick_bands([dict(r, snr_db=-3.0) for r in rows], 2), [])
+    check('bands: no pick from noise only', E.pick_bands([dict(r, detail_db=-3.0) for r in rows], 2), [])
 
     out = os.path.join(tmp, 'bands_out')
     os.makedirs(out, exist_ok=True)
