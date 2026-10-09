@@ -693,7 +693,15 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
                                    'signal-to-noise (noise, striping and empty bands score low). For '
                                    'hyperspectral cubes whose good bands change from image to image. '
                                    'The scores are written to BAND_QUALITY.csv.')
-        f.addRow('Auto bands (best N by SNR)', self.auto_bands)
+        self.auto_range = QtWidgets.QLineEdit()
+        self.auto_range.setPlaceholderText('all bands (or e.g. 1-70)')
+        self.auto_range.setToolTip('Bands Auto bands searches, first-last. G1A HS/HV: the good bands are '
+                                   'usually within the first 60-70.')
+        hl = QtWidgets.QHBoxLayout()
+        hl.addWidget(self.auto_bands, 1)
+        hl.addWidget(QtWidgets.QLabel('within bands'))
+        hl.addWidget(self.auto_range)
+        f.addRow('Auto bands (best N by SNR)', hl)
 
         self.ref_path = PathRow('dir')
         f.addRow('Reference folder (L8_ref / C1 / …)', self.ref_path)
@@ -963,6 +971,8 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.max_feat.setValue(int(j.get('max_num_features') or 32000))
         self.gpu_win.setValue(int(j.get('gpu_window_px') or 0))
         self.auto_bands.setValue(int(j.get('auto_bands') or 0))
+        r = j.get('auto_bands_range') or []
+        self.auto_range.setText(f'{r[0]}-{r[1]}' if len(r) == 2 else '')
         self._update_kp_label()
         self.target_res.setText('' if j['target_resolution'] is None else f"{j['target_resolution']:g}")
         self.max_err.setValue(float(j['max_expected_error_m']) / 1000.0)
@@ -994,6 +1004,15 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.resume.setChecked(bool(j['resume']))
         self.save_imgs.setChecked(bool(j['save_match_images']))
         self.debug.setChecked(bool(j['debug']))
+
+    def _auto_range(self) -> list:
+        t = self.auto_range.text().strip()
+        if not t:
+            return []
+        m = re.fullmatch(r'\s*(\d+)\s*[-:,]\s*(\d+)\s*', t)
+        if not m or int(m.group(1)) < 1 or int(m.group(2)) < int(m.group(1)):
+            raise ValueError(f'Auto bands range {t!r}: give first-last, e.g. 1-70.')
+        return [int(m.group(1)), int(m.group(2))]
 
     def get_job(self):
         """Widgets -> job dict. Raises ValueError with a readable message."""
@@ -1032,6 +1051,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             'max_num_features': self.max_feat.value(),
             'gpu_window_px': self.gpu_win.value(),
             'auto_bands': self.auto_bands.value(),
+            'auto_bands_range': self._auto_range(),
             'target_resolution': float(tr) if tr else None,
             'max_expected_error_m': self.max_err.value() * 1000.0,
             'coarse_method': self.coarse.currentText(),

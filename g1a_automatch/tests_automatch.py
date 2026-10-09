@@ -820,6 +820,16 @@ def test_gui_dialog():
         w.gpu_win.setValue(0)
         w.auto_bands.setValue(2)
         check('gui: auto bands reaches the job (0 = off)', (w.get_job()['auto_bands'], w.auto_bands.minimum()), (2, 0))
+        w.auto_range.setText('1-70')
+        check('gui: auto bands range reaches the job', w.get_job()['auto_bands_range'], [1, 70])
+        w.auto_range.setText('70-1')
+        try:
+            w.get_job()
+            bad = False
+        except ValueError:
+            bad = True
+        check('gui: a reversed auto bands range is refused', bad, True)
+        w.auto_range.setText('')
         w.auto_bands.setValue(0)
         w.settings = G.QtCore.QSettings(os.path.join(tempfile.mkdtemp(), 'gui_test.ini'), G.QtCore.QSettings.IniFormat
                                         if G.QT_API == 'PyQt5' else G.QtCore.QSettings.Format.IniFormat)
@@ -1657,6 +1667,14 @@ def test_auto_bands(tmp):
     check('bands: job picks one band and writes BAND_QUALITY.csv',
           (len(picked), note, os.path.exists(os.path.join(out, 'BAND_QUALITY.csv'))), (1, '', True))
     check('bands: the log shows the table', 'picked: ' + picked[0] in buf.getvalue(), True)
+    with contextlib.redirect_stdout(io.StringIO()):
+        picked, note = J.resolve_auto_bands(dict(job, auto_bands=1, auto_bands_range=[25, 40]), scene, E)
+    check('bands: auto_bands_range limits the search (best within 25-40 is 25-27)',
+          (len(picked) == 1 and 25 <= int(picked[0][4:]) <= 27, note), (True, ''))
+    picked, note = J.resolve_auto_bands(dict(job, auto_bands_range=[50, 60]), scene, E)
+    check('bands: a range beyond the bands is reported', (picked, 'beyond' in note), ([], True))
+    picked, note = J.resolve_auto_bands(dict(job, auto_bands_range=[9]), scene, E)
+    check('bands: a malformed range is reported', (picked, 'not [first, last]' in note), ([], True))
     picked, note = J.resolve_auto_bands(dict(job, channels=['band5']), scene, E)
     check('bands: explicit channels win over auto_bands', (picked, 'ignored' in note), ([], True))
     picked, note = J.resolve_auto_bands(dict(job, auto_bands=0), scene, E)

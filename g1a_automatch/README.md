@@ -82,6 +82,10 @@ How each band is scored:
 - The picks are at least 1/30 of the band count apart (6 bands in a
   180-band cube), so a top-3 is not three neighbours of one peak.
 
+`auto_bands_range: [1, 70]` (GUI: *within bands* `1-70`) limits the search.
+In G1A HS/HV cubes the good bands are usually within the first 60–70 of 180,
+and a third of the bands is scored in a third of the time.
+
 The scores are written to `BAND_QUALITY.csv` in the output folder and the
 log. Preflight prints them too, so a server preflight shows the pick before
 a long run. With more than 20 bands, `channels` `[]` and `auto_bands` 0,

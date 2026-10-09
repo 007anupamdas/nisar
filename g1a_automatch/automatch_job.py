@@ -81,6 +81,7 @@ DEFAULT_JOB: Dict = {
     'channels': [],              # [] = all; raster: "band1".., NISAR: "HH"..
     'auto_bands': 0,             # rasters with channels []: match only the N bands with the best
                                  # signal-to-noise (hyperspectral cubes); 0 = off
+    'auto_bands_range': [],      # [first, last] band searched by auto_bands, e.g. [1, 70]; [] = all
     'reference_dir': '',         # L8_ref / C1 / any RIVAL-readable collection
     'reference_label': '',       # tag in file names; default from folder name
     'reference_mode': 'auto',    # auto | index-shp | sidecar | degree-tile
@@ -165,6 +166,7 @@ JOB_HELP = {
     'input_path': 'Image to assess: G1A raster (any rasterio format) or NISAR .h5 / scene folder',
     'channels': 'Channels to process ([] = all): band1.. for rasters, HH/HV.. for NISAR',
     'auto_bands': 'Pick the N bands with the best signal-to-noise when channels is [] (hyperspectral); 0 = off',
+    'auto_bands_range': '[first, last] band auto_bands searches, e.g. [1, 70]; [] = all bands',
     'reference_dir': 'Reference collection (L8_ref, C1, ...) - discovered like DPQED_rival.py',
     'max_expected_error_m': 'Worst-case geolocation error; search buffer for references and coarse alignment',
     'coarse_method': 'auto = matcher at coarse resolution, phase correlation if weak',
@@ -808,7 +810,15 @@ def resolve_auto_bands(job: Dict, scene, E, out_dir: str = '') -> Tuple[List[str
         return [], ''
     if job['channels']:
         return [], f'auto_bands {n} ignored: channels {job["channels"]} are set'
-    rows = E.band_quality(scene.raster_path)
+    rng = list(job.get('auto_bands_range') or [])
+    bands = None
+    if rng:
+        if len(rng) != 2 or int(rng[0]) < 1 or int(rng[1]) < int(rng[0]):
+            return [], f'auto_bands_range {rng} is not [first, last]; every band will be matched'
+        bands = list(range(int(rng[0]), min(int(rng[1]), len(scene.channels)) + 1))
+        if not bands:
+            return [], f'auto_bands_range {rng} is beyond the {len(scene.channels)} bands; every band will be matched'
+    rows = E.band_quality(scene.raster_path, bands)
     picked = E.pick_bands(rows, n)
     print(E.format_band_quality(rows, picked), flush=True)
     if out_dir:
@@ -997,6 +1007,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     bq.add_argument('input')
     bq.add_argument('--top', type=int, default=3, help='bands to pick (default 3)')
     bq.add_argument('--csv', default='', help='write every band\'s scores here')
+    bq.add_argument('--range', type=int, nargs=2, metavar=('FIRST', 'LAST'), help='bands to search, e.g. 1 70')
     w = sub.add_parser('weights', help='check which model weight files are on this machine '
                                        '(options: python automatch_weights.py -h)')
     w.add_argument('rest', nargs=argparse.REMAINDER)
@@ -1040,7 +1051,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
     if a.cmd == 'bands':
         import automatch_engine as E
-        rows = E.band_quality(a.input)
+        rows = E.band_quality(a.input, list(range(a.range[0], a.range[1] + 1)) if a.range else None)
         picked = E.pick_bands(rows, a.top)
         print(E.format_band_quality(rows, picked))
         if a.csv:
