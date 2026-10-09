@@ -1,0 +1,2056 @@
+"""Drive DPQED_rival's Qt-side class with PyQt5/QGIS stubbed out.
+
+Covers what tests_rival_meta.py cannot: the folder scan, the CRS wiring and the
+canvas behaviour, none of which live in the pure-helper slice. Geometry and CRS
+calls are stubs, so this proves the code paths execute and route correctly -- it
+says nothing about whether QGIS renders anything.
+
+    python3 tests_rival_gui_stub.py        # exits non-zero on any assertion
+
+Two stubbing traps worth knowing, both of which hid real differences until
+fixed: a MagicMock caches its return_value, so QgsMapCanvas() handed back ONE
+object for both canvases, and QgsPointXY(...) handed back one point for every
+coordinate. Both now get real stand-ins.
+"""
+import os, sys, shutil, tempfile, types
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+from unittest.mock import MagicMock
+
+for name in ["PyQt5", "PyQt5.QtWidgets", "PyQt5.QtCore", "PyQt5.QtGui",
+             "qgis", "qgis.gui", "qgis.core"]:
+    sys.modules[name] = MagicMock()
+
+# Qt base classes must be real classes for subclassing to work
+qw = sys.modules["PyQt5.QtWidgets"]
+qg = sys.modules["qgis.gui"]
+qc = sys.modules["PyQt5.QtCore"]
+class _Base:
+    """Stand-in for the Qt classes the module subclasses.
+
+    Attributes are memoised: returning a fresh MagicMock per access is the
+    mirror of the cached-return_value trap -- every call would land on a
+    different mock, so `widget.hide.called` was always False.
+    """
+    def __init__(self, *a, **k): pass
+
+    def __getattr__(self, n):
+        m = MagicMock()
+        object.__setattr__(self, n, m)
+        return m
+# QgsMapCanvasItem must be a real class too: subclassing a MagicMock silently
+# "succeeds" and hands back another MagicMock, so GcpLabel's body would never
+# run and every assertion about it would pass without testing anything.
+for mod, names in ((qw, ["QMainWindow", "QWidget"]),
+                   (qg, ["QgsMapTool", "QgsMapCanvasItem"]),
+                   (qc, ["QObject"])):
+    for n in names:
+        setattr(mod, n, type(n, (_Base,), {}))
+
+# A MagicMock caches its return_value, so QgsMapCanvas() would hand back ONE
+# object for both canvases and hide any per-canvas difference. Give each call a
+# fresh mock.
+qg.QgsMapCanvas = MagicMock(side_effect=lambda *a, **k: MagicMock())
+
+# Same trap for the map tools: QgsMapToolZoom(canvas, False) and (canvas, True)
+# differ only by that flag, so one cached return_value would make zoom-in and
+# zoom-out indistinguishable. Record the arguments on each instance instead.
+def _tool_factory(name):
+    def make(*a, **k):
+        m = MagicMock()
+        m._tool, m._args = name, a
+        return m
+    return MagicMock(side_effect=make)
+
+qg.QgsMapToolPan  = _tool_factory("pan")
+qg.QgsMapToolZoom = _tool_factory("zoom")
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import DPQED_rival as R
+print("imported OK; QCDashboard built:", type(R.win).__name__)
+
+
+class _PointXY:
+    """QgsPointXY stand-in. The mock caches its return_value, so every
+    QgsPointXY(...) would otherwise be the same object and identity tests
+    between distinct points would silently pass."""
+    def __init__(self, x, y=None):
+        if y is None:
+            x, y = x.x(), x.y()
+        self._x, self._y = float(x), float(y)
+    def x(self): return self._x
+    def y(self): return self._y
+    def __repr__(self): return f"({self._x:.3f}, {self._y:.3f})"
+
+R.QgsPointXY = _PointXY
+
+
+class _Rect:
+    """QgsRectangle stand-in, for the same reason as _PointXY."""
+    def __init__(self, *b): self._b = tuple(float(v) for v in b)
+    def xMinimum(self): return self._b[0]
+    def yMinimum(self): return self._b[1]
+    def xMaximum(self): return self._b[2]
+    def yMaximum(self): return self._b[3]
+    def __repr__(self):
+        return (f"[{self._b[0]:.1f},{self._b[1]:.1f} .. "
+                f"{self._b[2]:.1f},{self._b[3]:.1f}]")
+
+R.QgsRectangle = _Rect
+
+
+qw.QFileDialog.getExistingDirectory = MagicMock()
+warned = []
+qw.QMessageBox.warning  = lambda *a, **k: warned.append(a[-1])
+qw.QMessageBox.critical = lambda *a, **k: warned.append("CRITICAL: " + a[-1])
+win = R.win
+win.input_tif_layer = None
+
+
+def scan(folder):
+    """Run the real select_reference_folder over a prepared folder."""
+    del warned[:]
+    qw.QFileDialog.getExistingDirectory = MagicMock(return_value=folder)
+    win.dropdown_band.currentText = MagicMock(return_value="All bands")
+    win.ref_footprints = {}
+    win.select_reference_folder()
+    return win.ref_mode, dict(win.ref_footprints), list(warned)
+
+
+def report(title, mode, prints, warns):
+    print(f"\n{title}: mode={mode}, {len(prints)} footprint(s)")
+    for path, rec in sorted(prints.items()):
+        print(f"  {rec['band']:4s} {rec['source']:24s} {len(rec['ring']):3d} vtx"
+              f"  -> {os.path.basename(path)}  {win._label_for(path)}")
+    if warns:
+        print("  warnings:", warns)
+
+
+# ── 0. the input scene's own footprint comes from its sidecar ────────────────
+d0 = tempfile.mkdtemp()
+met0 = ("NISAR_S2_PR_GSLC_028_084_A_010_3700_DHNA_A_"
+        "20260819T001733_20260819T001810_P00500_M_F_I_001.met")
+shutil.copy(os.path.join(HERE, met0), d0)
+input_tif = os.path.join(d0, met0[:-len(".met")] + ".tif")
+open(input_tif, "w").close()
+ring = win._input_footprint_ring(input_tif)
+assert ring == [(76.534748, 17.614687), (78.827076, 18.171194),
+                (79.385351, 15.993327), (77.112174, 15.446038)], ring
+# the swath, not the product grid: strictly inside the raster's own bbox
+assert R.rings_bounds([ring]) == (76.534748, 15.446038, 79.385351, 18.171194)
+assert win._input_footprint_ring(os.path.join(d0, "no_sidecar.tif")) is None
+print("input footprint read from the scene's own .met")
+shutil.rmtree(d0, ignore_errors=True)
+
+# ── 1. NISAR sidecars, split across a Meta subfolder ─────────────────────────
+d1 = tempfile.mkdtemp()
+xml = ("NISAR_L2_PR_GSLC_028_084_A_010_4005_DHDH_A_"
+       "20260819T001734_20260819T001808_P05023_N_F_J_001.h5.iso.xml")
+met = ("NISAR_S2_PR_GSLC_028_084_A_010_3700_DHNA_A_"
+       "20260819T001733_20260819T001810_P00500_M_F_I_001.met")
+os.makedirs(os.path.join(d1, "Meta"))
+for sidecar in (xml, met):
+    shutil.copy(os.path.join(HERE, sidecar), os.path.join(d1, "Meta"))
+open(os.path.join(d1, xml[:-len(".h5.iso.xml")] + ".tif"), "w").close()
+open(os.path.join(d1, met[:-len(".met")] + ".tif"), "w").close()
+mode, prints, warns = scan(d1)
+report("NISAR sidecars in Meta/, rasters above", mode, prints, warns)
+assert mode == "sidecar", mode
+assert sorted(r["band"] for r in prints.values()) == ["LSAR", "SSAR"]
+assert not warns, warns
+assert all(win._label_for(p).startswith("[") for p in prints)
+
+# band filter still narrows, and offers only the tags present
+win._refresh_band_choices()
+assert [win.dropdown_band.addItem.call_args_list[i][0][0]
+        for i in range(len(win.dropdown_band.addItem.call_args_list))][-2:] \
+    == ["LSAR", "SSAR"], "band combo should list both tags"
+
+# ── 2. C1: the name is the footprint ─────────────────────────────────────────
+d2 = tempfile.mkdtemp()
+# the reported folder: unpadded degree counts and an '_ortho' suffix, with some
+# tiles filed two levels down the way a real collection is organised
+for name in ("N16E73.tif", "N16E74.tif"):
+    open(os.path.join(d2, name), "w").close()
+nested = os.path.join(d2, "Kerala", "2023")
+os.makedirs(nested)
+for name in ("N17E73.tif", "N8E76_ortho.tif", "N9E76_ortho.tif"):
+    open(os.path.join(nested, name), "w").close()
+mode, prints, warns = scan(d2)
+report("C1 degree tiles", mode, prints, warns)
+assert mode == "degree-tile", mode
+assert len(prints) == 5, prints
+n16e73 = [r for p, r in prints.items() if p.endswith("N16E73.tif")][0]
+assert n16e73["ring"] == [(73.0, 17.0), (74.0, 17.0), (74.0, 16.0), (73.0, 16.0)]
+# no NISAR band here: labels stay unprefixed and the filter collapses
+assert all(r["band"] == "UNK" for r in prints.values())
+n8 = [r for p, r in prints.items() if p.endswith("N8E76_ortho.tif")][0]
+assert n8["ring"] == [(76.0, 9.0), (77.0, 9.0), (77.0, 8.0), (76.0, 8.0)], n8
+assert all(not win._label_for(p).startswith("[") for p in prints)
+assert not warns, warns
+
+# ── 3. rasters with nothing to place them ────────────────────────────────────
+d3 = tempfile.mkdtemp()
+open(os.path.join(d3, "some_scene.tif"), "w").close()
+open(os.path.join(d3, "readme.txt"), "w").close()
+mode, prints, warns = scan(d3)
+report("unplaceable rasters", mode, prints, warns)
+assert mode is None and not prints, (mode, prints)
+assert warns and "index.shp" in warns[0] and "N16E73.tif" in warns[0], warns
+
+# ── 4. an empty folder is refused outright ───────────────────────────────────
+d4 = tempfile.mkdtemp()
+mode, prints, warns = scan(d4)
+report("no rasters at all", mode, prints, warns)
+assert warns and warns[0].startswith("CRITICAL:"), warns
+
+# ── 5. both canvases are pinned to the CRS their picks are read as ───────────
+def crs_calls(canvas):
+    return [c[0][0] for c in canvas.setDestinationCrs.call_args_list]
+
+win._apply_canvas_crs()
+# NISAR is UTM, C1/L8 are WGS84: both canvases render in the working CRS so a
+# reference pick is already in the table's units.
+assert crs_calls(win.canvas_left)[-1] is win.proj_crs, "left canvas not pinned"
+assert crs_calls(win.canvas_right)[-1] is win.proj_crs, "right canvas not pinned"
+
+# adopting a working CRS from the input raster must re-pin the left canvas
+class _CRS:
+    def __init__(self, authid): self._a = authid
+    def isValid(self): return True
+    def isGeographic(self): return False
+    def authid(self): return self._a
+    def description(self): return self._a
+
+new_crs = _CRS("EPSG:32643")
+assert win.adopt_working_crs(new_crs) is True
+assert win.proj_crs is new_crs
+assert crs_calls(win.canvas_left)[-1] is new_crs, "left canvas not re-pinned"
+assert crs_calls(win.canvas_right)[-1] is new_crs, "right canvas not re-pinned"
+print("\nboth canvases pinned to", win.proj_crs.authid(), "and re-pinned on adopt")
+
+# a reference pick is taken verbatim -- no conversion left to get wrong
+tool = R.DragMapTool(win.canvas_right, win, False)
+tool.toMapCoordinates = MagicMock(return_value=_PointXY(325000.0, 1900000.0))
+win.table.currentRow = MagicMock(return_value=0)
+recorded = []
+win.table.setItem = lambda row, col, item: recorded.append((col, item))
+R.QTableWidgetItem = lambda text: text     # bound at import, patch it there
+win.table.item = MagicMock(return_value=None)
+tool.update_data(object())
+picked = [(c, v) for c, v in recorded if c in (2, 3)]
+print("reference pick ->", picked)
+assert picked == [(2, "325000.000"), (3, "1900000.000")], picked
+
+# a geographic CRS is refused: the error columns are metres
+assert win.adopt_working_crs(_CRS("EPSG:4326")) is True  # not geographic per stub
+class _Geo(_CRS):
+    def isGeographic(self): return True
+assert win.adopt_working_crs(_Geo("EPSG:4326")) is False, "geographic CRS accepted"
+print("geographic CRS refused as a working CRS")
+
+# ── 6. a mark on the input canvas drives the reference canvas ────────────────
+R.REF_CANVAS_CRS = "working"
+win.proj_crs = _CRS("EPSG:32644")
+win._rebuild_transforms()
+
+# one reference tile, its projected ring a 2 km box around (325000, 1900000)
+tile = "/refs/N17E78.tif"
+win.ref_footprints = {tile: {
+    "ring": [(78.0, 18.0), (79.0, 18.0), (79.0, 17.0), (78.0, 17.0)],
+    "ring_proj": [(324000.0, 1901000.0), (326000.0, 1901000.0),
+                  (326000.0, 1899000.0), (324000.0, 1899000.0)],
+    "band": "UNK", "crs": None, "granule": None, "source": "tile-name (1 deg)"}}
+win.ref_tif_list = [tile]
+
+inside  = R.QgsPointXY(325000.0, 1900000.0)
+outside = R.QgsPointXY(500000.0, 1900000.0)
+# QgsGeometry is a mock, so drive containment off the real ring instead
+def _fake_geom(wkt=None):
+    g = MagicMock()
+    g.contains = lambda pt: getattr(pt, "_inside", False)
+    g.area = lambda: 4.0e6
+    return g
+R.QgsGeometry.fromWkt = _fake_geom
+R.QgsGeometry.fromPointXY = lambda pt: type("G", (), {"_inside": pt is inside})()
+
+assert win.reference_for_point(inside) == tile
+assert win.reference_for_point(outside) is None
+print("\nreference_for_point: inside ->", os.path.basename(tile), ", outside -> None")
+
+win.current_ref_layer = None
+win._load_ref_layer = MagicMock(return_value=MagicMock())
+win.canvas_right.setCenter.reset_mock()
+win.canvas_right.zoomScale.reset_mock()
+win.draw_marker = MagicMock()
+
+win.canvas_right.setExtent.reset_mock()
+win.canvas_right.size.return_value = MagicMock(width=lambda: 800,
+                                               height=lambda: 400)
+win.follow_input_point(inside)
+assert win._load_ref_layer.called, "tile covering the point was not loaded"
+# The view must be set from an explicit ground rectangle. setCenter + zoomScale
+# is what left the canvas at the origin: a scale silently does nothing on a
+# canvas that has not been laid out, and a click then read as (-456, -244).
+assert win.canvas_right.setExtent.called, "reference view never got an extent"
+rect = win.canvas_right.setExtent.call_args[0][0]
+cx = (rect.xMinimum() + rect.xMaximum()) / 2.0
+cy = (rect.yMinimum() + rect.yMaximum()) / 2.0
+assert (cx, cy) == (325000.0, 1900000.0), (cx, cy)
+assert rect.xMaximum() - rect.xMinimum() == R.REF_VIEW_WIDTH_M, rect
+# 2:1 canvas -> half the ground height, so the aspect is honoured
+assert rect.yMaximum() - rect.yMinimum() == R.REF_VIEW_WIDTH_M / 2.0, rect
+assert win.draw_marker.called, "reference canvas was not marked"
+print("follow_input_point: loaded tile, extent", rect, "centred on", (cx, cy),
+      ", marked")
+
+# and the marker sits at the pick, in the canvas's CRS
+marked = win.draw_marker.call_args[0][0]
+assert (marked.x(), marked.y()) == (325000.0, 1900000.0), marked
+
+# ── 7. the extent handed to the canvas is in the canvas's CRS ────────────────
+wgs_layer = MagicMock()
+wgs_layer.crs.return_value = _CRS("EPSG:4326")
+wgs_layer.extent.return_value = _Rect(78.0, 17.0, 79.0, 18.0)
+transformed = _Rect(300000.0, 1880000.0, 400000.0, 1990000.0)
+R.QgsCoordinateTransform = MagicMock(
+    return_value=MagicMock(transformBoundingBox=MagicMock(return_value=transformed)))
+got = win._extent_in_ref_canvas(wgs_layer)
+assert got is transformed, "WGS84 extent handed to a UTM canvas unconverted"
+print("extent of a WGS84 layer converted for the UTM canvas")
+
+same = MagicMock()
+same.crs.return_value = win.proj_crs
+same.extent.return_value = _Rect(1, 2, 3, 4)
+assert win._extent_in_ref_canvas(same) is same.extent.return_value, \
+    "same-CRS extent should not be transformed"
+print("same-CRS extent passed through untouched")
+
+# ── 7b. a footprint outside the working CRS is dropped, not fatal ────────────
+# Reported from the field on QGIS 3.44: a global L8 index carried a tile at
+# 167.37E, UTM 44N refused it with "Point outside of projection domain", and
+# the QgsCsException aborted the whole folder load -- taking the dozen tiles
+# that DID overlap with it. A tile that cannot be put on the scene's grid is
+# not comparable with the scene; that is a tile to skip, not a folder to fail.
+class _DomainLimitedTransform:
+    """Refuses points far from a central meridian, as PROJ does for UTM."""
+
+    def __init__(self, central_lon, span=40.0):
+        self.central_lon, self.span = central_lon, span
+
+    def transform(self, pt):
+        lon = pt.x()
+        if abs(lon - self.central_lon) > self.span:
+            raise RuntimeError(
+                f"Forward transform of ({lon:.6f}, {pt.y():.6f}) "
+                f"Error: Point outside of projection domain")
+        return R.QgsPointXY((lon - self.central_lon) * 100000.0, pt.y() * 100.0)
+
+
+near = [(78.0, 17.0), (79.0, 17.0), (79.0, 18.0), (78.0, 18.0)]
+far  = [(167.370334, 6.828540), (168.0, 6.8), (168.0, 7.4), (167.4, 7.4)]
+win.ref_footprints = {
+    "/ref/near_a.tif": {"ring": near, "band": "UNK"},
+    "/ref/far_pacific.tif": {"ring": far, "band": "UNK"},
+    "/ref/near_b.tif": {"ring": near, "band": "UNK"},
+}
+win.transform_wgs_to_proj = _DomainLimitedTransform(81.0)
+win.proj_crs = _CRS("EPSG:32644")
+
+win._reproject_footprints()          # must not raise
+
+assert len(win.ref_footprints["/ref/near_a.tif"]["ring_proj"]) == 4, \
+    "an in-domain footprint should still be projected"
+assert win.ref_footprints["/ref/far_pacific.tif"]["ring_proj"] == [], \
+    "an out-of-domain footprint should be dropped to an empty ring"
+assert len(win.ref_footprints["/ref/near_b.tif"]["ring_proj"]) == 4, \
+    "a footprint after the failing one must still be projected"
+print("out-of-domain footprint dropped; the usable ones survive the same pass")
+
+# and the consumers already treat an empty ring_proj as 'not placed'
+win.ref_tif_list = list(win.ref_footprints)
+_real_ring_wkt = R.ring_wkt      # section 16 needs the real one back
+R.ring_wkt = lambda ring: None if not ring else "POLYGON((0 0,1 0,1 1,0 0))"
+R.QgsGeometry = MagicMock()
+R.QgsGeometry.fromWkt.return_value.contains.return_value = False
+win.reference_for_point(R.QgsPointXY(0.0, 0.0))   # must not raise on the empty
+print("an empty ring_proj is skipped by the point lookup rather than crashing")
+
+# ── 8. the wgs84 fallback converts picks instead of pixels ───────────────────
+R.REF_CANVAS_CRS = "wgs84"
+win.transform_proj_to_wgs = MagicMock(
+    transform=MagicMock(return_value=R.QgsPointXY(78.5, 17.2)))
+win.transform_wgs_to_proj = MagicMock(
+    transform=MagicMock(return_value=R.QgsPointXY(325000.0, 1900000.0)))
+assert win._ref_canvas_crs() is win.wgs84_crs
+out = win._to_ref_canvas(inside)
+assert win.transform_proj_to_wgs.transform.called, "no conversion under wgs84 mode"
+back = win._from_ref_canvas(out)
+assert win.transform_wgs_to_proj.transform.called
+# the view rectangle is built in metres and then converted, so it is the same
+# patch of ground either way
+win.transform_proj_to_wgs.transformBoundingBox = MagicMock(
+    return_value=_Rect(78.49, 17.19, 78.51, 17.21))
+wgs_rect = win._ref_view_rect(inside)
+assert win.transform_proj_to_wgs.transformBoundingBox.called, \
+    "metric view rect handed to a WGS84 canvas unconverted"
+metric = win.transform_proj_to_wgs.transformBoundingBox.call_args[0][0]
+assert metric.xMaximum() - metric.xMinimum() == R.REF_VIEW_WIDTH_M, metric
+print("REF_CANVAS_CRS='wgs84': canvas is WGS84, picks convert both ways, "
+      "view rect converted", metric, "->", wgs_rect)
+R.REF_CANVAS_CRS = "working"
+
+# ── 9. every map tool applies to BOTH canvases ───────────────────────────────
+# Real checkable buttons: the mock would report every button as checked at once,
+# so an exclusive row could not be told apart from a broken one.
+class _Button:
+    def __init__(self): self._on = False
+    def setCheckable(self, _): pass
+    def setToolTip(self, _): pass
+    def setChecked(self, v):
+        if v:
+            for b in win.tool_buttons.values():
+                b._on = False
+        self._on = bool(v)
+    def isChecked(self): return self._on
+
+win.tool_buttons = {m: _Button() for m in R.MAP_TOOLS}
+win.tool_buttons[R.TOOL_MARK].setChecked(True)
+win.init_map_tools()
+
+def tools():
+    return (win.canvas_left.setMapTool.call_args[0][0],
+            win.canvas_right.setMapTool.call_args[0][0])
+
+for mode in R.MAP_TOOLS:
+    win.set_map_tool(mode)
+    assert tools() == win.map_tools[mode], f"{mode} not applied to both canvases"
+    checked = [m for m, b in win.tool_buttons.items() if b.isChecked()]
+    assert checked == [mode], f"tool row not exclusive: {checked}"
+print("\nall four tools apply to both canvases, one selected at a time:",
+      ", ".join(R.MAP_TOOLS))
+
+# four distinct tool objects per canvas, and zoom-out really is the out variant
+per_canvas = [win.map_tools[m][0] for m in R.MAP_TOOLS]
+assert len(set(map(id, per_canvas))) == 4, "map tools are not distinct"
+assert win.map_tools[R.TOOL_PAN][0]._tool == "pan"
+zoom_in  = win.map_tools[R.TOOL_ZOOM_IN][0]
+zoom_out = win.map_tools[R.TOOL_ZOOM_OUT][0]
+assert zoom_in._tool == zoom_out._tool == "zoom"
+assert zoom_in._args[1] is False, zoom_in._args
+assert zoom_out._args[1] is True, zoom_out._args
+print("zoom in/out built as the in and out variants, one per canvas")
+
+# marking still routes to the DragMapTool the measuring paths reach by name
+win.set_map_tool(R.TOOL_MARK)
+assert tools() == (win.tool_left, win.tool_right), "marking not restored"
+
+# ── 9b. with Sync Maps on, the reference follows the input's scale ────────────
+win.cb_sync.isChecked = MagicMock(return_value=True)
+win.canvas_left.extent = MagicMock(return_value=_Rect(320000, 1898000,
+                                                      330000, 1902000))
+rect = win._ref_view_rect(_PointXY(325000.0, 1900000.0))
+assert rect.xMaximum() - rect.xMinimum() == 10000.0, rect
+print("zoomed input (10 km wide) -> reference view matches:", rect)
+
+# unsynced, it falls back to the fixed reference width
+win.cb_sync.isChecked = MagicMock(return_value=False)
+rect = win._ref_view_rect(_PointXY(325000.0, 1900000.0))
+assert rect.xMaximum() - rect.xMinimum() == R.REF_VIEW_WIDTH_M, rect
+print("sync off -> reference view back to REF_VIEW_WIDTH_M:", rect)
+
+# a degenerate extent must not produce a zero-width view
+win.cb_sync.isChecked = MagicMock(return_value=True)
+win.canvas_left.extent = MagicMock(return_value=_Rect(0, 0, 0, 0))
+rect = win._ref_view_rect(_PointXY(325000.0, 1900000.0))
+assert rect.xMaximum() - rect.xMinimum() == R.REF_VIEW_WIDTH_M, rect
+print("degenerate input extent -> falls back, not a zero-width view")
+win.cb_sync.isChecked = MagicMock(return_value=False)
+
+# ── 9c. panning the input swaps the reference TILE, not just the view ────────
+# Reported from use: "syncing happens only when I mark point". The centre did
+# follow every pan -- but the tile under it never changed, so panning off the
+# loaded tile showed empty ground and the reference only caught up at the one
+# moment it was already right.
+# section 7b replaced the footprint set, so re-establish the one tile
+R.REF_CANVAS_CRS = "working"
+win.proj_crs = _CRS("EPSG:32644")
+win._rebuild_transforms()
+win.ref_footprints = {tile: {
+    "ring": [(78.0, 18.0), (79.0, 18.0), (79.0, 17.0), (78.0, 17.0)],
+    "ring_proj": [(324000.0, 1901000.0), (326000.0, 1901000.0),
+                  (326000.0, 1899000.0), (324000.0, 1899000.0)],
+    "band": "UNK", "crs": None, "granule": None, "source": "tile-name (1 deg)"}}
+win.ref_tif_list = [tile]
+R.QgsGeometry.fromWkt = _fake_geom
+R.QgsGeometry.fromPointXY = lambda pt: type("G", (), {"_inside": pt is inside})()
+
+win.cb_sync.isChecked = MagicMock(return_value=True)
+win.canvas_left.extent = MagicMock(return_value=_Rect(324000, 1899000,
+                                                      326000, 1901000))
+win.canvas_left.center = MagicMock(return_value=inside)
+win.current_ref_layer = None
+win._load_ref_layer = MagicMock(return_value=MagicMock())
+win.canvas_right.setExtent.reset_mock()
+win._sync_tile_timer = MagicMock()
+
+win.sync_canvas_extents()
+# the view moves at once -- that is cheap
+assert win.canvas_right.setExtent.called, "reference view did not follow the pan"
+# the tile swap waits for the view to settle: walking the footprint list on
+# every mouse-move of a drag is what froze this tool once already
+assert win._sync_tile_timer.start.called, "tile swap not scheduled"
+assert win._sync_tile_timer.start.call_args[0][0] == R.SYNC_TILE_DEBOUNCE_MS
+
+win.canvas_right.setExtent.reset_mock()
+win._sync_reference_tile()
+assert win._load_ref_layer.called, "panned onto a new tile and it was not loaded"
+assert win._load_ref_layer.call_args[0][0] == tile
+rect = win.canvas_right.setExtent.call_args[0][0]
+cx = (rect.xMinimum() + rect.xMaximum()) / 2.0
+assert cx == 325000.0, cx
+print("\npanning the input loads the tile under the new centre and re-centres "
+      "the reference on it")
+
+# a settle that lands on the tile already showing must not reload it
+shown = MagicMock()
+shown.isValid.return_value = True
+shown.source.return_value = tile
+win.current_ref_layer = shown
+win._load_ref_layer.reset_mock()
+win._sync_reference_tile()
+assert not win._load_ref_layer.called, "reloaded the tile already on screen"
+print("a pan within the same tile re-centres without reloading it")
+
+# with sync off, panning does neither
+win.cb_sync.isChecked = MagicMock(return_value=False)
+win.canvas_right.setExtent.reset_mock()
+win._sync_tile_timer.start.reset_mock()
+win.sync_canvas_extents()
+win._sync_reference_tile()
+assert not win.canvas_right.setExtent.called and not win._sync_tile_timer.start.called
+print("sync off -> panning the input leaves the reference alone")
+win.current_ref_layer = None
+
+# ── 10. the input R/G/B picker ───────────────────────────────────────────────
+class _Provider:
+    def __init__(self, n): self._n = n
+    def bandCount(self): return self._n
+    def dataType(self, band): return 6
+    def cumulativeCut(self, band, lo, hi): return (0.1 * band, 10.0 * band)
+    def bandStatistics(self, band):
+        return MagicMock(minimumValue=0.0, maximumValue=1.0)
+
+
+def fake_layer(n, names=None):
+    lyr = MagicMock()
+    lyr.isValid.return_value = True
+    lyr.dataProvider.return_value = _Provider(n)
+    lyr.bandName.side_effect = (lambda b: names[b - 1]) if names else \
+        (lambda b: f"Band {b:03d}")
+    return lyr
+
+# names the raster carries are used; QGIS's synthetic 'Band 001' is not
+pol = fake_layer(3, ["HH", "HV", "HH/HV"])
+assert win._band_labels(pol) == ["1: HH", "2: HV", "3: HH/HV"], win._band_labels(pol)
+assert win._band_labels(fake_layer(2)) == ["Band 1", "Band 2"]
+print("band labels from the raster:", win._band_labels(pol))
+
+captured = []
+R.QgsMultiBandColorRenderer = lambda p, r, g, b: (
+    captured.append(("rgb", r, g, b)) or MagicMock())
+R.QgsSingleBandGrayRenderer = lambda p, b: (
+    captured.append(("grey", b)) or MagicMock())
+
+# a real combo stand-in: the mock would report one shared current index
+class _Combo:
+    def __init__(self): self._items, self._idx, self._visible = [], -1, True
+    def blockSignals(self, _): pass
+    def clear(self): self._items, self._idx = [], -1
+    def addItem(self, t): self._items.append(t)
+    def count(self): return len(self._items)
+    def setCurrentIndex(self, i): self._idx = i
+    def setVisible(self, v): self._visible = bool(v)
+    def currentIndex(self): return self._idx
+    def currentText(self): return self._items[self._idx] if self._idx >= 0 else ""
+
+win.norm_bounds = {"input": {}, "ref": {}}
+
+# NISAR carries two bands; every slot offers both and the default is 1,1,1
+dual = fake_layer(2, ["HH", "HV"])
+win.band_combos = [_Combo(), _Combo(), _Combo()]
+win.input_tif_layer = dual
+win.band_container.show.reset_mock()
+win.populate_band_picker(dual)
+assert [c._items for c in win.band_combos] == [["1: HH", "2: HV"]] * 3, \
+    "each slot should offer every band"
+assert [c.currentIndex() for c in win.band_combos] == [0, 0, 0], "default is not 1,1,1"
+assert captured[-1] == ("rgb", 1, 1, 1), captured
+assert win.band_container.show.called, "picker hidden for a 2-band raster"
+print("2-band input -> every slot lists both, default", captured[-1])
+
+# any band in any slot, repeats allowed
+win.band_combos[1].setCurrentIndex(1)
+win.apply_input_bands()
+assert captured[-1] == ("rgb", 1, 2, 1), captured
+print("HH/HV/HH selected ->", captured[-1])
+
+# a 3-band chip works the same way
+win.input_tif_layer = pol
+win.band_combos = [_Combo(), _Combo(), _Combo()]
+win.populate_band_picker(pol)
+assert [c._items for c in win.band_combos] == [["1: HH", "2: HV", "3: HH/HV"]] * 3
+assert captured[-1] == ("rgb", 1, 1, 1), captured
+for combo, idx in zip(win.band_combos, (0, 1, 2)):
+    combo.setCurrentIndex(idx)
+win.apply_input_bands()
+assert captured[-1] == ("rgb", 1, 2, 3), captured
+print("3-band input -> composite", captured[-1])
+
+# single band: nothing to choose between, so no picker, still rendered
+single = fake_layer(1, ["HH"])
+win.input_tif_layer = single
+win.band_container.show.reset_mock()
+win.populate_band_picker(single)
+# the combos go, but the overlay stays: Normalize acts on any raster and has to
+# stay reachable even when there is nothing to compose
+assert not any(c._visible for c in win.band_combos), "combos shown for one band"
+assert win.band_container.show.called, "overlay hidden, taking Normalize with it"
+assert captured[-1] == ("grey", 1), captured
+print("1-band input -> combos hidden, overlay kept, rendered", captured[-1])
+
+# ── 11. Normalize pins a stretch, and panning does not disturb it ────────────
+win.input_tif_layer = dual
+win.band_combos = [_Combo(), _Combo(), _Combo()]
+win.norm_bounds = {"input": {}, "ref": {}}
+win.populate_band_picker(dual)
+
+# with nothing pinned, the band goes through the percentile clip
+before = len(captured)
+win.apply_input_bands()
+assert captured[-1][0] == "rgb", captured[-1]
+
+# pinning band 1 makes _stretch_for return those bounds verbatim
+win.norm_bounds["input"][1] = (0.167, 0.5715)
+ce = win._stretch_for(dual, 1)
+assert ce.setMinimumValue.call_args[0][0] == 0.167, ce.setMinimumValue.call_args
+assert ce.setMaximumValue.call_args[0][0] == 0.5715, ce.setMaximumValue.call_args
+print("\nNormalize pins band 1 at", win.norm_bounds["input"][1],
+      "and _stretch_for returns it verbatim")
+
+# an unpinned band still falls through to the percentile clip
+measured = []
+_orig_cut = win.sampled_cut
+win.sampled_cut = lambda p, b, lo, hi, ext=None: (
+    measured.append(b) or (0.1, 0.9))
+win._stretch_cache = {}
+win._stretch_for(dual, 2)
+assert measured == [2], measured
+win._stretch_for(dual, 1)          # pinned: must not measure again
+assert measured == [2], measured
+win.sampled_cut = _orig_cut
+print("unpinned bands measure; a pinned band never re-measures")
+
+# ── 11b. stretch statistics are sampled and cached ───────────────────────────
+# An unsampled cumulativeCut reads the WHOLE raster at full resolution, per
+# band, on the GUI thread -- the regression that froze QGIS for minutes on load.
+calls = {"cut": [], "stats": []}
+
+class _BigProvider:
+    def bandCount(self): return 2
+    def dataType(self, band): return 6
+    def cumulativeCut(self, band, lo, hi, extent=None, sample=None):
+        calls["cut"].append((band, sample))
+        if sample is None:                     # the unsampled overload
+            raise AssertionError("unsampled cumulativeCut would scan everything")
+        return (0.1, 10.0)
+    def bandStatistics(self, band, stats=None, extent=None, sample=None):
+        calls["stats"].append((band, sample))
+        return MagicMock(minimumValue=0.0, maximumValue=1.0)
+
+big = MagicMock()
+big.isValid.return_value = True
+big.source.return_value = "/big/scene.tif"
+big.dataProvider.return_value = _BigProvider()
+big.bandName.side_effect = lambda b: ["HH", "HV"][b - 1]
+
+win.cb_normalize_input.isChecked = MagicMock(return_value=False)
+win.band_combos = [_Combo(), _Combo(), _Combo()]
+win.input_tif_layer = big
+win._stretch_cache = {}
+win.populate_band_picker(big)
+
+assert calls["cut"], "no stretch computed"
+assert all(sample == R.RASTER_SAMPLE_SIZE for _, sample in calls["cut"]), calls
+print("\nstretch sampled at", R.RASTER_SAMPLE_SIZE, "px, not the whole raster")
+
+# default is 1,1,1 -- three channels on one band must not cost three passes
+assert len(calls["cut"]) == 1, calls["cut"]
+print("R=G=B=1 -> one statistics pass, not three:", calls["cut"])
+
+# re-picking the channel order reuses the cache
+before = len(calls["cut"])
+win.band_combos[1].setCurrentIndex(1)
+win.apply_input_bands()
+assert [b for b, _ in calls["cut"]] == [1, 2], calls["cut"]
+win.band_combos[1].setCurrentIndex(0)
+win.apply_input_bands()
+assert len(calls["cut"]) == before + 1, "re-picking recomputed a cached band"
+print("re-picking a band reuses the cache:", calls["cut"])
+
+# Normalize now measures the CURRENT VIEW and pins the result, so it is an
+# action rather than a mode: nothing about it is cached by _stretch_for.
+win.canvas_left.extent = MagicMock(return_value=_Rect(324000, 1899000,
+                                                      326000, 1901000))
+win.clip_combos = {"input": MagicMock(currentData=lambda: 2.0),
+                   "ref": MagicMock(currentData=lambda: 2.0)}
+win.view_extent_for = MagicMock(return_value=_Rect(324000, 1899000,
+                                                   326000, 1901000))
+win.pixel_window = MagicMock(return_value=(10, 20, 400, 400))
+win._gamma_bounds = MagicMock(return_value=(0.2, 0.5))
+win.norm_bounds = {"input": {}, "ref": {}}
+win.input_tif_layer = big
+win.band_combos = [_Combo(), _Combo(), _Combo()]
+win.populate_band_picker(big)
+win.normalize_to_view("input")
+
+assert win._gamma_bounds.called, "Normalize did not reach the gamma bounds"
+args = win._gamma_bounds.call_args[0]
+assert args[4] == (10, 20, 400, 400), args      # the view's pixel window
+assert args[5] == 2.0, args                     # the chosen clip percentage
+assert win.norm_bounds["input"][1] == (0.2, 0.5), win.norm_bounds
+print("Normalize measures the view window", args[4], "at clip", args[5],
+      "and pins", win.norm_bounds["input"][1])
+
+# panning must not disturb it: the pinned bounds survive a re-render
+win.canvas_left.extent = MagicMock(return_value=_Rect(400000, 1899000,
+                                                      402000, 1901000))
+win._gamma_bounds.reset_mock()
+win.apply_input_bands()
+assert not win._gamma_bounds.called, "re-render re-measured after a pan"
+assert win.norm_bounds["input"][1] == (0.2, 0.5), win.norm_bounds
+print("panning does not re-stretch; the pinned bounds survive")
+
+# the clip percentage reaches the measurement
+win.clip_combos["input"] = MagicMock(currentData=lambda: 5.0)
+assert win.clip_percent("input") == 5.0
+win.clip_combos["input"] = MagicMock(currentData=lambda: None,
+                                     currentText=lambda: "1%")
+assert win.clip_percent("input") == 1.0      # falls back to the label
+print("clip percentage read from the tool, label as fallback")
+
+# loading a raster drops only that raster's cached bounds
+win.clear_stretch_cache("/big/scene.tif")
+assert not any(k[0] == "/big/scene.tif" for k in win._stretch_cache)
+print("loading a raster clears its own cached bounds")
+
+# ── 11c. the mark is a solid cross in a contrasting colour ───────────────────
+made = []
+R.QgsVertexMarker = MagicMock(side_effect=lambda canvas: (
+    made.append(MagicMock()) or made[-1]))
+R.QColor = lambda *rgb: ("color", rgb)
+
+# section 6 replaced draw_marker with a mock to check follow_input_point; put
+# the real method back so this exercises the shipped drawing code
+win.draw_marker = R.QCDashboard.draw_marker.__get__(win, R.QCDashboard)
+win.markers = {"left": [], "right": []}
+win.canvas_left.scene.return_value = MagicMock()
+win.draw_marker(_PointXY(325000.0, 1900000.0), win.canvas_left,
+                R.MARKER_COLOR_INPUT)
+
+items = win.markers["left"]
+assert len(items) == 1, items          # one solid cross, no halo behind it
+assert items[0].setColor.call_args[0][0] == ("color", R.MARKER_COLOR_INPUT)
+
+# The input is shown as a red/cyan composite and the reference as greyscale, so
+# a red, green or grey mark disappears into one of them.
+for name, rgb in (("input", R.MARKER_COLOR_INPUT), ("ref", R.MARKER_COLOR_REF)):
+    r, g, b = rgb
+    assert not (r == g == b), f"{name} mark is a grey"
+    assert rgb not in ((255, 0, 0), (0, 255, 0)), f"{name} mark is red or green"
+assert R.MARKER_COLOR_INPUT != R.MARKER_COLOR_REF, "both marks the same colour"
+print("\nsolid single cross, input %s / ref %s, neither red, green nor grey"
+      % (R.MARKER_COLOR_INPUT, R.MARKER_COLOR_REF))
+
+# re-marking takes the old item off the scene
+scene = win.canvas_left.scene.return_value
+scene.removeItem.reset_mock()
+win.draw_marker(_PointXY(325010.0, 1900000.0), win.canvas_left,
+                R.MARKER_COLOR_INPUT)
+removed = [c[0][0] for c in scene.removeItem.call_args_list]
+assert removed == [items[0]], removed
+print("re-marking removes the previous cross, leaving no orphan")
+
+# clear_markers empties both canvases
+win.canvas_right.scene.return_value = MagicMock()
+win.draw_marker(_PointXY(325000.0, 1900000.0), win.canvas_right,
+                R.MARKER_COLOR_REF)
+win.clear_markers()
+assert win.markers["left"] == [] and win.markers["right"] == [], win.markers
+print("clear_markers empties both canvases")
+
+# ── 12. arrow keys nudge the mark, not the view ──────────────────────────────
+class _Table:
+    """Enough QTableWidget for the nudge path, with real cell values."""
+    def __init__(self, row, cells):
+        self._row, self._cells = row, dict(cells)
+    def currentRow(self): return self._row
+    def item(self, row, col):
+        v = self._cells.get((row, col))
+        return None if v is None else MagicMock(text=lambda v=v: v)
+    def setItem(self, row, col, item): self._cells[(row, col)] = str(item)
+    def blockSignals(self, _): pass
+    def rowCount(self): return 1
+
+def utm_layer(px, py):
+    lyr = MagicMock()
+    lyr.isValid.return_value = True
+    lyr.crs.return_value = win.proj_crs
+    lyr.rasterUnitsPerPixelX.return_value = px
+    lyr.rasterUnitsPerPixelY.return_value = py
+    return lyr
+
+win.proj_crs = _CRS("EPSG:32644")
+win._rebuild_transforms()
+win.input_tif_layer = utm_layer(5.0, 5.0)      # NISAR posts at 5 m
+win.current_ref_layer = None
+win.draw_marker = MagicMock()
+win.calculate_error = MagicMock()
+win.canvas_left.setExtent.reset_mock()
+win.canvas_left.setCenter.reset_mock()
+
+# In X/Y marked at (325000, 1900000); one press of Right
+win.table = _Table(0, {(0, 0): "325000.000", (0, 1): "1900000.000",
+                       (0, 2): "0.000", (0, 3): "0.000"})
+assert win.nudge_point(True, 1, 0) is True
+assert win.table._cells[(0, 0)] == "325005.000", win.table._cells
+assert win.table._cells[(0, 1)] == "1900000.000", win.table._cells
+print("\nRight arrow -> In X moves one 5 m pixel east:",
+      win.table._cells[(0, 0)])
+
+# Up is north (+Y), and Shift multiplies the step
+assert win.nudge_point(True, 0, 1) is True
+assert win.table._cells[(0, 1)] == "1900005.000", win.table._cells
+assert win.nudge_point(True, 0, -R.NUDGE_SHIFT_FACTOR) is True
+assert win.table._cells[(0, 1)] == "1899955.000", win.table._cells
+print("Up = north, Shift steps", R.NUDGE_SHIFT_FACTOR, "pixels:",
+      win.table._cells[(0, 1)])
+
+# the error is recomputed and the marker redrawn -- but the view is untouched
+assert win.calculate_error.called and win.draw_marker.called
+assert not win.canvas_left.setExtent.called, "nudging moved the view"
+assert not win.canvas_left.setCenter.called, "nudging moved the view"
+print("marker and error updated, view untouched")
+
+# nothing marked on that side yet -> not handled, so the canvas still pans
+assert win.nudge_point(False, 1, 0) is False, "nudged an unmarked Ref"
+win.table = _Table(0, {(0, 0): "0.000", (0, 1): "0.000"})
+assert win.nudge_point(True, 1, 0) is False, "nudged an unmarked In"
+win.table = _Table(-1, {})
+assert win.nudge_point(True, 1, 0) is False, "nudged with no row selected"
+print("unmarked side / no row -> not handled, canvas keeps the key")
+
+# a WGS84 reference tile: its pixel is degrees, so the step is measured through
+# the transform rather than added to a UTM coordinate as if it were metres
+wgs = MagicMock()
+wgs.isValid.return_value = True
+wgs.crs.return_value = _CRS("EPSG:4326")
+wgs.rasterUnitsPerPixelX.return_value = 2.5e-5     # ~2.8 m at this latitude
+wgs.rasterUnitsPerPixelY.return_value = 2.5e-5
+win.current_ref_layer = wgs
+R.QgsCoordinateTransform = MagicMock(side_effect=lambda src, dst, prj: MagicMock(
+    transform=lambda p: _PointXY(p.x() + 1.0, p.y() + 2.0)))
+step = win._pixel_step(False, _PointXY(325000.0, 1900000.0))
+assert step is not None and step[0] > 0 and step[1] > 0, step
+print("WGS84 reference pixel measured through the transform:",
+      tuple(round(v, 3) for v in step))
+
+# ── 12a. the normalize range is read from the raster, per band ───────────────
+# Reported from a real L-band chip: band 1 reads 0.158..0.580 and band 2
+# 0.07..0.27 -- linear amplitude, a third scale after dB and DN. No hard-coded
+# range fits all three, so it has to come from the raster.
+class _AmpProvider:
+    """A two-band amplitude raster with the reported ranges."""
+    RANGES = {1: (0.158, 0.580), 2: (0.07, 0.27)}
+    def __init__(self): self.cut_calls = []
+    def bandCount(self): return 2
+    def dataType(self, band): return 6
+    def cumulativeCut(self, band, lo, hi, extent=None, sample=None):
+        self.cut_calls.append((band, lo, hi, sample))
+        if sample is None:
+            raise AssertionError("unsampled cumulativeCut")
+        return self.RANGES[band] if (lo, hi) == (0.0, 1.0) else (0.2, 0.5)
+    def bandStatistics(self, band, stats=None, extent=None, sample=None):
+        lo, hi = self.RANGES[band]
+        return MagicMock(minimumValue=lo, maximumValue=hi)
+
+amp = _AmpProvider()
+assert win.normalize_range(amp, 1) == (0.158, 0.580), win.normalize_range(amp, 1)
+assert win.normalize_range(amp, 2) == (0.07, 0.27), win.normalize_range(amp, 2)
+print("\nnormalize range read from the raster per band:",
+      win.normalize_range(amp, 1), win.normalize_range(amp, 2))
+
+# full min/max, not a percentile clip -- the percentiles are taken later on the
+# stretched values and clipping twice would compound
+assert all(args[1:3] == (0.0, 1.0) for args in amp.cut_calls), amp.cut_calls
+assert all(args[3] == R.RASTER_SAMPLE_SIZE for args in amp.cut_calls), amp.cut_calls
+
+# a provider that cannot be measured falls back rather than failing
+class _Unmeasurable:
+    def cumulativeCut(self, *a, **k): raise RuntimeError("no histogram")
+    def bandStatistics(self, *a, **k): raise RuntimeError("no stats")
+assert win.normalize_range(_Unmeasurable(), 1) == (float(R.NORM_MIN),
+                                                   float(R.NORM_MAX))
+print("unmeasurable raster falls back to NORM_MIN..NORM_MAX:",
+      win.normalize_range(_Unmeasurable(), 1))
+
+# and the flag turns the whole thing off without touching anything else
+R.NORM_USE_DATA_RANGE = False
+assert win.normalize_range(amp, 1) == (float(R.NORM_MIN), float(R.NORM_MAX))
+R.NORM_USE_DATA_RANGE = True
+print("NORM_USE_DATA_RANGE=False restores the fixed range")
+
+# ── 12b. the gamma stretch on dB data, and on data carrying NaN ──────────────
+# Reported: 'Normalize NISAR' renders the input black while the reference
+# normalises fine. Two independent causes, both exercised here against real
+# numpy arrays through a stubbed GDAL.
+import numpy as np
+
+def fake_gdal(array, nodata=None):
+    band = MagicMock()
+    band.XSize, band.YSize = array.shape[1], array.shape[0]
+    band.ReadAsArray = MagicMock(return_value=array)
+    band.GetNoDataValue = MagicMock(return_value=nodata)
+    ds = MagicMock()
+    ds.GetRasterBand = MagicMock(return_value=band)
+    osgeo = types.ModuleType("osgeo")
+    gdal = types.ModuleType("osgeo.gdal")
+    gdal.GA_ReadOnly = 0
+    gdal.Open = MagicMock(return_value=ds)
+    osgeo.gdal = gdal
+    sys.modules["osgeo"], sys.modules["osgeo.gdal"] = osgeo, gdal
+
+# section 11 replaced _gamma_bounds with a mock to check the Normalize routing;
+# put the real method back so this exercises the shipped arithmetic
+win._gamma_bounds = R.QCDashboard._gamma_bounds.__get__(win, R.QCDashboard)
+
+rng = np.random.default_rng(0)
+
+# (1) an S-band-like DN scene over the reference's own 0-1500 range: unchanged
+dn = rng.uniform(20.0, 900.0, size=(64, 64))
+fake_gdal(dn)
+lo, hi = win._gamma_bounds("/ref.tif", 1)
+assert lo is not None and hi > lo, (lo, hi)
+assert R.NORM_MIN <= lo < hi <= R.NORM_MAX, (lo, hi)
+print("\nreference DN scene over NORM_MIN..NORM_MAX: bounds",
+      (round(lo, 1), round(hi, 1)), "-- behaviour unchanged")
+
+# (2) a NISAR chip in float32 dB. Forcing the reference's 0-1500 range clips
+# every pixel to the very bottom of the curve, which is what rendered black.
+db = rng.uniform(-28.0, 2.0, size=(64, 64))
+span = float(db.max() - db.min())
+fake_gdal(db)
+
+# It does not fail loudly -- it returns a technically valid range that covers
+# almost none of the data, so nearly every pixel clamps to black. That is the
+# reported symptom, pinned here so the fix cannot silently regress.
+forced = win._gamma_bounds("/in.tif", 1)
+forced_span = forced[1] - forced[0]
+assert forced_span / span < 0.10, (forced, span)
+print("dB scene forced through 0-1500 -> stretch covers only "
+      f"{100 * forced_span / span:.1f}% of the data: that is the black render")
+
+# over its own range it produces a usable stretch inside the data
+own = win._gamma_bounds("/in.tif", 1, float(db.min()), float(db.max()))
+assert own[0] is not None and own[1] > own[0], own
+assert db.min() <= own[0] < own[1] <= db.max(), own
+own_span = own[1] - own[0]
+assert own_span / span > 0.5, (own, span)
+print("dB scene over its own range -> covers "
+      f"{100 * own_span / span:.1f}% of the data:",
+      tuple(round(v, 2) for v in own))
+
+# (3) NaN nodata, which --gtiff writes. NaN != NaN, so a nodata test alone lets
+# every NaN through and one NaN makes every percentile NaN.
+holed = db.copy()
+holed[:8, :8] = np.nan
+fake_gdal(holed, nodata=float("nan"))
+with_nan = win._gamma_bounds("/in.tif", 1, float(db.min()), float(db.max()))
+assert with_nan[0] is not None and np.isfinite(with_nan[0]), with_nan
+assert abs(with_nan[0] - own[0]) < 1.0 and abs(with_nan[1] - own[1]) < 1.0, \
+    (with_nan, own)
+print("NaN nodata excluded -> bounds still finite and close to the clean scene:",
+      tuple(round(v, 2) for v in with_nan))
+
+# all-NaN is refused rather than returning nonsense
+fake_gdal(np.full((32, 32), np.nan))
+assert win._gamma_bounds("/in.tif", 1, -30.0, 5.0) == (None, None)
+# a degenerate range is refused too
+fake_gdal(db)
+assert win._gamma_bounds("/in.tif", 1, 5.0, 5.0) == (None, None)
+print("all-NaN and degenerate ranges refused, so the caller falls back")
+
+# ── 13. shapefile export collects only fully marked rows ─────────────────────
+class _Rows:
+    def __init__(self, rows): self._rows = rows
+    def rowCount(self): return len(self._rows)
+    def item(self, row, col):
+        v = self._rows[row][col]
+        return None if v is None else MagicMock(text=lambda v=v: v)
+
+win.transform_proj_to_wgs = MagicMock(
+    transform=MagicMock(return_value=_PointXY(78.5, 17.2)))
+win.table = _Rows([
+    ["325010.000", "1900007.000", "325000.000", "1900000.000"],   # complete
+    ["0.000", "0.000", "325000.000", "1900000.000"],              # no input
+    ["325010.000", "1900007.000", "0.000", "0.000"],              # no reference
+    ["325020.000", "1900000.000", "325000.000", "1900000.000"],   # complete
+    [None, None, None, None],                                     # empty row
+])
+rows = win.export_rows()
+assert [r["row"] for r in rows] == [1, 4], [r["row"] for r in rows]
+print("\nexport skips half-marked and empty rows, keeping table numbering:",
+      [r["row"] for r in rows])
+assert rows[0]["dx"] == 10.0 and rows[0]["dy"] == 7.0, rows[0]
+assert rows[1]["dx"] == 20.0 and rows[1]["dy"] == 0.0, rows[1]
+assert rows[1]["bearing"] == 90.0, rows[1]        # due east
+print("errors and bearings carried through:",
+      [(r["dx"], r["dy"], r["bearing"]) for r in rows])
+
+# a row is skipped rather than exported as an offset from the origin
+assert all(r["ref_x"] != 0.0 for r in rows), rows
+
+# lon/lat come from the working-CRS transform, not from the map units
+assert rows[0]["in_lon"] == 78.5 and rows[0]["in_lat"] == 17.2, rows[0]
+print("lon/lat filled from the transform, for quiver.py's columns")
+
+# nothing marked at all -> the writer is never reached
+win.table = _Rows([["0.000", "0.000", "0.000", "0.000"]])
+assert win.export_rows() == []
+qw.QFileDialog.getSaveFileName = MagicMock(return_value=("/tmp/should_not.shp", ""))
+del warned[:]
+win.save_shapefile()
+assert not qw.QFileDialog.getSaveFileName.called, "asked for a path with no rows"
+assert warned and "marked" in warned[0], warned
+print("no marked rows -> warned, no file dialog, nothing written")
+
+# ── 12. every way the input scene arrives reads its footprint ────────────────
+# A scene loaded through the button and one already open in the QGIS project
+# took different paths: only the button read the footprint, so a project-loaded
+# scene was filtered against its full product grid -- with nothing in the log to
+# say which box the filter had used. Both now go through adopt_input_layer.
+d5 = tempfile.mkdtemp()
+shutil.copy(os.path.join(HERE, met0), d5)
+tif5 = os.path.join(d5, met0[:-len(".met")] + ".tif")
+open(tif5, "w").close()
+
+scene = fake_layer(3)
+scene.name.return_value = "Input_scene"
+scene.source.return_value = tif5
+scene.crs.return_value = _CRS("EPSG:32644")
+index = fake_layer(1)
+index.name.return_value = "L8Ref_index"
+index.source.return_value = os.path.join(d5, "L8_2D_PAN_index.shp")
+
+win.input_ring, win.input_tif_layer = None, None
+R.QgsProject.instance.return_value.mapLayers.return_value = {
+    "1": index, "2": scene}
+win.auto_connect_layers()
+
+assert win.input_tif_layer is scene, win.input_tif_layer
+assert win.input_ring == [(76.534748, 17.614687), (78.827076, 18.171194),
+                          (79.385351, 15.993327), (77.112174, 15.446038)], \
+    win.input_ring
+assert win.proj_crs.authid() == "EPSG:32644", win.proj_crs.authid()
+print("\na scene adopted from the QGIS project reads the same footprint as one "
+      "loaded through the button")
+
+# and when there is no footprint to read, the log says so rather than falling
+# back silently -- the symptom that made this invisible in the field
+win.input_ring = None
+scene.source.return_value = os.path.join(d5, "no_sidecar.tif")
+open(scene.source.return_value, "w").close()
+win.auto_connect_layers()
+assert win.input_ring is None
+print("no sidecar -> the fallback to the full extent is announced, not silent")
+
+# ── 13. a geographic input is measured in a zone over the scene ──────────────
+# Reported from the field: a WGS84 scene over the Gulf. adopt_working_crs
+# refuses a geographic CRS -- the error columns are metres -- and the working
+# CRS was therefore left at the hard-coded UTM 44N over India. Both canvases
+# then drew in a zone the scene was 2,300 km outside, and rendered nothing at
+# all, with no error raised anywhere.
+d6 = tempfile.mkdtemp()
+tif6 = os.path.join(d6, "gulf_scene.tif")
+open(tif6, "w").close()
+
+R.QgsCoordinateReferenceSystem = MagicMock(side_effect=lambda code: _CRS(code))
+
+gulf = fake_layer(6)
+gulf.name.return_value = "Input_TIF"
+gulf.source.return_value = tif6
+gulf.crs.return_value = _Geo("EPSG:4326")
+gulf.extent.return_value = _Rect(53.984143, 23.475142, 61.949699, 28.789957)
+
+# a projected input is still taken as it is -- this path must not change
+utm = fake_layer(2)
+utm.crs.return_value = _CRS("EPSG:32643")
+utm.extent.return_value = _Rect(300000.0, 1880000.0, 400000.0, 1990000.0)
+assert win._working_crs_for(utm) is utm.crs.return_value
+
+win.proj_crs = _CRS("EPSG:32644")        # the default, as on a first load
+converted = _Rect(300000.0, 2600000.0, 800000.0, 3190000.0)
+R.QgsCoordinateTransform = MagicMock(
+    return_value=MagicMock(transformBoundingBox=MagicMock(return_value=converted)))
+win.adopt_input_layer(gulf, tif6)
+
+# 54..62 E centres on 58 E, which is zone 40 -- not the 44 it was measuring in
+assert win.proj_crs.authid() == "EPSG:32640", win.proj_crs.authid()
+handed = win.canvas_left.setExtent.call_args[0][0]
+assert handed is converted, "input canvas handed the layer's own degrees"
+print("\na geographic input picks the UTM zone over its centre,",
+      win.proj_crs.authid(), "- and the input canvas gets metres, not degrees")
+
+# ── 14. every recorded GCP stays on the input canvas, numbered ───────────────
+# Asked for from use: one pick at a time says nothing about coverage, and
+# coverage is what an accuracy figure rests on. The reference canvas keeps one
+# mark -- it only ever shows the tile the current row is measured against.
+made = []
+R.QgsVertexMarker = MagicMock(side_effect=lambda c: made.append(MagicMock()) or made[-1])
+
+win.table = _Rows([
+    ["325010.000", "1900007.000", "325000.000", "1900000.000"],
+    ["0.000", "0.000", "0.000", "0.000"],                      # a fresh row
+    ["325020.000", "1900000.000", "0.000", "0.000"],           # input only: still a GCP
+    [None, None, None, None],
+])
+scene = MagicMock()
+win.canvas_left.scene = MagicMock(return_value=scene)
+win.gcp_items = []
+win._bulk_table_edit = False
+win.markers["left"] = ["the live magenta cross"]
+
+win.refresh_gcp_overlay()
+crosses = [i for i in win.gcp_items if i in made]
+labels  = [i for i in win.gcp_items if isinstance(i, R.GcpLabel)]
+assert len(crosses) == 2, len(crosses)
+assert [l.text for l in labels] == ["1", "3"], [l.text for l in labels]
+assert [(l.map_point.x(), l.map_point.y()) for l in labels] == \
+    [(325010.0, 1900007.0), (325020.0, 1900000.0)]
+# a row marked on the input but not yet on the reference is still a GCP: it is
+# a point that has been measured, whatever the export makes of it
+assert labels[1].text == "3"
+# the live cross belongs to the other set and is not disturbed
+assert win.markers["left"] == ["the live magenta cross"]
+print("\nevery recorded GCP is drawn on the input canvas, numbered",
+      [l.text for l in labels], "- the live cross untouched")
+
+# a second pass replaces the set rather than stacking on it
+scene.removeItem.reset_mock()
+before = list(win.gcp_items)
+win.refresh_gcp_overlay()
+removed = [c[0][0] for c in scene.removeItem.call_args_list]
+assert removed == before, "the previous overlay was not taken off the scene"
+assert len(win.gcp_items) == len(before)
+print("re-marking replaces the overlay rather than stacking it")
+
+# loading a CSV rebuilds it once at the end, not once per row
+win._bulk_table_edit = True
+win.gcp_items = []
+win.refresh_gcp_overlay()
+assert win.gcp_items == [], "overlay rebuilt during a bulk load"
+win._bulk_table_edit = False
+print("a bulk table load defers the rebuild to the end")
+
+# the number is haloed: black four ways, then the colour on top
+lbl = labels[0]
+painter = MagicMock()
+lbl.paint(painter)
+drawn = [c[0][2] for c in painter.drawText.call_args_list]
+assert drawn == ["1"] * 5, drawn
+# one pen for the four halo passes, one for the number itself
+assert painter.setPen.call_count == 2, painter.setPen.call_count
+offsets = [(c[0][0], c[0][1]) for c in painter.drawText.call_args_list]
+assert offsets[-1] == (R.GCP_LABEL_OFFSET_PX, -R.GCP_LABEL_OFFSET_PX), offsets
+assert sorted(offsets[:4]) == sorted(
+    [(R.GCP_LABEL_OFFSET_PX + dx, -R.GCP_LABEL_OFFSET_PX + dy)
+     for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1))]), offsets
+print("the number is drawn with a four-way black halo, then in colour on top")
+
+# ── 15. clicking a recorded GCP selects its row instead of overwriting it ────
+class _SelTable(_Rows):
+    """_Rows plus the selection and writing the mark tool actually uses."""
+    def __init__(self, rows, current=-1):
+        super().__init__(rows)
+        self._cur, self.selected, self.written = current, [], []
+    def currentRow(self): return self._cur
+    def setCurrentCell(self, r, c):
+        self.selected.append((r, c))
+        self._cur = r
+    def blockSignals(self, _): pass
+    def setItem(self, r, c, item): self.written.append((r, c))
+
+gcp_rows = [
+    ["325010.000", "1900007.000", "325000.000", "1900000.000"],   # GCP 1
+    ["0.000", "0.000", "0.000", "0.000"],                         # not a GCP
+    ["325200.000", "1900000.000", "0.000", "0.000"],              # GCP 3
+]
+win.canvas_left.mapUnitsPerPixel = MagicMock(return_value=2.0)   # 10 px -> 20 m
+
+# sitting on row 3, a click on GCP 1 moves the selection there
+win.table = _SelTable(gcp_rows, current=2)
+assert win.select_gcp_at(_PointXY(325010.0, 1900007.0)) is True
+assert win.table.selected == [(0, 0)], win.table.selected
+print("\nclicking a recorded GCP selects its row:", win.table.selected)
+
+# 15 m away is inside the 20 m reach; 25 m is not
+win.table = _SelTable(gcp_rows, current=2)
+assert win.select_gcp_at(_PointXY(325025.0, 1900007.0)) is True
+win.table = _SelTable(gcp_rows, current=2)
+assert win.select_gcp_at(_PointXY(325035.0, 1900007.0)) is False
+assert win.table.selected == []
+print("the reach is GCP_PICK_RADIUS_PX screen pixels wide, not a map distance")
+
+# the current row's own mark is NOT a selection target -- clicking it has to
+# keep refining the point, which is what the measuring tool is for
+win.table = _SelTable(gcp_rows, current=0)
+assert win.select_gcp_at(_PointXY(325010.0, 1900007.0)) is False
+assert win.table.selected == []
+print("clicking your own mark still refines it rather than re-selecting it")
+
+# and the press must decide before anything is written: update_data runs on
+# press, move and release, so a later check would already have overwritten
+win.draw_marker      = MagicMock()
+win.calculate_error  = MagicMock()
+win.follow_input_point = MagicMock()
+mark = R.DragMapTool(win.canvas_left, win, True)
+
+win.table = _SelTable(gcp_rows, current=2)
+mark.toMapCoordinates = MagicMock(return_value=_PointXY(325010.0, 1900007.0))
+mark.canvasPressEvent(MagicMock())
+assert win.table.written == [], "the press overwrote the row it selected"
+assert mark.dragging is False
+mark.canvasReleaseEvent(MagicMock())
+assert win.table.written == [], "the release overwrote it instead"
+assert win.table.selected == [(0, 0)]
+print("a press on a GCP selects, and neither it nor the release writes a pick")
+
+win.table = _SelTable(gcp_rows, current=2)
+mark.toMapCoordinates = MagicMock(return_value=_PointXY(400000.0, 1950000.0))
+mark.canvasPressEvent(MagicMock())
+assert mark.dragging is True
+assert win.table.written == [(2, 0), (2, 1)], win.table.written
+assert win.table.selected == []
+print("a press on open ground marks the current row, as before")
+
+# ── 16. a point in one reference's nodata is offered the one that has data ───
+# Reported from use: the L8 index states one BOX per image, nodata corners
+# included, so a point sits inside two or three boxes and is in the fill wedge
+# of one of them -- and the smallest box is as likely to be the empty one as
+# any other. Real GeoTIFFs, read through the shipped probe.
+import re
+import numpy as _np
+import rasterio as _rio
+from rasterio.transform import from_origin as _from_origin
+
+d7 = tempfile.mkdtemp()
+
+def _write(name, arr, ox, oy, px=10.0, nodata=0):
+    path = os.path.join(d7, name)
+    with _rio.open(path, "w", driver="GTiff", height=arr.shape[0],
+                   width=arr.shape[1], count=1, dtype=arr.dtype,
+                   crs="EPSG:32644", transform=_from_origin(ox, oy, px, px),
+                   nodata=nodata) as dst:
+        dst.write(arr, 1)
+    return path
+
+# A: 200x200 at 10 m from (300000, 1900000). Its western half is fill.
+a = _np.full((200, 200), 100, dtype="int16")
+a[:, :100] = 0
+tile_a = _write("small_with_wedge.tif", a, 300000.0, 1900000.0)
+# B: 210x210 over the same ground -- a LARGER box, so the old smallest-box
+# rule picked A, and A is empty exactly where the point is
+tile_b = _write("larger_all_data.tif",
+                _np.full((210, 210), 50, dtype="int16"), 300000.0, 1900000.0)
+
+def _ring(ox, oy, n, px=10.0):
+    return [(ox, oy), (ox + n * px, oy), (ox + n * px, oy - n * px), (ox, oy - n * px)]
+
+win.proj_crs = _CRS("EPSG:32644")
+R.QgsCoordinateReferenceSystem.fromWkt = lambda wkt: _CRS("EPSG:32644")
+win.ref_footprints = {
+    tile_a: {"ring": [], "ring_proj": _ring(300000.0, 1900000.0, 200),
+             "band": "UNK", "crs": None, "granule": None, "source": "index-shp"},
+    tile_b: {"ring": [], "ring_proj": _ring(300000.0, 1900000.0, 210),
+             "band": "UNK", "crs": None, "granule": None, "source": "index-shp"},
+}
+win.ref_tif_list = [tile_a, tile_b]
+
+def _boxgeom(wkt):
+    nums = [float(v) for v in re.findall(r"-?\d+\.?\d*", wkt or "")]
+    xs, ys = nums[0::2], nums[1::2]
+    g = MagicMock()
+    g.contains = lambda pt: (min(xs) <= pt._px <= max(xs)
+                             and min(ys) <= pt._py <= max(ys))
+    g.area = lambda: (max(xs) - min(xs)) * (max(ys) - min(ys))
+    return g
+
+# section 7b replaced ring_wkt with a fixed string; this section needs the real
+# one, since the box a candidate is judged by comes out of it
+R.ring_wkt = _real_ring_wkt
+R.QgsGeometry.fromWkt = _boxgeom
+R.QgsGeometry.fromPointXY = lambda pt: type(
+    "P", (), {"_px": pt.x(), "_py": pt.y()})()
+
+# both boxes contain it; A is the smaller; A is fill there and B is not
+west = _PointXY(300500.0, 1899000.0)
+assert win._has_data_at(tile_a, west) is False
+assert win._has_data_at(tile_b, west) is True
+assert win.reference_for_point(west) == tile_b, \
+    "offered the smaller box even though it is nodata at the point"
+print("\na point in the smaller tile's nodata is offered the tile that has data")
+
+# where both carry data the smaller box still wins, as before
+east = _PointXY(301500.0, 1899000.0)
+assert win._has_data_at(tile_a, east) is True
+assert win.reference_for_point(east) == tile_a, "smallest-box order was lost"
+print("where both have data the smallest footprint still wins")
+
+# a point off A's grid entirely reads as fill rather than as unreadable
+assert win._has_data_at(tile_a, _PointXY(400000.0, 1899000.0)) is False
+
+# an unreadable file cannot be judged, and a tile is trusted rather than
+# refused -- refusing on a failed read empties the canvas over real ground
+missing = os.path.join(d7, "not_here.tif")
+assert win._has_data_at(missing, west) is None
+win.ref_tif_list = [missing]
+win.ref_footprints = {missing: dict(win.ref_footprints[tile_a])}
+assert win.reference_for_point(west) == missing
+print("a tile whose pixel cannot be read is trusted, not refused")
+
+# with every candidate fill at the point, one is still shown rather than none
+win.ref_tif_list = [tile_a]
+win.ref_footprints = {tile_a: {"ring": [], "ring_proj": _ring(300000.0, 1900000.0, 200),
+                               "band": "UNK", "crs": None, "granule": None,
+                               "source": "index-shp"}}
+assert win.reference_for_point(west) == tile_a
+print("all candidates fill -> the smallest is still shown rather than none")
+
+shutil.rmtree(d7, ignore_errors=True)
+
+# ── 17. the reference mark is put where the measured error says to look ─────
+# section 15 replaced follow_input_point with a mock; this needs the real one
+win.follow_input_point = R.QCDashboard.follow_input_point.__get__(win)
+win.show_reference_for = MagicMock(return_value=True)
+win.show_ref_at        = MagicMock()
+win._syncing           = False
+
+# row 0 complete: its reference sat 30 m west and 10 m north of its input
+done = ["1000.000", "1000.000", "970.000", "1010.000"]
+
+# the first pick has nothing to go on and must mirror the input exactly
+win.table = _SelTable([["2000.000", "2000.000", "0.000", "0.000"]], current=0)
+pt, off, n = win.predicted_reference_point(_PointXY(2000.0, 2000.0))
+assert off is None and n == 0, (off, n)
+assert (pt.x(), pt.y()) == (2000.0, 2000.0)
+print("\nthe first pick mirrors the input: nothing measured to go on yet")
+
+# with one error behind it, the next mark carries the same offset
+win.table = _SelTable([done, ["2000.000", "2000.000", "0.000", "0.000"]],
+                      current=1)
+pt, off, n = win.predicted_reference_point(_PointXY(2000.0, 2000.0))
+assert (pt.x(), pt.y()) == (1970.0, 2010.0), (pt.x(), pt.y())
+assert off == (30.0, -10.0) and n == 1, (off, n)
+print("with one error behind it the mark moves 30 m west, 10 m north:",
+      (pt.x(), pt.y()))
+
+# THE trap: a predicted position must never reach the table. Written as a
+# measurement it would feed back into the statistics it came from, and every
+# error after the first would read as exactly the mean.
+win.follow_input_point(_PointXY(2000.0, 2000.0))
+assert win.table.written == [], "the prediction was written to the table"
+marked = win.show_ref_at.call_args[0][0]
+assert (marked.x(), marked.y()) == (1970.0, 2010.0), (marked.x(), marked.y())
+assert win.show_reference_for.call_args[0][0] is marked or \
+    (win.show_reference_for.call_args[0][0].x(),
+     win.show_reference_for.call_args[0][0].y()) == (1970.0, 2010.0)
+print("the prediction moves the mark and the tile lookup, and writes NOTHING")
+
+# a row that already carries a reference does not predict its own position
+# from its own error
+win.table = _SelTable([done], current=0)
+pt, off, n = win.predicted_reference_point(_PointXY(1000.0, 1000.0))
+assert off is None and (pt.x(), pt.y()) == (1000.0, 1000.0), (off, pt)
+print("the row being marked is left out of its own prediction")
+
+# and the offset is the mean of what has been measured, not the last alone
+win.table = _SelTable([done,
+                       ["3000.000", "3000.000", "2990.000", "2970.000"],
+                       ["4000.000", "4000.000", "0.000", "0.000"]], current=2)
+pt, off, n = win.predicted_reference_point(_PointXY(4000.0, 4000.0))
+assert n == 2 and off == (20.0, 10.0), (n, off)
+assert (pt.x(), pt.y()) == (3980.0, 3990.0), (pt.x(), pt.y())
+print("two errors averaged:", off, "->", (pt.x(), pt.y()))
+
+# switched off, it mirrors the input again
+R.PREDICT_REF_MARK = False
+pt, off, n = win.predicted_reference_point(_PointXY(4000.0, 4000.0))
+assert off is None and (pt.x(), pt.y()) == (4000.0, 4000.0)
+R.PREDICT_REF_MARK = True
+print("PREDICT_REF_MARK=False restores the exact mirror")
+
+# ── 18. a Lambert Conformal Conic input, and lon/lat in the CSV ─────────────
+# LCC is projected, so it is adopted as the working CRS exactly like UTM and
+# the error columns stay in metres. Nothing in the tool is UTM-specific; the
+# UTM arithmetic only runs for an input with NO projected CRS at all.
+lcc = fake_layer(1)
+lcc.crs.return_value = _CRS("ESRI:102024")
+lcc.extent.return_value = _Rect(-500000.0, 1000000.0, 500000.0, 2000000.0)
+assert win._working_crs_for(lcc) is lcc.crs.return_value, \
+    "a Lambert Conformal Conic input was not adopted as the working CRS"
+assert win.adopt_working_crs(lcc.crs.return_value) is True
+print("\na Lambert Conformal Conic input is adopted as the working CRS")
+
+# the CSV carries lon/lat for both ends, so the file means the same thing
+# whichever grid the picks were measured on
+d8 = tempfile.mkdtemp()
+out_csv = os.path.join(d8, "picks.csv")
+
+class _FakeTf:
+    """A transform with a position-dependent result, so the two ends differ."""
+    def transform(self, pt):
+        return _PointXY(70.0 + pt.x() / 100000.0, 10.0 + pt.y() / 100000.0)
+
+win.transform_proj_to_wgs = _FakeTf()
+win.table = _Rows([
+    ["325010.000", "1900007.000", "325000.000", "1900000.000", "10.000", "7.000"],
+    ["0.000", "0.000", "0.000", "0.000", "0.000", "0.000"],   # nothing marked
+])
+qw.QFileDialog.getSaveFileName = MagicMock(return_value=(out_csv, ""))
+win.save_csv()
+
+import csv as _csv
+with open(out_csv, encoding="utf-8-sig") as f:
+    got = list(_csv.reader(f))
+assert got[0] == ["In_X", "In_Y", "Ref_X", "Ref_Y", "DX_Err", "DY_Err",
+                  "Row", "In_Lon", "In_Lat", "Ref_Lon", "Ref_Lat"], got[0]
+# the six original columns are untouched, so a reader parsing by index is safe
+assert got[1][:6] == ["325010.000", "1900007.000", "325000.000",
+                      "1900000.000", "10.000", "7.000"], got[1]
+assert got[1][6] == "1"
+assert got[1][7:] == ["73.25010000", "29.00007000",
+                      "73.25000000", "29.00000000"], got[1][7:]
+# an unmarked row gets no lon/lat at all rather than a transformed (0, 0)
+assert got[2][7:] == ["", "", "", ""], got[2]
+print("CSV carries both ends in lon/lat; an unmarked row stays blank")
+
+# and it still loads back: load_csv_smart maps by header name, so the added
+# columns are ignored rather than shifting the ones it reads
+win.table = _SelTable([], current=-1)
+win.table._rows = []
+win.calculate_error = MagicMock()
+win.update_stats = MagicMock()
+class _Loadable(_SelTable):
+    def rowCount(self): return len(self._rows)
+    def setRowCount(self, n): del self._rows[n:]
+    def insertRow(self, r): self._rows.append([None] * 6)
+    def setItem(self, r, c, item):
+        self._rows[r][c] = item.text() if hasattr(item, "text") else item
+qw.QTableWidgetItem = lambda v="": type("I", (), {"text": lambda s, v=v: v})()
+R.QTableWidgetItem = qw.QTableWidgetItem
+win.table = _Loadable([])
+qw.QFileDialog.getOpenFileName = MagicMock(return_value=(out_csv, ""))
+win.load_csv_smart()
+assert win.table._rows[0][:4] == ["325010.000", "1900007.000",
+                                  "325000.000", "1900000.000"], win.table._rows[0]
+print("the wider file still loads: the extra columns are ignored, not misread")
+
+shutil.rmtree(d8, ignore_errors=True)
+
+# ── 19. a sidecar named *META*, in the same folder as the tif ───────────────
+WANT = [(76.534748, 17.614687), (78.827076, 18.171194),
+        (79.385351, 15.993327), (77.112174, 15.446038)]
+
+def _folder_with(meta_name, tif_name="G1A_ort_ADRIN.tif"):
+    """A folder holding one raster and one sidecar under the given name."""
+    d = tempfile.mkdtemp()
+    shutil.copy(os.path.join(HERE, met0), os.path.join(d, meta_name))
+    open(os.path.join(d, tif_name), "w").close()
+    return d, os.path.join(d, tif_name)
+
+# the reported shape: <scene>_META.txt beside <scene>.tif, no Meta/ subfolder
+d9, tif9 = _folder_with("G1A_ort_ADRIN_META.txt")
+assert win._input_footprint_ring(tif9) == WANT
+print("\n<scene>_META.txt beside the tif is read")
+
+# lower case, and the label leading rather than trailing
+d10, tif10 = _folder_with("meta_G1A_ort_ADRIN.txt")
+assert win._input_footprint_ring(tif10) == WANT
+print("meta_<scene>.txt is read too")
+
+# a file named only for being metadata names no raster -- beside the one scene
+# being loaded, in its own folder, it is that scene's
+d11, tif11 = _folder_with("METADATA.txt")
+assert win._input_footprint_ring(tif11) == WANT
+print("a bare METADATA.txt beside a single raster is read")
+
+# but a sidecar naming a DIFFERENT raster is still refused
+d12, tif12 = _folder_with("SOMEONE_ELSE_META.txt")
+assert win._input_footprint_ring(tif12) is None
+print("a sidecar naming another scene is still refused")
+
+# and a raster that merely has 'meta' in its name is not opened as one
+d13 = tempfile.mkdtemp()
+open(os.path.join(d13, "G1A_metadata_ort.tif"), "w").close()
+assert win._input_footprint_ring(os.path.join(d13, "G1A_metadata_ort.tif")) is None
+print("a raster with 'meta' in its name is not mistaken for a sidecar")
+
+for d in (d9, d10, d11, d12, d13):
+    shutil.rmtree(d, ignore_errors=True)
+
+# ── 20. an LCC whose '.prj' cannot travel falls back to lon/lat geometry ────
+# Reported from use twice: an LCC input exported a shapefile with no usable
+# .prj, which every GIS opens as 'unknown' and draws in the PROJECT CRS -- so
+# Lambert metres get read as degrees and the points land nowhere near the scene
+# the raster beside them draws perfectly. What QGIS will write into a '.prj' is
+# the writer's decision, so the code asks for a public authority code first and
+# reads the file back afterwards.
+class _Unnameable(_CRS):
+    def authid(self): return ""
+    def toWkt(self): return 'PROJCS["Lambert Conformal Conic"]'   # not evidence
+    def description(self): return "Lambert Conformal Conic"
+
+class _LocalOnly(_CRS):
+    """What QGIS mints for a CRS it stored in the local profile."""
+    def authid(self): return "USER:100001"
+    def description(self): return "Lambert Conformal Conic"
+
+win.wgs84_crs = _CRS("EPSG:4326")
+win.proj_crs = _Unnameable("")
+out_crs, lonlat, why = win._export_crs()
+assert lonlat is True and out_crs is win.wgs84_crs, (lonlat, out_crs)
+assert "no authority code" in why, why
+print("\nan unnameable LCC exports as lon/lat:", why)
+
+win.proj_crs = _LocalOnly("")
+out_crs, lonlat, why = win._export_crs()
+assert lonlat is True and out_crs is win.wgs84_crs, (lonlat, out_crs)
+assert "USER:100001" in why, why
+print("a USER: code is not a code anyone else can resolve:", why)
+
+captured = {"crs": None, "pts": [], "writers": 0, "prj": True}
+
+class _Writer:
+    """Stands in for QgsVectorFileWriter, including what it leaves on disk.
+
+    The real one writes a '.prj' only for a CRS it can express, and flushes on
+    delete. 'prj' switches that off, which is the failure being guarded.
+    """
+    def __init__(self, path, crs):
+        self._path, self._crs = path, crs
+
+    def addFeature(self, feat):
+        captured["pts"].append(feat._pt)
+
+    def __del__(self):
+        if captured["prj"] and self._crs.authid():
+            with open(os.path.splitext(self._path)[0] + ".prj", "w") as f:
+                f.write('PROJCS["%s",GEOGCS["WGS 84"]]' % self._crs.authid())
+
+class _Feat:
+    def __init__(self, fields): self._pt = None
+    def setGeometry(self, g): self._pt = g
+    def setAttributes(self, a): pass
+
+def _writer_for(path, fields, crs=None):
+    captured["crs"] = crs
+    captured["writers"] += 1
+    captured["pts"] = []        # each pass rewrites the file from scratch
+    return _Writer(path, crs)
+
+R.QgsFeature = _Feat
+R.QgsGeometry.fromPointXY = lambda pt: (pt.x(), pt.y())
+R.QgsFields = lambda: MagicMock()
+R.QgsField = lambda n, t: (n, t)
+R.QVariant = MagicMock(Int=1, Double=2)
+win._make_writer = _writer_for
+base_row = {n: 0.0 for n, _ in R.SHP_FIELDS}
+shp_dir = tempfile.mkdtemp()
+shp_path = os.path.join(shp_dir, "picks.shp")
+prj_path = os.path.join(shp_dir, "picks.prj")
+win.export_rows = MagicMock(return_value=[
+    {**base_row, "in_x": 325010.0, "in_y": 1900007.0,
+     "in_lon": 78.5, "in_lat": 17.2},
+    {**base_row, "in_x": 325020.0, "in_y": 1900000.0,
+     "in_lon": None, "in_lat": None},        # could not be converted
+])
+qw.QFileDialog.getSaveFileName = MagicMock(return_value=(shp_path, ""))
+win.save_shapefile()
+assert captured["crs"] is win.wgs84_crs, "the writer was still given the LCC"
+assert captured["writers"] == 1, "lon/lat was decided up front, not on retry"
+# geometry is the lon/lat, and the row that could not be converted is skipped
+# rather than written at its LCC metres as though they were degrees
+assert captured["pts"] == [(78.5, 17.2)], captured["pts"]
+print("geometry written as lon/lat; the unconvertible row was skipped, not "
+      "written as degrees")
+
+# a CRS that CAN be named still exports in the working CRS, as before
+win.proj_crs = _CRS("EPSG:32644")
+captured["writers"] = 0
+win.export_rows = MagicMock(return_value=[
+    {**base_row, "in_x": 325010.0, "in_y": 1900007.0,
+     "in_lon": 78.5, "in_lat": 17.2}])
+win.save_shapefile()
+assert captured["crs"] is win.proj_crs
+assert captured["writers"] == 1, "an EPSG-coded CRS should not need a retry"
+assert captured["pts"] == [(325010.0, 1900007.0)], captured["pts"]
+assert R.prj_is_usable(open(prj_path).read()), "no .prj was written"
+print("an EPSG-coded working CRS still exports in map coordinates")
+
+# the second guard: the code was named, the writer still left no '.prj'. A
+# stale one from the export just above sits next to it, and must not answer
+# for this write -- that is what made the first fix look like it worked.
+captured["prj"], captured["writers"] = False, 0
+assert os.path.exists(prj_path), "the stale .prj under test is missing"
+win.save_shapefile()
+assert captured["writers"] == 2, "the missing .prj did not trigger a re-export"
+assert captured["crs"] is win.wgs84_crs, captured["crs"]
+assert captured["pts"] == [(78.5, 17.2)], captured["pts"]
+assert not os.path.exists(prj_path), "the stale .prj was left in place"
+print("a writer that leaves no '.prj' gets one re-export in lon/lat, and the "
+      "stale sidecar does not vouch for it")
+shutil.rmtree(shp_dir, ignore_errors=True)
+
+# ── 21. a reference pick drives the input, and Clear Rows asks first ─────────
+# Requested from use: marking on the input already brings the reference to the
+# point; a pick on the reference should bring the input to it as well, so a
+# row can be started from either side.
+for name in ("follow_input_point", "follow_reference_point",
+             "sync_canvas_extents", "draw_marker"):
+    setattr(win, name, getattr(R.QCDashboard, name).__get__(win))
+win.draw_marker        = MagicMock()
+win.show_reference_for = MagicMock(return_value=True)
+win.show_ref_at        = MagicMock()
+win._syncing           = False
+win._sync_tile_timer   = MagicMock()
+win.cb_sync.isChecked  = MagicMock(return_value=True)
+win.canvas_left.extent = MagicMock(return_value=_Rect(0.0, 0.0, 1000.0, 500.0))
+# QgsMapCanvas.setExtent emits extentsChanged before it returns, and that is
+# wired to sync_canvas_extents -- so the stub does the same, to prove the guard
+win.canvas_left.setExtent = MagicMock(
+    side_effect=lambda r: win.sync_canvas_extents())
+win.canvas_right.setExtent.reset_mock()
+
+def _centre(rect):
+    return ((rect.xMinimum() + rect.xMaximum()) / 2.0,
+            (rect.yMinimum() + rect.yMaximum()) / 2.0)
+
+# row 0 is complete: its reference sat 30 m west and 10 m north of its input,
+# so dx = +30, dy = -10. Row 1 is started from the RIGHT: reference only.
+done = ["1000.000", "1000.000", "970.000", "1010.000"]
+win.table = _SelTable([done, ["0.000", "0.000", "1970.000", "2010.000"]],
+                      current=1)
+win.follow_reference_point(_PointXY(1970.0, 2010.0))
+# In = Ref + (dx, dy): 30 m east, 10 m south of the reference pick
+rect = win.canvas_left.setExtent.call_args[0][0]
+assert _centre(rect) == (2000.0, 2000.0), _centre(rect)
+assert (rect.xMaximum() - rect.xMinimum(), rect.yMaximum() - rect.yMinimum()) \
+    == (1000.0, 500.0), "the input's zoom was not kept"
+marked, canvas, colour = win.draw_marker.call_args[0]
+assert (marked.x(), marked.y()) == (2000.0, 2000.0), marked
+assert canvas is win.canvas_left and colour == R.MARKER_COLOR_REF, colour
+assert win.table.written == [], "the predicted input reached the table"
+print("\na reference pick puts the input at Ref + (dx, dy), keeps its zoom, "
+      "marks it in the reference colour, and writes NOTHING")
+
+# the guard: the input moved, extentsChanged fired inside the move, and the
+# reference must not have been re-centred on the input's new centre -- that
+# would pull it off the pick by exactly the offset
+assert not win.canvas_right.setExtent.called, \
+    "Sync Maps moved the reference off the pick just made"
+assert not win._sync_tile_timer.start.called, "a tile swap was queued"
+assert win._syncing is False, "the guard was left set"
+print("Sync Maps does not answer that move by dragging the reference away")
+
+# a row whose input is already recorded goes to that pick, not a guess
+win.draw_marker.reset_mock()
+win.table = _SelTable([done, ["2500.000", "2600.000", "1970.000", "2010.000"]],
+                      current=1)
+win.follow_reference_point(_PointXY(1970.0, 2010.0))
+assert _centre(win.canvas_left.setExtent.call_args[0][0]) == (2500.0, 2600.0)
+assert not win.draw_marker.called, "a provisional cross was drawn over a pick"
+print("with an input already recorded, the input goes to it unmarked-over")
+
+# nothing measured yet: the input mirrors the reference exactly
+win.draw_marker.reset_mock()
+win.table = _SelTable([["0.000", "0.000", "500.000", "600.000"]], current=0)
+win.follow_reference_point(_PointXY(500.0, 600.0))
+assert _centre(win.canvas_left.setExtent.call_args[0][0]) == (500.0, 600.0)
+print("the first pick has nothing to go on and mirrors the reference")
+
+# and the other direction no longer paints a guess over a recorded reference:
+# started from the right, the first click on the left must leave it showing
+win.show_ref_at.reset_mock()
+win.table = _SelTable([done, ["2000.000", "2000.000", "1972.000", "2011.000"]],
+                      current=1)
+win.follow_input_point(_PointXY(2000.0, 2000.0))
+shown, colour = win.show_ref_at.call_args[0]
+assert (shown.x(), shown.y()) == (1972.0, 2011.0), shown
+assert colour == R.MARKER_COLOR_REF, colour
+print("an input pick on a row with a reference shows THAT reference, in its "
+      "own colour, not a predicted one")
+
+# the mark tool routes each canvas to its own follower
+win.follow_input_point     = MagicMock()
+win.follow_reference_point = MagicMock()
+win.calculate_error        = MagicMock()
+win._from_ref_canvas       = lambda pt: pt
+win.table = _SelTable([["0.000", "0.000", "0.000", "0.000"]], current=0)
+ref_tool = R.DragMapTool(win.canvas_right, win, False)
+ref_tool.toMapCoordinates = MagicMock(return_value=_PointXY(10.0, 20.0))
+ref_tool.canvasPressEvent(MagicMock())
+assert win.table.written == [(0, 2), (0, 3)], win.table.written
+assert win.follow_reference_point.called and not win.follow_input_point.called
+print("a press on the reference writes Ref X/Y and follows to the input")
+
+# Clear Rows: everything goes, so it asks, and No is the default
+class _Clearable(_SelTable):
+    def setRowCount(self, n): self._rows = self._rows[:n]
+win.clear_markers, win.update_stats = MagicMock(), MagicMock()
+win.table = _Clearable([done, ["5.000", "5.000", "0.000", "0.000"]], current=0)
+asked = []
+qw.QMessageBox.question = lambda *a, **k: asked.append(a) or qw.QMessageBox.No
+win.clear_rows()
+assert win.table.rowCount() == 2, "rows went without a yes"
+assert asked and "2 row(s)" in asked[0][2] and "1 of them" in asked[0][2], asked
+assert asked[0][4] == qw.QMessageBox.No, "No is not the default button"
+qw.QMessageBox.question = lambda *a, **k: qw.QMessageBox.Yes
+win.clear_rows()
+assert win.table.rowCount() == 0
+assert win.clear_markers.called and win.update_stats.called
+asked.clear()
+qw.QMessageBox.question = lambda *a, **k: asked.append(a) or qw.QMessageBox.Yes
+win.clear_rows()
+assert asked == [], "an empty table still asked"
+print("Clear Rows asks with No as default, counts the marked rows, and "
+      "clears the table, the crosses and the statistics on yes")
+
+# ── 22. rows start by marking; 'Add Row' is no longer needed ────────────────
+# Requested from use: clicking Add Row before every point was the slowest part
+# of a session. A press starts a row when the selected one is complete.
+class _Item:
+    def __init__(self, t): self._t = str(t)
+    def text(self): return self._t
+
+class _LiveTable:
+    """A table that keeps what is written, and records the signal state."""
+    def __init__(self):
+        self.rows, self._cur, self.blocked = [], -1, False
+        self.selected_while_blocked = []
+    def rowCount(self): return len(self.rows)
+    def currentRow(self): return self._cur
+    def insertRow(self, r): self.rows.insert(r, [_Item("0.000")] * 6)
+    def setItem(self, r, c, item):
+        self.rows[r] = list(self.rows[r]); self.rows[r][c] = item
+    def item(self, r, c): return self.rows[r][c]
+    def setCurrentCell(self, r, c):
+        self._cur = r
+        self.selected_while_blocked.append(self.blocked)
+    def blockSignals(self, b): self.blocked = b
+    def scrollToItem(self, _): pass
+    def state(self): return 0
+    def cells(self, r): return [self.rows[r][c].text() for c in range(4)]
+
+R.QTableWidgetItem = _Item
+R.Qt.ShiftModifier = 0x02000000
+for name in ("row_for_pick", "_append_row", "focus_canvas", "select_gcp_at"):
+    setattr(win, name, getattr(R.QCDashboard, name).__get__(win))
+win.draw_marker = win.calculate_error = MagicMock()
+win.follow_input_point = win.follow_reference_point = MagicMock()
+win._from_ref_canvas = lambda pt: pt
+win.canvas_left.mapUnitsPerPixel = MagicMock(return_value=2.0)  # reach 20 m
+win.table = _LiveTable()
+left  = R.DragMapTool(win.canvas_left,  win, True)
+right = R.DragMapTool(win.canvas_right, win, False)
+
+def press(tool, x, y, shift=False):
+    tool.toMapCoordinates = MagicMock(return_value=_PointXY(x, y))
+    ev = MagicMock(modifiers=lambda: R.Qt.ShiftModifier if shift else 0)
+    tool.canvasPressEvent(ev)
+    tool.canvasReleaseEvent(ev)
+
+press(left, 1000.0, 1000.0)
+assert win.table.rowCount() == 1 and win.table.currentRow() == 0
+assert win.table.cells(0) == ["1000.000", "1000.000", "0.000", "0.000"]
+assert win.table.selected_while_blocked == [True], \
+    "the new row was selected with signals live -- the canvases would snap to (0, 0)"
+print("\nthe first press on an empty table starts row 1 and marks it, "
+      "without the selection snapping the canvases")
+
+press(right, 970.0, 1010.0)
+assert win.table.rowCount() == 1
+assert win.table.cells(0) == ["1000.000", "1000.000", "970.000", "1010.000"]
+press(right, 972.0, 1011.0)                  # a correction to that reference
+assert win.table.rowCount() == 1 and win.table.cells(0)[2:] == ["972.000",
+                                                                  "1011.000"]
+print("the reference fills the same row, and a second click corrects it")
+
+press(left, 1005.0, 1000.0)                  # 5 m from its own mark: refine
+assert win.table.rowCount() == 1 and win.table.cells(0)[:2] == ["1005.000",
+                                                                  "1000.000"]
+print("a press on the complete row's own input mark refines it")
+
+press(left, 2000.0, 2000.0)                  # open ground: the next point
+assert win.table.rowCount() == 2 and win.table.currentRow() == 1
+assert win.table.cells(1) == ["2000.000", "2000.000", "0.000", "0.000"]
+assert win.table.cells(0) == ["1005.000", "1000.000", "972.000", "1011.000"], \
+    "the finished row was overwritten"
+print("once a row is complete, a press elsewhere on the input starts row 2 "
+      "and leaves row 1 alone")
+
+press(left, 2500.0, 2500.0)                  # row 2 still open: moved, not added
+assert win.table.rowCount() == 2 and win.table.cells(1)[:2] == ["2500.000",
+                                                                  "2500.000"]
+print("a row still waiting for its reference is re-marked, not abandoned")
+
+press(right, 2470.0, 2510.0)
+win.table._cur = 0                           # back on the finished row 1
+press(left, 3000.0, 3000.0, shift=True)
+assert win.table.rowCount() == 2 and win.table.cells(0)[:2] == ["3000.000",
+                                                                  "3000.000"]
+print("Shift marks the selected row wherever the press is")
+
+# a press on another row's GCP still selects it, writing nothing
+win.table._cur = 1
+press(left, 3005.0, 3000.0)                  # 5 m from row 1's input
+assert win.table.rowCount() == 2 and win.table.currentRow() == 0
+print("a press on another row's GCP still selects that row")
+
+# the reference can start the very first row too
+win.table = _LiveTable()
+press(right, 500.0, 600.0)
+assert win.table.rowCount() == 1 and win.table.cells(0) == [
+    "0.000", "0.000", "500.000", "600.000"]
+print("with nothing selected, a press on the reference starts a row from there")
+
+# switched off: no row selected means nothing is marked, as before
+R.AUTO_ADD_ROWS = False
+win.table = _LiveTable()
+press(left, 1.0, 2.0)
+assert win.table.rowCount() == 0 and left.dragging is False
+R.AUTO_ADD_ROWS = True
+print("AUTO_ADD_ROWS=False restores 'Add Row first'")
+
+# hovering a canvas gives it the keyboard, unless a cell is being typed in
+win.canvas_left.setFocus.reset_mock()
+# real Qt's QObject.eventFilter returns False: "not handled, pass it on"
+qc.QObject.eventFilter = lambda self, obj, event: False
+nudge = R.ArrowNudgeFilter.__new__(R.ArrowNudgeFilter)
+nudge.dashboard, nudge.is_left_map = win, True
+R.QEvent.Enter, R.QEvent.KeyPress = "enter", "keypress"
+nudge.eventFilter(win.canvas_left, MagicMock(type=lambda: "enter"))
+assert win.canvas_left.setFocus.called, "hover did not give the canvas focus"
+win.canvas_left.setFocus.reset_mock()
+win.table.state = lambda: R.QTableWidget.EditingState
+nudge.eventFilter(win.canvas_left, MagicMock(type=lambda: "enter"))
+assert not win.canvas_left.setFocus.called, "hover stole focus from a cell edit"
+print("hovering a canvas gives it the arrow keys, but not mid-way through "
+      "typing a cell")
+
+# ── 23. statistics on export, honest live stats, a remembered folder ────────
+for name in ("update_stats", "write_stats", "save_csv", "_measured_errors",
+             "restore_reference_folder", "select_reference_folder",
+             "_saved_ref_folder"):
+    setattr(win, name, getattr(R.QCDashboard, name).__get__(win))
+win.refresh_gcp_overlay = MagicMock()
+for lbl in ("lbl_rmse_x", "lbl_rmse_y", "lbl_ce90"):
+    setattr(win, lbl, MagicMock())
+rows23 = [["1003.000", "1004.000", "1000.000", "1000.000", "3.000", "4.000"],
+          ["2005.000", "2000.000", "2000.000", "2000.000", "5.000", "0.000"],
+          # half-marked: its error column holds its whole coordinate
+          ["325010.000", "1900007.000", "0.000", "0.000",
+           "325010.000", "1900007.000"],
+          ["0.000"] * 6]                                   # empty
+win.table = _SelTable(rows23, current=2)
+win.update_stats()
+ce90 = R.accuracy_stats([3.0, 5.0], [4.0, 0.0])["ce90"]
+assert win.lbl_ce90.setText.call_args[0][0].startswith(f"CE90:    {ce90:.3f}"), \
+    win.lbl_ce90.setText.call_args
+print("\nthe live CE90 counts the two finished rows, not the half-marked one "
+      f"({ce90:.3f} m)")
+
+out_dir = tempfile.mkdtemp()
+csv_path = os.path.join(out_dir, "picks.csv")
+qw.QFileDialog.getSaveFileName = MagicMock(return_value=(csv_path, ""))
+win._lonlat_for = lambda a, b: None
+win.proj_crs = _CRS("EPSG:32644")
+win.save_csv()
+stats_csv = os.path.join(out_dir, "picks_stats.csv")
+assert os.path.exists(stats_csv), "Export CSV wrote no statistics file"
+import csv as _csv
+got = {r["Statistic"]: r for r in _csv.DictReader(open(stats_csv, encoding="utf-8-sig"))}
+assert got["n_points"]["Value"] == "2", got["n_points"]
+assert got["mean_dx"]["Value"] == "4.000" and got["mean_dy"]["Value"] == "2.000"
+assert got["ce90"]["Value"] == f"{ce90:.3f}"
+assert got["working_crs"]["Value"] == "EPSG:32644"
+print("Export CSV writes picks_stats.csv beside it: n=2, mean, std, RMSE, CE90")
+
+# and Export SHP writes the same file beside the shapefile
+win.write_stats(os.path.join(out_dir, "quiver.shp"))
+assert os.path.exists(os.path.join(out_dir, "quiver_stats.csv"))
+src = R.QCDashboard.save_shapefile.__code__.co_names
+assert "write_stats" in src, "Export SHP does not write the statistics file"
+print("Export SHP writes quiver_stats.csv beside the shapefile")
+shutil.rmtree(out_dir, ignore_errors=True)
+
+# the reference folder is remembered and loaded without asking
+store = {}
+class _Settings:
+    def __init__(self, *a): pass
+    def value(self, k, d=None): return store.get(k, d)
+    def setValue(self, k, v): store[k] = v
+R.QSettings = _Settings
+win.load_reference_folder = MagicMock()
+ref_dir = tempfile.mkdtemp()
+store["ref_folder"] = ref_dir
+win.ref_folder_path = None
+win.restore_reference_folder()
+win.load_reference_folder.assert_called_once_with(ref_dir)
+print("the folder from the last session is loaded on start-up, no dialog")
+
+store["ref_folder"] = ref_dir + "_gone"
+win.load_reference_folder.reset_mock()
+win.restore_reference_folder()
+assert not win.load_reference_folder.called, "loaded a folder that is gone"
+print("a remembered folder that no longer exists is skipped quietly")
+
+store["ref_folder"] = ref_dir
+qw.QFileDialog.getExistingDirectory = MagicMock(return_value="")
+win.select_reference_folder()
+assert qw.QFileDialog.getExistingDirectory.call_args[0][2] == ref_dir
+assert not win.load_reference_folder.called, "a cancelled dialog changed it"
+print("changing it opens the dialog at the remembered folder; cancel keeps it")
+
+win.load_reference_folder = R.QCDashboard.load_reference_folder.__get__(win)
+win._folder_entries = MagicMock(return_value=([], [], []))
+win._refresh_band_choices = win.filter_reference_tifs = MagicMock()
+win.load_reference_folder("/new/refs")
+assert store["ref_folder"] == "/new/refs"
+print("a newly chosen folder becomes the remembered one")
+shutil.rmtree(ref_dir, ignore_errors=True)
+
+# ── 24. Sync Maps carries the measured offset, so a 70 km error is followed ──
+# Reported from use: with errors near 70 km the reference did not follow the
+# points already marked. A click predicted correctly, but every pan of the
+# input re-centred the reference on the raw input centre -- 70 km off the
+# feature, and on another tile -- before the next point was ever clicked.
+for name in ("sync_canvas_extents", "_sync_reference_tile",
+             "_ref_centre_for_input_view", "predicted_reference_point",
+             "_predicted_offset_now", "_measured_errors", "_ref_view_rect"):
+    setattr(win, name, getattr(R.QCDashboard, name).__get__(win))
+win._syncing = False
+win._sync_tile_timer = MagicMock()
+win.cb_sync.isChecked = MagicMock(return_value=True)
+win.canvas_left.center = MagicMock(return_value=_PointXY(500000.0, 2000000.0))
+win.canvas_left.extent = MagicMock(
+    return_value=_Rect(495000.0, 1997500.0, 505000.0, 2002500.0))
+win.canvas_right.size.return_value = MagicMock(width=lambda: 800,
+                                               height=lambda: 400)
+win._to_ref_canvas = lambda pt: pt
+win._ref_canvas_crs = lambda: win.proj_crs
+win.show_reference_for = MagicMock(return_value=True)
+
+def _ref_centre():
+    r = win.canvas_right.setExtent.call_args[0][0]
+    return ((r.xMinimum() + r.xMaximum()) / 2.0, (r.yMinimum() + r.yMaximum()) / 2.0)
+
+# one finished row: dx = +70 000, dy = -1 500 (In - Ref); row 1 is being worked
+win.table = _SelTable([["470000.000", "1500000.000", "400000.000", "1501500.000"],
+                       ["0.000", "0.000", "0.000", "0.000"]], current=1)
+win.canvas_right.setExtent.reset_mock()
+win.sync_canvas_extents()
+assert _ref_centre() == (430000.0, 2001500.0), _ref_centre()
+win.canvas_right.setExtent.reset_mock()
+win._sync_reference_tile()
+looked = win.show_reference_for.call_args[0][0]
+assert (looked.x(), looked.y()) == (430000.0, 2001500.0), looked
+assert _ref_centre() == (430000.0, 2001500.0), _ref_centre()
+print("\na pan with a 70 km offset puts the reference, and its tile, 70 km "
+      "west of the input centre -- where the feature is")
+
+# nothing measured: same coordinates, as before
+win.table = _SelTable([["0.000"] * 4], current=0)
+win.sync_canvas_extents()
+assert _ref_centre() == (500000.0, 2000000.0), _ref_centre()
+# and switched off: same coordinates whatever has been measured
+R.PREDICT_REF_MARK = False
+win.table = _SelTable([["470000.000", "1500000.000", "400000.000", "1501500.000"]],
+                      current=-1)
+win.sync_canvas_extents()
+assert _ref_centre() == (500000.0, 2000000.0), _ref_centre()
+R.PREDICT_REF_MARK = True
+print("with nothing measured, or PREDICT_REF_MARK off, it is the exact mirror")
+
+# ── 25. a click predicts onto a tile outside the input's footprint ──────────
+# Reported from use: even clicks did not land at the averaged error. Two
+# reasons, both at large offsets: the dropdown only holds tiles overlapping
+# the INPUT footprint, so a point 70 km away usually had no tile in it; and
+# with no tile the click returned without moving the reference at all.
+class _Box:
+    """Axis-aligned footprint geometry: enough for contains/area."""
+    def __init__(self, b): self.b = b
+    def contains(self, g):
+        x, y = g.pt.x(), g.pt.y()
+        return self.b[0] <= x <= self.b[2] and self.b[1] <= y <= self.b[3]
+    def area(self): return (self.b[2] - self.b[0]) * (self.b[3] - self.b[1])
+class _Pt:
+    def __init__(self, pt): self.pt = pt
+saved = (R.QgsGeometry, R.ring_wkt)
+R.QgsGeometry = type("G", (), {"fromWkt": staticmethod(lambda w: _Box(w)),
+                               "fromPointXY": staticmethod(lambda p: _Pt(p))})
+R.ring_wkt = lambda ring: ring
+for name in ("follow_input_point", "show_reference_for", "reference_for_point",
+             "_tiles_containing", "predicted_reference_point",
+             "_predicted_offset_now", "_measured_errors"):
+    setattr(win, name, getattr(R.QCDashboard, name).__get__(win))
+win._syncing = False
+win._band_choice = lambda: None
+win._has_data_at = lambda path, pt: True
+win._label_for = lambda p: os.path.basename(p)
+win.current_ref_layer = None
+win.cleanup_reference_layer = MagicMock()
+win._load_ref_layer = MagicMock()
+win.show_ref_at = MagicMock()
+win.dropdown_ref = MagicMock()
+near_tile, far_tile = "/refs/over_scene.tif", "/refs/70km_west.tif"
+win.ref_footprints = {
+    near_tile: {"ring_proj": (450000.0, 1950000.0, 550000.0, 2050000.0)},
+    far_tile:  {"ring_proj": (360000.0, 1950000.0, 449000.0, 2050000.0)},
+}
+win.ref_tif_list = [near_tile]          # the filter kept only the overlapping one
+# one finished row 70 km out; row 1 being marked at (500000, 2000000)
+win.table = _SelTable([["470000.000", "1500000.000", "400000.000", "1501500.000"],
+                       ["500000.000", "2000000.000", "0.000", "0.000"]], current=1)
+win.follow_input_point(_PointXY(500000.0, 2000000.0))
+loaded = win._load_ref_layer.call_args[0][0]
+assert loaded == far_tile, f"loaded {loaded}, not the tile 70 km away"
+assert far_tile in win.ref_tif_list, "the tile was not added to the dropdown"
+shown = win.show_ref_at.call_args[0][0]
+assert (shown.x(), shown.y()) == (430000.0, 2001500.0), shown
+print("\na click with a 70 km error loads the tile outside the input's "
+      "footprint that covers the predicted point, and marks it there")
+
+# no tile anywhere: the reference still goes to the prediction, not nowhere
+win.ref_footprints = {near_tile: win.ref_footprints[near_tile]}
+win.ref_tif_list = [near_tile]
+win.show_ref_at.reset_mock()
+win.follow_input_point(_PointXY(500000.0, 2000000.0))
+shown = win.show_ref_at.call_args[0][0]
+assert (shown.x(), shown.y()) == (430000.0, 2001500.0), shown
+print("with no tile there at all, the reference still moves to the "
+      "predicted point and marks it, instead of silently staying put")
+R.QgsGeometry, R.ring_wkt = saved
+
+for d in (d1, d2, d3, d4, d5, d6):
+    shutil.rmtree(d, ignore_errors=True)
+print("\nstubbed integration OK")
