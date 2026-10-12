@@ -165,6 +165,25 @@ Windows compared at the same map position cannot match when the error is
    (`from-pair-N (phasecorr disagreed)` in the log).
    When the pairs still differ by more than half of `max_expected_error_m`,
    the log warns. Every estimate is written to `raw_matches_*/COARSE_OFFSETS.csv`.
+   **One coarse offset per channel, for every detector** (`coarse_shared`,
+   on by default). The offset belongs to the image, not to the detector. It
+   is measured once, by a panel of up to three of the job's detectors that
+   are best at it: TopicFM, MINIMA-RoMa, LoFTR, GIM-RoMa, ALIKED-LG, SFD2,
+   DISK, SIFT, in that order; `coarse_detectors` names them instead.
+   - Each pair keeps the panel's best-supported estimate, and the checks
+     above run on the pooled set. Every detector then gets the result.
+   - It is written to `COARSE_SHARED.csv` in each sweep's channel folder.
+     It is cached in the pair cache (`COARSE_SHARED.json`) while the coarse
+     settings, panel and pairs stay the same. With `coarse_cell_km` set, every
+     window size reuses it; with 0, the cell follows the window size.
+   - A panel detector without weights is skipped.
+   - Why: when each detector measured its own offset (job 342, G1A HS), 18
+     detectors whose coarse matcher found nothing borrowed phase-correlation
+     guesses. They put 34 of 55 pairs 60–110 km off, so their windows
+     compared ground that does not match. `coarse_shared: false` brings back
+     per-detector offsets.
+   - A coarse matcher that runs out of GPU memory retries once at twice the
+     coarse pixel (job 346, RDD on a 16 GB card).
 3. Fine windows read the reference **shifted by that offset and padded by
    `search_margin_m`**. The final errors are measured from the matched
    coordinates themselves, so they contain the full offset.

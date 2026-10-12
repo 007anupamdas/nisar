@@ -542,6 +542,11 @@ class PipelineConfig:
     # window, instead of one translation per image/reference pair.
     coarse_local: bool = True
     coarse_cell_m: Optional[float] = None
+    # One coarse offset per channel, measured by a small panel of detectors
+    # and given to every detector (the offset belongs to the image). Off: each
+    # detector measures its own, as before job 342.
+    coarse_shared: bool = True
+    coarse_detectors: Optional[List[str]] = None   # the panel; None = automatic
 
     def __post_init__(self):
         if self.smnn_thresholds is None:
@@ -2071,17 +2076,28 @@ class CoarseAligner:
         tried = []
         if method in ('auto', 'matcher') and matcher is not None:
             try:
-                est = self._by_matcher(pair, matcher, res)
+                mres = res
+                try:
+                    est = self._by_matcher(pair, matcher, mres)
+                except Exception as e:
+                    if not is_gpu_oom(e):
+                        raise
+                    # job 346: RDD on the 16 GB A4000 -- half the pixels a side is a quarter of the memory
+                    safe_cuda_empty_cache()
+                    print(f'[Coarse] pair {pair["pair_id"]}: out of GPU memory at {mres:.0f} m; '
+                          f'retrying at {2 * mres:.0f} m')
+                    mres = 2 * mres
+                    est = self._by_matcher(pair, matcher, mres)
                 samples = est.pop('samples', None) if est else None
                 ok = est is not None and est['support'] >= cfg.coarse_min_support \
                     and est['support'] >= 0.2 * est['n']
                 # With internal distortion the global mode can be weak while each
                 # region is consistent, so a good local field also counts.
-                field = (self._offset_field(pair, samples, res, cfg.coarse_min_support)
+                field = (self._offset_field(pair, samples, mres, cfg.coarse_min_support)
                          if cfg.coarse_local and est is not None else None)
                 tried.append(f"matcher: {est if est else 'no matches'}")
                 if ok or field is not None:
-                    out = {**est, 'method': f'matcher@{res:.0f}m', 'field': field}
+                    out = {**est, 'method': f'matcher@{mres:.0f}m', 'field': field}
                     if not ok:  # report the field's centre value as the pair offset
                         out['dx'] = float(np.median(np.asarray(field['dx'])))
                         out['dy'] = float(np.median(np.asarray(field['dy'])))
@@ -5115,6 +5131,34 @@ def build_variants(name: str, config: 'PipelineConfig',
     return list(iter_variants(name, config, params))
 
 
+# Detectors that measured the most coarse matcher offsets on G1A HS (jobs 342,
+# 346: TopicFM 16-20 of 55 pairs, MINIMA-RoMa 15-16, LoFTR 10-14, ...); the
+# coarse panel takes the first of them a job runs.
+COARSE_PANEL_ORDER = ('imw-topicfm', 'imw-minima-roma', 'loftr', 'imw-gim-roma', 'imw-aliked-lg',
+                      'imw-sfd2', 'disk', 'sift')
+
+
+def coarse_panel(detector_types: List[str], config: 'PipelineConfig', n: int = 3) -> List[str]:
+    """The detectors that measure the shared coarse offset: coarse_detectors
+    when set, else up to n of the job's detectors in COARSE_PANEL_ORDER,
+    topped up with the job's first detectors."""
+    if config.coarse_detectors:
+        return list(config.coarse_detectors)
+    out: List[str] = []
+    for p in COARSE_PANEL_ORDER:
+        hit = next((d for d in detector_types if (d == p or d.startswith(p)) and d not in out), None)
+        if hit:
+            out.append(hit)
+        if len(out) >= n:
+            return out
+    for d in detector_types:
+        if len(out) >= n:
+            break
+        if d not in out:
+            out.append(d)
+    return out
+
+
 def iter_variants(name: str, config: 'PipelineConfig', params: Optional[Dict] = None):
     base, _ = resolve_detector_name(name)
     if params is None:
@@ -5239,6 +5283,11 @@ class AutoMatchPipeline:
         aligner = CoarseAligner(cfg)
         shared_coarse: Dict[int, Dict] = {}
         matcher_free = (cfg.coarse_method or 'auto').lower() in ('none', 'manual', 'phasecorr')
+        panel_coarse = None
+        if cfg.coarse_shared and not matcher_free and disk_pairs:
+            cache = os.path.join(self.scene.cache_dir(cfg.temp_dir), f'{pol}_to{s1_ref_tag}', 'COARSE_SHARED.json')
+            panel_coarse = self._shared_coarse(pol, disk_pairs, detector_types, aligner, cache,
+                                               os.path.join(pol_out_dir, 'COARSE_SHARED.csv'))
 
         run_records = []
         for matcher in self._iter_matchers(detector_types):
@@ -5260,24 +5309,19 @@ class AutoMatchPipeline:
                 matcher.warmup()             # missing weights stop here, in seconds
                 offsets, all_match_data = [], []
                 ests: Dict[int, Dict] = {}
-                for pair in disk_pairs:
-                    pid = pair['pair_id']
-                    if matcher_free and pid in shared_coarse:
-                        ests[pid] = shared_coarse[pid]
-                    else:
-                        report('stage', stage='coarse', channel=pol, detector=tag, pair=pid)
-                        ests[pid] = aligner.estimate(pair, None if matcher_free else matcher)
-                        if matcher_free:
-                            shared_coarse[pid] = ests[pid]
-                self._drop_matcher_outliers(disk_pairs, ests, cfg)
-                self._check_phasecorr_offsets(disk_pairs, ests, cfg)
-                self._borrow_failed_offsets(disk_pairs, ests)
-                spread = self._coarse_spread(ests)
-                if spread > 0.5 * cfg.max_expected_error_m:
-                    print(f'[Coarse] WARNING: {tag}: the pairs\' coarse offsets differ by up to '
-                          f'{spread / 1000:.0f} km, more than one image moves from place to place. Pairs with '
-                          f'a wrong offset match the wrong ground (the chip consensus drops them when they '
-                          f'are few); if most pairs disagree, check the input\'s pixel size and window size.')
+                if panel_coarse is not None:
+                    ests = copy.deepcopy(panel_coarse)
+                else:
+                    for pair in disk_pairs:
+                        pid = pair['pair_id']
+                        if matcher_free and pid in shared_coarse:
+                            ests[pid] = shared_coarse[pid]
+                        else:
+                            report('stage', stage='coarse', channel=pol, detector=tag, pair=pid)
+                            ests[pid] = aligner.estimate(pair, None if matcher_free else matcher)
+                            if matcher_free:
+                                shared_coarse[pid] = ests[pid]
+                    self._settle_coarse(disk_pairs, ests, cfg, tag)
                 for pair in disk_pairs:
                     pid = pair['pair_id']
                     est = ests[pid]
@@ -5382,6 +5426,141 @@ class AutoMatchPipeline:
         if cfg.cleanup_after_pair and disk_pairs:
             shutil.rmtree(os.path.dirname(disk_pairs[0]['nisar_path']), ignore_errors=True)
         return run_records
+
+    # ── one coarse offset per channel ────────────────────────────────────────
+    @staticmethod
+    def _settle_coarse(pairs: List[Dict], ests: Dict[int, Dict], cfg, label: str) -> None:
+        """The checks every set of coarse offsets goes through: matcher
+        outliers, phase correlation against the matcher, failed pairs borrow;
+        then the spread warning."""
+        AutoMatchPipeline._drop_matcher_outliers(pairs, ests, cfg)
+        AutoMatchPipeline._check_phasecorr_offsets(pairs, ests, cfg)
+        AutoMatchPipeline._borrow_failed_offsets(pairs, ests)
+        spread = AutoMatchPipeline._coarse_spread(ests)
+        if spread > 0.5 * cfg.max_expected_error_m:
+            print(f'[Coarse] WARNING: {label}: the pairs\' coarse offsets differ by up to '
+                  f'{spread / 1000:.0f} km, more than one image moves from place to place. Pairs with '
+                  f'a wrong offset match the wrong ground (the chip consensus drops them when they '
+                  f'are few); if most pairs disagree, check the input\'s pixel size and window size.')
+
+    @staticmethod
+    def _coarse_rank(e: Optional[Dict]) -> Tuple[int, float]:
+        """Order of preference between two estimates of one pair: a matcher
+        offset by its support, then phase correlation by its peak, then
+        anything else."""
+        if not e:
+            return (-1, 0.0)
+        m = str(e.get('method'))
+        if m.startswith('matcher'):
+            return (2, float(e.get('support') or 0))
+        if m.startswith('phasecorr'):
+            return (1, float(e.get('peak') or 0))
+        return (0, 0.0)
+
+    @staticmethod
+    def _pool_coarse(per_detector: Dict[str, Dict[int, Dict]], pair_ids: List[int]) -> Dict[int, Dict]:
+        """Each pair's best estimate over the panel's detectors (_coarse_rank),
+        tagged with the detector that measured it; 'failed' where none did."""
+        out: Dict[int, Dict] = {}
+        for pid in pair_ids:
+            best, who = None, ''
+            for tag, ests in per_detector.items():
+                e = ests.get(pid)
+                if AutoMatchPipeline._coarse_rank(e) > AutoMatchPipeline._coarse_rank(best):
+                    best, who = e, tag
+            if best is None or AutoMatchPipeline._coarse_rank(best)[0] <= 0:
+                best, who = {'dx': 0.0, 'dy': 0.0, 'support': None, 'n': None, 'peak': None,
+                             'method': 'failed'}, ''
+            out[pid] = dict(best, panel_detector=who)
+        return out
+
+    def _shared_coarse(self, pol: str, pairs: List[Dict], detector_types: List[str], aligner,
+                       cache_path: str, csv_path: str = '') -> Optional[Dict[int, Dict]]:
+        """One coarse offset per pair for every detector of this channel.
+
+        Job 342 (G1A HS): each detector measured its own coarse offsets, and
+        18 detectors whose coarse matcher found nothing borrowed phase-
+        correlation guesses, 34 of 55 pairs 60-110 km wrong: their windows
+        compared ground that does not match. The offset belongs to the image,
+        so a small panel (coarse_panel) measures it, each pair keeps the best-
+        supported estimate of the panel, the usual checks (_settle_coarse)
+        run on the pooled set, and every detector gets the result. Saved to
+        cache_path and reused while the coarse settings, panel and pairs are
+        the same. None when no panel detector could be built (each detector
+        then measures its own, as before)."""
+        cfg = self.config
+        panel = coarse_panel(detector_types, cfg)
+        cell = cfg.coarse_cell_m or (cfg.window_size if cfg.coarse_local else None)
+        key = hashlib.sha1(json.dumps({
+            'v': 1, 'panel': panel, 'cell': cell,
+            'coarse': [cfg.coarse_method, cfg.coarse_resolution_m, cfg.coarse_max_px, cfg.max_expected_error_m,
+                       cfg.coarse_min_support, cfg.coarse_min_peak, cfg.coarse_local,
+                       list(cfg.initial_offset_m) if cfg.initial_offset_m else None,
+                       cfg.search_margin_m, cfg.smnn_thresholds[:1], cfg.detector_params or {}],
+            'pairs': [(p['pair_id'], p.get('reference_path'), p.get('nisar_path'), list(p.get('bounds') or []))
+                      for p in pairs]}, sort_keys=True, default=str).encode()).hexdigest()
+        ests = None
+        try:
+            with open(cache_path, encoding='utf-8') as f:
+                saved = json.load(f)
+            if saved.get('key') == key:
+                ests = {int(k): v for k, v in saved['ests'].items()}
+                print(f'[Coarse] {pol}: shared coarse offsets of panel {panel} from {cache_path}')
+        except (OSError, ValueError, KeyError):
+            pass
+        if ests is None:
+            print('-' * 80)
+            print(f'[Coarse] {pol}: one coarse offset per pair for every detector, measured by {panel}')
+            per_detector: Dict[str, Dict[int, Dict]] = {}
+            for d in panel:
+                m = None
+                try:
+                    m = next(iter(iter_variants(d, cfg)), None)
+                    if m is None:
+                        continue
+                    tag = m.get_filename_prefix()
+                    m.selected_matchers()
+                    m.warmup()
+                    got = per_detector.setdefault(tag, {})
+                    for pair in pairs:
+                        report('stage', stage='coarse', channel=pol, detector=tag, pair=pair['pair_id'])
+                        got[pair['pair_id']] = aligner.estimate(pair, m)
+                    n = sum(1 for e in got.values() if str(e['method']).startswith('matcher'))
+                    print(f'[Coarse] panel {tag}: matcher offsets on {n} of {len(pairs)} pairs')
+                except ModelLoadError as e:
+                    print(f'[Coarse] panel {d}: not available ({e}); next')
+                except Exception as e:
+                    print(f'[Coarse] panel {d}: {type(e).__name__}: {e}; next')
+                finally:
+                    unload = getattr(m, 'unload_model', None)
+                    if callable(unload):
+                        unload()
+                    del m
+                    safe_cuda_empty_cache()
+                    gc.collect()
+            if not per_detector:
+                print(f'[Coarse] {pol}: no panel detector could be built; each detector measures its own')
+                return None
+            ests = self._pool_coarse(per_detector, [p['pair_id'] for p in pairs])
+            self._settle_coarse(pairs, ests, cfg, f'shared ({pol})')
+            try:
+                os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                with open(cache_path, 'w', encoding='utf-8') as f:
+                    json.dump({'key': key, 'panel': panel, 'ests': {str(k): v for k, v in ests.items()}}, f,
+                              default=lambda o: o.tolist() if hasattr(o, 'tolist') else str(o))
+            except OSError as e:
+                print(f'[Coarse] could not save {cache_path}: {e}')
+        for pair in pairs:
+            e = ests[pair['pair_id']]
+            print(f'[Coarse] shared pair {pair["pair_id"]}: dE={e["dx"]:.1f} m dN={e["dy"]:.1f} m '
+                  f'({e["method"]}{", " + e["panel_detector"] if e.get("panel_detector") else ""}, '
+                  f'support={e.get("support")})')
+        if csv_path:
+            os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+            pd.DataFrame([{'pair_id': p['pair_id'], 'reference': os.path.basename(p.get('reference_path', '')),
+                           **{k: v for k, v in ests[p['pair_id']].items() if k != 'field'}}
+                          for p in pairs]).to_csv(csv_path, index=False)
+        return ests
 
     @staticmethod
     def _centre(p: Dict) -> Tuple[float, float]:

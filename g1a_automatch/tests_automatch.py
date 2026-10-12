@@ -960,6 +960,12 @@ def test_gui_dialog():
               (['HH', 'HV'], ['HH', 'HV']))
         cp.edit.clear()
         cp.set_names([])
+        w.coarse_shared.setChecked(False)
+        w.coarse_dets.setText('imw-topicfm, loftr')
+        check('gui: shared coarse fields reach the job', (w.get_job()['coarse_shared'], w.get_job()['coarse_detectors']),
+              (False, ['imw-topicfm', 'loftr']))
+        w.coarse_shared.setChecked(True)
+        w.coarse_dets.setText('')
         w.auto_range.setText('1-70')
         check('gui: auto bands range reaches the job', w.get_job()['auto_bands_range'], [1, 70])
         w.auto_range.setText('70-1')
@@ -1858,6 +1864,135 @@ def test_auto_bands(tmp):
     check('bands pack: ticked channels are packed as they are', (same['channels'], note), (['band7'], None))
 
 
+def test_shared_coarse(tmp):
+    """Job 342 (G1A HS): 18 detectors whose coarse matcher found nothing put
+    34 of 55 pairs on a phase-correlation guess 60-110 km off. One coarse
+    offset per channel, measured by a panel and given to every detector."""
+    import contextlib
+    import io
+    import math
+    import automatch_engine as E
+    km = 1000.0
+    P = E.AutoMatchPipeline
+    pairs = [{'pair_id': i, 'bounds': [i * 20 * km, 0, i * 20 * km + 30 * km, 30 * km],
+              'reference_path': f'ref{i}.tif', 'nisar_path': f'in{i}.tif'} for i in range(1, 25)]
+    truth = (81500.0, 3800.0)
+
+    def mat(dx, dy, sup):
+        return {'dx': dx, 'dy': dy, 'support': sup, 'n': sup * 2, 'peak': None, 'field': None,
+                'method': 'matcher@180m'}
+
+    def pc(dx, dy, peak):
+        return {'dx': dx, 'dy': dy, 'support': None, 'n': None, 'peak': peak, 'field': None,
+                'method': 'phasecorr@180m'}
+    fail = {'dx': 0.0, 'dy': 0.0, 'support': None, 'n': None, 'peak': None, 'method': 'failed'}
+
+    def phase_only():
+        return {i: (pc(-21500, 59600, 0.07) if i <= 9 else pc(82000, 4000, 0.08) if i >= 20 else dict(fail))
+                for i in range(1, 25)}
+    strong = phase_only()
+    strong.update({i: mat(truth[0] + 50 * (i % 3), truth[1] - 40 * (i % 2), 30) for i in range(10, 20)})
+    weak = phase_only()
+    weak.update({i: mat(truth[0], truth[1], 12) for i in (10, 12, 14, 16)})
+    cfg = E.PipelineConfig()
+
+    def off(ests):
+        return sum(1 for e in ests.values() if math.hypot(e['dx'] - truth[0], e['dy'] - truth[1]) > 5 * km)
+    alone = phase_only()
+    with contextlib.redirect_stdout(io.StringIO()):
+        P._settle_coarse(pairs, alone, cfg, 'sift')
+    check('coarse shared: a detector without matcher offsets puts pairs on the wrong guess (job 342)',
+          off(alone) > 5, True)
+    pooled = P._pool_coarse({'topicfm': strong, 'sift': phase_only(), 'xoftr': weak}, [p['pair_id'] for p in pairs])
+    check('coarse shared: each pair keeps the best-supported estimate',
+          (pooled[11]['panel_detector'], pooled[10]['support']), ('topicfm', 30))
+    with contextlib.redirect_stdout(io.StringIO()):
+        P._settle_coarse(pairs, pooled, cfg, 'shared')
+    check('coarse shared: pooled and checked, every pair within 5 km of the scene offset', off(pooled), 0)
+
+    # coarse_panel
+    dets = ['sift', 'disk_depth', 'imw-topicfm', 'loftr', 'imw-xoftr']
+    check('coarse panel: the best coarse detectors of the job, in order', E.coarse_panel(dets, cfg),
+          ['imw-topicfm', 'loftr', 'disk_depth'])
+    check('coarse panel: topped up from the job', E.coarse_panel(['gftt', 'keynet'], cfg), ['gftt', 'keynet'])
+    check('coarse panel: coarse_detectors wins', E.coarse_panel(dets, E.PipelineConfig(coarse_detectors=['imw-xoftr'])),
+          ['imw-xoftr'])
+
+    # _shared_coarse: panel built, cache reused, a missing model skipped
+    calls = []
+
+    class FakeMatcher:
+        def __init__(self, name):
+            self.name = name
+
+        def get_filename_prefix(self):
+            return self.name
+
+        def selected_matchers(self):
+            return ['smnn']
+
+        def warmup(self):
+            if self.name == 'loftr':
+                raise E.ModelLoadError('no weights here')
+
+        def unload_model(self):
+            pass
+
+    table = {'imw-topicfm': strong, 'disk_depth': weak}
+
+    class FakeAligner:
+        def estimate(self, pair, m):
+            calls.append(m.name)
+            return dict(table.get(m.name, phase_only())[pair['pair_id']])
+    iv = E.iter_variants
+    E.iter_variants = lambda d, c, params=None: iter([FakeMatcher(d)])
+    try:
+        pipe = P.__new__(P)
+        pipe.config = E.PipelineConfig(window_size=256)
+        cache = os.path.join(tmp, 'coarse', 'COARSE_SHARED.json')
+        csvp = os.path.join(tmp, 'coarse_out', 'COARSE_SHARED.csv')
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            got = pipe._shared_coarse('band3', pairs, dets, FakeAligner(), cache, csvp)
+        check('coarse shared: the panel measures each pair once; a detector without weights is skipped',
+              (sorted(set(calls)), len(calls)), (['disk_depth', 'imw-topicfm'], 2 * len(pairs)))
+        check('coarse shared: the result is right on every pair, and written out',
+              (off(got), os.path.exists(cache), os.path.exists(csvp)), (0, True, True))
+        check('coarse shared: the log names the panel', 'measured by' in buf.getvalue() and 'not available' in buf.getvalue(),
+              True)
+        calls.clear()
+        with contextlib.redirect_stdout(io.StringIO()):
+            again = pipe._shared_coarse('band3', pairs, dets, FakeAligner(), cache)
+        check('coarse shared: read back from the cache, nothing measured again',
+              (calls, {k: (v['dx'], v['dy']) for k, v in again.items()} == {k: (v['dx'], v['dy']) for k, v in got.items()}),
+              ([], True))
+        pipe.config = E.PipelineConfig(window_size=256, max_expected_error_m=100000.0)
+        with contextlib.redirect_stdout(io.StringIO()):
+            pipe._shared_coarse('band3', pairs, dets, FakeAligner(), cache)
+        check('coarse shared: other coarse settings measure again', len(calls), 2 * len(pairs))
+        E.iter_variants = lambda d, c, params=None: iter([FakeMatcher('loftr')])
+        with contextlib.redirect_stdout(io.StringIO()):
+            none = pipe._shared_coarse('band3', pairs, ['loftr'], FakeAligner(), os.path.join(tmp, 'c2.json'))
+        check('coarse shared: no panel detector -> None (each detector measures its own)', none, None)
+    finally:
+        E.iter_variants = iv
+
+    # out of GPU memory in the coarse matcher: retried at twice the pixel
+    al = E.CoarseAligner(E.PipelineConfig(coarse_local=False))
+    tries = []
+
+    def by_matcher(pair, m, res):
+        tries.append(res)
+        if len(tries) == 1:
+            raise E.GpuOutOfMemory('CUDA out of memory')
+        return {'dx': 100.0, 'dy': -50.0, 'support': 40, 'n': 60, 'peak': None}
+    al._by_matcher = by_matcher
+    al._resolution = lambda pair: 180.0
+    with contextlib.redirect_stdout(io.StringIO()):
+        est = al.estimate({'pair_id': 1}, FakeMatcher('rdd'))
+    check('coarse: out of GPU memory, retried at twice the pixel (job 346)', (tries, est['method']),
+          ([180.0, 360.0], 'matcher@360m'))
+
+
 def test_partial_cover():
     """Jobs 336 and 343: a warning when the first-ranked configuration is km
     off while one reaching fewer points is close (343, matches on part of the
@@ -2305,6 +2440,7 @@ def main():
         test_jobs_318_323(tmp)
         test_coarse_outliers()
         test_partial_cover()
+        test_shared_coarse(tmp)
         test_auto_bands(tmp)
         test_kornia_versions(tmp)
         test_warmup_and_padding()

@@ -126,6 +126,8 @@ DEFAULT_JOB: Dict = {
     'search_margin_m': 1500,
     'coarse_local': True,        # per-cell coarse offsets (internal distortion)
     'coarse_cell_km': 0,         # cell size; 0 = one window wide
+    'coarse_shared': True,       # one coarse offset per channel for every detector, measured by a panel
+    'coarse_detectors': [],      # that panel; [] = up to 3 of the job's detectors (TopicFM, MINIMA-RoMa, LoFTR, ...)
 
     # RANSAC (thresholds in pixels of the working resolution unless *_m given)
     'ransac_methods': ['magsac'],
@@ -170,6 +172,8 @@ JOB_HELP = {
     'reference_dir': 'Reference collection (L8_ref, C1, ...) - discovered like DPQED_rival.py',
     'max_expected_error_m': 'Worst-case geolocation error; search buffer for references and coarse alignment',
     'coarse_method': 'auto = matcher at coarse resolution, phase correlation if weak',
+    'coarse_shared': 'One coarse offset per channel, measured by a few detectors and given to every detector',
+    'coarse_detectors': 'Detectors that measure the shared coarse offset ([] = automatic)',
     'initial_offset_m': '[dE, dN] metres (input minus reference) if known, e.g. from RIVAL',
     'truth_csv': 'Manually measured points (RIVAL CSV): every detector + matcher is ranked against them',
 }
@@ -490,6 +494,12 @@ def preflight(job: Dict, check_weights: bool = True) -> Dict:
         names = {d['name'] for d in cat['detectors']}
         wanted = list(dict.fromkeys(job['detectors']))
         unknown = [d for d in wanted if E.resolve_detector_name(d)[0] not in names]
+        if job['coarse_shared'] and job['coarse_method'] in ('auto', 'matcher'):
+            pcfg = E.PipelineConfig(coarse_detectors=list(job['coarse_detectors']) or None)
+            info['coarse_panel'] = E.coarse_panel(wanted, pcfg)
+            for d in job['coarse_detectors']:
+                if E.resolve_detector_name(d)[0] not in names:
+                    errors.append(f'coarse_detectors: {d!r} is not available here')
         if unknown:
             skipped = dict(cat['imcui'].get('skipped') or [])
             lacking = E.kornia_unavailable()
@@ -610,6 +620,8 @@ def _config_for(job: Dict, win: int, nf: Optional[int], res: float, out_dir: str
         search_margin_m=job['search_margin_m'], min_gpu_free_gb=job['min_gpu_free_gb'],
         coarse_local=bool(job['coarse_local']),
         coarse_cell_m=(float(job['coarse_cell_km']) * 1000.0) if job['coarse_cell_km'] else None,
+        coarse_shared=bool(job['coarse_shared']),
+        coarse_detectors=list(job['coarse_detectors']) or None,
         consensus_model=job['consensus_model'], consensus_surface_degree=job['consensus_surface'],
         save_match_images=job['save_match_images'], weights_cache_dir=job['weights_cache_dir'],
         nisar_band=job['nisar_band'], nisar_frequency=job['nisar_frequency'],

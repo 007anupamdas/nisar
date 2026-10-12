@@ -1049,6 +1049,14 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.coarse_cell.setSuffix(' km')
         self.coarse_cell.setSpecialValueText('one window')
         f.addRow('Offset cell size', self.coarse_cell)
+        self.coarse_shared = QtWidgets.QCheckBox('one coarse offset for all detectors, measured by a few of them')
+        self.coarse_shared.setToolTip('The offset belongs to the image. Off: each detector measures its own; '
+                                      'on G1A HS (job 342) detectors whose coarse step found nothing then '
+                                      'borrowed wrong offsets on most pairs.')
+        f.addRow('Shared coarse offset', self.coarse_shared)
+        self.coarse_dets = QtWidgets.QLineEdit()
+        self.coarse_dets.setPlaceholderText('automatic: up to 3 of TopicFM, MINIMA-RoMa, LoFTR, GIM-RoMa, … in the job')
+        f.addRow('Coarse detectors', self.coarse_dets)
 
     def _build_ransac_tab(self):
         f = self._form_tab('RANSAC & consensus')
@@ -1182,6 +1190,8 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.margin.setValue(float(j['search_margin_m']))
         self.coarse_local.setChecked(bool(j['coarse_local']))
         self.coarse_cell.setValue(float(j['coarse_cell_km'] or 0))
+        self.coarse_shared.setChecked(bool(j.get('coarse_shared', True)))
+        self.coarse_dets.setText(', '.join(j.get('coarse_detectors') or []))
         for m, cb in self.ransac_boxes.items():
             cb.setChecked(m in [str(x) for x in j['ransac_methods']])
         self.ransac_px.setText(fmt_list(j['ransac_thresholds_px']))
@@ -1256,6 +1266,8 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             'search_margin_m': self.margin.value(),
             'coarse_local': self.coarse_local.isChecked(),
             'coarse_cell_km': self.coarse_cell.value(),
+            'coarse_shared': self.coarse_shared.isChecked(),
+            'coarse_detectors': [t for t in re.split(r'[,\s]+', self.coarse_dets.text().strip()) if t],
             'ransac_methods': methods,
             'ransac_thresholds_px': parse_float_list(self.ransac_px.text(), 'RANSAC thresholds'),
             'ransac_thresholds_m': [],
