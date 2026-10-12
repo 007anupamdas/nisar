@@ -61,22 +61,104 @@ RANK_COLS = ['rank', 'channel', 'sweep', 'detector', 'matcher', 'ransac', 'truth
 # ─────────────────────────────────────────────────────────────────────────────
 # truth
 # ─────────────────────────────────────────────────────────────────────────────
-def load_truth(path: str) -> pd.DataFrame:
-    """Manual points: truth_id, in_lon, in_lat, ref_lon, ref_lat."""
+MAX_TRUTH_ERROR_KM = 500.0     # a point further off than this is a broken row, not an error
+
+
+def _coord(df: pd.DataFrame, col: str, lim: float) -> pd.Series:
+    """A lon/lat column as numbers; blank, text ('-', 'NA'), exactly 0 (an
+    unset RIVAL point) and out-of-range values become NaN."""
+    if col not in df.columns:
+        return pd.Series(np.nan, index=df.index)
+    v = pd.to_numeric(df[col], errors='coerce')
+    return v.where((v != 0) & (v.abs() <= lim))
+
+
+def _xy(df: pd.DataFrame, col: str) -> pd.Series:
+    if col not in df.columns:
+        return pd.Series(np.nan, index=df.index)
+    v = pd.to_numeric(df[col], errors='coerce')
+    return v
+
+
+def _fill_from_xy(lon: pd.Series, lat: pd.Series, x: pd.Series, y: pd.Series,
+                  known: List[Tuple[pd.Series, pd.Series, pd.Series, pd.Series]]) -> Tuple[pd.Series, pd.Series, List]:
+    """Missing lon/lat of a point from its projected X/Y, through the X/Y ->
+    lon/lat mapping fitted on the file's own complete points (input and
+    reference points share RIVAL's X/Y grid). Quadratic with 8+ known
+    points, else affine with 4+; used only when it fits them within ~20 m."""
+    gx = np.concatenate([k[0].values for k in known])
+    gy = np.concatenate([k[1].values for k in known])
+    glo = np.concatenate([k[2].values for k in known])
+    gla = np.concatenate([k[3].values for k in known])
+    ok = np.isfinite(gx) & np.isfinite(gy) & np.isfinite(glo) & np.isfinite(gla)
+    want = (lon.isna() | lat.isna()) & x.notna() & y.notna() & ((x != 0) | (y != 0))
+    if not want.any() or ok.sum() < 4:
+        return lon, lat, []
+    gx, gy, glo, gla = gx[ok], gy[ok], glo[ok], gla[ok]
+    mx, my = gx.mean(), gy.mean()
+    sc = max(np.ptp(gx), np.ptp(gy), 1.0)
+
+    def design(a, b):
+        u, v = (a - mx) / sc, (b - my) / sc
+        cols = [np.ones_like(u), u, v] + ([u * u, u * v, v * v] if ok.sum() >= 8 else [])
+        return np.column_stack(cols)
+    A = design(gx, gy)
+    clo = np.linalg.lstsq(A, glo, rcond=None)[0]
+    cla = np.linalg.lstsq(A, gla, rcond=None)[0]
+    resid = max(np.abs(A @ clo - glo).max(), np.abs(A @ cla - gla).max())
+    if resid > 2e-4:                      # ~20 m: the X/Y grid is not one smooth map of lon/lat
+        return lon, lat, []
+    B = design(x[want].values, y[want].values)
+    lon, lat = lon.copy(), lat.copy()
+    lon[want], lat[want] = B @ clo, B @ cla
+    return lon, lat, list(want[want].index)
+
+
+def load_truth(path: str, max_error_km: float = MAX_TRUTH_ERROR_KM) -> pd.DataFrame:
+    """Manual points: truth_id, in_lon, in_lat, ref_lon, ref_lat.
+
+    RIVAL exports sometimes leave a point's Ref_Lon / Ref_Lat empty, 0 or
+    text: such a row used to count as an error of thousands of km (a 0) or
+    stop the file (text). A missing lon/lat is recovered from the row's
+    X/Y when the file's other points give the X/Y -> lon/lat mapping; a row
+    still incomplete, or with input and reference more than max_error_km
+    apart, is left out, with a note naming it."""
     df = pd.read_csv(path, encoding='utf-8-sig')
     df.columns = [str(c).strip() for c in df.columns]
+    name = os.path.basename(path)
     missing = [c for c in TRUTH_COLUMNS if c not in df.columns]
     if missing:
-        raise ValueError(f'{os.path.basename(path)}: ground truth needs the columns {TRUTH_COLUMNS} '
+        raise ValueError(f'{name}: ground truth needs the columns {TRUTH_COLUMNS} '
                          f'(missing {missing}); RIVAL "Export CSV" files have them')
-    df = df.dropna(subset=TRUTH_COLUMNS)
-    if df.empty:
-        raise ValueError(f'{os.path.basename(path)}: no complete rows')
     ids = df['Row'].tolist() if 'Row' in df.columns else list(range(1, len(df) + 1))
-    return pd.DataFrame({'truth_id': ids, 'in_lon': df['In_Lon'].astype(float).values,
-                         'in_lat': df['In_Lat'].astype(float).values,
-                         'ref_lon': df['Ref_Lon'].astype(float).values,
-                         'ref_lat': df['Ref_Lat'].astype(float).values})
+    ilo, ila = _coord(df, 'In_Lon', 180), _coord(df, 'In_Lat', 90)
+    rlo, rla = _coord(df, 'Ref_Lon', 180), _coord(df, 'Ref_Lat', 90)
+    ix, iy, rx, ry = _xy(df, 'In_X'), _xy(df, 'In_Y'), _xy(df, 'Ref_X'), _xy(df, 'Ref_Y')
+    known = [(ix, iy, ilo, ila), (rx, ry, rlo, rla)]
+    rlo, rla, fixed_r = _fill_from_xy(rlo, rla, rx, ry, known)
+    ilo, ila, fixed_i = _fill_from_xy(ilo, ila, ix, iy, known)
+    for idx in fixed_r:
+        print(f'[Truth] {name}: point {ids[idx]} had no Ref_Lon/Ref_Lat; taken from its Ref_X/Ref_Y')
+    for idx in fixed_i:
+        print(f'[Truth] {name}: point {ids[idx]} had no In_Lon/In_Lat; taken from its In_X/In_Y')
+    keep = ilo.notna() & ila.notna() & rlo.notna() & rla.notna()
+    for idx in df.index[~keep]:
+        gone = [c for c, v in (('In_Lon', ilo), ('In_Lat', ila), ('Ref_Lon', rlo), ('Ref_Lat', rla))
+                if pd.isna(v[idx])]
+        print(f'[Truth] WARNING {name}: point {ids[idx]} left out: no usable {", ".join(gone)}')
+    # input and reference of one point are a geolocation error apart, never continents
+    lat0 = np.radians((ila + rla) / 2.0)
+    dist_km = np.hypot((ilo - rlo) * 111.32 * np.cos(lat0), (ila - rla) * 110.57)
+    far = keep & (dist_km > max_error_km)
+    for idx in df.index[far]:
+        print(f'[Truth] WARNING {name}: point {ids[idx]} left out: input and reference are '
+              f'{dist_km[idx]:.0f} km apart (more than {max_error_km:g} km: a broken row)')
+    keep &= ~far
+    if not keep.any():
+        raise ValueError(f'{name}: no complete rows')
+    return pd.DataFrame({'truth_id': [ids[i] for i in df.index[keep]],
+                         'in_lon': ilo[keep].astype(float).values, 'in_lat': ila[keep].astype(float).values,
+                         'ref_lon': rlo[keep].astype(float).values, 'ref_lat': rla[keep].astype(float).values})
 
 
 def truth_in_crs(truth: pd.DataFrame, crs: str) -> pd.DataFrame:

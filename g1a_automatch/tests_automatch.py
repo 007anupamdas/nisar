@@ -1213,6 +1213,7 @@ def test_truth_helpers(tmp):
     point, error surface elsewhere, extrapolation flagged and not scored."""
     import numpy as np
     import pandas as pd
+    import math
     import automatch_truth as T
     rng = np.random.default_rng(1)
     E0, N0 = 500000.0, 3000000.0
@@ -1275,6 +1276,46 @@ def test_truth_helpers(tmp):
     errs = J._check_gcp_file(path)
     check('truth: a RIVAL file given as manual GCP CSV is refused with the fix named',
           len(errs) == 1 and 'Ground truth CSV' in errs[0])
+    # RIVAL rows with a point unset: Ref_Lon/Ref_Lat blank, 0 or text, In_Lon/In_Lat 0
+    import contextlib
+    import io
+    rng = np.random.default_rng(3)
+    ex, ny = 500000 + rng.uniform(-80e3, 80e3, 8), 1600000 + rng.uniform(-80e3, 80e3, 8)
+    ddx, ddy = rng.uniform(-6e3, 6e3, 8), rng.uniform(5e3, 9e3, 8)
+    to43 = Transformer.from_crs('EPSG:32643', 'EPSG:4326', always_xy=True)
+    a_lo, a_la = to43.transform(ex, ny)
+    b_lo, b_la = to43.transform(ex - ddx, ny - ddy)
+    full = pd.DataFrame({'In_X': ex, 'In_Y': ny, 'Ref_X': ex - ddx, 'Ref_Y': ny - ddy, 'Row': range(1, 9),
+                         'In_Lon': a_lo, 'In_Lat': a_la, 'Ref_Lon': b_lo, 'Ref_Lat': b_la}).astype(object)
+    broken = full.copy()
+    broken.loc[1, ['Ref_Lon', 'Ref_Lat']] = ''            # blank
+    broken.loc[2, ['Ref_Lon', 'Ref_Lat']] = 0             # zero
+    broken.loc[3, ['Ref_Lon']] = '-'                      # text, and no X/Y to recover it
+    broken.loc[3, ['Ref_X']] = ''
+    broken.loc[4, ['In_Lon', 'In_Lat']] = 0               # the case reported: In 0, Ref blank, no X/Y
+    broken.loc[4, ['Ref_Lon', 'Ref_Lat', 'In_X', 'In_Y', 'Ref_X', 'Ref_Y']] = ''
+    bp = os.path.join(tmp, 'truth_broken.csv')
+    broken.to_csv(bp, index=False)
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        got = T.load_truth(bp)
+    check('truth: rows without a usable point are left out, never scored (In 0 / Ref blank)',
+          sorted(got['truth_id']), [1, 2, 3, 6, 7, 8])
+    ref = full.set_index('Row')
+    gi = got.set_index('truth_id')
+    err = max(math.hypot((gi.ref_lon[i] - ref.Ref_Lon[i]) * 111320 * math.cos(math.radians(ref.Ref_Lat[i])),
+                         (gi.ref_lat[i] - ref.Ref_Lat[i]) * 110570) for i in (2, 3))
+    check('truth: a blank or 0 Ref_Lon/Ref_Lat is recovered from Ref_X/Ref_Y within 5 m', err < 5, True)
+    check('truth: each recovered or dropped point is named',
+          ('point 2 had no Ref_Lon' in buf.getvalue(), 'point 4 left out' in buf.getvalue(),
+           'point 5 left out' in buf.getvalue()), (True, True, True))
+    far = full.copy()
+    far.loc[0, ['Ref_Lon', 'Ref_Lat']] = [10.0, 10.0]
+    fp = os.path.join(tmp, 'truth_far.csv')
+    far.to_csv(fp, index=False)
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        got = T.load_truth(fp)
+    check('truth: a point thousands of km off is a broken row, left out',
+          (1 in got['truth_id'].tolist(), 'km apart' in buf.getvalue()), (False, True))
     try:
         pd.DataFrame({'a': [1]}).to_csv(os.path.join(tmp, 'bad.csv'), index=False)
         T.load_truth(os.path.join(tmp, 'bad.csv'))
