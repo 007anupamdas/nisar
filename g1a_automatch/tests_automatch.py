@@ -17,6 +17,7 @@ import ast
 import csv
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -173,6 +174,13 @@ def test_e2e_rerun(tmp):
     check('rerun: no file left from the previous run', not any('_smnn_0.95_' in f for f in files))
 
 
+def _pass_of(path):
+    """The matching pass in a filtered CSV's name (..._pix<col>_<pass>_aff_...);
+    windows can start at any column since they go down to 128 px."""
+    m = re.search(r'_pix\d+_(.+?)_aff', os.path.basename(path))
+    return m.group(1) if m else ''
+
+
 def test_e2e_variants(tmp):
     """SIFT rootsift on/off + DISK LightGlue filter sweep: every variant and
     matcher pass is run and named, and RIVAL_BEST picks one of them."""
@@ -198,14 +206,14 @@ def test_e2e_variants(tmp):
     rows = list(_csv.DictReader(open(man, encoding='utf-8'))) if os.path.exists(man) else []
     check('variants: one manifest row per variant', sorted(r['detector'] for r in rows),
           ['dedode_L-C4-v2_B-upright', 'disk_depth', 'sift', 'sift-rs0'])
-    ded = {os.path.basename(p).split('_pix0_')[1].split('_aff')[0]
+    ded = {_pass_of(p)
            for p in glob.glob(os.path.join(out, '*', 'band1_toC1', 'filtered_*dedode*', '*.csv'))}
     check('variants: DeDoDe matched with AdaLAM and LightGlue', ded >= {'ada', 'lgm'})
-    sift = {os.path.basename(p).split('_pix0_')[1].split('_aff')[0]
+    sift = {_pass_of(p)
             for p in glob.glob(os.path.join(out, '*', 'band1_toC1', 'filtered_*_sift', '*.csv'))}
     check('variants: SIFT matched with SMNN and AdaLAM', {'ada', 'smnn_0.95'} <= sift)
     check('variants: all ran', {r['status'] for r in rows}, {'ok'})
-    lgm = {os.path.basename(p).split('_pix0_')[1].split('_aff')[0]
+    lgm = {_pass_of(p)
            for p in glob.glob(os.path.join(out, '*', 'band1_toC1', 'filtered_*disk_depth', '*.csv'))}
     check('variants: both LightGlue passes filtered', lgm >= {'lgm', 'lgm_lf0p2'})
     best = os.path.join(out, 'RIVAL_BEST_G1A_SYNTH_L1_band1.csv')
