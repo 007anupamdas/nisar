@@ -382,8 +382,9 @@ CE90_SIGMA = 2.146
 # the fully marked rows, so a run's numbers travel with its picks.
 EXPORT_STATS = True
 
-# Exports ask only for a FOLDER; the files are named after the input scene,
-# <input stem><EXPORT_SUFFIX>.csv / .shp / _stats.csv. The folder is remembered.
+# Exports ask only for a FOLDER; the files are named after the folder the
+# input sits in, <folder name><EXPORT_SUFFIX>.csv / .shp / _stats.csv. The
+# output folder is remembered.
 EXPORT_SUFFIX = "_rival"
 
 # The reference folder is remembered between sessions and loaded on start-up;
@@ -1244,13 +1245,15 @@ def stats_rows(summary):
 
 
 def export_paths(folder, input_path):
-    """{'csv', 'shp', 'stats'} in folder, named after the input scene.
+    """{'csv', 'shp', 'stats'} in folder, named after the INPUT'S FOLDER.
 
-    G1A_ort.tif -> G1A_ort_rival.csv, G1A_ort_rival.shp, G1A_ort_rival_stats.csv.
-    Only the last extension is dropped, so a name with dots in it keeps them.
-    With no input loaded the stem is 'rival'.
+    /data/NISAR_L2_0042/G1A_ort.tif -> NISAR_L2_0042_rival.csv, .shp and
+    _stats.csv: the folder carries the product name, the tif inside is often
+    generic. The name is taken whole -- a folder has no extension to drop.
+    With no input loaded (or one at a filesystem root) the stem is 'rival'.
     """
-    stem = os.path.splitext(os.path.basename(input_path or ""))[0]
+    parent = os.path.dirname(os.path.abspath(input_path)) if input_path else ""
+    stem = os.path.basename(parent.rstrip("/\\")) if parent else ""
     base = os.path.join(folder, (stem + EXPORT_SUFFIX) if stem else "rival")
     return {"csv": base + ".csv", "shp": base + ".shp",
             "stats": base + "_stats.csv"}

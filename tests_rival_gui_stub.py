@@ -2082,27 +2082,27 @@ class _Settings:
     def setValue(self, k, v): store[k] = v
 R.QSettings = _Settings
 out_dir = tempfile.mkdtemp()
-win.input_path = "/data/scenes/G1A_ort.tif"
+win.input_path = "/data/NISAR_0042/G1A_ort.tif"
 qw.QFileDialog.getExistingDirectory = MagicMock(return_value=out_dir)
 asked = []
 qw.QMessageBox.question = lambda *a, **k: asked.append(a) or qw.QMessageBox.No
 p = win._export_target("csv", "Export CSV")
-assert p == os.path.join(out_dir, "G1A_ort_rival.csv"), p
-assert qw.QFileDialog.getExistingDirectory.call_args[0][2] == "/data/scenes", \
+assert p == os.path.join(out_dir, "NISAR_0042_rival.csv"), p
+assert qw.QFileDialog.getExistingDirectory.call_args[0][2] == "/data/NISAR_0042", \
     "first export should open at the input's folder"
 assert store["export_folder"] == out_dir and asked == []
-assert win._export_target("shp", "Export SHP") == os.path.join(out_dir, "G1A_ort_rival.shp")
-print("\nexports ask for a folder only, and are named G1A_ort_rival.csv/.shp")
+assert win._export_target("shp", "Export SHP") == os.path.join(out_dir, "NISAR_0042_rival.shp")
+print("\nexports ask for a folder only, and are named NISAR_0042_rival.csv/.shp")
 
 win._export_target("csv", "x")
 assert qw.QFileDialog.getExistingDirectory.call_args[0][2] == out_dir
 print("the next export opens at the folder used last")
 
-open(os.path.join(out_dir, "G1A_ort_rival.csv"), "w").write("old")
+open(os.path.join(out_dir, "NISAR_0042_rival.csv"), "w").write("old")
 assert win._export_target("csv", "Export CSV") is None and asked
-assert open(os.path.join(out_dir, "G1A_ort_rival.csv")).read() == "old"
+assert open(os.path.join(out_dir, "NISAR_0042_rival.csv")).read() == "old"
 qw.QMessageBox.question = lambda *a, **k: qw.QMessageBox.Yes
-assert win._export_target("csv", "Export CSV").endswith("G1A_ort_rival.csv")
+assert win._export_target("csv", "Export CSV").endswith("NISAR_0042_rival.csv")
 print("an existing file for the scene is replaced only on yes, No by default")
 
 qw.QFileDialog.getExistingDirectory = MagicMock(return_value="")
