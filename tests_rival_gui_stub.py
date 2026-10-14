@@ -1027,10 +1027,10 @@ print("lon/lat filled from the transform, for quiver.py's columns")
 # nothing marked at all -> the writer is never reached
 win.table = _Rows([["0.000", "0.000", "0.000", "0.000"]])
 assert win.export_rows() == []
-qw.QFileDialog.getSaveFileName = MagicMock(return_value=("/tmp/should_not.shp", ""))
+win._export_target = MagicMock(return_value="/tmp/should_not.shp")
 del warned[:]
 win.save_shapefile()
-assert not qw.QFileDialog.getSaveFileName.called, "asked for a path with no rows"
+assert not win._export_target.called, "asked for a folder with no rows"
 assert warned and "marked" in warned[0], warned
 print("no marked rows -> warned, no file dialog, nothing written")
 
@@ -1426,7 +1426,7 @@ win.table = _Rows([
     ["325010.000", "1900007.000", "325000.000", "1900000.000", "10.000", "7.000"],
     ["0.000", "0.000", "0.000", "0.000", "0.000", "0.000"],   # nothing marked
 ])
-qw.QFileDialog.getSaveFileName = MagicMock(return_value=(out_csv, ""))
+win._export_target = lambda kind, title, _p=out_csv: _p
 win.save_csv()
 
 import csv as _csv
@@ -1584,7 +1584,7 @@ win.export_rows = MagicMock(return_value=[
     {**base_row, "in_x": 325020.0, "in_y": 1900000.0,
      "in_lon": None, "in_lat": None},        # could not be converted
 ])
-qw.QFileDialog.getSaveFileName = MagicMock(return_value=(shp_path, ""))
+win._export_target = lambda kind, title, _p=shp_path: _p
 win.save_shapefile()
 assert captured["crs"] is win.wgs84_crs, "the writer was still given the LCC"
 assert captured["writers"] == 1, "lon/lat was decided up front, not on retry"
@@ -1881,7 +1881,7 @@ print("\nthe live CE90 counts the two finished rows, not the half-marked one "
 
 out_dir = tempfile.mkdtemp()
 csv_path = os.path.join(out_dir, "picks.csv")
-qw.QFileDialog.getSaveFileName = MagicMock(return_value=(csv_path, ""))
+win._export_target = lambda kind, title, _p=csv_path: _p
 win._lonlat_for = lambda a, b: None
 win.proj_crs = _CRS("EPSG:32644")
 win.save_csv()
@@ -2072,6 +2072,43 @@ assert made[0].text == "Input: /data/scenes/other.tif"
 assert "show_input_path" in R.QCDashboard.adopt_input_layer.__code__.co_names
 print("\nthe input path is shown bottom-left, replaced (not stacked) on reload, "
       "on every way a scene is adopted")
+
+# ── 27. exports ask for a folder and are named after the input ─────────────
+win._export_target = R.QCDashboard._export_target.__get__(win)
+store = {}
+class _Settings:
+    def __init__(self, *a): pass
+    def value(self, k, d=None): return store.get(k, d)
+    def setValue(self, k, v): store[k] = v
+R.QSettings = _Settings
+out_dir = tempfile.mkdtemp()
+win.input_path = "/data/scenes/G1A_ort.tif"
+qw.QFileDialog.getExistingDirectory = MagicMock(return_value=out_dir)
+asked = []
+qw.QMessageBox.question = lambda *a, **k: asked.append(a) or qw.QMessageBox.No
+p = win._export_target("csv", "Export CSV")
+assert p == os.path.join(out_dir, "G1A_ort_rival.csv"), p
+assert qw.QFileDialog.getExistingDirectory.call_args[0][2] == "/data/scenes", \
+    "first export should open at the input's folder"
+assert store["export_folder"] == out_dir and asked == []
+assert win._export_target("shp", "Export SHP") == os.path.join(out_dir, "G1A_ort_rival.shp")
+print("\nexports ask for a folder only, and are named G1A_ort_rival.csv/.shp")
+
+win._export_target("csv", "x")
+assert qw.QFileDialog.getExistingDirectory.call_args[0][2] == out_dir
+print("the next export opens at the folder used last")
+
+open(os.path.join(out_dir, "G1A_ort_rival.csv"), "w").write("old")
+assert win._export_target("csv", "Export CSV") is None and asked
+assert open(os.path.join(out_dir, "G1A_ort_rival.csv")).read() == "old"
+qw.QMessageBox.question = lambda *a, **k: qw.QMessageBox.Yes
+assert win._export_target("csv", "Export CSV").endswith("G1A_ort_rival.csv")
+print("an existing file for the scene is replaced only on yes, No by default")
+
+qw.QFileDialog.getExistingDirectory = MagicMock(return_value="")
+assert win._export_target("csv", "Export CSV") is None
+print("cancelling the folder dialog exports nothing")
+shutil.rmtree(out_dir, ignore_errors=True)
 
 for d in (d1, d2, d3, d4, d5, d6):
     shutil.rmtree(d, ignore_errors=True)

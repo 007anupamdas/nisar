@@ -710,6 +710,20 @@ check("the file sits beside the export, either kind",
       (H["stats_path_for"]("/a/picks.csv"), H["stats_path_for"]("/a/picks.shp")),
       ("/a/picks_stats.csv", "/a/picks_stats.csv"))
 
+# ── 22. export names come from the input scene ───────────────────────────────
+print("\n-- export file names --")
+f = H["export_paths"]
+check("named after the input, all three files",
+      f("/out", "/data/G1A_ort.tif"),
+      {"csv": "/out/G1A_ort_rival.csv", "shp": "/out/G1A_ort_rival.shp",
+       "stats": "/out/G1A_ort_rival_stats.csv"})
+check("dots in the scene name survive; only the extension goes",
+      f("/out", "/d/NISAR_L2.v1.tif")["csv"], "/out/NISAR_L2.v1_rival.csv")
+check("no input loaded still gives a name",
+      f("/out", None)["shp"], "/out/rival.shp")
+check("the stats file the export writes is the one named here",
+      H["stats_path_for"](f("/out", "/d/a.tif")["shp"]), f("/out", "/d/a.tif")["stats"])
+
 print()
 if failures:
     print(f"{len(failures)} FAILURE(S)")

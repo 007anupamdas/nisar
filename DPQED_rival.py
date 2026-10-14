@@ -382,6 +382,10 @@ CE90_SIGMA = 2.146
 # the fully marked rows, so a run's numbers travel with its picks.
 EXPORT_STATS = True
 
+# Exports ask only for a FOLDER; the files are named after the input scene,
+# <input stem><EXPORT_SUFFIX>.csv / .shp / _stats.csv. The folder is remembered.
+EXPORT_SUFFIX = "_rival"
+
 # The reference folder is remembered between sessions and loaded on start-up;
 # 'Select Reference Folder' is then only needed to change it.
 REMEMBER_REF_FOLDER = True
@@ -1239,6 +1243,19 @@ def stats_rows(summary):
     return rows
 
 
+def export_paths(folder, input_path):
+    """{'csv', 'shp', 'stats'} in folder, named after the input scene.
+
+    G1A_ort.tif -> G1A_ort_rival.csv, G1A_ort_rival.shp, G1A_ort_rival_stats.csv.
+    Only the last extension is dropped, so a name with dots in it keeps them.
+    With no input loaded the stem is 'rival'.
+    """
+    stem = os.path.splitext(os.path.basename(input_path or ""))[0]
+    base = os.path.join(folder, (stem + EXPORT_SUFFIX) if stem else "rival")
+    return {"csv": base + ".csv", "shp": base + ".shp",
+            "stats": base + "_stats.csv"}
+
+
 def stats_path_for(export_path):
     """<name>_stats.csv beside an export, whatever the export's extension."""
     return os.path.splitext(export_path)[0] + "_stats.csv"
@@ -1457,6 +1474,7 @@ class QCDashboard(QMainWindow):
         self._syncing          = False
         self._last_sync_offset = None
         self.lbl_input_path    = None
+        self.input_path        = None
         # Panning moves the reference centre at once and swaps the tile under it
         # once the view settles; see _sync_reference_tile.
         self._sync_tile_timer = QTimer(self)
@@ -3498,12 +3516,9 @@ class QCDashboard(QMainWindow):
                 "No fully marked rows. A row needs both an input and a "
                 "reference pick before it describes an error.")
             return
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Export Shapefile", "", "Shapefile (*.shp)")
+        path = self._export_target("shp", "Export SHP")
         if not path:
             return
-        if not path.lower().endswith(".shp"):
-            path += ".shp"
 
         fields = QgsFields()
         types = {"int": QVariant.Int, "double": QVariant.Double}
@@ -3672,7 +3687,7 @@ class QCDashboard(QMainWindow):
         can be read, plotted or joined against a survey without first knowing
         which grid the picks were measured on.
         """
-        path, _ = QFileDialog.getSaveFileName(self, "Export Results", "", "CSV Files (*.csv)")
+        path = self._export_target("csv", "Export CSV")
         if not path:
             return
         crs = self.proj_crs.authid() or self.proj_crs.description()
@@ -3689,6 +3704,43 @@ class QCDashboard(QMainWindow):
         print(f"[CSV] {self.table.rowCount()} row(s) -> {os.path.basename(path)}; "
               f"map coordinates in {crs}, lon/lat in EPSG:4326")
         self.write_stats(path)
+
+    def _export_target(self, kind, title):
+        """Ask for an output folder; return the path for `kind`, or None.
+
+        The name is not asked for: it comes from the input scene, so every
+        run on a scene lands under the same recognisable name. Because that
+        name is fixed, an existing file is not replaced without a yes.
+        """
+        start = ""
+        try:
+            saved = self._settings().value("export_folder", "")
+            if isinstance(saved, str) and os.path.isdir(saved):
+                start = saved
+        except Exception:
+            pass
+        if not start and self.input_path:
+            start = os.path.dirname(os.path.abspath(self.input_path))
+        folder = QFileDialog.getExistingDirectory(
+            self, f"{title} -- choose the output folder", start)
+        if not folder:
+            return None
+        try:
+            self._settings().setValue("export_folder", folder)
+        except Exception as e:
+            print(f"[EXPORT] could not remember the folder: {e}")
+        targets = export_paths(folder, self.input_path)
+        path = targets[kind]
+        clash = [p for p in (path, targets["stats"]) if os.path.exists(p)]
+        if clash:
+            answer = QMessageBox.question(
+                self, title,
+                "Replace the existing file(s)?\n\n"
+                + "\n".join(os.path.basename(p) for p in clash),
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if answer != QMessageBox.Yes:
+                return None
+        return path
 
     def write_stats(self, export_path):
         """Write <name>_stats.csv beside an export. Returns its path, or None."""
@@ -3810,6 +3862,7 @@ class QCDashboard(QMainWindow):
         project fall back to its full extent, with no sign of it in the log.
         """
         self.show_input_path(path)
+        self.input_path = path
         self.input_tif_layer = layer
         self.ensure_overviews(path)
         self.input_ring = self._input_footprint_ring(path)
