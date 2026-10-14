@@ -2051,6 +2051,28 @@ print("with no tile there at all, the reference still moves to the "
       "predicted point and marks it, instead of silently staying put")
 R.QgsGeometry, R.ring_wkt = saved
 
+# ── 26. the input file's path sits in the status bar ───────────────────────
+win.show_input_path = R.QCDashboard.show_input_path.__get__(win)
+bar = MagicMock()
+win.statusBar = MagicMock(return_value=bar)
+win.lbl_input_path = None
+made = []
+class _Lbl:
+    def __init__(self): self.text = ""; made.append(self)
+    def setTextInteractionFlags(self, f): pass
+    def setText(self, t): self.text = t
+    def setToolTip(self, t): self.tip = t
+R.QLabel = _Lbl
+win.show_input_path("/data/scenes/G1A_ort.tif")
+assert made and made[0].text == "Input: /data/scenes/G1A_ort.tif", made
+assert bar.addWidget.call_count == 1
+win.show_input_path("/data/scenes/other.tif")
+assert len(made) == 1 and bar.addWidget.call_count == 1, "label stacked"
+assert made[0].text == "Input: /data/scenes/other.tif"
+assert "show_input_path" in R.QCDashboard.adopt_input_layer.__code__.co_names
+print("\nthe input path is shown bottom-left, replaced (not stacked) on reload, "
+      "on every way a scene is adopted")
+
 for d in (d1, d2, d3, d4, d5, d6):
     shutil.rmtree(d, ignore_errors=True)
 print("\nstubbed integration OK")

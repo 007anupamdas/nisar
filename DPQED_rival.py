@@ -1456,6 +1456,7 @@ class QCDashboard(QMainWindow):
         self.current_ref_layer = None
         self._syncing          = False
         self._last_sync_offset = None
+        self.lbl_input_path    = None
         # Panning moves the reference centre at once and swaps the tile under it
         # once the view settles; see _sync_reference_tile.
         self._sync_tile_timer = QTimer(self)
@@ -3781,6 +3782,25 @@ class QCDashboard(QMainWindow):
             self.cleanup_reference_layer()
             self._load_ref_layer(path)
 
+    def show_input_path(self, path):
+        """Name the input file in the status bar, bottom left, for the session.
+
+        A permanent widget rather than showMessage, so a passing status message
+        cannot wipe it -- the point is to always know which file is measured.
+        """
+        try:
+            label = self.lbl_input_path
+            if label is None:
+                label = QLabel()
+                label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                self.statusBar().addWidget(label, 1)
+                self.lbl_input_path = label
+            text = os.path.abspath(path) if path else "no input loaded"
+            label.setText(f"Input: {text}")
+            label.setToolTip(text)
+        except Exception as e:
+            print(f"[STATUS] {e}")
+
     def adopt_input_layer(self, layer, path):
         """Everything that has to happen once, however the input scene arrives.
 
@@ -3789,6 +3809,7 @@ class QCDashboard(QMainWindow):
         skipped on the other -- which is what made a scene loaded through the
         project fall back to its full extent, with no sign of it in the log.
         """
+        self.show_input_path(path)
         self.input_tif_layer = layer
         self.ensure_overviews(path)
         self.input_ring = self._input_footprint_ring(path)
