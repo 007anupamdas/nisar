@@ -715,15 +715,21 @@ print("\n-- export file names --")
 f = H["export_paths"]
 check("named after the folder the input sits in, all three files",
       f("/out", "/data/NISAR_L2_0042/G1A_ort.tif"),
-      {"csv": "/out/NISAR_L2_0042_rival.csv", "shp": "/out/NISAR_L2_0042_rival.shp",
-       "stats": "/out/NISAR_L2_0042_rival_stats.csv"})
+      {"csv": "/out/csv/NISAR_L2_0042_rival.csv",
+       "shp": "/out/shp/NISAR_L2_0042_rival.shp",
+       "stats": "/out/stats/NISAR_L2_0042_rival_stats.csv"})
 check("not the file name", "G1A_ort" in f("/out", "/data/scene_a/G1A_ort.tif")["csv"],
       False)
 check("a folder name with dots is kept whole",
-      f("/out", "/d/NISAR.L2.v1/a.tif")["csv"], "/out/NISAR.L2.v1_rival.csv")
-check("no input loaded still gives a name", f("/out", None)["shp"], "/out/rival.shp")
+      f("/out", "/d/NISAR.L2.v1/a.tif")["csv"], "/out/csv/NISAR.L2.v1_rival.csv")
+check("no input loaded still gives a name", f("/out", None)["shp"], "/out/shp/rival.shp")
 check("an input at the filesystem root still gives a name",
-      f("/out", "/a.tif")["csv"], "/out/rival.csv")
+      f("/out", "/a.tif")["csv"], "/out/csv/rival.csv")
+check("csv/ and shp/ exports both put stats in the one stats/ folder",
+      (H["stats_path_for"]("/out/csv/a_rival.csv"), H["stats_path_for"]("/out/shp/a_rival.shp")),
+      ("/out/stats/a_rival_stats.csv", "/out/stats/a_rival_stats.csv"))
+check("an export elsewhere keeps its stats beside it",
+      H["stats_path_for"]("/a/picks.csv"), "/a/picks_stats.csv")
 check("the stats file the export writes is the one named here",
       H["stats_path_for"](f("/out", "/d/x/a.tif")["shp"]), f("/out", "/d/x/a.tif")["stats"])
 

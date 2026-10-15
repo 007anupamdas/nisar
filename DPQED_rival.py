@@ -387,6 +387,8 @@ EXPORT_STATS = True
 # input sits in, <folder name><EXPORT_SUFFIX>.csv / .shp / _stats.csv. The
 # output folder is remembered.
 EXPORT_SUFFIX = "_rival"
+# Each kind of export gets its own subfolder of the output folder.
+EXPORT_SUBDIRS = {"csv": "csv", "shp": "shp", "stats": "stats"}
 
 # 'Load Input' takes a scene FOLDER. Of its many rasters (*_Height.tif,
 # *_SatEle.tif, ...) the scene is the one named *GTD_*_1.tif or *ITD_*_1.tif
@@ -1266,9 +1268,10 @@ def export_paths(folder, input_path):
     """
     parent = os.path.dirname(os.path.abspath(input_path)) if input_path else ""
     stem = os.path.basename(parent.rstrip("/\\")) if parent else ""
-    base = os.path.join(folder, (stem + EXPORT_SUFFIX) if stem else "rival")
-    return {"csv": base + ".csv", "shp": base + ".shp",
-            "stats": base + "_stats.csv"}
+    name = (stem + EXPORT_SUFFIX) if stem else "rival"
+    sub = lambda k: os.path.join(folder, EXPORT_SUBDIRS[k], name)
+    return {"csv": sub("csv") + ".csv", "shp": sub("shp") + ".shp",
+            "stats": sub("stats") + "_stats.csv"}
 
 
 def pick_scene_tifs(names, pattern=INPUT_SCENE_PATTERN):
@@ -1316,8 +1319,16 @@ def cog_path_for(src, bands):
 
 
 def stats_path_for(export_path):
-    """<name>_stats.csv beside an export, whatever the export's extension."""
-    return os.path.splitext(export_path)[0] + "_stats.csv"
+    """Where the stats for an export go.
+
+    An export in an output folder's csv/ or shp/ subfolder puts its stats in
+    the sibling stats/ subfolder; anywhere else, beside the export.
+    """
+    stem = os.path.splitext(os.path.basename(export_path))[0] + "_stats.csv"
+    parent = os.path.dirname(export_path)
+    if os.path.basename(parent) in (EXPORT_SUBDIRS["csv"], EXPORT_SUBDIRS["shp"]):
+        return os.path.join(os.path.dirname(parent), EXPORT_SUBDIRS["stats"], stem)
+    return os.path.join(parent, stem)
 
 
 # ── END PURE HELPERS ──────────────────────────────────────────────────────────
@@ -3888,6 +3899,8 @@ class QCDashboard(QMainWindow):
         if not folder:
             return None
         targets = export_paths(folder, self.input_path)
+        for k in (kind, "stats"):
+            os.makedirs(os.path.dirname(targets[k]), exist_ok=True)
         path = targets[kind]
         clash = [p for p in (path, targets["stats"]) if os.path.exists(p)]
         if clash:

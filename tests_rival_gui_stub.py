@@ -2087,11 +2087,12 @@ qw.QFileDialog.getExistingDirectory = MagicMock(return_value=out_dir)
 asked = []
 qw.QMessageBox.question = lambda *a, **k: asked.append(a) or qw.QMessageBox.No
 p = win._export_target("csv", "Export CSV")
-assert p == os.path.join(out_dir, "NISAR_0042_rival.csv"), p
+assert p == os.path.join(out_dir, "csv", "NISAR_0042_rival.csv"), p
 assert qw.QFileDialog.getExistingDirectory.call_args[0][2] == "/data/NISAR_0042", \
     "first export should open at the input's folder"
 assert store["export_folder"] == out_dir and asked == []
-assert win._export_target("shp", "Export SHP") == os.path.join(out_dir, "NISAR_0042_rival.shp")
+assert win._export_target("shp", "Export SHP") == os.path.join(out_dir, "shp", "NISAR_0042_rival.shp")
+assert all(os.path.isdir(os.path.join(out_dir, d)) for d in ("csv", "shp", "stats"))
 print("\nexports ask for a folder only, and are named NISAR_0042_rival.csv/.shp")
 
 qw.QFileDialog.getExistingDirectory.reset_mock()
@@ -2099,9 +2100,9 @@ assert win._export_target("csv", "x").startswith(out_dir)
 assert not qw.QFileDialog.getExistingDirectory.called, "asked again"
 print("the output folder is kept: the next export does not ask")
 
-open(os.path.join(out_dir, "NISAR_0042_rival.csv"), "w").write("old")
+open(os.path.join(out_dir, "csv", "NISAR_0042_rival.csv"), "w").write("old")
 assert win._export_target("csv", "Export CSV") is None and asked
-assert open(os.path.join(out_dir, "NISAR_0042_rival.csv")).read() == "old"
+assert open(os.path.join(out_dir, "csv", "NISAR_0042_rival.csv")).read() == "old"
 qw.QMessageBox.question = lambda *a, **k: qw.QMessageBox.Yes
 assert win._export_target("csv", "Export CSV").endswith("NISAR_0042_rival.csv")
 print("an existing file for the scene is replaced only on yes, No by default")
