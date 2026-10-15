@@ -44,6 +44,14 @@ check("session id", a["session_id"], "4471")
 check("strip id", a["strip_id"], "3")
 check("centre falls back to the corner mean", (a["centre_lat"], a["centre_lon"]),
       (16.5, 78.5))
+real = C.meta_ancillary(C.parse_band_meta(
+    "SessionType = DAY\nSessionNumber = 4471\nStripCount = 9\n"
+    "StripNumber = 3\n"))
+check("SessionNumber, not SessionType", real["session_id"], "4471")
+check("StripNumber, not StripCount", real["strip_id"], "3")
+check("and the log names the real keys",
+      (real["sources"]["session_id"], real["sources"]["strip_id"]),
+      ("SessionNumber", "StripNumber"))
 a2 = C.meta_ancillary(C.parse_band_meta("SceneCenterLat = 16.25\nSceneCenterLon = 78.75"))
 check("a stated scene centre wins", (a2["centre_lat"], a2["centre_lon"]), (16.25, 78.75))
 check("absent fields stay empty", a2["date"], None)

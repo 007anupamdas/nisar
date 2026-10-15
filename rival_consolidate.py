@@ -36,8 +36,11 @@ BAND_META_NAME = "BAND_META.txt"
 META_KEYS = {
     "date":       ("dateofpass", "acquisitiondate", "dateofacquisition",
                    "imagingdate", "passdate", "date"),
-    "session_id": ("sessionid", "session"),
-    "strip_id":   ("stripid", "strip"),
+    # SessionNumber / StripNumber are the keys BAND_META actually uses; they
+    # are tried exactly first, so no other key mentioning "session" or
+    # "strip" can be taken for them.
+    "session_id": ("sessionnumber", "sessionid", "sessionno", "session"),
+    "strip_id":   ("stripnumber", "stripid", "stripno", "strip"),
     "centre_lat": ("scenecenterlat", "scenecentrelat", "centerlat", "centrelat"),
     "centre_lon": ("scenecenterlon", "scenecentrelon", "centerlon", "centrelon"),
 }
