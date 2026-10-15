@@ -730,15 +730,17 @@ check("the stats file the export writes is the one named here",
 # ── 23. scene rasters in an input folder, and the COG name ───────────────────
 print("\n-- input folder --")
 f = H["pick_scene_tifs"]
-names = ["266697511_ITD.tif", "266697511_GTD.TIF", "266697511_ITD_Height.tif",
-         "266697511_pixgrid.tif", "BAND_META.txt", "266697511_ITD_b1-2_cog.tif",
-         "x_itd.tiff"]
-check("only stems ending in ITD or GTD are the scene",
-      f(names), ["266697511_GTD.TIF", "266697511_ITD.tif", "x_itd.tiff"])
+names = ["266697511_GTD_ABC_1.tif", "266697511_ITD_ABC_1.TIF",
+         "266697511_GTD_ABC_1_Height.tif", "266697511_GTD_ABC_1_SatEle.tif",
+         "266697511_GTD.tif", "266697511_GTD_ABC_2.tif", "BAND_META.txt",
+         "266697511_GTD_ABC_1_b1-2_cog.tif", "x_itd_y_1.tiff"]
+check("only *GTD_*_1 / *ITD_*_1 are the scene",
+      f(names), ["266697511_GTD_ABC_1.tif", "266697511_ITD_ABC_1.TIF",
+                 "x_itd_y_1.tiff"])
 check("an empty folder has no scene", f([]), [])
 check("the COG is named for its bands, beside the source",
-      H["cog_path_for"]("/d/266697511_ITD.tif", [3, 1]),
-      "/d/266697511_ITD_b3-1_cog.tif")
+      H["cog_path_for"]("/d/266697511_ITD_A_1.tif", [3, 1]),
+      "/d/266697511_ITD_A_1_b3-1_cog.tif")
 
 print()
 if failures:

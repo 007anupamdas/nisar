@@ -2127,12 +2127,12 @@ def _tif(name, count):
             d.write(np.full((48, 64), float(b), "float32"), b)
             d.set_band_description(b, f"B{b}")
     return path
-src = _tif("266697511_ITD.tif", 4)
-_tif("266697511_ITD_Height.tif", 1)
-_tif("266697511_pixgrid.tif", 1)
+src = _tif("266697511_ITD_A_1.tif", 4)
+_tif("266697511_ITD_A_1_Height.tif", 1)
+_tif("266697511_ITD_A_1_SatEle.tif", 1)
 
 # the folder's other rasters are not the scene
-assert R.pick_scene_tifs(os.listdir(scene_dir)) == ["266697511_ITD.tif"]
+assert R.pick_scene_tifs(os.listdir(scene_dir)) == ["266697511_ITD_A_1.tif"]
 
 for name in ("load_input_folder", "_ask_bands", "choose_output_folder",
              "_saved_output_folder"):
@@ -2144,7 +2144,7 @@ qw.QFileDialog.getExistingDirectory = MagicMock(return_value=scene_dir)
 qw.QInputDialog.getItem = MagicMock(side_effect=AssertionError("asked with one scene"))
 win._ask_bands = MagicMock(return_value=[3, 1])
 win.load_input_folder()
-cog = os.path.join(scene_dir, "266697511_ITD_b3-1_cog.tif")
+cog = os.path.join(scene_dir, "266697511_ITD_A_1_b3-1_cog.tif")
 assert os.path.exists(cog), os.listdir(scene_dir)
 with rasterio.open(cog) as d:
     assert d.count == 2 and float(d.read(1)[0, 0]) == 3.0 and float(d.read(2)[0, 0]) == 1.0
@@ -2164,14 +2164,14 @@ assert os.path.getmtime(cog) == mtime
 print("the same bands again reuse the COG instead of rebuilding it")
 
 # both ITD and GTD present: it asks which
-_tif("266697511_GTD.tif", 2)
-qw.QInputDialog.getItem = MagicMock(return_value=("266697511_GTD.tif", True))
+_tif("266697511_GTD_A_1.tif", 2)
+qw.QInputDialog.getItem = MagicMock(return_value=("266697511_GTD_A_1.tif", True))
 win._ask_bands = MagicMock(return_value=[2])
 win._build_cog_with_progress = lambda s_, d_, b_: R.build_cog(s_, d_, b_)
 win.load_input_folder()
-assert qw.QInputDialog.getItem.call_args[0][3] == ["266697511_GTD.tif",
-                                                    "266697511_ITD.tif"]
-assert win.load_input_path.call_args[0][0].endswith("266697511_GTD_b2_cog.tif")
+assert qw.QInputDialog.getItem.call_args[0][3] == ["266697511_GTD_A_1.tif",
+                                                    "266697511_ITD_A_1.tif"]
+assert win.load_input_path.call_args[0][0].endswith("266697511_GTD_A_1_b2_cog.tif")
 print("with both ITD and GTD in the folder, it asks which")
 
 # a folder with no scene raster says so and loads nothing

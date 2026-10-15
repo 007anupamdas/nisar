@@ -388,12 +388,13 @@ EXPORT_STATS = True
 # output folder is remembered.
 EXPORT_SUFFIX = "_rival"
 
-# 'Load Input' takes a scene FOLDER. Of its many rasters (*ITD_Height.tif,
-# *pixgrid.tif, ...) the scene is the one whose name ends in one of these --
+# 'Load Input' takes a scene FOLDER. Of its many rasters (*_Height.tif,
+# *_SatEle.tif, ...) the scene is the one named *GTD_*_1.tif or *ITD_*_1.tif
+# (INPUT_SCENE_PATTERN, matched on the name without extension, any case) --
 # asked which when more than one is there. The chosen bands are written to a
 # COG beside it, which is what the canvas loads; an existing COG for the same
 # bands is reused rather than rebuilt.
-INPUT_SCENE_SUFFIXES = ("ITD", "GTD")
+INPUT_SCENE_PATTERN = r"(ITD|GTD)_.*_1$"
 COG_SUFFIX = "_cog"
 COG_CREATION_OPTIONS = ["COMPRESS=DEFLATE", "BIGTIFF=IF_SAFER",
                         "NUM_THREADS=ALL_CPUS", "OVERVIEWS=AUTO"]
@@ -1270,19 +1271,19 @@ def export_paths(folder, input_path):
             "stats": base + "_stats.csv"}
 
 
-def pick_scene_tifs(names, suffixes=INPUT_SCENE_SUFFIXES):
+def pick_scene_tifs(names, pattern=INPUT_SCENE_PATTERN):
     """The scene rasters among a folder's file names, sorted.
 
-    A scene is a .tif whose stem ENDS in one of the suffixes, any case:
-    X_ITD.tif and XGTD.TIF qualify; X_ITD_Height.tif, X_pixgrid.tif and a COG
-    this tool wrote (X_ITD_b1-2_cog.tif) do not.
+    A scene is a .tif whose name without extension matches the pattern, any
+    case: X_GTD_Y_1.tif and X_ITD_Y_1.TIF qualify; X_GTD_Y_1_Height.tif,
+    X_SatEle.tif and a COG this tool wrote (X_GTD_Y_1_b1-2_cog.tif) do not,
+    because their names do not end in _1.
     """
+    rx = re.compile(pattern, re.IGNORECASE)
     out = []
     for n in names:
         stem, ext = os.path.splitext(n)
-        if ext.lower() not in (".tif", ".tiff"):
-            continue
-        if any(stem.upper().endswith(s.upper()) for s in suffixes):
+        if ext.lower() in (".tif", ".tiff") and rx.search(stem):
             out.append(n)
     return sorted(out)
 
@@ -3975,7 +3976,7 @@ class QCDashboard(QMainWindow):
         if not found:
             QMessageBox.warning(
                 self, "Load Input",
-                f"No *{'.tif or *'.join(INPUT_SCENE_SUFFIXES)}.tif in\n{folder}")
+                f"No *GTD_*_1.tif or *ITD_*_1.tif in\n{folder}")
             return
         name = found[0]
         if len(found) > 1:
