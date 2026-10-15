@@ -1669,7 +1669,7 @@ class QCDashboard(QMainWindow):
 
         self.btn_input_tif        = QPushButton("Load Input Folder")
         self.btn_input_tif.setToolTip(
-            "Choose a scene folder: its *ITD.tif or *GTD.tif is picked, you\n"
+            "Choose a scene folder: its *GTD_*_1.tif or *ITD_*_1.tif is picked, you\n"
             "choose the bands, and a COG of them is built beside it and loaded.")
         self.btn_clear_input      = QPushButton("Clear Input")
         self.btn_clear_input.setToolTip(
@@ -3952,7 +3952,7 @@ class QCDashboard(QMainWindow):
     def load_input_folder(self):
         """Input from a scene folder: pick the ITD/GTD tif, choose bands, COG it.
 
-        The folder holds many rasters; only the one named *ITD.tif or *GTD.tif
+        The folder holds many rasters; only the one named *GTD_*_1.tif or *ITD_*_1.tif
         is the scene (asked which when both are there). The chosen bands are
         written to a COG beside it -- reused when one for the same bands is
         already there and newer than its source -- and that is what loads.
