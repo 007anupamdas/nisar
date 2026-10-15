@@ -396,6 +396,15 @@ EXPORT_SUBDIRS = {"csv": "csv", "shp": "shp", "stats": "stats"}
 # asked which when more than one is there. The chosen bands are written to a
 # COG beside it, which is what the canvas loads; an existing COG for the same
 # bands is reused rather than rebuilt.
+# With more than three bands the display bands are picked automatically, the
+# way the G1A automatch engine picks bands to match on (band_quality and
+# pick_bands, ported from g1a_automatch/automatch_engine.py on branch
+# claude/fervent-goldberg-asdn6s): every band is scored for fine detail above
+# its own noise and striping, and the best three at least 1/30 of the bands
+# apart are taken -- so a hazy, dark, noisy or striped band, and three
+# neighbours of one peak, are not. A choice made by hand (Shift+Load Input
+# Folder) is remembered for that product type and wins.
+AUTO_PICK_BANDS = True
 INPUT_SCENE_PATTERN = r"(ITD|GTD)_.*_1$"
 COG_SUFFIX = "_cog"
 COG_CREATION_OPTIONS = ["COMPRESS=DEFLATE", "BIGTIFF=IF_SAFER",
@@ -1389,6 +1398,281 @@ def build_cog(src, dst, bands, progress=None):
         return False
     os.replace(tmp, dst)
     return True
+
+
+# ── BAND QUALITY (ported from the G1A automatch engine) ───────────────────────
+# A faithful port of band_quality / pick_bands from
+# g1a_automatch/automatch_engine.py (branch claude/fervent-goldberg-asdn6s),
+# so RIVAL displays the bands the matcher matches on. QGIS ships neither
+# OpenCV nor rasterio, so cv2.GaussianBlur and cv2.erode are replaced by numpy
+# equivalents with the same kernel size and border rules, and the raster is
+# read through GDAL (rasterio when there is no osgeo). tests_rival_gui_stub
+# checks the port against the original on the same rasters.
+UNUSABLE_DB = -99.0
+_NOISE_KERNEL = None
+_DOG_SIGMAS = (1.0, 2.0)
+_DOG_GAIN = None
+
+
+def _gauss_blur(a, sigma):
+    """cv2.GaussianBlur(a, (0, 0), sigma) for float32: kernel size
+    round(8 sigma + 1) | 1, border BORDER_REFLECT_101 (numpy 'reflect')."""
+    import numpy as np
+    k = int(round(sigma * 8 + 1)) | 1
+    r = k // 2
+    x = np.arange(-r, r + 1, dtype=np.float64)
+    w = np.exp(-(x ** 2) / (2 * sigma * sigma))
+    w /= w.sum()
+    a = a.astype(np.float64)
+    p = np.pad(a, ((r, r), (0, 0)), mode="reflect")
+    a = sum(w[i] * p[i:i + a.shape[0]] for i in range(k))
+    p = np.pad(a, ((0, 0), (r, r)), mode="reflect")
+    return sum(w[i] * p[:, i:i + a.shape[1]] for i in range(k))
+
+
+def _erode_box(valid, size):
+    """cv2.erode(valid, ones((size, size))): a pixel stays only if its whole
+    window is valid; outside the image counts as valid, as in OpenCV."""
+    import numpy as np
+    r = size // 2
+    bad = np.pad(~valid, r, mode="constant", constant_values=False).astype(np.int64)
+    c = np.pad(bad.cumsum(0).cumsum(1), ((1, 0), (1, 0)))
+    h, w = valid.shape
+    tot = (c[size:size + h, size:size + w] - c[:h, size:size + w]
+           - c[size:size + h, :w] + c[:h, :w])
+    return tot == 0
+
+
+def _noise_sigma(block, valid):
+    import numpy as np
+    global _NOISE_KERNEL
+    if _NOISE_KERNEL is None:
+        _NOISE_KERNEL = np.array([[1, -2, 1], [-2, 4, -2], [1, -2, 1]], np.float64)
+    if block.shape[0] < 3 or block.shape[1] < 3:
+        return float("nan")
+    b = block.astype(np.float64)
+    r = sum(_NOISE_KERNEL[i, j] * b[i:i + b.shape[0] - 2, j:j + b.shape[1] - 2]
+            for i in range(3) for j in range(3))
+    ok = np.ones_like(r, bool)
+    for i in range(3):
+        for j in range(3):
+            ok &= valid[i:i + valid.shape[0] - 2, j:j + valid.shape[1] - 2]
+    if ok.sum() < 100:
+        return float("nan")
+    return float(1.4826 * np.median(np.abs(r[ok])) / 6.0)
+
+
+def _dog(a):
+    import numpy as np
+    a = a.astype(np.float32)
+    return (_gauss_blur(a, _DOG_SIGMAS[0]) - _gauss_blur(a, _DOG_SIGMAS[1])).astype(np.float64)
+
+
+def _dog_noise_gain():
+    import numpy as np
+    rng = np.random.default_rng(1)
+    r = _dog(rng.normal(size=(256, 256)))
+    c = _dog(np.repeat(rng.normal(size=(1, 256)), 256, axis=0))
+    return float(r[16:-16, 16:-16].std()), float(c[16:-16, 16:-16].std())
+
+
+def _detail_rms(block, valid):
+    import numpy as np
+    if min(block.shape) < 32:
+        return float("nan")
+    fill = np.where(valid, block, np.median(block[valid]) if valid.any() else 0.0)
+    r = _dog(fill)
+    ok = _erode_box(valid, 15)
+    if ok.sum() < 500:
+        return float("nan")
+    return float(np.sqrt(np.mean(r[ok] ** 2)))
+
+
+def _quant_step(block, valid):
+    import numpy as np
+    u = np.unique(block[valid])
+    if u.size < 2:
+        return 0.0
+    return float(np.min(np.diff(u)))
+
+
+def _stripe_sigma(block, valid):
+    import numpy as np
+    out = 0.0
+    b = np.where(valid, block.astype(np.float64), np.nan)
+    for axis in (0, 1):
+        with np.errstate(all="ignore"):
+            m = np.nanmean(b, axis=axis)
+        m = m[np.isfinite(m)]
+        if m.size < 20:
+            continue
+        pad = np.pad(m, 4, mode="edge")
+        run = np.array([np.median(pad[i:i + 9]) for i in range(m.size)])
+        out = max(out, float(1.4826 * np.median(np.abs(m - run))))
+    return out
+
+
+class _BandReader:
+    """The few reads band_quality needs, through GDAL or rasterio."""
+
+    def __init__(self, path):
+        import numpy as np
+        try:
+            from osgeo import gdal
+            self.ds, self.gdal = gdal.Open(path), True
+            self.count, self.height, self.width = (self.ds.RasterCount,
+                                                   self.ds.RasterYSize, self.ds.RasterXSize)
+            b1 = self.ds.GetRasterBand(1)
+            self.nodata = b1.GetNoDataValue()
+            dt = gdal.GetDataTypeName(b1.DataType).lower()
+            self.is_int = ("int" in dt) or dt == "byte"
+        except ImportError:
+            import rasterio
+            self.ds, self.gdal = rasterio.open(path), False
+            self.count, self.height, self.width = self.ds.count, self.ds.height, self.ds.width
+            self.nodata = self.ds.nodata
+            self.is_int = np.issubdtype(np.dtype(self.ds.dtypes[0]), np.integer)
+
+    def overview(self, bands, oh, ow):
+        import numpy as np
+        if self.gdal:
+            from osgeo import gdal
+            return np.stack([self.ds.GetRasterBand(b).ReadAsArray(
+                buf_xsize=ow, buf_ysize=oh, resample_alg=gdal.GRIORA_NearestNeighbour)
+                for b in bands]).astype(np.float64)
+        return self.ds.read(bands, out_shape=(len(bands), oh, ow)).astype(np.float64)
+
+    def window(self, bands, x, y, w, h):
+        import numpy as np
+        if self.gdal:
+            return np.stack([self.ds.GetRasterBand(b).ReadAsArray(x, y, w, h)
+                             for b in bands]).astype(np.float64)
+        import rasterio.windows
+        return self.ds.read(bands, window=rasterio.windows.Window(x, y, w, h)
+                            ).astype(np.float64)
+
+    def close(self):
+        if not self.gdal:
+            self.ds.close()
+        self.ds = None
+
+
+def band_quality(path, bands=None, max_side=1024, block=256, n_blocks=6, nodata=None):
+    """Score every band for crisp detail above its noise (see the engine's
+    docstring); returns one dict per band with 'band', 'score', 'detail_db'."""
+    import numpy as np
+    global _DOG_GAIN
+    if _DOG_GAIN is None:
+        _DOG_GAIN = _dog_noise_gain()
+    rows = []
+    src = _BandReader(path)
+    try:
+        idx = list(bands or range(1, src.count + 1))
+        nd = src.nodata if nodata is None else nodata
+        scale = max(1.0, max(src.height, src.width) / float(max_side))
+        oh, ow = max(8, int(round(src.height / scale))), max(8, int(round(src.width / scale)))
+
+        def valid_of(a):
+            v = np.isfinite(a)
+            if nd is not None and not (isinstance(nd, float) and np.isnan(nd)):
+                v &= a != nd
+            else:
+                v &= a != 0
+            return v
+
+        spread, cover, ovalid = {}, {}, np.zeros((oh, ow), np.float32)
+        for k in range(0, len(idx), 16):
+            chunk = idx[k:k + 16]
+            arr = src.overview(chunk, oh, ow)
+            for b, a in zip(chunk, arr):
+                v = valid_of(a)
+                cover[b] = float(v.mean())
+                ovalid += v
+                spread[b] = (float(np.subtract(*np.percentile(a[v], [98, 2])))
+                             if v.sum() > 50 else 0.0)
+        ovalid /= max(1, len(idx))
+
+        bs = int(min(block, src.height, src.width))
+        cells = []
+        step = max(1, int(bs / scale))
+        for r in range(0, oh - step + 1, step):
+            for c in range(0, ow - step + 1, step):
+                if ovalid[r:r + step, c:c + step].mean() >= 0.9:
+                    cells.append((r, c))
+        if not cells:
+            cells = [(max(0, (oh - step) // 2), max(0, (ow - step) // 2))]
+        pick = [cells[int(i)] for i in np.linspace(0, len(cells) - 1,
+                                                   min(n_blocks, len(cells)))]
+        wins = [(min(int(c * scale), src.width - bs), min(int(r * scale), src.height - bs))
+                for r, c in pick]
+        noise = {b: [] for b in idx}
+        stripe = {b: [] for b in idx}
+        detail = {b: [] for b in idx}
+        qstep = {b: [] for b in idx}
+        for x0, y0 in wins:
+            for k in range(0, len(idx), 16):
+                chunk = idx[k:k + 16]
+                arr = src.window(chunk, x0, y0, bs, bs)
+                for b, a in zip(chunk, arr):
+                    v = valid_of(a)
+                    noise[b].append(_noise_sigma(a, v))
+                    stripe[b].append(_stripe_sigma(a, v))
+                    detail[b].append(_detail_rms(a, v))
+                    qstep[b].append(_quant_step(a, v))
+        best_cover = max(cover.values()) if cover else 0.0
+        for b in idx:
+            n = [x for x in noise[b] if np.isfinite(x)]
+            sn = float(np.median(n)) if n else float("nan")
+            st = float(np.median(stripe[b])) if stripe[b] else 0.0
+            eff = float(np.hypot(sn, st)) if np.isfinite(sn) else float("nan")
+            q = [x for x in qstep[b] if x > 0]
+            floor = (float(np.median(q)) if q else (1.0 if src.is_int else 0.0)) / np.sqrt(12.0)
+            if np.isfinite(eff):
+                eff = max(eff, floor)
+            ok = (spread[b] > 0 and np.isfinite(eff) and eff > 0
+                  and cover[b] >= 0.5 * best_cover > 0)
+            sig = float(np.sqrt(max((spread[b] / 4.11) ** 2 - eff ** 2, 0.0))) if ok else 0.0
+            snr = sig / eff if ok else 0.0
+            d = [x for x in detail[b] if np.isfinite(x)]
+            nd_ = (float(np.hypot(_DOG_GAIN[0] * max(sn, floor), _DOG_GAIN[1] * st))
+                   if ok else float("nan"))
+            det = (float(np.sqrt(max(float(np.median(d)) ** 2 - nd_ ** 2, 0.0)))
+                   if (ok and d) else 0.0)
+            sharp = det / sig if sig > 0 else 0.0
+            dsnr = det / nd_ if (ok and nd_ > 0) else 0.0
+            score = 100.0 * sharp * dsnr ** 2 / (dsnr ** 2 + 4.0) if snr > 0 else 0.0
+            rows.append({"band": b, "score": float(round(score, 3)),
+                         "detail_db": (float(round(20 * np.log10(dsnr), 2))
+                                       if dsnr > 0 else UNUSABLE_DB)})
+    finally:
+        src.close()
+    return rows
+
+
+def pick_bands(rows, n, spacing=None):
+    """The n best band numbers by score, at least `spacing` apart (default a
+    30th of the bands); bands without detail above their noise never."""
+    if n <= 0 or not rows:
+        return []
+    if spacing is None:
+        spacing = max(1, int(round(len(rows) / 30.0)))
+    chosen = []
+    for r in sorted(rows, key=lambda r: -r["score"]):
+        if r["score"] <= 0:
+            break
+        if r["detail_db"] <= 0:
+            continue
+        if all(abs(r["band"] - c["band"]) >= spacing for c in chosen):
+            chosen.append(r)
+        if len(chosen) == n:
+            break
+    return [c["band"] for c in chosen]
+
+
+def auto_rgb(path):
+    """The three best bands for display, highest band number first (red), or None."""
+    picked = pick_bands(band_quality(path), 3)
+    return sorted(picked, reverse=True) if len(picked) == 3 else None
 
 
 def raster_band_names(path):
@@ -4137,12 +4421,22 @@ class QCDashboard(QMainWindow):
             shift = bool(QApplication.keyboardModifiers() & Qt.ShiftModifier)
         except Exception:
             pass
+        auto = None
+        if AUTO_PICK_BANDS and n > 3 and (shift or not saved):
+            try:
+                auto = auto_rgb(src)
+            except Exception as e:
+                print(f"[COG] automatic band pick failed: {e}")
+        if auto and not shift:
+            print(f"[COG] bands {auto} picked automatically (band quality, as "
+                  f"the matcher) from {n}; Shift+Load Input Folder to choose")
+            return auto
         if saved and not shift:
             print(f"[COG] bands {saved} remembered for {n}-band products "
                   f"(Shift+Load Input Folder to choose again)")
             return saved
 
-        default = saved or default_rgb(n)
+        default = auto or saved or default_rgb(n)
         dlg = QDialog(self)
         dlg.setWindowTitle(f"Display bands -- {os.path.basename(src)} ({n} bands)")
         lay = QVBoxLayout(dlg)

@@ -2345,6 +2345,86 @@ assert warned and not win.save_csv.called
 print("No keeps the old files; nothing marked warns and writes nothing")
 shutil.rmtree(out32, ignore_errors=True)
 
+# ── 33. display bands picked as the matcher picks them (band quality) ───────
+# the two OpenCV calls the matcher uses, replaced by numpy, must agree
+try:
+    import cv2 as _cv2
+except ImportError:
+    _cv2 = None
+if _cv2 is not None:
+    rng33 = np.random.default_rng(5)
+    img = rng33.normal(0, 1, (70, 90)).astype(np.float32)
+    for sg in (1.0, 2.0):
+        ref = _cv2.GaussianBlur(img, (0, 0), sg).astype(np.float64)
+        assert np.allclose(R._gauss_blur(img, sg), ref, atol=1e-5), sg
+    v = rng33.random((70, 90)) > 0.03
+    assert (R._erode_box(v, 15) ==
+            _cv2.erode(v.astype(np.uint8), np.ones((15, 15), np.uint8)).astype(bool)).all()
+    print("\nthe numpy blur and erosion match OpenCV's exactly")
+
+def _scene(seed):
+    r = np.random.default_rng(seed).normal(0, 1, (256, 256))
+    return r
+def _smooth(a, n):
+    for _ in range(n):
+        a = (a + np.roll(a, 1, 0) + np.roll(a, 1, 1) + np.roll(a, -1, 0)
+             + np.roll(a, -1, 1)) / 5
+    return a
+d33 = tempfile.mkdtemp()
+src33 = os.path.join(d33, "hs_GTD_A_1.tif")
+rng33 = np.random.default_rng(3)
+crisp = [_smooth(_scene(s_), 1) for s_ in (11, 12, 13)]       # fine detail
+hazy = _smooth(_scene(14), 40)                                 # broad shading only
+bands = []
+for b in range(1, 31):
+    if b == 3:    a = 1000 + 300 * crisp[0] / crisp[0].std() + rng33.normal(0, 3, (256, 256))
+    elif b == 15: a = 1000 + 300 * crisp[1] / crisp[1].std() + rng33.normal(0, 3, (256, 256))
+    elif b == 27: a = 1000 + 300 * crisp[2] / crisp[2].std() + rng33.normal(0, 3, (256, 256))
+    elif b == 4:  a = 1000 + 300 * crisp[0] / crisp[0].std() + rng33.normal(0, 3, (256, 256))
+    elif b in (8, 9):
+        a = 1000 + 600 * hazy / hazy.std()                     # bright but soft
+    elif b in (20, 21):
+        a = 1000 + rng33.normal(0, 400, (256, 256))           # pure noise
+    else:
+        a = 1000 + 300 * crisp[0] / crisp[0].std() + rng33.normal(0, 3, (256, 256))
+        a += np.repeat(rng33.normal(0, 250, (1, 256)), 256, axis=0)   # striped
+    bands.append(a)
+with rasterio.open(src33, "w", driver="GTiff", width=256, height=256, count=30,
+                   dtype="float32", crs="EPSG:32644",
+                   transform=from_origin(300000, 1900000, 10, 10)) as dd:
+    for k, a in enumerate(bands, start=1):
+        dd.write(a.astype("float32"), k)
+rows33 = R.band_quality(src33)
+best = R.pick_bands(rows33, 3)
+assert set(best) <= {3, 4, 15, 27} and len(best) == 3, best
+score = {r["band"]: r["score"] for r in rows33}
+assert min(score[b] for b in (3, 4, 15, 27)) > max(
+    score[b] for b in (8, 9, 20, 21) + tuple(range(22, 27))), score
+print("the crisp bands win; hazy (8, 9), noisy (20, 21) and striped bands all "
+      "score below them")
+# the spacing rule: with 90 bands no two picks are within 3 of each other
+rows90 = [{"band": b, "score": 100.0 - b * 0.1, "detail_db": 5.0} for b in range(1, 91)]
+assert R.pick_bands(rows90, 3) == [1, 4, 7], R.pick_bands(rows90, 3)
+rows90[1]["detail_db"] = -1.0
+print("with 90 bands the top three are kept 3 apart, not three neighbours")
+
+win._ask_bands = R.QCDashboard._ask_bands.__get__(win)
+R.raster_band_names = lambda p: [str(i) for i in range(1, 31)]
+store.clear()
+R.QApplication.keyboardModifiers = MagicMock(return_value=0)
+asked_n.clear()
+assert win._ask_bands(src33) == sorted(best, reverse=True)
+assert not asked_n, "asked although the bands could be picked"
+print("Load Input Folder uses them without a dialog, highest band as red")
+store["cog_rgb/30"] = "1,2,3"
+assert win._ask_bands(src33) == [1, 2, 3]
+R.QApplication.keyboardModifiers = MagicMock(return_value=R.Qt.ShiftModifier)
+win._ask_bands(src33)
+assert asked_n, "Shift did not open the dialog"
+R.QApplication.keyboardModifiers = MagicMock(return_value=0)
+print("a hand choice for this product type still wins; Shift opens the dialog")
+shutil.rmtree(d33, ignore_errors=True)
+
 for d in (d1, d2, d3, d4, d5, d6):
     shutil.rmtree(d, ignore_errors=True)
 print("\nstubbed integration OK")
