@@ -2025,6 +2025,35 @@ def test_shared_coarse(tmp):
     finally:
         E.iter_variants = iv
 
+    # an offset longer than the search buffer is a match outside the search (job 356)
+    al2 = E.CoarseAligner(E.PipelineConfig(coarse_local=False, max_expected_error_m=150000.0))
+    al2._resolution = lambda pair: 180.0
+    al2._by_matcher = lambda pair, m, res: {'dx': -139058.0, 'dy': -92086.0, 'support': 130, 'n': 200, 'peak': None}
+    al2._by_phase_correlation = lambda pair, res: {'dx': -62305.0, 'dy': -93304.0, 'support': None, 'n': None,
+                                                   'peak': 0.08}
+    with contextlib.redirect_stdout(io.StringIO()):
+        est = al2.estimate({'pair_id': 1}, FakeMatcher('minima'))
+    check('coarse: a 167 km matcher offset with a 150 km buffer is refused; phase correlation is used',
+          (est['method'], round(est['dx'])), ('phasecorr@180m', -62305))
+    al2._by_phase_correlation = lambda pair, res: {'dx': 151000.0, 'dy': 0.0, 'support': None, 'n': None, 'peak': 0.2}
+    with contextlib.redirect_stdout(io.StringIO()):
+        est = al2.estimate({'pair_id': 1}, FakeMatcher('minima'))
+    check('coarse: nothing within the buffer -> failed (the pair borrows)', est['method'], 'failed')
+    # thin evidence is reported
+    thin = {i: dict(fail) for i in range(1, 25)}
+    thin[1] = mat(-20000, -90000, 130)
+    E.iter_variants = lambda d, c, params=None: iter([FakeMatcher(d)])
+    table.clear()
+    table['imw-topicfm'] = thin
+    try:
+        pipe.config = E.PipelineConfig(window_size=256)
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            pipe._shared_coarse('band11', pairs, ['imw-topicfm'], FakeAligner(), os.path.join(tmp, 'c3.json'))
+        check('coarse shared: an offset resting on one measured pair is flagged', 'rests on 1 measured pair' in buf.getvalue(),
+              True)
+    finally:
+        E.iter_variants = iv
+
     # out of GPU memory in the coarse matcher: retried at twice the pixel
     al = E.CoarseAligner(E.PipelineConfig(coarse_local=False))
     tries = []

@@ -184,6 +184,12 @@ Windows compared at the same map position cannot match when the error is
      per-detector offsets.
    - A coarse matcher that runs out of GPU memory retries once at twice the
      coarse pixel (job 346, RDD on a 16 GB card).
+   - An estimate longer than `max_expected_error_m` is refused. The
+     references are only searched that far, so such a match lies outside the
+     search (job 356: one pair's 167 km offset, with a 150 km buffer, had been
+     given to all 23 pairs). When the shared offset rests on fewer than 3
+     measured pairs, the log warns. Then a RIVAL point as `initial_offset_m`,
+     or other `coarse_detectors`, may be needed.
 3. Fine windows read the reference **shifted by that offset and padded by
    `search_margin_m`**. The final errors are measured from the matched
    coordinates themselves, so they contain the full offset.

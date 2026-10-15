@@ -2074,6 +2074,13 @@ class CoarseAligner:
 
         res = self._resolution(pair)
         tried = []
+        # The references are searched max_expected_error_m beyond the overlap,
+        # so a longer offset is a match outside the search: spurious (job 356:
+        # one pair's 167 km offset, with a 150 km buffer, was given to all 23).
+        reach = float(cfg.max_expected_error_m or 0.0)
+
+        def beyond(e):
+            return reach > 0 and math.hypot(e['dx'], e['dy']) > reach
         if method in ('auto', 'matcher') and matcher is not None:
             try:
                 mres = res
@@ -2096,6 +2103,10 @@ class CoarseAligner:
                 field = (self._offset_field(pair, samples, mres, cfg.coarse_min_support)
                          if cfg.coarse_local and est is not None else None)
                 tried.append(f"matcher: {est if est else 'no matches'}")
+                if est is not None and beyond(est):
+                    tried.append(f'matcher offset {math.hypot(est["dx"], est["dy"]) / 1000:.0f} km is beyond '
+                                 f'max_expected_error_m ({reach / 1000:.0f} km)')
+                    ok, field = False, None
                 if ok or field is not None:
                     out = {**est, 'method': f'matcher@{mres:.0f}m', 'field': field}
                     if not ok:  # report the field's centre value as the pair offset
@@ -2110,6 +2121,9 @@ class CoarseAligner:
             try:
                 est = self._by_phase_correlation(pair, res)
                 tried.append(f"phasecorr: {est}")
+                if est is not None and beyond(est):
+                    tried.append(f'phase-correlation offset beyond max_expected_error_m ({reach / 1000:.0f} km)')
+                    est = None
                 if est is not None and est['peak'] >= cfg.coarse_min_peak:
                     field = None
                     if cfg.coarse_local:
@@ -5542,7 +5556,14 @@ class AutoMatchPipeline:
                 print(f'[Coarse] {pol}: no panel detector could be built; each detector measures its own')
                 return None
             ests = self._pool_coarse(per_detector, [p['pair_id'] for p in pairs])
+            n_meas = sum(1 for e in ests.values() if str(e['method']).startswith('matcher'))
             self._settle_coarse(pairs, ests, cfg, f'shared ({pol})')
+            n_kept = sum(1 for e in ests.values() if str(e['method']).startswith('matcher'))
+            if n_kept < 3:
+                print(f'[Coarse] WARNING {pol}: the shared coarse offset rests on {n_kept} measured pair(s) '
+                      f'(the panel measured {n_meas} of {len(pairs)}); the other pairs borrow it. If the '
+                      f'results are kilometres off, set initial_offset_m from a RIVAL point, or name '
+                      f'other coarse_detectors.')
             try:
                 os.makedirs(os.path.dirname(cache_path), exist_ok=True)
                 with open(cache_path, 'w', encoding='utf-8') as f:
