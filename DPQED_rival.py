@@ -144,7 +144,8 @@ from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QTableWidget, QTableWidgetItem, QPushButton,
                              QFileDialog, QHeaderView, QCheckBox, QComboBox,
                              QMessageBox, QApplication, QShortcut, QLabel,
-                             QFrame, QButtonGroup)
+                             QFrame, QButtonGroup, QDialog, QDialogButtonBox,
+                             QInputDialog, QProgressDialog)
 from PyQt5.QtCore import Qt, QObject, QEvent, QTimer, QRectF, QSettings
 from PyQt5.QtGui import QKeySequence, QFont, QColor, QPen
 from qgis.gui import (QgsMapCanvas, QgsMapTool, QgsMapToolPan, QgsMapToolZoom,
@@ -386,6 +387,16 @@ EXPORT_STATS = True
 # input sits in, <folder name><EXPORT_SUFFIX>.csv / .shp / _stats.csv. The
 # output folder is remembered.
 EXPORT_SUFFIX = "_rival"
+
+# 'Load Input' takes a scene FOLDER. Of its many rasters (*ITD_Height.tif,
+# *pixgrid.tif, ...) the scene is the one whose name ends in one of these --
+# asked which when more than one is there. The chosen bands are written to a
+# COG beside it, which is what the canvas loads; an existing COG for the same
+# bands is reused rather than rebuilt.
+INPUT_SCENE_SUFFIXES = ("ITD", "GTD")
+COG_SUFFIX = "_cog"
+COG_CREATION_OPTIONS = ["COMPRESS=DEFLATE", "BIGTIFF=IF_SAFER",
+                        "NUM_THREADS=ALL_CPUS", "OVERVIEWS=AUTO"]
 
 # The reference folder is remembered between sessions and loaded on start-up;
 # 'Select Reference Folder' is then only needed to change it.
@@ -1259,12 +1270,106 @@ def export_paths(folder, input_path):
             "stats": base + "_stats.csv"}
 
 
+def pick_scene_tifs(names, suffixes=INPUT_SCENE_SUFFIXES):
+    """The scene rasters among a folder's file names, sorted.
+
+    A scene is a .tif whose stem ENDS in one of the suffixes, any case:
+    X_ITD.tif and XGTD.TIF qualify; X_ITD_Height.tif, X_pixgrid.tif and a COG
+    this tool wrote (X_ITD_b1-2_cog.tif) do not.
+    """
+    out = []
+    for n in names:
+        stem, ext = os.path.splitext(n)
+        if ext.lower() not in (".tif", ".tiff"):
+            continue
+        if any(stem.upper().endswith(s.upper()) for s in suffixes):
+            out.append(n)
+    return sorted(out)
+
+
+def cog_path_for(src, bands):
+    """<stem>_b1-2-3_cog.tif beside src: one COG per band choice."""
+    stem = os.path.splitext(src)[0]
+    return f"{stem}_b{'-'.join(str(int(b)) for b in bands)}{COG_SUFFIX}.tif"
+
+
 def stats_path_for(export_path):
     """<name>_stats.csv beside an export, whatever the export's extension."""
     return os.path.splitext(export_path)[0] + "_stats.csv"
 
 
 # ── END PURE HELPERS ──────────────────────────────────────────────────────────
+
+
+# ── COG BUILDER ───────────────────────────────────────────────────────────────
+def build_cog(src, dst, bands, progress=None):
+    """Write the chosen 1-based bands of src to a COG at dst. True on success.
+
+    GDAL first, because QGIS ships it; rasterio when there is no osgeo.
+    progress(fraction) is called as the copy runs and may return False to
+    cancel. Written to a temporary name and renamed into place, so a cancelled
+    or failed build never leaves a half-written file that would later be
+    reused as though it were complete.
+    """
+    tmp = dst + ".part"
+    try:
+        from osgeo import gdal
+        gdal.UseExceptions()
+
+        def cb(frac, _msg, _data):
+            return 1 if progress is None or progress(frac) is not False else 0
+
+        opts = gdal.TranslateOptions(format="COG", bandList=list(bands),
+                                     creationOptions=COG_CREATION_OPTIONS,
+                                     callback=cb)
+        ds = gdal.Translate(tmp, src, options=opts)
+        if ds is None:
+            raise RuntimeError("gdal.Translate returned nothing")
+        ds = None
+    except ImportError:
+        import rasterio
+        from rasterio.shutil import copy as rio_copy
+        mem = tmp + ".src.tif"
+        with rasterio.open(src) as s_ds:
+            prof = s_ds.profile.copy()
+            prof.update(count=len(bands), driver="GTiff", tiled=True,
+                        blockxsize=512, blockysize=512, compress="deflate")
+            with rasterio.open(mem, "w", **prof) as d:
+                for i, b in enumerate(bands, start=1):
+                    d.write(s_ds.read(int(b)), i)
+                    desc = s_ds.descriptions[int(b) - 1]
+                    if desc:
+                        d.set_band_description(i, desc)
+                    if progress is not None and progress(i / len(bands) * 0.9) is False:
+                        raise RuntimeError("cancelled")
+        rio_copy(mem, tmp, driver="COG", compress="DEFLATE")
+        os.remove(mem)
+        if progress is not None:
+            progress(1.0)
+    except Exception as e:
+        for f in (tmp, tmp + ".src.tif"):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+        print(f"[COG] {os.path.basename(src)}: {e}")
+        return False
+    os.replace(tmp, dst)
+    return True
+
+
+def raster_band_names(path):
+    """['1: HH', '2: HV', ...] -- band numbers with whatever description exists."""
+    try:
+        from osgeo import gdal
+        ds = gdal.Open(path)
+        names = [ds.GetRasterBand(i).GetDescription() for i in range(1, ds.RasterCount + 1)]
+        ds = None
+    except ImportError:
+        import rasterio
+        with rasterio.open(path) as ds:
+            names = list(ds.descriptions)
+    return [f"{i}: {d}" if d else f"{i}" for i, d in enumerate(names, start=1)]
 
 
 # ── MAP TOOL ──────────────────────────────────────────────────────────────────
@@ -1561,7 +1666,10 @@ class QCDashboard(QMainWindow):
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
 
-        self.btn_input_tif        = QPushButton("Load Input TIF")
+        self.btn_input_tif        = QPushButton("Load Input Folder")
+        self.btn_input_tif.setToolTip(
+            "Choose a scene folder: its *ITD.tif or *GTD.tif is picked, you\n"
+            "choose the bands, and a COG of them is built beside it and loaded.")
         self.btn_reference_folder = QPushButton("Select Reference Folder")
         self.btn_load  = QPushButton("Load CSV")
         self.btn_load.setToolTip("Load CSV  (Ctrl+O)")
@@ -1576,6 +1684,8 @@ class QCDashboard(QMainWindow):
             "Export the marked rows as a point shapefile  (Ctrl+Shift+S).\n"
             "Points sit at the input pick, carrying dx/dy, magnitude and\n"
             "bearing, so two scenes over one area overlay as quiver plots.")
+        self.btn_out_folder = QPushButton("Output Folder")
+        self.btn_out_folder.setToolTip("Where Export CSV / SHP write -- kept until changed")
         self.btn_del   = QPushButton("Delete Row")
         self.btn_del.setToolTip("Delete Row  (Ctrl+Delete)")
         self.btn_clear = QPushButton("Clear Rows")
@@ -1637,7 +1747,7 @@ class QCDashboard(QMainWindow):
         btn_layout = QHBoxLayout()
         for w in ([self.btn_input_tif, self.btn_reference_folder,
                    self.btn_load, self.btn_add, self.btn_save, self.btn_shp,
-                   self.btn_del, self.btn_clear]
+                   self.btn_del, self.btn_clear, self.btn_out_folder]
                   + [self.tool_buttons[m] for m in MAP_TOOLS]
                   + [self.cb_sync]):
             btn_layout.addWidget(w)
@@ -1652,7 +1762,8 @@ class QCDashboard(QMainWindow):
         central.setLayout(main_layout)
         self.setCentralWidget(central)
 
-        self.btn_input_tif.clicked.connect(lambda: self.manual_load_tif(True))
+        self.btn_input_tif.clicked.connect(self.load_input_folder)
+        self.btn_out_folder.clicked.connect(self.choose_output_folder)
         self.btn_reference_folder.clicked.connect(self.select_reference_folder)
         self.btn_load.clicked.connect(self.load_csv_smart)
         self.btn_add.clicked.connect(self.add_manual_row)
@@ -3708,30 +3819,45 @@ class QCDashboard(QMainWindow):
               f"map coordinates in {crs}, lon/lat in EPSG:4326")
         self.write_stats(path)
 
-    def _export_target(self, kind, title):
-        """Ask for an output folder; return the path for `kind`, or None.
-
-        The name is not asked for: it comes from the input scene, so every
-        run on a scene lands under the same recognisable name. Because that
-        name is fixed, an existing file is not replaced without a yes.
-        """
-        start = ""
+    def _saved_output_folder(self):
         try:
             saved = self._settings().value("export_folder", "")
-            if isinstance(saved, str) and os.path.isdir(saved):
-                start = saved
         except Exception:
-            pass
-        if not start and self.input_path:
-            start = os.path.dirname(os.path.abspath(self.input_path))
+            return None
+        return saved if isinstance(saved, str) and os.path.isdir(saved) else None
+
+    def choose_output_folder(self):
+        """Ask for the export folder and keep it until changed. Returns it or None."""
+        start = self._saved_output_folder() or (
+            os.path.dirname(os.path.abspath(self.input_path)) if self.input_path else "")
         folder = QFileDialog.getExistingDirectory(
-            self, f"{title} -- choose the output folder", start)
+            self, "Output folder for Export CSV / SHP", start)
         if not folder:
             return None
         try:
             self._settings().setValue("export_folder", folder)
         except Exception as e:
             print(f"[EXPORT] could not remember the folder: {e}")
+        try:
+            self.btn_out_folder.setToolTip(f"Exports go to:\n{folder}\n(click to change)")
+        except Exception:
+            pass
+        print(f"[EXPORT] output folder: {folder}")
+        return folder
+
+    def _export_target(self, kind, title):
+        """The path for `kind` in the output folder, or None.
+
+        The folder is the remembered one -- asked only the first time, or via
+        the Output Folder button.
+
+        The name is not asked for: it comes from the input scene, so every
+        run on a scene lands under the same recognisable name. Because that
+        name is fixed, an existing file is not replaced without a yes.
+        """
+        folder = self._saved_output_folder() or self.choose_output_folder()
+        if not folder:
+            return None
         targets = export_paths(folder, self.input_path)
         path = targets[kind]
         clash = [p for p in (path, targets["stats"]) if os.path.exists(p)]
@@ -3816,6 +3942,125 @@ class QCDashboard(QMainWindow):
         print(f"[TABLE] cleared {n} row(s), {marked} fully marked")
 
     # ── TIF LOADING & INIT ────────────────────────────────────────────────────
+    def load_input_folder(self):
+        """Input from a scene folder: pick the ITD/GTD tif, choose bands, COG it.
+
+        The folder holds many rasters; only the one named *ITD.tif or *GTD.tif
+        is the scene (asked which when both are there). The chosen bands are
+        written to a COG beside it -- reused when one for the same bands is
+        already there and newer than its source -- and that is what loads.
+        """
+        start = ""
+        try:
+            saved = self._settings().value("input_folder", "")
+            if isinstance(saved, str) and os.path.isdir(saved):
+                start = os.path.dirname(saved)
+        except Exception:
+            pass
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select the input scene folder", start)
+        if not folder:
+            return
+        try:
+            self._settings().setValue("input_folder", folder)
+        except Exception:
+            pass
+        found = pick_scene_tifs(os.listdir(folder))
+        if not found:
+            QMessageBox.warning(
+                self, "Load Input",
+                f"No *{'.tif or *'.join(INPUT_SCENE_SUFFIXES)}.tif in\n{folder}")
+            return
+        name = found[0]
+        if len(found) > 1:
+            name, ok = QInputDialog.getItem(
+                self, "Load Input", "Which scene raster?", found, 0, False)
+            if not ok:
+                return
+        src = os.path.join(folder, name)
+
+        bands = self._ask_bands(src)
+        if not bands:
+            return
+        cog = cog_path_for(src, bands)
+        if os.path.exists(cog) and os.path.getmtime(cog) >= os.path.getmtime(src):
+            print(f"[COG] reusing {os.path.basename(cog)}")
+        elif not self._build_cog_with_progress(src, cog, bands):
+            QMessageBox.critical(self, "Load Input",
+                                 f"Could not build the COG for\n{src}\n"
+                                 f"(see the Python console)")
+            return
+        self.load_input_path(cog, source=src)
+
+    def _ask_bands(self, src):
+        """A checkbox per band; returns the 1-based bands ticked, or None."""
+        try:
+            names = raster_band_names(src)
+        except Exception as e:
+            QMessageBox.critical(self, "Load Input", f"Cannot read\n{src}\n{e}")
+            return None
+        if len(names) == 1:
+            return [1]
+        try:
+            last = self._settings().value("cog_bands", "")
+            last = [int(b) for b in str(last).split(",") if b.strip()]
+        except Exception:
+            last = []
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Bands for the COG -- {os.path.basename(src)}")
+        lay = QVBoxLayout(dlg)
+        boxes = []
+        for i, n in enumerate(names, start=1):
+            cb = QCheckBox(n)
+            cb.setChecked((i in last) if last and max(last) <= len(names) else True)
+            lay.addWidget(cb)
+            boxes.append(cb)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        lay.addWidget(bb)
+        if dlg.exec_() != QDialog.Accepted:
+            return None
+        bands = [i for i, cb in enumerate(boxes, start=1) if cb.isChecked()]
+        if not bands:
+            QMessageBox.warning(self, "Load Input", "No band chosen.")
+            return None
+        try:
+            self._settings().setValue("cog_bands", ",".join(map(str, bands)))
+        except Exception:
+            pass
+        return bands
+
+    def _build_cog_with_progress(self, src, dst, bands):
+        dlg = QProgressDialog(f"Building {os.path.basename(dst)}", "Cancel",
+                              0, 100, self)
+        dlg.setWindowTitle("COG")
+        dlg.setMinimumDuration(0)
+
+        def progress(frac):
+            dlg.setValue(int(frac * 100))
+            QApplication.processEvents()
+            return not dlg.wasCanceled()
+
+        print(f"[COG] {os.path.basename(src)} bands {bands} -> {os.path.basename(dst)}")
+        ok = build_cog(src, dst, bands, progress)
+        dlg.close()
+        return ok
+
+    def load_input_path(self, path, source=None):
+        """Load a raster as the input scene. source: the file it was made from."""
+        lyr = QgsRasterLayer(path, "Input_TIF")
+        if not lyr.isValid():
+            QMessageBox.critical(self, "Load Input", f"QGIS cannot open\n{path}")
+            return
+        if self.input_tif_layer and self.input_tif_layer.isValid():
+            QgsProject.instance().removeMapLayer(self.input_tif_layer.id())
+        self.input_tif_layer = None
+        QgsProject.instance().addMapLayer(lyr, False)
+        self.adopt_input_layer(lyr, path, source=source)
+        if self.ref_folder_path:
+            self.filter_reference_tifs()
+
     def manual_load_tif(self, is_input):
         path, _ = QFileDialog.getOpenFileName(
             self, "Select TIF", "", "TIF (*.tif *.tiff *.TIF *.TIFF *.vrt)"
@@ -3856,7 +4101,7 @@ class QCDashboard(QMainWindow):
         except Exception as e:
             print(f"[STATUS] {e}")
 
-    def adopt_input_layer(self, layer, path):
+    def adopt_input_layer(self, layer, path, source=None):
         """Everything that has to happen once, however the input scene arrives.
 
         The Load Input TIF button and the auto-connect of a layer already open
@@ -3868,7 +4113,9 @@ class QCDashboard(QMainWindow):
         self.input_path = path
         self.input_tif_layer = layer
         self.ensure_overviews(path)
-        self.input_ring = self._input_footprint_ring(path)
+        # the footprint sidecar sits beside the ORIGINAL scene and is named
+        # for it; a COG made from it has another name
+        self.input_ring = self._input_footprint_ring(source or path)
         if self.input_ring is None:
             print(f"[INPUT] no footprint for {os.path.basename(path)}; "
                   f"selecting references against its full extent")

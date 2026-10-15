@@ -2094,9 +2094,10 @@ assert store["export_folder"] == out_dir and asked == []
 assert win._export_target("shp", "Export SHP") == os.path.join(out_dir, "NISAR_0042_rival.shp")
 print("\nexports ask for a folder only, and are named NISAR_0042_rival.csv/.shp")
 
-win._export_target("csv", "x")
-assert qw.QFileDialog.getExistingDirectory.call_args[0][2] == out_dir
-print("the next export opens at the folder used last")
+qw.QFileDialog.getExistingDirectory.reset_mock()
+assert win._export_target("csv", "x").startswith(out_dir)
+assert not qw.QFileDialog.getExistingDirectory.called, "asked again"
+print("the output folder is kept: the next export does not ask")
 
 open(os.path.join(out_dir, "NISAR_0042_rival.csv"), "w").write("old")
 assert win._export_target("csv", "Export CSV") is None and asked
@@ -2105,10 +2106,83 @@ qw.QMessageBox.question = lambda *a, **k: qw.QMessageBox.Yes
 assert win._export_target("csv", "Export CSV").endswith("NISAR_0042_rival.csv")
 print("an existing file for the scene is replaced only on yes, No by default")
 
+store.clear()
 qw.QFileDialog.getExistingDirectory = MagicMock(return_value="")
 assert win._export_target("csv", "Export CSV") is None
-print("cancelling the folder dialog exports nothing")
+print("with no folder yet, cancelling the dialog exports nothing")
 shutil.rmtree(out_dir, ignore_errors=True)
+
+# ── 28. input from a scene folder: ITD/GTD picked, bands chosen, COG built ──
+# an earlier section installs a fake osgeo; this one runs the real rasterio build
+sys.modules.pop("osgeo", None); sys.modules.pop("osgeo.gdal", None)
+import rasterio
+from rasterio.transform import from_origin
+scene_dir = tempfile.mkdtemp()
+def _tif(name, count):
+    path = os.path.join(scene_dir, name)
+    with rasterio.open(path, "w", driver="GTiff", width=64, height=48,
+                       count=count, dtype="float32", crs="EPSG:32644",
+                       transform=from_origin(300000, 1900000, 10, 10)) as d:
+        for b in range(1, count + 1):
+            d.write(np.full((48, 64), float(b), "float32"), b)
+            d.set_band_description(b, f"B{b}")
+    return path
+src = _tif("266697511_ITD.tif", 4)
+_tif("266697511_ITD_Height.tif", 1)
+_tif("266697511_pixgrid.tif", 1)
+
+# the folder's other rasters are not the scene
+assert R.pick_scene_tifs(os.listdir(scene_dir)) == ["266697511_ITD.tif"]
+
+for name in ("load_input_folder", "_ask_bands", "choose_output_folder",
+             "_saved_output_folder"):
+    setattr(win, name, getattr(R.QCDashboard, name).__get__(win))
+win._build_cog_with_progress = lambda s_, d_, b_: R.build_cog(s_, d_, b_)
+win.load_input_path = MagicMock()
+store.clear()
+qw.QFileDialog.getExistingDirectory = MagicMock(return_value=scene_dir)
+qw.QInputDialog.getItem = MagicMock(side_effect=AssertionError("asked with one scene"))
+win._ask_bands = MagicMock(return_value=[3, 1])
+win.load_input_folder()
+cog = os.path.join(scene_dir, "266697511_ITD_b3-1_cog.tif")
+assert os.path.exists(cog), os.listdir(scene_dir)
+with rasterio.open(cog) as d:
+    assert d.count == 2 and float(d.read(1)[0, 0]) == 3.0 and float(d.read(2)[0, 0]) == 1.0
+    assert d.descriptions == ("B3", "B1"), d.descriptions
+    assert d.crs.to_epsg() == 32644
+args, kw = win.load_input_path.call_args
+assert args[0] == cog and kw.get("source") == src, (args, kw)
+assert not [f for f in os.listdir(scene_dir) if f.endswith(".part")]
+print("\na scene folder loads its *ITD.tif, the chosen bands (3, 1) become a "
+      "COG beside it, in that order, and the COG is what loads")
+
+# a second load with the same bands reuses the COG
+mtime = os.path.getmtime(cog)
+win._build_cog_with_progress = MagicMock(side_effect=AssertionError("rebuilt"))
+win.load_input_folder()
+assert os.path.getmtime(cog) == mtime
+print("the same bands again reuse the COG instead of rebuilding it")
+
+# both ITD and GTD present: it asks which
+_tif("266697511_GTD.tif", 2)
+qw.QInputDialog.getItem = MagicMock(return_value=("266697511_GTD.tif", True))
+win._ask_bands = MagicMock(return_value=[2])
+win._build_cog_with_progress = lambda s_, d_, b_: R.build_cog(s_, d_, b_)
+win.load_input_folder()
+assert qw.QInputDialog.getItem.call_args[0][3] == ["266697511_GTD.tif",
+                                                    "266697511_ITD.tif"]
+assert win.load_input_path.call_args[0][0].endswith("266697511_GTD_b2_cog.tif")
+print("with both ITD and GTD in the folder, it asks which")
+
+# a folder with no scene raster says so and loads nothing
+empty = tempfile.mkdtemp()
+qw.QFileDialog.getExistingDirectory = MagicMock(return_value=empty)
+win.load_input_path.reset_mock()
+warned.clear()
+win.load_input_folder()
+assert not win.load_input_path.called and warned, warned
+print("a folder with no *ITD/*GTD tif warns and loads nothing")
+shutil.rmtree(scene_dir, ignore_errors=True); shutil.rmtree(empty, ignore_errors=True)
 
 for d in (d1, d2, d3, d4, d5, d6):
     shutil.rmtree(d, ignore_errors=True)
