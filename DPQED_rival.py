@@ -1288,6 +1288,27 @@ def pick_scene_tifs(names, pattern=INPUT_SCENE_PATTERN):
     return sorted(out)
 
 
+def band_choice_key(band_count):
+    """Settings key for the remembered display bands of an n-band product."""
+    return f"cog_rgb/{int(band_count)}"
+
+
+def parse_band_choice(text, band_count):
+    """'34,22,11' -> [34, 22, 11], or None if empty or out of range."""
+    try:
+        bands = [int(b) for b in str(text or "").split(",") if b.strip()]
+    except ValueError:
+        return None
+    if not bands or len(bands) > 3 or any(b < 1 or b > band_count for b in bands):
+        return None
+    return bands
+
+
+def default_rgb(band_count):
+    """First guess for R, G, B: bands 1, 2, 3, or as many as there are."""
+    return list(range(1, min(3, int(band_count)) + 1))
+
+
 def cog_path_for(src, bands):
     """<stem>_b1-2-3_cog.tif beside src: one COG per band choice."""
     stem = os.path.splitext(src)[0]
@@ -1670,7 +1691,8 @@ class QCDashboard(QMainWindow):
         self.btn_input_tif        = QPushButton("Load Input Folder")
         self.btn_input_tif.setToolTip(
             "Choose a scene folder: its *GTD_*_1.tif or *ITD_*_1.tif is picked, you\n"
-            "choose the bands, and a COG of them is built beside it and loaded.")
+            "choose the bands, and a COG of them is built beside it and loaded.\n"
+            "Bands are remembered per product type; Shift+click to choose again.")
         self.btn_clear_input      = QPushButton("Clear Input")
         self.btn_clear_input.setToolTip(
             "Unload the input raster so a new one can be given.\n"
@@ -4000,40 +4022,70 @@ class QCDashboard(QMainWindow):
         self.load_input_path(cog, source=src)
 
     def _ask_bands(self, src):
-        """A checkbox per band; returns the 1-based bands ticked, or None."""
+        """Red / Green / Blue band for the COG, as 1-based bands, or None.
+
+        One drop-down per channel, not a checkbox per band: a hyperspectral
+        scene has 150+ bands, and ticking them all built a COG of the whole
+        cube. Green and Blue may be '(none)' for a single-band view.
+
+        Remembered per product type -- keyed by the band count, which is what
+        tells a 150-band hyperspectral product from a 4-band multispectral one
+        -- and reused without asking. Hold Shift while clicking Load Input
+        Folder to choose again; a product with another band count asks.
+        """
         try:
             names = raster_band_names(src)
         except Exception as e:
             QMessageBox.critical(self, "Load Input", f"Cannot read\n{src}\n{e}")
             return None
-        if len(names) == 1:
+        n = len(names)
+        if n == 1:
             return [1]
+        key = band_choice_key(n)
+        saved = None
         try:
-            last = self._settings().value("cog_bands", "")
-            last = [int(b) for b in str(last).split(",") if b.strip()]
+            saved = parse_band_choice(self._settings().value(key, ""), n)
         except Exception:
-            last = []
+            pass
+        shift = False
+        try:
+            shift = bool(QApplication.keyboardModifiers() & Qt.ShiftModifier)
+        except Exception:
+            pass
+        if saved and not shift:
+            print(f"[COG] bands {saved} remembered for {n}-band products "
+                  f"(Shift+Load Input Folder to choose again)")
+            return saved
+
+        default = saved or default_rgb(n)
         dlg = QDialog(self)
-        dlg.setWindowTitle(f"Bands for the COG -- {os.path.basename(src)}")
+        dlg.setWindowTitle(f"Display bands -- {os.path.basename(src)} ({n} bands)")
         lay = QVBoxLayout(dlg)
-        boxes = []
-        for i, n in enumerate(names, start=1):
-            cb = QCheckBox(n)
-            cb.setChecked((i in last) if last and max(last) <= len(names) else True)
-            lay.addWidget(cb)
-            boxes.append(cb)
+        combos = []
+        for ch, label in enumerate(("Red", "Green", "Blue")):
+            row = QHBoxLayout()
+            row.addWidget(QLabel(f"{label} band:"))
+            cb = QComboBox()
+            if ch:
+                cb.addItem("(none)")
+            cb.addItems(names)
+            want = default[ch] if ch < len(default) else None
+            cb.setCurrentIndex((want - 1 + (1 if ch else 0)) if want else 0)
+            row.addWidget(cb)
+            lay.addLayout(row)
+            combos.append(cb)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(dlg.accept)
         bb.rejected.connect(dlg.reject)
         lay.addWidget(bb)
         if dlg.exec_() != QDialog.Accepted:
             return None
-        bands = [i for i, cb in enumerate(boxes, start=1) if cb.isChecked()]
-        if not bands:
-            QMessageBox.warning(self, "Load Input", "No band chosen.")
-            return None
+        bands = [combos[0].currentIndex() + 1]
+        for cb in combos[1:]:
+            if cb.currentIndex() > 0:
+                bands.append(cb.currentIndex())
         try:
-            self._settings().setValue("cog_bands", ",".join(map(str, bands)))
+            self._settings().setValue(key, ",".join(map(str, bands)))
         except Exception:
             pass
         return bands

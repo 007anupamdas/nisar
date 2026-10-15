@@ -2203,6 +2203,60 @@ assert win.table.rowCount() == 1, "the rows went with the input"
 print("\nClear Input unloads the raster, footprint and path, re-filters the "
       "references, and leaves the table alone")
 
+# ── 30. display bands: R/G/B drop-downs, remembered per product type ───────
+win._ask_bands = R.QCDashboard._ask_bands.__get__(win)
+store.clear()
+R.raster_band_names = lambda p: [str(i) for i in range(1, 156)]   # 155 bands
+R.QApplication.keyboardModifiers = MagicMock(return_value=0)
+R.Qt.ShiftModifier = 0x02000000
+class _Combo:
+    def __init__(self): self.items, self.idx = [], 0
+    def addItem(self, t): self.items.append(t)
+    def addItems(self, ts): self.items.extend(ts)
+    def setCurrentIndex(self, i): self.idx = i
+    def currentIndex(self): return self.idx
+combos = []
+R.QComboBox = lambda: combos.append(_Combo()) or combos[-1]
+class _Dlg:
+    Accepted = 1
+    def __init__(self, *a): pass
+    def setWindowTitle(self, t): pass
+    def accept(self): pass
+    def reject(self): pass
+    def exec_(self):
+        # the user picks R=34, G=22, B=(none)
+        combos[-3].idx, combos[-2].idx, combos[-1].idx = 33, 22, 0
+        return 1
+R.QDialog = _Dlg
+asked_n = []
+_orig = _Dlg.exec_
+def _count(self): asked_n.append(1); return _orig(self)
+_Dlg.exec_ = _count
+for n_ in ("QVBoxLayout", "QHBoxLayout", "QLabel", "QDialogButtonBox"):
+    setattr(R, n_, MagicMock())
+bands = win._ask_bands("/s/hs_GTD_A_1.tif")
+assert bands == [34, 22], bands
+assert combos[-3].items[0] == "1" and combos[-2].items[0] == "(none)"
+assert all(len(c.items) <= 156 for c in combos[-3:])
+assert store["cog_rgb/155"] == "34,22"
+print("\na 155-band product asks Red/Green/Blue, one drop-down each -- not "
+      "155 ticked boxes -- and Blue can be none")
+
+assert win._ask_bands("/s/hs2_GTD_A_1.tif") == [34, 22] and len(asked_n) == 1
+print("the next product with 155 bands reuses 34, 22 without asking")
+
+R.QApplication.keyboardModifiers = MagicMock(return_value=R.Qt.ShiftModifier)
+win._ask_bands("/s/hs2_GTD_A_1.tif")
+assert len(asked_n) == 2
+R.QApplication.keyboardModifiers = MagicMock(return_value=0)
+print("Shift+Load asks again")
+
+R.raster_band_names = lambda p: ["1: B", "2: G", "3: R", "4: NIR"]
+win._ask_bands("/s/ms_GTD_A_1.tif")
+assert len(asked_n) == 3, "a 4-band product reused the hyperspectral choice"
+assert (combos[-3].idx, combos[-2].idx, combos[-1].idx) == (33, 22, 0)
+print("a product with another band count asks afresh")
+
 for d in (d1, d2, d3, d4, d5, d6):
     shutil.rmtree(d, ignore_errors=True)
 print("\nstubbed integration OK")

@@ -742,6 +742,21 @@ check("the COG is named for its bands, beside the source",
       H["cog_path_for"]("/d/266697511_ITD_A_1.tif", [3, 1]),
       "/d/266697511_ITD_A_1_b3-1_cog.tif")
 
+# ── 24. remembered display bands ─────────────────────────────────────────────
+print("\n-- display bands --")
+f = H["parse_band_choice"]
+check("a saved R,G,B reads back", f("34,22,11", 155), [34, 22, 11])
+check("a single band is allowed", f("5", 155), [5])
+check("nothing saved", f("", 155), None)
+check("a band beyond this product's count is refused", f("34,22,160", 155), None)
+check("more than three channels is refused", f("1,2,3,4", 155), None)
+check("junk is refused", f("a,b", 155), None)
+check("each band count is its own product type",
+      (H["band_choice_key"](155), H["band_choice_key"](4)),
+      ("cog_rgb/155", "cog_rgb/4"))
+check("first guess: 1, 2, 3", H["default_rgb"](155), [1, 2, 3])
+check("first guess on two bands", H["default_rgb"](2), [1, 2])
+
 print()
 if failures:
     print(f"{len(failures)} FAILURE(S)")
