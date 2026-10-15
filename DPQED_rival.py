@@ -1670,6 +1670,10 @@ class QCDashboard(QMainWindow):
         self.btn_input_tif.setToolTip(
             "Choose a scene folder: its *ITD.tif or *GTD.tif is picked, you\n"
             "choose the bands, and a COG of them is built beside it and loaded.")
+        self.btn_clear_input      = QPushButton("Clear Input")
+        self.btn_clear_input.setToolTip(
+            "Unload the input raster so a new one can be given.\n"
+            "The table is kept: export or Clear Rows separately.")
         self.btn_reference_folder = QPushButton("Select Reference Folder")
         self.btn_load  = QPushButton("Load CSV")
         self.btn_load.setToolTip("Load CSV  (Ctrl+O)")
@@ -1745,7 +1749,8 @@ class QCDashboard(QMainWindow):
         map_layout.addWidget(self.canvas_right)
 
         btn_layout = QHBoxLayout()
-        for w in ([self.btn_input_tif, self.btn_reference_folder,
+        for w in ([self.btn_input_tif, self.btn_clear_input,
+                   self.btn_reference_folder,
                    self.btn_load, self.btn_add, self.btn_save, self.btn_shp,
                    self.btn_del, self.btn_clear, self.btn_out_folder]
                   + [self.tool_buttons[m] for m in MAP_TOOLS]
@@ -1763,6 +1768,7 @@ class QCDashboard(QMainWindow):
         self.setCentralWidget(central)
 
         self.btn_input_tif.clicked.connect(self.load_input_folder)
+        self.btn_clear_input.clicked.connect(self.clear_input)
         self.btn_out_folder.clicked.connect(self.choose_output_folder)
         self.btn_reference_folder.clicked.connect(self.select_reference_folder)
         self.btn_load.clicked.connect(self.load_csv_smart)
@@ -4046,6 +4052,30 @@ class QCDashboard(QMainWindow):
         ok = build_cog(src, dst, bands, progress)
         dlg.close()
         return ok
+
+    def clear_input(self):
+        """Unload the input raster, leaving RIVAL ready for a new one.
+
+        Everything adopt_input_layer set from the scene goes with it -- layer,
+        footprint, path, status-bar label -- and the reference dropdown is
+        re-filtered without a footprint, so it no longer narrows to the old
+        scene. The table is left alone: its rows are measurements, and losing
+        them should take an explicit Clear Rows, not a side effect.
+        """
+        if self.input_tif_layer is not None:
+            try:
+                QgsProject.instance().removeMapLayer(self.input_tif_layer.id())
+            except Exception as e:
+                print(f"[INPUT] {e}")
+        self.input_tif_layer = None
+        self.input_ring = None
+        self.input_path = None
+        self.canvas_left.setLayers([])
+        self.clear_markers()
+        self.show_input_path(None)
+        if self.ref_folder_path:
+            self.filter_reference_tifs()
+        print("[INPUT] cleared")
 
     def load_input_path(self, path, source=None):
         """Load a raster as the input scene. source: the file it was made from."""

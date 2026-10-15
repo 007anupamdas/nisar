@@ -2184,6 +2184,25 @@ assert not win.load_input_path.called and warned, warned
 print("a folder with no *ITD/*GTD tif warns and loads nothing")
 shutil.rmtree(scene_dir, ignore_errors=True); shutil.rmtree(empty, ignore_errors=True)
 
+# ── 29. Clear Input unloads the scene, keeps the rows ──────────────────────
+win.clear_input = R.QCDashboard.clear_input.__get__(win)
+win.show_input_path = MagicMock()
+win.clear_markers = MagicMock()
+win.filter_reference_tifs = MagicMock()
+win.canvas_left.setLayers.reset_mock()
+lyr = MagicMock(); lyr.id.return_value = "L1"
+win.input_tif_layer, win.input_ring, win.input_path = lyr, [(0, 0)], "/s/a.tif"
+win.ref_folder_path = "/refs"
+win.table = _SelTable([["1.000", "2.000", "3.000", "4.000"]], current=0)
+win.clear_input()
+assert win.input_tif_layer is None and win.input_ring is None and win.input_path is None
+win.canvas_left.setLayers.assert_called_with([])
+win.show_input_path.assert_called_with(None)
+assert win.filter_reference_tifs.called, "references still narrowed to the old scene"
+assert win.table.rowCount() == 1, "the rows went with the input"
+print("\nClear Input unloads the raster, footprint and path, re-filters the "
+      "references, and leaves the table alone")
+
 for d in (d1, d2, d3, d4, d5, d6):
     shutil.rmtree(d, ignore_errors=True)
 print("\nstubbed integration OK")
