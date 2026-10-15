@@ -1720,6 +1720,12 @@ class QCDashboard(QMainWindow):
         self.btn_add.setToolTip(
             "Add Row  (Ctrl+N)\nNot needed to measure: marking on the input "
             "starts a new row\nonce the selected one has both picks.")
+        self.btn_export = QPushButton("Export")
+        self.btn_export.setToolTip(
+            "Export everything to the output folder  (Ctrl+S):\n"
+            "csv/  the table, both ends also in lon/lat\n"
+            "shp/  the picks as points, dx/dy/mag/bearing (quiver-ready)\n"
+            "stats/  mean, std, RMSE, CE90")
         self.btn_save  = QPushButton("Export CSV")
         self.btn_save.setToolTip("Export CSV  (Ctrl+S)")
         self.btn_shp   = QPushButton("Export SHP")
@@ -1790,7 +1796,7 @@ class QCDashboard(QMainWindow):
         btn_layout = QHBoxLayout()
         for w in ([self.btn_input_tif, self.btn_clear_input,
                    self.btn_reference_folder,
-                   self.btn_load, self.btn_add, self.btn_save, self.btn_shp,
+                   self.btn_load, self.btn_add, self.btn_export,
                    self.btn_del, self.btn_clear, self.btn_out_folder]
                   + [self.tool_buttons[m] for m in MAP_TOOLS]
                   + [self.cb_sync]):
@@ -1812,6 +1818,7 @@ class QCDashboard(QMainWindow):
         self.btn_reference_folder.clicked.connect(self.select_reference_folder)
         self.btn_load.clicked.connect(self.load_csv_smart)
         self.btn_add.clicked.connect(self.add_manual_row)
+        self.btn_export.clicked.connect(self.export_all)
         self.btn_save.clicked.connect(self.save_csv)
         self.btn_shp.clicked.connect(self.save_shapefile)
         self.btn_del.clicked.connect(self.delete_row)
@@ -1830,9 +1837,7 @@ class QCDashboard(QMainWindow):
             combo.currentIndexChanged.connect(lambda _: self.apply_input_bands())
 
         QShortcut(QKeySequence("Ctrl+N"),      self).activated.connect(self.add_manual_row)
-        QShortcut(QKeySequence("Ctrl+S"),      self).activated.connect(self.save_csv)
-        QShortcut(QKeySequence("Ctrl+Shift+S"), self).activated.connect(
-            self.save_shapefile)
+        QShortcut(QKeySequence("Ctrl+S"),      self).activated.connect(self.export_all)
         QShortcut(QKeySequence("Ctrl+O"),      self).activated.connect(self.load_csv_smart)
         QShortcut(QKeySequence("Ctrl+Delete"), self).activated.connect(self.delete_row)
         QShortcut(QKeySequence("Ctrl+Shift+Delete"), self).activated.connect(
@@ -3697,7 +3702,7 @@ class QCDashboard(QMainWindow):
         except Exception:
             return None
 
-    def save_shapefile(self):
+    def save_shapefile(self, path=None):
         """Write the marked rows as a point layer, one point per pick.
 
         Points sit at the input position -- where the feature was measured --
@@ -3712,7 +3717,8 @@ class QCDashboard(QMainWindow):
                 "No fully marked rows. A row needs both an input and a "
                 "reference pick before it describes an error.")
             return
-        path = self._export_target("shp", "Export SHP")
+        if path is None:
+            path = self._export_target("shp", "Export SHP")
         if not path:
             return
 
@@ -3873,7 +3879,7 @@ class QCDashboard(QMainWindow):
             return None
         return self._to_lonlat(x, y)
 
-    def save_csv(self):
+    def save_csv(self, path=None):
         """Export the table, with each end also in lon/lat.
 
         The map coordinates are in the working CRS, which is whatever the input
@@ -3883,7 +3889,8 @@ class QCDashboard(QMainWindow):
         can be read, plotted or joined against a survey without first knowing
         which grid the picks were measured on.
         """
-        path = self._export_target("csv", "Export CSV")
+        if path is None:
+            path = self._export_target("csv", "Export CSV")
         if not path:
             return
         crs = self.proj_crs.authid() or self.proj_crs.description()
@@ -3928,7 +3935,30 @@ class QCDashboard(QMainWindow):
         return folder
 
     def _export_target(self, kind, title):
-        """The path for `kind` in the output folder, or None.
+        targets = self._export_targets((kind,), title)
+        return targets[kind] if targets else None
+
+    def export_all(self):
+        """One button for every export: CSV, shapefile and statistics.
+
+        Asks before replacing once, for all the files together, then writes
+        each without asking again. With no fully marked row there is nothing
+        to export.
+        """
+        if not self.export_rows():
+            QMessageBox.warning(
+                self, "Export",
+                "No fully marked rows. A row needs both an input and a "
+                "reference pick before it describes an error.")
+            return
+        targets = self._export_targets(("csv", "shp"), "Export")
+        if not targets:
+            return
+        self.save_csv(path=targets["csv"])
+        self.save_shapefile(path=targets["shp"])
+
+    def _export_targets(self, kinds, title):
+        """{kind: path} for each kind (and 'stats') in the output folder, or None.
 
         The folder is the remembered one -- asked only the first time, or via
         the Output Folder button.
@@ -3941,10 +3971,10 @@ class QCDashboard(QMainWindow):
         if not folder:
             return None
         targets = export_paths(folder, self.input_path)
-        for k in (kind, "stats"):
+        wanted = list(kinds) + ["stats"]
+        for k in wanted:
             os.makedirs(os.path.dirname(targets[k]), exist_ok=True)
-        path = targets[kind]
-        clash = [p for p in (path, targets["stats"]) if os.path.exists(p)]
+        clash = [targets[k] for k in wanted if os.path.exists(targets[k])]
         if clash:
             answer = QMessageBox.question(
                 self, title,
@@ -3953,7 +3983,7 @@ class QCDashboard(QMainWindow):
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
             if answer != QMessageBox.Yes:
                 return None
-        return path
+        return {k: targets[k] for k in wanted}
 
     def write_stats(self, export_path):
         """Write <name>_stats.csv beside an export. Returns its path, or None."""

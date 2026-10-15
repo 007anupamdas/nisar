@@ -92,6 +92,7 @@ write(os.path.join(res, "csv", "266697521_rival_stats.csv"),
 write(os.path.join(res, "picks.csv"), old)
 os.makedirs(os.path.join(prod, "266697511"))
 open(os.path.join(prod, "266697511", "BAND_META.txt"), "w").write(
+    "Sensor = LISS4\nSensorMode = MX\n"
     "DateOfPass = 12-MAR-2025\nSessionID = 4471\nStripId = 3\n"
     "SceneCenterLat = 16.5\nSceneCenterLon = 78.5\n")
 out = os.path.join(res, "out", "all.csv")
@@ -104,6 +105,9 @@ r1, r2 = rows
 check("ancillary from BAND_META", (r1["date"], r1["session_id"], r1["strip_id"],
                                    r1["centre_lat"]),
       ("12-MAR-2025", "4471", "3", "16.500000"))
+check("Sensor from its own key, not SensorMode", r1["sensor"], "LISS4")
+check("sensor sits beside the other ancillary columns",
+      C.OUT_COLUMNS[:5], ["product_id", "request_id", "product_no", "sensor", "date"])
 check("targeting mean and CE90 from the picks", (r1["n_points"], r1["mean_dx"],
                                                  r1["mean_dy"], r1["ce90"]),
       ("2", "4.000", "2.000", f"{H['error_summary']([(3, 4), (5, 0)])['ce90']:.3f}"))

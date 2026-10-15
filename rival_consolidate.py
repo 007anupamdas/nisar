@@ -39,6 +39,7 @@ META_KEYS = {
     # SessionNumber / StripNumber are the keys BAND_META actually uses; they
     # are tried exactly first, so no other key mentioning "session" or
     # "strip" can be taken for them.
+    "sensor":     ("sensor",),
     "session_id": ("sessionnumber", "sessionid", "sessionno", "session"),
     "strip_id":   ("stripnumber", "stripid", "stripno", "strip"),
     "centre_lat": ("scenecenterlat", "scenecentrelat", "centerlat", "centrelat"),
@@ -61,7 +62,8 @@ PICK_COLUMNS = {
 }
 
 OUT_COLUMNS = [
-    "product_id", "request_id", "product_no", "date", "session_id", "strip_id",
+    "product_id", "request_id", "product_no", "sensor", "date", "session_id",
+    "strip_id",
     "centre_lat", "centre_lon", "n_points",
     "mean_dx", "mean_dy", "std_dx", "std_dy", "rmse_dx", "rmse_dy",
     "mean_radial", "rmse_radial", "max_radial", "ce90", "axis_ratio",
@@ -245,7 +247,7 @@ def consolidate(results_folder, products_folder, out_csv, log=print):
             errs, lonlats = read_picks(csv.DictReader(f))
         st = error_summary(errs)
         meta_path = os.path.join(products_folder, pid, BAND_META_NAME)
-        anc = {"date": None, "session_id": None, "strip_id": None,
+        anc = {"sensor": None, "date": None, "session_id": None, "strip_id": None,
                "centre_lat": None, "centre_lon": None, "sources": {}}
         if os.path.isfile(meta_path):
             with open(meta_path, encoding="utf-8", errors="replace") as f:
@@ -261,7 +263,7 @@ def consolidate(results_folder, products_folder, out_csv, log=print):
         row = {
             "product_id": pid, "request_id": req, "product_no": prodno,
             "date": anc["date"], "session_id": anc["session_id"],
-            "strip_id": anc["strip_id"],
+            "strip_id": anc["strip_id"], "sensor": anc["sensor"],
             "centre_lat": _fmt(anc["centre_lat"], 6),
             "centre_lon": _fmt(anc["centre_lon"], 6),
             "n_points": st["n"], "results_csv": path, "band_meta": meta_path,

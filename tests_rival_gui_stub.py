@@ -2311,6 +2311,40 @@ assert win._ref_pan_timer.start.called
 print("only a hand pan of the reference triggers the swap")
 R.QgsGeometry, R.ring_wkt = saved31
 
+# ── 32. one Export button writes csv/, shp/ and stats/, asking once ─────────
+for name in ("export_all", "_export_targets", "_export_target"):
+    setattr(win, name, getattr(R.QCDashboard, name).__get__(win))
+out32 = tempfile.mkdtemp()
+store.clear(); store["export_folder"] = out32
+win.input_path = "/data/NISAR_0042/G1A_ort.tif"
+win.export_rows = MagicMock(return_value=[{"row": 1}])
+win.save_csv, win.save_shapefile = MagicMock(), MagicMock()
+asked = []
+qw.QMessageBox.question = lambda *a, **k: asked.append(a) or qw.QMessageBox.Yes
+win.export_all()
+csv_p = win.save_csv.call_args[1]["path"]
+shp_p = win.save_shapefile.call_args[1]["path"]
+assert csv_p == os.path.join(out32, "csv", "NISAR_0042_rival.csv"), csv_p
+assert shp_p == os.path.join(out32, "shp", "NISAR_0042_rival.shp"), shp_p
+assert asked == [], "asked with nothing to replace"
+for p_ in (csv_p, shp_p, os.path.join(out32, "stats", "NISAR_0042_rival_stats.csv")):
+    open(p_, "w").close()
+win.export_all()
+assert len(asked) == 1 and asked[0][2].count("\n") >= 4, asked
+print("\nExport writes csv/ and shp/ (and stats/) in one go, and asks once "
+      "to replace all three -- not once per file")
+
+qw.QMessageBox.question = lambda *a, **k: qw.QMessageBox.No
+win.save_csv.reset_mock(); win.save_shapefile.reset_mock()
+win.export_all()
+assert not win.save_csv.called and not win.save_shapefile.called
+win.export_rows = MagicMock(return_value=[])
+warned.clear()
+win.export_all()
+assert warned and not win.save_csv.called
+print("No keeps the old files; nothing marked warns and writes nothing")
+shutil.rmtree(out32, ignore_errors=True)
+
 for d in (d1, d2, d3, d4, d5, d6):
     shutil.rmtree(d, ignore_errors=True)
 print("\nstubbed integration OK")
