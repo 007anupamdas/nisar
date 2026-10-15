@@ -1621,6 +1621,11 @@ class QCDashboard(QMainWindow):
         self._sync_tile_timer = QTimer(self)
         self._sync_tile_timer.setSingleShot(True)
         self._sync_tile_timer.timeout.connect(self._sync_reference_tile)
+        # panning the REFERENCE itself: bring up the neighbouring tile once
+        # the view settles past the edge of the one showing
+        self._ref_pan_timer = QTimer(self)
+        self._ref_pan_timer.setSingleShot(True)
+        self._ref_pan_timer.timeout.connect(self._ref_pan_tile)
 
         self.wgs84_crs = QgsCoordinateReferenceSystem("EPSG:4326")
         self.proj_crs  = QgsCoordinateReferenceSystem(WORKING_CRS_DEFAULT)
@@ -1814,6 +1819,7 @@ class QCDashboard(QMainWindow):
         self.table.itemChanged.connect(self.handle_manual_typing)
         self.table.itemSelectionChanged.connect(self.sync_view_to_row)
         self.canvas_left.extentsChanged.connect(self.sync_canvas_extents)
+        self.canvas_right.extentsChanged.connect(self.on_ref_extents_changed)
         self.dropdown_ref.currentIndexChanged.connect(self.load_reference_tif_from_dropdown)
         self.dropdown_band.currentIndexChanged.connect(lambda _: self.filter_reference_tifs())
         self.btn_norm_ref.clicked.connect(lambda: self.normalize_to_view("ref"))
@@ -3086,6 +3092,42 @@ class QCDashboard(QMainWindow):
             if geom.contains(target):
                 inside.append((geom.area(), tif_path))
         return inside
+
+    def on_ref_extents_changed(self):
+        """The reference view moved by hand: settle, then check the tile.
+
+        Moves made by the program (following the input, a row, a click) run
+        under _syncing and are ignored here -- they already chose the tile.
+        """
+        if self._syncing:
+            return
+        try:
+            self._ref_pan_timer.start(SYNC_TILE_DEBOUNCE_MS)
+        except Exception:
+            self._ref_pan_tile()
+
+    def _ref_pan_tile(self):
+        """Swap to the tile under the reference view's centre, if it changed.
+
+        Errors can run past 50-100 km, further than one tile reaches. Panning
+        the reference north off its tile now brings up the one north of it,
+        and so on in every direction -- searching the whole folder, not only
+        the tiles that overlap the input. Over a gap with no tile, the current
+        one stays rather than the canvas going blank. The view itself is never
+        moved: it is where it was panned to.
+        """
+        if self._syncing:
+            return
+        self._syncing = True
+        try:
+            centre = self._from_ref_canvas(self.canvas_right.center())
+            best = self.reference_for_point(centre)
+            if best:
+                self.show_reference_for(centre)
+        except Exception as e:
+            print(f"[REF PAN] {e}")
+        finally:
+            self._syncing = False
 
     def show_reference_for(self, pt):
         """Bring up the reference tile covering a point. True if one is showing."""

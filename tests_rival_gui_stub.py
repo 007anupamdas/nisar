@@ -2258,6 +2258,59 @@ assert len(asked_n) == 3, "a 4-band product reused the hyperspectral choice"
 assert (combos[-3].idx, combos[-2].idx, combos[-1].idx) == (33, 22, 0)
 print("a product with another band count asks afresh")
 
+# ── 31. panning the reference past its tile brings up the neighbour ────────
+saved31 = (R.QgsGeometry, R.ring_wkt)
+R.QgsGeometry = type("G", (), {"fromWkt": staticmethod(lambda w: _Box(w)),
+                               "fromPointXY": staticmethod(lambda p: _Pt(p))})
+R.ring_wkt = lambda ring: ring
+for name in ("on_ref_extents_changed", "_ref_pan_tile", "show_reference_for",
+             "reference_for_point", "_tiles_containing"):
+    setattr(win, name, getattr(R.QCDashboard, name).__get__(win))
+win._from_ref_canvas = lambda pt: pt
+win._has_data_at = lambda path, pt: True
+win._band_choice = lambda: None
+win._label_for = lambda p: os.path.basename(p)
+win.cleanup_reference_layer = MagicMock()
+win._load_ref_layer = MagicMock()
+win.dropdown_ref = MagicMock()
+here, north, far_north = "/refs/N16E78.tif", "/refs/N17E78.tif", "/refs/N19E78.tif"
+win.ref_footprints = {
+    here:      {"ring_proj": (0.0,      0.0, 100000.0, 100000.0)},
+    north:     {"ring_proj": (0.0, 100000.0, 100000.0, 200000.0)},
+    far_north: {"ring_proj": (0.0, 300000.0, 100000.0, 400000.0)},
+}
+win.ref_tif_list = [here]                 # only the tile over the input listed
+win.current_ref_layer = MagicMock(isValid=lambda: True, source=lambda: here)
+win._syncing = False
+win._ref_pan_timer = MagicMock()
+win.canvas_right.setExtent.reset_mock()
+
+win.canvas_right.center = MagicMock(return_value=_PointXY(50000.0, 150000.0))
+win._ref_pan_tile()
+assert win._load_ref_layer.call_args[0][0] == north, win._load_ref_layer.call_args
+assert north in win.ref_tif_list
+assert not win.canvas_right.setExtent.called, "the panned view was moved"
+print("\npanning the reference north off its tile loads the tile north of it, "
+      "even one outside the input's footprint, and leaves the view where it is")
+
+# over a gap: the tile showing stays, the canvas is not blanked
+win.current_ref_layer = MagicMock(isValid=lambda: True, source=lambda: north)
+win._load_ref_layer.reset_mock(); win.canvas_right.setLayers.reset_mock()
+win.canvas_right.center = MagicMock(return_value=_PointXY(50000.0, 250000.0))
+win._ref_pan_tile()
+assert not win._load_ref_layer.called and not win.canvas_right.setLayers.called
+print("panning over a gap with no tile keeps the current one instead of blanking")
+
+# a program move (under _syncing) does not schedule a swap; a hand pan does
+win._syncing = True
+win.on_ref_extents_changed()
+assert not win._ref_pan_timer.start.called
+win._syncing = False
+win.on_ref_extents_changed()
+assert win._ref_pan_timer.start.called
+print("only a hand pan of the reference triggers the swap")
+R.QgsGeometry, R.ring_wkt = saved31
+
 for d in (d1, d2, d3, d4, d5, d6):
     shutil.rmtree(d, ignore_errors=True)
 print("\nstubbed integration OK")
