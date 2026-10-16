@@ -361,6 +361,20 @@ def local_path(server_path: str, job_dir: str, server_job_dir: str) -> str:
     return os.path.join(loc_prefix, *rest)
 
 
+SHARE: Tuple[str, str] = ('', '')     # (local, server) mount, e.g. ('V:\\', '/maintenance/'), as Pack uses
+
+
+def _by_share(server_path: str) -> str:
+    loc, srv = SHARE
+    if not loc or not srv:
+        return server_path
+    sp = str(server_path).replace('\\', '/')
+    srv_n = srv.replace('\\', '/').rstrip('/') + '/'
+    if not sp.lower().startswith(srv_n.lower()):
+        return server_path
+    return os.path.join(loc, *[x for x in sp[len(srv_n):].split('/') if x])
+
+
 def job_truth_csv(job_dir: str) -> str:
     """The ground-truth CSV the job was run with (truth_csv in its
     job_used.json), as this machine sees it; '' when it has none or the file
@@ -377,8 +391,12 @@ def job_truth_csv(job_dir: str) -> str:
     t = job.get('truth_csv') or ''
     if not t:
         return ''
-    loc = local_path(t, job_dir, job.get('output_dir') or '')
-    return loc if os.path.exists(loc) else ''
+    for loc in (local_path(t, job_dir, job.get('output_dir') or ''), _by_share(t)):
+        if loc and os.path.exists(loc):
+            return loc
+    print(f'[Cross] {os.path.basename(job_dir)}: its ground truth {t} is not reachable from here '
+          f'(set the share mapping, e.g. V:\\ = /maintenance/)')
+    return ''
 
 
 def batch(parent: str, top_n: int = 5, min_agree: int = 0, cell_km: float = 25.0,
@@ -440,10 +458,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                                                  "own truth_csv, from its job_used.json)")
     ap.add_argument('--batch', action='store_true',
                     help='output_dir holds many job output folders: cross-check each, results in CROSS_ALL.csv')
+    ap.add_argument('--share-local', default='', help="where the server's share is mounted here, e.g. V:\\")
+    ap.add_argument('--share-server', default='', help='the same share on the server, e.g. /maintenance/')
     ap.add_argument('--jobs', default='', help="with --batch: only these job numbers, e.g. '335-363, 370'")
     ap.add_argument('--from-truth-points', action='store_true',
                     help='replay on output_dir/TRUTH_POINTS.csv + TRUTH_RANKING.csv only (no match files)')
     a = ap.parse_args(argv)
+    global SHARE
+    SHARE = (a.share_local, a.share_server)
     if a.batch:
         return batch(a.output_dir, a.top, a.min_agree, a.cell_km, a.tolerance_m, a.truth, a.jobs)
     if a.from_truth_points:

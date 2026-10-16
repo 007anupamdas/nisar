@@ -790,6 +790,11 @@ def test_gui_cross():
         w._finished(0)
         check('gui cross: the table opens when the check finishes', hasattr(w, '_last_cross_dialog'), True)
         check('gui cross: the button is there', w.btn_cross_check.text(), 'Cross-check…')
+        dlg.share_local.setText('V:\\')
+        dlg.share_server.setText('/maintenance/')
+        a = dlg.args()
+        check('gui cross: the share mapping (Pack\'s) reaches the command',
+              (a[a.index('--share-local') + 1], a[a.index('--share-server') + 1]), ('V:\\', '/maintenance/'))
     finally:
         w.close()
 
@@ -2319,6 +2324,20 @@ def test_cross_check(tmp):
     with open(os.path.join(jd, 'job_used.json'), 'w') as f:
         json.dump({'output_dir': '/maintenance/ICIGDev/GPUPOC/output/output359', 'truth_csv': ''}, f)
     check('cross: a job without truth gives none', X.job_truth_csv(jd), '')
+    # a job folder copied elsewhere: the share mapping (as Pack uses) finds the truth
+    moved = os.path.join(tmp, 'copied', 'output359')
+    os.makedirs(moved, exist_ok=True)
+    with open(os.path.join(moved, 'job_used.json'), 'w') as f:
+        json.dump({'output_dir': '/maintenance/ICIGDev/GPUPOC/output/output359',
+                   'truth_csv': '/maintenance/ICIGDev/GPUPOC/input/dqe/g1a/267577321/gt_347.csv'}, f)
+    with contextlib.redirect_stdout(io.StringIO()):
+        unreach = X.job_truth_csv(moved)
+    check('cross: unreachable without a mapping', unreach, '')
+    X.SHARE = (share, '/maintenance/')
+    try:
+        check('cross: found through the share mapping', X.job_truth_csv(moved), gt)
+    finally:
+        X.SHARE = ('', '')
 
 
 def test_partial_cover():

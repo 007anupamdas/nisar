@@ -796,10 +796,17 @@ class CrossDialog(QtWidgets.QDialog):
         self.tol.setSuffix(' m')
         self.tol.setSpecialValueText('automatic (the job\'s consensus tolerance)')
         f.addRow('Agreement tolerance', self.tol)
-        note = QtWidgets.QLabel('Ground truth: each job\'s own truth CSV, from its settings (job_used.json); '
-                                'server paths are translated to this machine\'s view of the share.')
+        note = QtWidgets.QLabel('Ground truth: each job\'s own truth CSV, from its settings (job_used.json). '
+                                'Server paths are translated through the share mapping (as in Pack for server).')
         note.setWordWrap(True)
         f.addRow(note)
+        self.share_local = QtWidgets.QLineEdit(settings.value('pack/share_local', 'V:\\'))
+        self.share_server = QtWidgets.QLineEdit(settings.value('pack/share_server', '/maintenance/'))
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(self.share_local)
+        row.addWidget(QtWidgets.QLabel('here  =  on the server'))
+        row.addWidget(self.share_server)
+        f.addRow('Share mapping', row)
         bb = QtWidgets.QDialogButtonBox()
         bb.addButton('Run cross-check', QtWidgets.QDialogButtonBox.ButtonRole.AcceptRole
                      if QT_API != 'PyQt5' else QtWidgets.QDialogButtonBox.AcceptRole)
@@ -821,6 +828,8 @@ class CrossDialog(QtWidgets.QDialog):
             return
         self.settings.setValue('cross_folder', self.folder.text())
         self.settings.setValue('cross_jobs', self.jobs.text())
+        self.settings.setValue('pack/share_local', self.share_local.text().strip())
+        self.settings.setValue('pack/share_server', self.share_server.text().strip())
         self.accept()
 
     def args(self):
@@ -830,6 +839,8 @@ class CrossDialog(QtWidgets.QDialog):
             a += ['--tolerance-m', f'{self.tol.value():g}']
         if self.jobs.text().strip():
             a += ['--jobs', self.jobs.text().strip()]
+        if self.share_local.text().strip() and self.share_server.text().strip():
+            a += ['--share-local', self.share_local.text().strip(), '--share-server', self.share_server.text().strip()]
         return a
 
 
