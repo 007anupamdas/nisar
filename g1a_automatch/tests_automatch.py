@@ -2304,6 +2304,21 @@ def test_cross_check(tmp):
     except ValueError:
         bad = True
     check('cross batch: a malformed job filter is refused', bad, True)
+    # each job's own ground truth, from its job_used.json, through the share's mount here
+    share = os.path.join(tmp, 'share')
+    jd = os.path.join(share, 'ICIGDev', 'GPUPOC', 'output', 'output359')
+    gt = os.path.join(share, 'ICIGDev', 'GPUPOC', 'input', 'dqe', 'g1a', '267577321', 'gt_347.csv')
+    os.makedirs(jd, exist_ok=True)
+    os.makedirs(os.path.dirname(gt), exist_ok=True)
+    with open(gt, 'w') as f:
+        f.write('In_Lon,In_Lat,Ref_Lon,Ref_Lat\n')
+    with open(os.path.join(jd, 'job_used.json'), 'w') as f:
+        json.dump({'output_dir': '/maintenance/ICIGDev/GPUPOC/output/output359',
+                   'truth_csv': '/maintenance/ICIGDev/GPUPOC/input/dqe/g1a/267577321/gt_347.csv'}, f)
+    check('cross: the job\'s own truth CSV is found through the share mount', X.job_truth_csv(jd), gt)
+    with open(os.path.join(jd, 'job_used.json'), 'w') as f:
+        json.dump({'output_dir': '/maintenance/ICIGDev/GPUPOC/output/output359', 'truth_csv': ''}, f)
+    check('cross: a job without truth gives none', X.job_truth_csv(jd), '')
 
 
 def test_partial_cover():

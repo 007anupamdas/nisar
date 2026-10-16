@@ -171,6 +171,7 @@ def run(output_dir: str, top_n: int = 5, min_agree: int = 0, cell_km: float = 25
     cfgs = cfgs if cfgs is not None else _configs(output_dir)
     rank_path = os.path.join(output_dir, 'TRUTH_RANKING.csv')
     ranking = pd.read_csv(rank_path) if os.path.exists(rank_path) else None
+    truth_csv = truth_csv or job_truth_csv(output_dir)
     truth = T.truth_in_crs(T.load_truth(truth_csv), crs) if truth_csv else None
     need = min_agree if min_agree > 0 else max(2, top_n // 2 + 1)
     out: Dict[str, Dict] = {}
@@ -335,6 +336,51 @@ def find_jobs(parent: str, jobs: Optional[set] = None) -> Tuple[List[str], Dict[
     return found, skipped
 
 
+def local_path(server_path: str, job_dir: str, server_job_dir: str) -> str:
+    """A path written on the server (/maintenance/...) as this machine sees
+    it: the server's output folder for the job and the folder it is opened
+    from here (V:\\ICIGDev\\GPUPOC\\output\\output359) share their last parts; what
+    differs in front is the mount, swapped in."""
+    if not server_path or os.path.exists(server_path):
+        return server_path
+    a = [x for x in re.split(r'[\\/]+', str(server_job_dir).rstrip('/\\')) if x]
+    b = [x for x in re.split(r'[\\/]+', os.path.abspath(job_dir).rstrip('/\\')) if x]
+    k = 0
+    while k < min(len(a), len(b)) and a[-1 - k].lower() == b[-1 - k].lower():
+        k += 1
+    if k == 0:
+        return server_path
+    srv_prefix = '/'.join(a[:len(a) - k])
+    loc_prefix = os.path.abspath(job_dir)
+    for _ in range(k):
+        loc_prefix = os.path.dirname(loc_prefix)
+    sp = str(server_path).replace('\\', '/').lstrip('/')
+    if not sp.lower().startswith(srv_prefix.lower()):
+        return server_path
+    rest = [x for x in sp[len(srv_prefix):].split('/') if x]
+    return os.path.join(loc_prefix, *rest)
+
+
+def job_truth_csv(job_dir: str) -> str:
+    """The ground-truth CSV the job was run with (truth_csv in its
+    job_used.json), as this machine sees it; '' when it has none or the file
+    cannot be reached from here."""
+    import json
+    p = os.path.join(job_dir, 'job_used.json')
+    if not os.path.exists(p):
+        return ''
+    try:
+        with open(p, encoding='utf-8') as f:
+            job = json.load(f)
+    except (OSError, ValueError):
+        return ''
+    t = job.get('truth_csv') or ''
+    if not t:
+        return ''
+    loc = local_path(t, job_dir, job.get('output_dir') or '')
+    return loc if os.path.exists(loc) else ''
+
+
 def batch(parent: str, top_n: int = 5, min_agree: int = 0, cell_km: float = 25.0,
           tol_m: Optional[float] = None, truth_csv: str = '', jobs: str = '') -> int:
     """Every finished automatch job in parent or one level below it
@@ -354,7 +400,9 @@ def batch(parent: str, top_n: int = 5, min_agree: int = 0, cell_km: float = 25.0
         print(f'[Cross] ===== {job}')
         if _glob.glob(os.path.join(d, '**', 'filtered_*'), recursive=True):
             try:
-                for ch, r in run(d, top_n, min_agree, cell_km, tol_m, truth_csv).items():
+                tcsv = truth_csv or job_truth_csv(d)
+                print(f'[Cross] {job}: ground truth ' + (tcsv if tcsv else 'none found in its settings'))
+                for ch, r in run(d, top_n, min_agree, cell_km, tol_m, tcsv).items():
                     rows.append({'job': job, 'mode': 'matches', **{k: v for k, v in r.items() if k != 'channel'},
                                  'channel': ch})
             except Exception as e:
@@ -388,7 +436,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument('--cell-km', type=float, default=25.0, help='cell size (default 25 km)')
     ap.add_argument('--tolerance-m', type=float, default=None, help='agreement tolerance (default: the job\'s '
                                                                          'consensus tolerance)')
-    ap.add_argument('--truth', default='', help='ground-truth CSV, to score the result')
+    ap.add_argument('--truth', default='', help="ground-truth CSV, to score the result (default: each job's "
+                                                 "own truth_csv, from its job_used.json)")
     ap.add_argument('--batch', action='store_true',
                     help='output_dir holds many job output folders: cross-check each, results in CROSS_ALL.csv')
     ap.add_argument('--jobs', default='', help="with --batch: only these job numbers, e.g. '335-363, 370'")

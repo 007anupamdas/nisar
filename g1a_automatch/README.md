@@ -422,7 +422,9 @@ are checked against each other:
 GUI: *Cross-check top detectors* (Output & run tab) sets it for runs; 0
 turns it off. The **Cross-check…** button runs it on finished jobs. Choose a
 job output folder, or a folder of them, then the top N, the agreement, the
-cell size and optionally a truth CSV. The results open as a table, one row
+cell size. Each job's ground truth is taken from its own settings
+(`truth_csv` in `job_used.json`), with the server path translated to the
+share as this machine mounts it. The results open as a table, one row
 per job and channel, with the cross-checked RMSE beside the best single
 configuration's. Double-click a row to open that job's folder.
 

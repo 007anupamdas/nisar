@@ -796,9 +796,10 @@ class CrossDialog(QtWidgets.QDialog):
         self.tol.setSuffix(' m')
         self.tol.setSpecialValueText('automatic (the job\'s consensus tolerance)')
         f.addRow('Agreement tolerance', self.tol)
-        self.truth = PathRow('file', 'CSV (*.csv);;All (*)')
-        self.truth.setText(defaults.get('truth_csv') or '')
-        f.addRow('Ground truth CSV (optional)', self.truth)
+        note = QtWidgets.QLabel('Ground truth: each job\'s own truth CSV, from its settings (job_used.json); '
+                                'server paths are translated to this machine\'s view of the share.')
+        note.setWordWrap(True)
+        f.addRow(note)
         bb = QtWidgets.QDialogButtonBox()
         bb.addButton('Run cross-check', QtWidgets.QDialogButtonBox.ButtonRole.AcceptRole
                      if QT_API != 'PyQt5' else QtWidgets.QDialogButtonBox.AcceptRole)
@@ -827,8 +828,6 @@ class CrossDialog(QtWidgets.QDialog):
              '--min-agree', str(self.agree.value()), '--cell-km', f'{self.cell.value():g}']
         if self.tol.value() > 0:
             a += ['--tolerance-m', f'{self.tol.value():g}']
-        if self.truth.text():
-            a += ['--truth', self.truth.text()]
         if self.jobs.text().strip():
             a += ['--jobs', self.jobs.text().strip()]
         return a
