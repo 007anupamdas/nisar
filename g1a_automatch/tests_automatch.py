@@ -743,6 +743,57 @@ def test_weights_and_failfast(tmp):
           ('from-pair-2', 1000.0, 2000.0, 2.0))
 
 
+def test_gui_cross():
+    """Cross-check dialog: the command it builds, and the results table read
+    from CROSS_ALL.csv."""
+    try:
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+        import DPQED_automatch as G
+    except Exception as e:
+        print(f'SKIP  GUI cross ({type(e).__name__}: {e})')
+        return
+    import contextlib
+    import io
+    import pandas as pd
+    import automatch_cross as X
+    app = G.QtWidgets.QApplication.instance() or G.QtWidgets.QApplication([])
+    w = G.AutoMatchWindow()
+    fmt = G.QtCore.QSettings.IniFormat if G.QT_API == 'PyQt5' else G.QtCore.QSettings.Format.IniFormat
+    w.settings = G.QtCore.QSettings(os.path.join(tempfile.mkdtemp(), 'cross.ini'), fmt)
+    try:
+        parent = tempfile.mkdtemp()
+        job = os.path.join(parent, 'output359')
+        os.makedirs(job)
+        pd.DataFrame([{'rank': i + 1, 'channel': 'band70', 'sweep': 'win384_nfauto', 'detector': d, 'matcher': 'nn',
+                       'ransac': 'magsac630', 'truth_rmse_m': 300.0 + i, 'truth_reached': 2}
+                      for i, d in enumerate(['sift', 'disk_depth', 'hessian'])]).to_csv(
+            os.path.join(job, 'TRUTH_RANKING.csv'), index=False)
+        pd.DataFrame([{'channel': 'band70', 'sweep': 'win384_nfauto', 'detector': d, 'matcher': 'nn',
+                       'ransac': 'magsac630', 'truth_id': t, 'truth_dE_m': 64000.0, 'truth_dN_m': -6000.0,
+                       'tool_dE_m': 64000.0 + 50 * i, 'tool_dN_m': -6000.0, 'method': 'local'}
+                      for i, d in enumerate(['sift', 'disk_depth', 'hessian']) for t in (1, 2)]).to_csv(
+            os.path.join(job, 'TRUTH_POINTS.csv'), index=False)
+        dlg = w.cross_dialog(run=False)
+        dlg.folder.setText(parent)
+        dlg.top.setValue(3)
+        dlg.cell.setValue(30)
+        a = dlg.args()
+        check('gui cross: the dialog builds the batch command',
+              (a[:3], a[a.index('--top') + 1], a[a.index('--cell-km') + 1]), (['cross', parent, '--batch'], '3', '30'))
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = X.main(a[1:])
+        res = G.CrossResultDialog(os.path.join(parent, 'CROSS_ALL.csv'), w)
+        check('gui cross: the results table shows each job, cross-checked beside the best single',
+              (rc, res.table.rowCount(), res.table.item(0, 0).text()), (0, 1, 'output359'))
+        w._cross_dir = parent
+        w.proc_kind, w._events, w.proc_buffer, w.proc = 'cross', [], '', None
+        w._finished(0)
+        check('gui cross: the table opens when the check finishes', hasattr(w, '_last_cross_dialog'), True)
+        check('gui cross: the button is there', w.btn_cross_check.text(), 'Cross-check…')
+    finally:
+        w.close()
+
+
 def test_gui_queue():
     """Queued runs on one workstation GPU: a run queued while another runs
     waits, starts when that one finishes, keeps its own copy of the settings,
@@ -2690,6 +2741,7 @@ def main():
         if a.gui:
             test_gui_dialog()
             test_gui_queue()
+            test_gui_cross()
         if a.e2e:
             test_e2e(tmp)
             test_e2e_variants(tmp)

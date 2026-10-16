@@ -753,6 +753,127 @@ class TruthDialog(QtWidgets.QDialog):
         lay.addWidget(close)
 
 
+class CrossDialog(QtWidgets.QDialog):
+    """Cross-check finished jobs (automatch_cross --batch): a job output folder,
+    or a folder holding many, and the settings of the check."""
+
+    def __init__(self, settings, defaults, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('Cross-check between detectors')
+        self.settings = settings
+        f = QtWidgets.QFormLayout(self)
+        head = QtWidgets.QLabel('Keeps the matches where most of the best detector + matcher configurations '
+                                'agree. Choose one job output folder, or a folder of job output folders (every '
+                                'job is checked; one table, CROSS_ALL.csv). Jobs with ground truth are also '
+                                'replayed at the truth points (TRUTH_POINTS.csv), which shows whether the '
+                                'cross-checked estimate beats the best single configuration.')
+        head.setWordWrap(True)
+        f.addRow(head)
+        self.folder = PathRow('dir')
+        self.folder.setText(settings.value('cross_folder', '') or defaults.get('output_dir', ''))
+        f.addRow('Job output folder(s)', self.folder)
+        self.top = QtWidgets.QSpinBox()
+        self.top.setRange(2, 30)
+        self.top.setValue(max(2, int(defaults.get('cross_top_n') or 5)))
+        f.addRow('Top detectors compared', self.top)
+        self.agree = QtWidgets.QSpinBox()
+        self.agree.setRange(0, 30)
+        self.agree.setSpecialValueText('more than half')
+        self.agree.setValue(int(defaults.get('cross_min_agree') or 0))
+        f.addRow('Must agree', self.agree)
+        self.cell = QtWidgets.QDoubleSpinBox()
+        self.cell.setRange(1, 500)
+        self.cell.setSuffix(' km')
+        self.cell.setValue(float(defaults.get('cross_cell_km') or 25.0))
+        f.addRow('Cell size', self.cell)
+        self.tol = QtWidgets.QDoubleSpinBox()
+        self.tol.setRange(0, 100000)
+        self.tol.setSuffix(' m')
+        self.tol.setSpecialValueText('automatic (the job\'s consensus tolerance)')
+        f.addRow('Agreement tolerance', self.tol)
+        self.truth = PathRow('file', 'CSV (*.csv);;All (*)')
+        self.truth.setText(defaults.get('truth_csv') or '')
+        f.addRow('Ground truth CSV (optional)', self.truth)
+        bb = QtWidgets.QDialogButtonBox()
+        bb.addButton('Run cross-check', QtWidgets.QDialogButtonBox.ButtonRole.AcceptRole
+                     if QT_API != 'PyQt5' else QtWidgets.QDialogButtonBox.AcceptRole)
+        bb.addButton(QtWidgets.QDialogButtonBox.StandardButton.Cancel if QT_API != 'PyQt5'
+                     else QtWidgets.QDialogButtonBox.Cancel)
+        bb.accepted.connect(self._ok)
+        bb.rejected.connect(self.reject)
+        f.addRow(bb)
+
+    def _ok(self):
+        if not self.folder.text() or not os.path.isdir(self.folder.text()):
+            QtWidgets.QMessageBox.warning(self, 'Cross-check', 'Choose an existing folder.')
+            return
+        self.settings.setValue('cross_folder', self.folder.text())
+        self.accept()
+
+    def args(self):
+        a = ['cross', self.folder.text(), '--batch', '--top', str(self.top.value()),
+             '--min-agree', str(self.agree.value()), '--cell-km', f'{self.cell.value():g}']
+        if self.tol.value() > 0:
+            a += ['--tolerance-m', f'{self.tol.value():g}']
+        if self.truth.text():
+            a += ['--truth', self.truth.text()]
+        return a
+
+
+class CrossResultDialog(QtWidgets.QDialog):
+    """CROSS_ALL.csv as a table: each job and channel, cross-checked against
+    the best single configuration."""
+
+    COLS = [('job', 'job'), ('channel', 'channel'), ('mode', 'from'), ('top_n', 'top'), ('min_agree', 'agree'),
+            ('cells_kept', 'cells kept'), ('cells_with_matches', 'of'), ('points', 'points'),
+            ('cross_rmse_m', 'cross RMSE m'), ('truth_rmse_m', 'cross RMSE m (matches)'),
+            ('cross_reached', 'reached'), ('truth_total', 'of'), ('best_single_rmse_m', 'best single m'),
+            ('best_single', 'best single'), ('configs', 'configurations compared'), ('csv', 'RIVAL_CROSS')]
+
+    def __init__(self, path, parent=None):
+        super().__init__(parent)
+        import csv as _csv
+        self.setWindowTitle('Cross-check results')
+        self.resize(1300, 560)
+        lay = QtWidgets.QVBoxLayout(self)
+        rows = list(_csv.DictReader(open(path, encoding='utf-8'))) if os.path.exists(path) else []
+        head = QtWidgets.QLabel(f'{len(rows)} row(s) from {path}. "matches": the full check on the match files '
+                                f'(RIVAL_CROSS written); "truth points": the check replayed at the ground-truth '
+                                f'points. Double-click a row to open its job folder.')
+        head.setWordWrap(True)
+        lay.addWidget(head)
+        cols = [c for c in self.COLS if any(r.get(c[0]) not in (None, '') for r in rows)] or self.COLS
+        t = QtWidgets.QTableWidget(0, len(cols))
+        t.setHorizontalHeaderLabels([c[1] for c in cols])
+        t.setEditTriggers(NO_EDIT)
+        t.setSelectionBehavior(SEL_ROWS)
+        for row in rows:
+            r = t.rowCount()
+            t.insertRow(r)
+            for c, (key, _) in enumerate(cols):
+                v = row.get(key) or ''
+                try:
+                    v = f'{float(v):.0f}' if key.endswith('_m') and v else v
+                except ValueError:
+                    pass
+                t.setItem(r, c, QtWidgets.QTableWidgetItem(str(v)))
+        t.resizeColumnsToContents()
+        base = os.path.dirname(path)
+        t.cellDoubleClicked.connect(lambda r, c: QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(
+            os.path.join(base, t.item(r, 0).text()))))
+        self.table = t
+        lay.addWidget(t, 1)
+        row = QtWidgets.QHBoxLayout()
+        b = QtWidgets.QPushButton('Open folder')
+        b.clicked.connect(lambda: QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(base)))
+        row.addWidget(b)
+        row.addStretch(1)
+        close = QtWidgets.QPushButton('Close')
+        close.clicked.connect(self.accept)
+        row.addWidget(close)
+        lay.addLayout(row)
+
+
 class AutoMatchWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
@@ -793,11 +914,11 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
                             ('Preflight', self.preflight), ('Run', self.run_job),
                             ('Queue run', self.queue_run),
                             ('Stop', self.stop), ('Open output', self.open_output),
-                            ('Pack for server…', self.pack_dialog)):
+                            ('Pack for server…', self.pack_dialog), ('Cross-check…', self.cross_dialog)):
             b = QtWidgets.QPushButton(label)
             b.clicked.connect(slot)
             btns.addWidget(b)
-            setattr(self, 'btn_' + label.split()[0].lower().rstrip('…'), b)
+            setattr(self, 'btn_' + label.split()[0].lower().rstrip('…').replace('-', '_'), b)
         self.btn_stop.setEnabled(False)
         bl.addLayout(btns)
         self.lbl_status = QtWidgets.QLabel('Ready.')
@@ -1509,10 +1630,10 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.proc_buffer = ''
         self._events = []
         self.proc.start(sys.executable, [JOB_SCRIPT] + args)
-        busy = kind in ('run', 'preflight', 'pack')
+        busy = kind in ('run', 'preflight', 'pack', 'cross')
         self.btn_run.setEnabled(not busy)
         self.btn_preflight.setEnabled(not busy)
-        self.btn_stop.setEnabled(kind in ('run', 'pack'))
+        self.btn_stop.setEnabled(kind in ('run', 'pack', 'cross'))
         self.lbl_status.setText(f'{kind} …')
         return True
 
@@ -1588,6 +1709,15 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             self._show_preflight(ev)
         elif kind == 'pack':
             self._pack_finished(code)
+        elif kind == 'cross':
+            path = os.path.join(getattr(self, '_cross_dir', ''), 'CROSS_ALL.csv')
+            if code == 0 and os.path.exists(path):
+                dlg = CrossResultDialog(path, self)
+                dlg.show()
+                self._last_cross_dialog = dlg
+                self.lbl_status.setText(f'Cross-check written: {path}')
+            else:
+                self.lbl_status.setText('Cross-check found nothing to check — see Log.')
         elif kind == 'weights':
             tmp_job = getattr(self, '_weights_job_file', None)
             if tmp_job:
@@ -1759,6 +1889,25 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             n = max(1000, min(want, cap))
             parts.append(f'{w} px: {n:,}' + (f' (capped; {want:,} at this density)' if want > cap else ''))
         self.lbl_kp.setText('auto gives ' + ' · '.join(parts) if parts else '')
+
+    def cross_dialog(self, *_, run=True):
+        """Cross-check finished jobs from a dialog; run=False returns the
+        dialog without showing it (tests)."""
+        try:
+            job = self.get_job()
+        except ValueError:
+            job = dict(DEFAULT_JOB)
+        dlg = CrossDialog(self.settings, job, self)
+        dlg.accepted.connect(lambda: self._start_cross(dlg))
+        if run:
+            dlg.exec() if hasattr(dlg, 'exec') else dlg.exec_()
+        return dlg
+
+    def _start_cross(self, dlg):
+        self._cross_dir = dlg.folder.text()
+        args = dlg.args()
+        self.log.appendPlainText('--- ' + ' '.join(args))
+        self._start(args, 'cross')
 
     def pack_dialog(self, *_, run=True):
         """Pack the current job for the GPU server (automatch_pack) from a
