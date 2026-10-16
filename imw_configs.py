@@ -21,12 +21,36 @@ Each catalog row is (short_tag, conf_dict, dense_flag):
 
 Edit SPARSE_SPECS / DENSE_SPECS below to choose what to run. Comment a row
 out to skip it (saves prefetch + GPU time).
+
+Runtime knobs (environment variables):
+  NISAR_IMW_ONLY        comma list of tags to keep, e.g. "sp-lg,minima-roma"
+  NISAR_IMW_RESIZE_MAX  long-side cap for imcui preprocessing (default 2048).
+                        force_resize is switched off for every entry: several
+                        registry confs (loftr, eloftr, roma, dkm, ...) resize
+                        to a fixed 640x480 / 320x240, which would resample a
+                        1024 px window and lose the 10 m/px geometry.
+If imcui is not importable, IMW_CONFIGS is [] (with a message) instead of the
+import failing, so dqe_imw.py can report it cleanly.
 """
 
 import copy
+import os
 from typing import Dict, List, Tuple
 
-from imcui.hloc import extract_features, match_features, match_dense
+try:
+    from imcui.hloc import extract_features, match_features, match_dense
+    _IMPORT_ERROR = None
+except ImportError as _e:  # imcui not installed in this environment
+    extract_features = match_features = match_dense = None
+    _IMPORT_ERROR = _e
+
+RESIZE_MAX = int(os.environ.get('NISAR_IMW_RESIZE_MAX', '2048'))
+
+
+def _keep_native_resolution(conf_section: Dict) -> None:
+    pp = conf_section.setdefault('preprocessing', {})
+    pp['force_resize'] = False
+    pp['resize_max'] = RESIZE_MAX
 
 
 # =============================================================================
@@ -110,6 +134,11 @@ DENSE_SPECS: List[Tuple[str, str]] = [
 def _build() -> List[Tuple[str, Dict, bool]]:
     cfgs: List[Tuple[str, Dict, bool]] = []
     seen = set()
+    if _IMPORT_ERROR is not None:
+        print(f'[imw_configs] ERROR: imcui not importable ({_IMPORT_ERROR}); '
+              f'IMW_CONFIGS is empty')
+        return cfgs
+    only = {t.strip() for t in os.environ.get('NISAR_IMW_ONLY', '').split(',') if t.strip()}
 
     def _check_tag(tag):
         if '_' in tag or '(' in tag or ' ' in tag:
@@ -126,11 +155,15 @@ def _build() -> List[Tuple[str, Dict, bool]]:
         if matcher_name not in match_features.confs:
             print(f"[imw_configs] SKIP {tag}: matcher '{matcher_name}' not found")
             continue
+        if only and tag not in only:
+            continue
         conf = {
             'feature': copy.deepcopy(extract_features.confs[feat_name]),
             'matcher': copy.deepcopy(match_features.confs[matcher_name]),
             'dense': False,
         }
+        _keep_native_resolution(conf['feature'])
+        _keep_native_resolution(conf['matcher'])
         cfgs.append((tag, conf, False))
 
     for tag, matcher_name in DENSE_SPECS:
@@ -138,10 +171,13 @@ def _build() -> List[Tuple[str, Dict, bool]]:
         if matcher_name not in match_dense.confs:
             print(f"[imw_configs] SKIP {tag}: dense matcher '{matcher_name}' not found")
             continue
+        if only and tag not in only:
+            continue
         conf = {
             'matcher': copy.deepcopy(match_dense.confs[matcher_name]),
             'dense': True,
         }
+        _keep_native_resolution(conf['matcher'])
         cfgs.append((tag, conf, True))
 
     return cfgs
