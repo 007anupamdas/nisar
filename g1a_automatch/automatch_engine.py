@@ -5449,7 +5449,7 @@ class AutoMatchPipeline:
         then the spread warning."""
         AutoMatchPipeline._drop_matcher_outliers(pairs, ests, cfg)
         AutoMatchPipeline._check_phasecorr_offsets(pairs, ests, cfg)
-        AutoMatchPipeline._borrow_failed_offsets(pairs, ests)
+        AutoMatchPipeline._borrow_failed_offsets(pairs, ests, cfg)
         spread = AutoMatchPipeline._coarse_spread(ests)
         if spread > 0.5 * cfg.max_expected_error_m:
             print(f'[Coarse] WARNING: {label}: the pairs\' coarse offsets differ by up to '
@@ -5588,6 +5588,55 @@ class AutoMatchPipeline:
         b = p['bounds']
         return (b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0
 
+    TREND_MIN_PAIRS = 6          # measured pairs before a plane is trusted
+    TREND_MIN_SPAN_M = 50000.0   # ... and the ground they must span
+    TREND_NEAR_M = 25000.0       # closer than this to a measured pair: take that pair's offset
+
+    @staticmethod
+    def _coarse_trend(pairs: List[Dict], ests: Dict[int, Dict], cfg=None):
+        """A plane dE, dN = a + b x + c y through the matcher-measured pairs'
+        offsets at their centres, or None. Job 347/359 (G1A HV, ~800 km): the
+        error grows from +49 km in the west to +77 km in the east; the panel
+        measured only western pairs (46.5 -> 50.2 km, the same slope), and the
+        eastern pairs, copying their nearest measured neighbour, were up to
+        27 km wrong. Needs TREND_MIN_PAIRS measured pairs spanning
+        TREND_MIN_SPAN_M, fitting the plane within max(5 km, 3 x
+        search_margin_m). Returns f(x, y) -> (dE, dN, metres to the nearest
+        measured pair)."""
+        mats = [p for p in pairs if str(ests[p['pair_id']]['method']).startswith('matcher')]
+        if len(mats) < AutoMatchPipeline.TREND_MIN_PAIRS:
+            return None
+        c = np.asarray([AutoMatchPipeline._centre(p) for p in mats], dtype=float)
+        if float(np.ptp(c, axis=0).max()) < AutoMatchPipeline.TREND_MIN_SPAN_M:
+            return None
+        v = np.asarray([(ests[p['pair_id']]['dx'], ests[p['pair_id']]['dy']) for p in mats], dtype=float)
+        c0 = c.mean(axis=0)
+        A = np.column_stack([np.ones(len(c)), (c - c0) / 1000.0])
+        coef = np.linalg.lstsq(A, v, rcond=None)[0]
+        tol = max(5000.0, 3.0 * float(getattr(cfg, 'search_margin_m', 0.0) or 0.0))
+        if float(np.abs(A @ coef - v).max()) > tol:
+            return None
+
+        def f(x, y):
+            dx, dy = np.array([1.0, (x - c0[0]) / 1000.0, (y - c0[1]) / 1000.0]) @ coef
+            near = float(np.hypot(c[:, 0] - x, c[:, 1] - y).min())
+            return float(dx), float(dy), near
+        return f
+
+    @staticmethod
+    def _from_trend(trend, p: Dict, why: str, peak=None) -> Optional[Dict]:
+        """The trend's offset at a pair far from every measured pair, with a
+        search margin that grows with that distance; None when a measured
+        pair is near (its own offset is the better guess there)."""
+        if trend is None:
+            return None
+        cx, cy = AutoMatchPipeline._centre(p)
+        dx, dy, near = trend(cx, cy)
+        if near < AutoMatchPipeline.TREND_NEAR_M:
+            return None
+        return {'dx': dx, 'dy': dy, 'support': None, 'n': None, 'peak': peak, 'field': None,
+                'margin_scale': 2.0 + near / 100000.0, 'method': f'trend ({why}, {near / 1000:.0f} km out)'}
+
     @staticmethod
     def _drop_matcher_outliers(pairs: List[Dict], ests: Dict[int, Dict], cfg,
                                per_km: float = 50.0) -> List[int]:
@@ -5646,6 +5695,15 @@ class AutoMatchPipeline:
             if root(pid) == main or not str(e['method']).startswith('matcher'):
                 continue
             cx, cy = cen[pid]
+            t = AutoMatchPipeline._from_trend(
+                AutoMatchPipeline._coarse_trend(members, ests, cfg), p, 'matcher outlier')
+            if t is not None:
+                print(f'[Coarse] pair {pid}: the matcher gave dE={e["dx"]:.0f} m dN={e["dy"]:.0f} m on '
+                      f'{e.get("support")} matches, apart from the {len(members)} pairs that agree; using '
+                      f'their trend (dE={t["dx"]:.0f} m dN={t["dy"]:.0f} m)')
+                ests[pid] = t
+                replaced.append(pid)
+                continue
             src = min(sources, key=lambda q: math.hypot(cen[q['pair_id']][0] - cx, cen[q['pair_id']][1] - cy))
             g = ests[src['pair_id']]
             dx, dy = field_offset(g['field'], cx, cy) if g.get('field') else (g['dx'], g['dy'])
@@ -5679,6 +5737,7 @@ class AutoMatchPipeline:
                 seen += list(zip(np.ravel(e['field']['dx']), np.ravel(e['field']['dy'])))
         seen = np.asarray(seen, dtype=float)
         tol = max(5000.0, 3.0 * float(cfg.search_margin_m or 0.0))
+        trend = AutoMatchPipeline._coarse_trend(pairs, ests, cfg)
         replaced = []
         for p in pairs:
             pid = p['pair_id']
@@ -5686,7 +5745,18 @@ class AutoMatchPipeline:
             if not str(e['method']).startswith('phasecorr'):
                 continue
             gap = float(np.nanmin(np.hypot(seen[:, 0] - e['dx'], seen[:, 1] - e['dy'])))
+            if trend is not None:      # where the scene's offset changes, judge by the trend there
+                tx, ty, _ = trend(*AutoMatchPipeline._centre(p))
+                gap = min(gap, math.hypot(tx - e['dx'], ty - e['dy']))
             if gap <= tol:
+                continue
+            t = AutoMatchPipeline._from_trend(trend, p, 'phasecorr disagreed', e.get('peak'))
+            if t is not None:
+                print(f'[Coarse] pair {pid}: phase correlation gave dE={e["dx"]:.0f} m dN={e["dy"]:.0f} m, '
+                      f'{gap / 1000:.1f} km from the measured offsets; using their trend '
+                      f'(dE={t["dx"]:.0f} m dN={t["dy"]:.0f} m)')
+                ests[pid] = t
+                replaced.append(pid)
                 continue
             cx, cy = AutoMatchPipeline._centre(p)
             src = min(mats, key=lambda q: math.hypot(AutoMatchPipeline._centre(q)[0] - cx,
@@ -5710,7 +5780,7 @@ class AutoMatchPipeline:
         return float(np.ptp(v, axis=0).max()) if len(v) > 1 else 0.0
 
     @staticmethod
-    def _borrow_failed_offsets(pairs: List[Dict], ests: Dict[int, Dict]) -> None:
+    def _borrow_failed_offsets(pairs: List[Dict], ests: Dict[int, Dict], cfg=None) -> None:
         """A pair whose coarse estimate failed takes the offset of the nearest
         pair of the same scene that succeeded (its field, read at this pair's
         centre), with a doubled search margin -- all pairs share one input
@@ -5723,9 +5793,14 @@ class AutoMatchPipeline:
             b = p['bounds']
             return (b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0
 
+        trend = AutoMatchPipeline._coarse_trend(pairs, ests, cfg)
         for p in pairs:
             e = ests[p['pair_id']]
             if e['method'] != 'failed':
+                continue
+            t = AutoMatchPipeline._from_trend(trend, p, 'failed')
+            if t is not None:
+                ests[p['pair_id']] = t
                 continue
             cx, cy = centre(p)
             src = min(good, key=lambda q: math.hypot(centre(q)[0] - cx, centre(q)[1] - cy))

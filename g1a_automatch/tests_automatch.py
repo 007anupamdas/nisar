@@ -2071,6 +2071,65 @@ def test_shared_coarse(tmp):
           ([180.0, 360.0], 'matcher@360m'))
 
 
+def test_coarse_trend():
+    """Job 347/359 (G1A HV, ~800 km): the error grows from +49 km in the west to
+    +77 km in the east, and the coarse panel measured only western pairs.
+    Eastern pairs that copied their nearest measured neighbour were up to 27 km
+    wrong; they now follow the plane through the measured offsets."""
+    import contextlib
+    import io
+    import math
+    import automatch_engine as E
+    P = E.AutoMatchPipeline
+    km = 1000.0
+    cfg = E.PipelineConfig()
+    xs = [(-400 + 10 * i) * km for i in range(81)]                       # pair centres, west -> east
+    pairs = [{'pair_id': i + 1, 'bounds': [x - 15 * km, -15 * km, x + 15 * km, 15 * km]} for i, x in enumerate(xs)]
+
+    def truth(x):
+        return 63000.0 + 0.037 * x, -6000.0 - 0.006 * x
+
+    def fresh():
+        ests = {}
+        for p, x in zip(pairs, xs):
+            dx, dy = truth(x)
+            if x <= -250 * km:                                          # the measured west
+                ests[p['pair_id']] = {'dx': dx, 'dy': dy, 'support': 500, 'n': 600, 'peak': None,
+                                      'field': None, 'method': 'matcher@315m'}
+            elif p['pair_id'] % 7 == 0:                                  # some phase correlation, right or garbage
+                good = p['pair_id'] % 14 == 0
+                ests[p['pair_id']] = {'dx': dx + (500 if good else 90000), 'dy': dy, 'support': None, 'n': None,
+                                      'peak': 0.06, 'field': None, 'method': 'phasecorr@315m'}
+            else:
+                ests[p['pair_id']] = {'dx': 0.0, 'dy': 0.0, 'support': None, 'n': None, 'peak': None,
+                                      'method': 'failed'}
+        return ests
+
+    def worst(ests):
+        return max(math.hypot(ests[p['pair_id']]['dx'] - truth(x)[0], ests[p['pair_id']]['dy'] - truth(x)[1])
+                   for p, x in zip(pairs, xs))
+    ests = fresh()
+    with contextlib.redirect_stdout(io.StringIO()):
+        P._settle_coarse(pairs, ests, cfg, 'shared')
+    check('coarse trend: every pair within 5 km of an error growing 28 km across the scene', worst(ests) < 5 * km, True)
+    east = ests[pairs[-1]['pair_id']]
+    check('coarse trend: the far east follows the plane, with a wider search',
+          (east['method'].startswith('trend'), east['margin_scale'] > 4.0), (True, True))
+    good_pc = ests[14 * 4]
+    check('coarse trend: a phase-correlation offset that agrees with the trend is kept',
+          good_pc['method'], 'phasecorr@315m')
+    # without enough measured pairs, the nearest pair is copied as before
+    few = {pid: e for pid, e in fresh().items()}
+    for pid in list(few)[3:16]:
+        if str(few[pid]['method']).startswith('matcher'):
+            few[pid] = {'dx': 0.0, 'dy': 0.0, 'support': None, 'n': None, 'peak': None, 'method': 'failed'}
+    check('coarse trend: fewer than 6 measured pairs -> no trend',
+          P._coarse_trend(pairs, few, cfg), None)
+    flat = {p['pair_id']: {'dx': 1000.0 * (p['pair_id'] % 2) * 20, 'dy': 0.0, 'support': 50, 'n': 60, 'peak': None,
+                           'field': None, 'method': 'matcher@60m'} for p in pairs[:10]}
+    check('coarse trend: measured offsets that no plane fits -> no trend', P._coarse_trend(pairs[:10], flat, cfg), None)
+
+
 def test_partial_cover():
     """Jobs 336 and 343: a warning when the first-ranked configuration is km
     off while one reaching fewer points is close (343, matches on part of the
@@ -2519,6 +2578,7 @@ def main():
         test_coarse_outliers()
         test_partial_cover()
         test_shared_coarse(tmp)
+        test_coarse_trend()
         test_auto_bands(tmp)
         test_kornia_versions(tmp)
         test_warmup_and_padding()

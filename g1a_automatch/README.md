@@ -184,6 +184,15 @@ Windows compared at the same map position cannot match when the error is
      per-detector offsets.
    - A coarse matcher that runs out of GPU memory retries once at twice the
      coarse pixel (job 346, RDD on a 16 GB card).
+   - **Errors that change across a long scene.** With 6 or more measured
+     pairs spanning 50 km or more, a plane is fitted through their offsets.
+     Pairs more than 25 km from any measured pair take the plane's value,
+     with a search margin that widens with that distance, instead of copying
+     the nearest pair. A phase-correlation offset that agrees with the plane
+     is kept. The plane is only used when it fits the measured pairs within
+     5 km. Why: job 347/359 (G1A HV, ~800 km) had errors growing from +49 km
+     in the west to +77 km in the east. Only western pairs were measured, and
+     eastern pairs copying them were up to 27 km wrong.
    - An estimate longer than `max_expected_error_m` is refused. The
      references are only searched that far, so such a match lies outside the
      search (job 356: one pair's 167 km offset, with a 150 km buffer, had been
