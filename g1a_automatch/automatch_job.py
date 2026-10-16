@@ -52,7 +52,7 @@ PROGRESS_PREFIX = '@@AUTOMATCH '
 AUTOMATCH_VERSION = '2026.10.15'
 CODE_FILES = ('automatch_engine.py', 'automatch_job.py', 'automatch_imcui.py', 'automatch_refs.py',
               'automatch_rival.py', 'automatch_truth.py', 'automatch_weights.py', 'automatch_gpuaas.py',
-              'automatch_native.py', 'imw_configs.py')
+              'automatch_native.py', 'imw_configs.py', 'automatch_cross.py')
 
 
 def code_fingerprint() -> str:
@@ -148,6 +148,10 @@ DEFAULT_JOB: Dict = {
     # ground truth (evaluation only: it does not steer matching or consensus)
     'truth_csv': '',             # RIVAL CSV of manually measured points (In/Ref lon/lat)
     'truth_radius_m': 5000,      # tool points this close to a truth point estimate its error
+    # Cross-check: keep the matches that several of the best configurations agree on
+    'cross_top_n': 5,            # configurations compared, one per detector (0 = off)
+    'cross_min_agree': 0,        # how many must agree in a cell; 0 = more than half
+    'cross_cell_km': 25.0,       # cell size of the comparison
 
     # RIVAL export
     'rival_max_points_per_chip': 200,   # 0 = all inliers
@@ -632,7 +636,8 @@ def _config_for(job: Dict, win: int, nf: Optional[int], res: float, out_dir: str
 
 # Job keys that cannot change what the matcher computes for a sweep point.
 _RESULT_NEUTRAL_KEYS = {'output_dir', 'temp_dir', 'resume', 'debug', 'rival_max_points_per_chip',
-                        'save_match_images', 'weights_cache_dir', 'truth_csv', 'truth_radius_m'}
+                        'save_match_images', 'weights_cache_dir', 'truth_csv', 'truth_radius_m',
+                        'cross_top_n', 'cross_min_agree', 'cross_cell_km'}
 
 
 def _sweep_key(job: Dict, win: int, nf: Optional[int]) -> str:
@@ -745,6 +750,22 @@ def _performance_table(out_root: str, manifest: List[Dict]) -> Optional[str]:
     return path
 
 
+def run_cross(job: Dict, out_root: str, working_crs: str) -> Dict:
+    """RIVAL_CROSS_<channel>.csv: the matches the job's top cross_top_n
+    configurations agree on (automatch_cross). {} when off or failed."""
+    if int(job.get('cross_top_n') or 0) < 2:
+        return {}
+    import automatch_cross as X
+    try:
+        return X.run(out_root, int(job['cross_top_n']), int(job.get('cross_min_agree') or 0),
+                     float(job.get('cross_cell_km') or 25.0), truth_csv=job.get('truth_csv') or '',
+                     working_crs=working_crs)
+    except Exception as e:
+        print(f'[Cross] not written: {type(e).__name__}: {e}')
+        traceback.print_exc()
+        return {}
+
+
 def refresh_after_compare(output_dir: str, res: Dict) -> List[str]:
     """After a finished run is ranked again (compare, e.g. a run made by an
     older version): PERFORMANCE.csv and RIVAL_BEST_* follow the new ranking,
@@ -766,6 +787,15 @@ def refresh_after_compare(output_dir: str, res: Dict) -> List[str]:
             written.append(dst)
             print(f"[Job] {os.path.basename(dst)} is now {b['detector']} + {b['matcher']} {b['ransac']} "
                   f"(truth RMSE {b['truth_rmse_m']:.1f} m)")
+    jp = os.path.join(output_dir, 'job_used.json')
+    if os.path.exists(jp):                  # the cross-check follows the new ranking too
+        with open(jp, encoding='utf-8') as f:
+            job = normalize(json.load(f))
+        if res.get('truth_csv'):
+            job['truth_csv'] = res['truth_csv']
+        for ch, r in run_cross(job, output_dir, res.get('crs') or '').items():
+            if r.get('csv'):
+                written.append(r['csv'])
     return written
 
 
@@ -1015,7 +1045,8 @@ def run_job(job: Dict) -> Dict:
         best_files[ch] = dst
         print(f"[Job] best for {ch} by ground truth: {b['detector']} + {b['matcher']} {b['ransac']} "
               f"{b['sweep']} (truth RMSE {b['truth_rmse_m']:.1f} m) -> {dst}")
-    emit({'event': 'done', 'manifest': man_path, 'best': best_files, 'truth': truth_files,
+    cross = run_cross(job, out_root, scene.working_crs)
+    emit({'event': 'done', 'manifest': man_path, 'best': best_files, 'truth': truth_files, 'cross': cross,
           'minutes': round((time.time() - t_job) / 60.0, 2)})
     print(f'[Job] done in {(time.time() - t_job) / 60.0:.1f} min; manifest {man_path}')
     return {'manifest': man_path, 'best': best_files}
@@ -1047,6 +1078,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     c = sub.add_parser('compare', help='rank the detector + matcher configurations of an output folder '
                                        'against ground truth (options: python automatch_truth.py -h)')
     c.add_argument('rest', nargs=argparse.REMAINDER)
+    sub.add_parser('cross', help='keep the matches the top configurations agree on '
+                                 '(options: python automatch_cross.py -h)').add_argument('rest', nargs=argparse.REMAINDER)
     k = sub.add_parser('pack', help='copy a scene, the references it needs and server settings for the '
                                     'GPU server (options: python automatch_pack.py -h)')
     k.add_argument('rest', nargs=argparse.REMAINDER)
@@ -1055,6 +1088,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     if argv and argv[0] == 'compare':
         import automatch_truth as T
         return T.main(list(argv[1:]))
+    if argv and argv[0] == 'cross':
+        import automatch_cross as X
+        return X.main(list(argv[1:]))
     if argv and argv[0] == 'pack':
         import automatch_pack as P
         return P.main(list(argv[1:]))

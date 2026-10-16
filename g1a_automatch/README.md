@@ -397,6 +397,43 @@ points that picked it). If a run's consensus did not complete, `compare`
 rebuilds it from the saved matches, so the run can still be ranked without
 matching again.
 
+## Cross-check between detectors (RIVAL_CROSS)
+
+A single configuration can be consistently wrong: many matches on the wrong
+ground pass its own RANSAC and chip consensus. After every run, and after
+compare, the top `cross_top_n` configurations (default 5, one per detector)
+are checked against each other:
+
+- **Choosing the top N:** with ground truth they follow `TRUTH_RANKING.csv`.
+  Without it, they are the configurations that agree most with all the
+  others; a detector that is 20 km off everywhere does not get in, however
+  many matches it has.
+- **Agreement per cell:** the scene is cut into `cross_cell_km` cells
+  (default 25 km). In each cell every top configuration with matches gives
+  its median offset. The cell counts when `cross_min_agree` of them (default
+  more than half) lie within the consensus tolerance of their common median.
+- **Output:**
+  - `RIVAL_CROSS_<channel>.csv` (+ `_detail.csv` naming each point's
+    detector): the matches of the agreeing configurations in the kept cells.
+  - `CROSS_CELLS_<channel>.csv`: every cell.
+  - `CROSS_SUMMARY.csv`: the configurations used and, with ground truth, the
+    truth RMSE of the cross-checked points.
+
+GUI: *Cross-check top detectors* (Output & run tab); 0 turns it off.
+
+Finished jobs, without rerunning:
+
+```bash
+python automatch_job.py cross <output folder>                        # full, from the match files
+python automatch_job.py cross <output folder> --from-truth-points    # from TRUTH_POINTS.csv + TRUTH_RANKING.csv only
+python automatch_job.py cross <folder of output folders> --batch     # every job; one table, CROSS_ALL.csv
+```
+
+`--from-truth-points` replays the check at the truth points: there the top
+configurations' estimates are compared, and their median is used where
+enough agree. It needs only the two small CSVs each job with ground truth
+writes. Its tolerance defaults to 1.5 × the RANSAC threshold.
+
 ## GPU service (gpuaas submit_job): step by step
 
 The GPU server already has the packages and weights the NISAR runs use, but

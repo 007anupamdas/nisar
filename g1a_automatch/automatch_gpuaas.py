@@ -205,6 +205,7 @@ def environment_report(job: Dict) -> str:
 def compare_run(job: Dict) -> int:
     """Rank a finished run's configurations against the truth again (e.g.
     with a newer scoring rule or more truth points); nothing is matched."""
+    import glob as _glob
     import shutil
     import automatch_truth as T
     src = job.get('_compare_dir') or ''
@@ -221,7 +222,8 @@ def compare_run(job: Dict) -> int:
     names = ['TRUTH_BY_DETECTOR_MATCHER.csv', 'TRUTH_RANKING.csv', 'TRUTH_POINTS.csv']
     names += [os.path.basename(p) for p in more]
     names += [os.path.basename(b['csv']) for b in res['best'].values()]
-    names += [n[:-4] + '_detail.csv' for n in names if n.startswith('RIVAL_TRUTH_BEST_')]
+    names += ['CROSS_SUMMARY.csv'] + [os.path.basename(p) for p in _glob.glob(os.path.join(src, 'CROSS_CELLS_*.csv'))]
+    names += [n[:-4] + '_detail.csv' for n in names if n.startswith(('RIVAL_TRUTH_BEST_', 'RIVAL_CROSS_'))]
     for n in names:
         if os.path.exists(os.path.join(src, n)):
             shutil.copyfile(os.path.join(src, n), os.path.join(job['output_dir'], n))

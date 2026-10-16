@@ -509,7 +509,7 @@ def compare(output_dir: str, truth_csv: str, radius_m: float = 5000.0, chips: st
         for ch, b in best.items():
             print(f"[Truth] best for {ch}: {b['detector']} + {b['matcher']} {b['ransac']} -> {b['csv']}")
     return {'by_detector_matcher': by, 'ranking': ranking, 'points': points, 'truth': truth, 'crs': crs,
-            'best': best}
+            'best': best, 'truth_csv': truth_csv}
 
 
 def write_truth_best(by: pd.DataFrame, chip_files: Dict, crs: str, output_dir: str,

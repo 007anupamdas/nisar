@@ -932,6 +932,25 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.truth_radius.setToolTip('Tool matches this close to a truth point estimate its error there '
                                      '(else the tool\'s error surface is used)')
         f.addRow('Truth neighbourhood', self.truth_radius)
+        self.cross_top = QtWidgets.QSpinBox()
+        self.cross_top.setRange(0, 30)
+        self.cross_top.setSpecialValueText('off')
+        self.cross_top.setToolTip('After the run, compare the best N detector + matcher configurations (one '
+                                  'per detector; by ground truth when given, else by agreement) and keep '
+                                  'the matches where most of them agree: RIVAL_CROSS_<channel>.csv.')
+        self.cross_agree = QtWidgets.QSpinBox()
+        self.cross_agree.setRange(0, 30)
+        self.cross_agree.setSpecialValueText('more than half')
+        self.cross_cell = QtWidgets.QDoubleSpinBox()
+        self.cross_cell.setRange(1, 500)
+        self.cross_cell.setSuffix(' km')
+        hl = QtWidgets.QHBoxLayout()
+        hl.addWidget(self.cross_top)
+        hl.addWidget(QtWidgets.QLabel('agreeing'))
+        hl.addWidget(self.cross_agree)
+        hl.addWidget(QtWidgets.QLabel('per cell of'))
+        hl.addWidget(self.cross_cell)
+        f.addRow('Cross-check top detectors', hl)
 
     def _build_algo_tab(self):
         w = QtWidgets.QWidget()
@@ -1162,6 +1181,9 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.gcp_path.setText(j['manual_gcp_csv'])
         self.truth_path.setText(j.get('truth_csv') or '')
         self.truth_radius.setValue(float(j.get('truth_radius_m') or 5000) / 1000.0)
+        self.cross_top.setValue(int(j.get('cross_top_n', 5) or 0))
+        self.cross_agree.setValue(int(j.get('cross_min_agree') or 0))
+        self.cross_cell.setValue(float(j.get('cross_cell_km') or 25.0))
         self.channels.set_checked(list(j['channels'] or []))
         self.detector_params = {k: {p: list(v) for p, v in d.items()}
                                 for k, d in (j.get('detector_params') or {}).items()}
@@ -1246,6 +1268,9 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             'manual_gcp_csv': self.gcp_path.text(),
             'truth_csv': self.truth_path.text().strip(),
             'truth_radius_m': self.truth_radius.value() * 1000.0,
+            'cross_top_n': self.cross_top.value(),
+            'cross_min_agree': self.cross_agree.value(),
+            'cross_cell_km': self.cross_cell.value(),
             'detectors': dets,
             'matchers': matchers,
             'detector_params': {k: v for k, v in self.detector_params.items() if v},

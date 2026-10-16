@@ -2130,6 +2130,108 @@ def test_coarse_trend():
     check('coarse trend: measured offsets that no plane fits -> no trend', P._coarse_trend(pairs[:10], flat, cfg), None)
 
 
+def test_cross_check(tmp):
+    """Matches kept only where most of the top configurations agree. Four
+    detectors measure the true offset; one is consistently 20 km off with the
+    most matches (it would win a single-configuration pick); one is wrong in
+    half the scene."""
+    import contextlib
+    import io
+    import numpy as np
+    import pandas as pd
+    from pyproj import Transformer
+    import automatch_cross as X
+    rng = np.random.default_rng(5)
+    true = (1000.0, -500.0)
+
+    def cfg(det, offsets, n=40, sweep='win512_nfauto', matcher='smnn0.9'):
+        rows = []
+        for ci in range(6):                       # six 25 km cells along E
+            off = offsets(ci)
+            if off is None:
+                continue
+            e = 500000 + ci * 25000 + rng.uniform(1000, 24000, n)
+            nn = 1600000 + rng.uniform(1000, 24000, n)
+            de, dn = off[0] + rng.normal(0, 60, n), off[1] + rng.normal(0, 60, n)
+            rows.append(pd.DataFrame({'x1-map': e, 'y1-map': nn, 'x2-map': e - de, 'y2-map': nn - dn,
+                                      'source_file': [f'{det}_c{ci}.csv'] * n}))
+        pts = pd.concat(rows, ignore_index=True)
+        pts = pts.assign(E=pts['x1-map'], N=pts['y1-map'], dE=pts['x1-map'] - pts['x2-map'],
+                         dN=pts['y1-map'] - pts['y2-map'])
+        return {'channel': 'band49', 'sweep': sweep, 'detector': det, 'matcher': matcher, 'ransac': 'magsac630',
+                'points': pts}
+    good = [cfg(d, lambda c: true) for d in ('imw-xoftr', 'imw-minima-roma', 'disk_epipolar', 'hessian')]
+    wrong = cfg('gftt', lambda c: (21000.0, -500.0), n=300)
+    half = cfg('sift', lambda c: true if c < 3 else (9000.0, 4000.0))
+    twin = cfg('imw-xoftr', lambda c: true, sweep='win1024_nfauto')      # same detector, other sweep
+    cfgs = good + [wrong, half, twin]
+    top, how = X.pick_top(cfgs, 5, 25000.0, 1000.0)
+    names = [c['detector'] for c in top]
+    check('cross: without truth, the consistently wrong detector is not among the top by agreement',
+          ('gftt' in names, how.startswith('agreement')), (False, True))
+    check('cross: one configuration per detector', len(names) == len(set(names)), True)
+    ranking = pd.DataFrame([{'rank': i + 1, 'channel': 'band49', 'sweep': c['sweep'], 'detector': c['detector'],
+                             'matcher': c['matcher'], 'ransac': c['ransac']}
+                            for i, c in enumerate([wrong] + good + [half])])
+    top, how = X.pick_top(cfgs, 5, 25000.0, 1000.0, ranking)
+    check('cross: with ground truth, the top follows its ranking', ([c['detector'] for c in top][0], how),
+          ('gftt', 'ground-truth ranking'))
+    pts, cells = X.cross_check(top, 25000.0, 1000.0, 3)
+    err = np.hypot(pts['dE'] - true[0], pts['dN'] - true[1])
+    check('cross: every kept point agrees with the true offset (the wrong one is outvoted in each cell)',
+          (len(pts) > 0, float(err.max()) < 1000.0, 'gftt' in set(pts['cross_detector'])), (True, True, False))
+    check('cross: all six cells kept, by the agreeing detectors', int(cells['kept'].sum()), 6)
+    lonely = [cfg('a', lambda c: true if c == 0 else None), cfg('b', lambda c: true if c == 5 else None)]
+    _, cells = X.cross_check(lonely, 25000.0, 1000.0, 2)
+    check('cross: a cell only one configuration reaches is not kept', int(cells['kept'].sum()), 0)
+    # run(): files and the truth score
+    to_ll = Transformer.from_crs('EPSG:32643', 'EPSG:4326', always_xy=True)
+    te = np.array([512000.0, 562000.0, 612000.0])
+    tn = np.full(3, 1612000.0)
+    ilo, ila = to_ll.transform(te, tn)
+    rlo, rla = to_ll.transform(te - true[0], tn - true[1])
+    tp = os.path.join(tmp, 'cross_truth.csv')
+    pd.DataFrame({'Row': [1, 2, 3], 'In_Lon': ilo, 'In_Lat': ila, 'Ref_Lon': rlo, 'Ref_Lat': rla}).to_csv(tp, index=False)
+    out = os.path.join(tmp, 'cross_out')
+    os.makedirs(out, exist_ok=True)
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        res = X.run(out, 5, 0, 25.0, 1000.0, truth_csv=tp, working_crs='EPSG:32643', cfgs=cfgs)
+    r = res.get('band49', {})
+    check('cross: RIVAL_CROSS, its detail file, the cells and the summary are written',
+          all(os.path.exists(os.path.join(out, n)) for n in ('RIVAL_CROSS_band49.csv', 'RIVAL_CROSS_band49_detail.csv',
+                                                             'CROSS_CELLS_band49.csv', 'CROSS_SUMMARY.csv')), True)
+    check('cross: the cross-checked points meet the truth within 100 m at all 3 points',
+          (r.get('truth_reached'), (r.get('truth_rmse_m') or 1e9) < 100), (3, True))
+    check('cross: the log names the configurations used', 'imw-xoftr' in buf.getvalue(), True)
+    check('cross: off below 2 configurations', X.run(out, 1, cfgs=cfgs, working_crs='EPSG:32643'), {})
+    # replay on a finished job's TRUTH_POINTS.csv + TRUTH_RANKING.csv (the uploaded jobs)
+    rows, rk = [], []
+    for i, det in enumerate(['imw-xoftr', 'disk_epipolar', 'hessian', 'imw-ripe', 'gftt']):
+        rk.append({'rank': i + 1, 'channel': 'band49', 'sweep': 'win512_nfauto', 'detector': det, 'matcher': 'nn',
+                   'ransac': 'magsac360', 'truth_rmse_m': 150.0 + 10 * i, 'truth_reached': 3})
+        for tid in (1, 2, 3):
+            off = 5000.0 if (det == 'gftt' and tid == 2) else 0.0
+            rows.append({'channel': 'band49', 'sweep': 'win512_nfauto', 'detector': det, 'matcher': 'nn',
+                         'ransac': 'magsac360', 'truth_id': tid, 'truth_dE_m': 70000.0, 'truth_dN_m': -9000.0,
+                         'tool_dE_m': 70000.0 + off + rng.normal(0, 80), 'tool_dN_m': -9000.0 + rng.normal(0, 80),
+                         'method': 'local'})
+    pd.DataFrame(rows).to_csv(os.path.join(out, 'TRUTH_POINTS.csv'), index=False)
+    pd.DataFrame(rk).to_csv(os.path.join(out, 'TRUTH_RANKING.csv'), index=False)
+    t = X.from_truth_points(os.path.join(out, 'TRUTH_POINTS.csv'), os.path.join(out, 'TRUTH_RANKING.csv'), 5)
+    r = t.iloc[0]
+    check('cross replay: TRUTH_POINTS.csv alone gives the cross-checked RMSE, the off detector outvoted',
+          (int(r['cross_reached']), r['cross_rmse_m'] < 120, r['tolerance_m']), (3, True, 540.0))
+    parent = os.path.join(tmp, 'cross_jobs')
+    os.makedirs(os.path.join(parent, 'output359'), exist_ok=True)
+    for n in ('TRUTH_POINTS.csv', 'TRUTH_RANKING.csv'):
+        shutil.copyfile(os.path.join(out, n), os.path.join(parent, 'output359', n))
+    with contextlib.redirect_stdout(io.StringIO()):
+        rc = X.main([parent, '--batch'])
+    allc = pd.read_csv(os.path.join(parent, 'CROSS_ALL.csv'))
+    check('cross batch: every job folder found, one row per job and channel in CROSS_ALL.csv',
+          (rc, allc['job'].tolist(), allc['mode'].tolist()), (0, ['output359'], ['truth points']))
+
+
 def test_partial_cover():
     """Jobs 336 and 343: a warning when the first-ranked configuration is km
     off while one reaching fewer points is close (343, matches on part of the
@@ -2579,6 +2681,7 @@ def main():
         test_partial_cover()
         test_shared_coarse(tmp)
         test_coarse_trend()
+        test_cross_check(tmp)
         test_auto_bands(tmp)
         test_kornia_versions(tmp)
         test_warmup_and_padding()
