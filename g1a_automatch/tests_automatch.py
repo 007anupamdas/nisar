@@ -2281,6 +2281,29 @@ def test_cross_check(tmp):
     allc = pd.read_csv(os.path.join(parent, 'CROSS_ALL.csv'))
     check('cross batch: every job folder found, one row per job and channel in CROSS_ALL.csv',
           (rc, allc['job'].tolist(), allc['mode'].tolist()), (0, ['output359'], ['truth points']))
+    # a shared output folder: finished, running, other users' and filtered jobs
+    def mk(name, files):
+        d = os.path.join(parent, name)
+        os.makedirs(d, exist_ok=True)
+        for n, text in files.items():
+            with open(os.path.join(d, n), 'w') as f:
+                f.write(text)
+    mk('output360', {'job_used.json': '{}', 'RUN_MANIFEST.csv': 'a\n', 'automatch.log': 'x\n[Job] done in 3 min\n'})
+    mk('output361', {'job_used.json': '{}', 'automatch.log': '[Job] >>> win512_nfauto\n'})        # still running
+    mk('output362', {'job_used.json': '{}', 'RUN_MANIFEST.csv': 'a\n', 'automatch.log': 'still going\n'})
+    mk('output900', {'result.tif': 'x', 'logs.csv': 'timestamp,message\n'})                        # another user's
+    found, skipped = X.find_jobs(parent)
+    names = sorted(os.path.basename(d) for d in found)
+    check('cross batch: finished automatch jobs only; running ones skipped, other folders ignored',
+          (names, sorted(skipped)), (['output359', 'output360'], ['output361', 'output362']))
+    found, _ = X.find_jobs(parent, X.parse_jobs('300-359, 999'))
+    check('cross batch: the job filter keeps only those numbers', [os.path.basename(d) for d in found], ['output359'])
+    try:
+        X.parse_jobs('35a')
+        bad = False
+    except ValueError:
+        bad = True
+    check('cross batch: a malformed job filter is refused', bad, True)
 
 
 def test_partial_cover():

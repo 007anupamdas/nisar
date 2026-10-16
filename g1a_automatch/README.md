@@ -434,6 +434,14 @@ python automatch_job.py cross <output folder> --from-truth-points    # from TRUT
 python automatch_job.py cross <folder of output folders> --batch     # every job; one table, CROSS_ALL.csv
 ```
 
+In a shared output folder (`output/output359`, …), `--batch` takes only
+finished automatch jobs. A job counts as finished when its folder has
+`job_used.json` and `RUN_MANIFEST.csv`, and `[Job] done` ends its
+`automatch.log`; compare jobs with `TRUTH_RANKING.csv` + `TRUTH_POINTS.csv`
+count too. Running jobs are listed as skipped, and other users' or other
+tools' folders are ignored. `--jobs "335-363, 370"` (GUI: *Jobs*) limits the
+check to those job numbers.
+
 `--from-truth-points` replays the check at the truth points: there the top
 configurations' estimates are compared, and their median is used where
 enough agree. It needs only the two small CSVs each job with ground truth

@@ -772,6 +772,11 @@ class CrossDialog(QtWidgets.QDialog):
         self.folder = PathRow('dir')
         self.folder.setText(settings.value('cross_folder', '') or defaults.get('output_dir', ''))
         f.addRow('Job output folder(s)', self.folder)
+        self.jobs = QtWidgets.QLineEdit(settings.value('cross_jobs', '') or '')
+        self.jobs.setPlaceholderText('all finished automatch jobs (or e.g. 335-363, 370)')
+        self.jobs.setToolTip('Job numbers to check in a shared output folder (output/output359 is job 359). '
+                             'Running jobs and other users\' folders are always skipped.')
+        f.addRow('Jobs', self.jobs)
         self.top = QtWidgets.QSpinBox()
         self.top.setRange(2, 30)
         self.top.setValue(max(2, int(defaults.get('cross_top_n') or 5)))
@@ -807,7 +812,14 @@ class CrossDialog(QtWidgets.QDialog):
         if not self.folder.text() or not os.path.isdir(self.folder.text()):
             QtWidgets.QMessageBox.warning(self, 'Cross-check', 'Choose an existing folder.')
             return
+        try:
+            import automatch_cross as X
+            X.parse_jobs(self.jobs.text())
+        except ValueError as e:
+            QtWidgets.QMessageBox.warning(self, 'Cross-check', str(e))
+            return
         self.settings.setValue('cross_folder', self.folder.text())
+        self.settings.setValue('cross_jobs', self.jobs.text())
         self.accept()
 
     def args(self):
@@ -817,6 +829,8 @@ class CrossDialog(QtWidgets.QDialog):
             a += ['--tolerance-m', f'{self.tol.value():g}']
         if self.truth.text():
             a += ['--truth', self.truth.text()]
+        if self.jobs.text().strip():
+            a += ['--jobs', self.jobs.text().strip()]
         return a
 
 

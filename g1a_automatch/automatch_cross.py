@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import math
 import os
+import re
 import sys
 from typing import Dict, List, Optional, Tuple
 
@@ -274,16 +275,79 @@ def from_truth_points(points_csv: str, ranking_csv: str, top_n: int = 5, min_agr
     return pd.DataFrame(rows)
 
 
+def parse_jobs(text: str) -> Optional[set]:
+    """'335-363, 370' -> {335, ..., 363, 370}; '' -> None (every job)."""
+    if not text or not str(text).strip():
+        return None
+    out = set()
+    for part in re.split(r'[,;\s]+', str(text).strip()):
+        if not part:
+            continue
+        m = re.fullmatch(r'(\d+)\s*-\s*(\d+)', part)
+        if m:
+            out.update(range(int(m.group(1)), int(m.group(2)) + 1))
+        elif part.isdigit():
+            out.add(int(part))
+        else:
+            raise ValueError(f'jobs: {part!r} is not a number or a range (e.g. 335-363, 370)')
+    return out
+
+
+def job_state(d: str) -> str:
+    """'finished' (an automatch run that ended: job_used.json, RUN_MANIFEST.csv
+    and '[Job] done' at the end of automatch.log), 'compare' (a compare
+    job's TRUTH_RANKING.csv + TRUTH_POINTS.csv), 'running' (an automatch run
+    still going), or '' (not an automatch output: another user's or tool's)."""
+    has = lambda n: os.path.exists(os.path.join(d, n))
+    if has('job_used.json') and (has('automatch.log') or has('RUN_MANIFEST.csv')):
+        done = has('RUN_MANIFEST.csv')
+        if done and has('automatch.log'):
+            try:
+                with open(os.path.join(d, 'automatch.log'), 'rb') as f:
+                    f.seek(max(0, os.path.getsize(os.path.join(d, 'automatch.log')) - 8192))
+                    done = b'[Job] done' in f.read()
+            except OSError:
+                pass
+        return 'finished' if done else 'running'
+    if has('TRUTH_RANKING.csv') and has('TRUTH_POINTS.csv'):
+        return 'compare'
+    return ''
+
+
+def find_jobs(parent: str, jobs: Optional[set] = None) -> Tuple[List[str], Dict[str, str]]:
+    """(finished automatch job folders, {skipped folder: why}) in parent and
+    one level below it (output/output359), optionally only those whose
+    number (the last digits of the name) is in jobs."""
+    cands = [parent] + sorted(os.path.join(parent, n) for n in os.listdir(parent)
+                              if os.path.isdir(os.path.join(parent, n)))
+    found, skipped = [], {}
+    for d in cands:
+        name = os.path.basename(os.path.normpath(d))
+        if jobs is not None and d != parent:
+            m = re.search(r'(\d+)\D*$', name)
+            if not m or int(m.group(1)) not in jobs:
+                continue
+        st = job_state(d)
+        if st in ('finished', 'compare'):
+            found.append(d)
+        elif st == 'running':
+            skipped[name] = 'still running'
+    return found, skipped
+
+
 def batch(parent: str, top_n: int = 5, min_agree: int = 0, cell_km: float = 25.0,
-          tol_m: Optional[float] = None, truth_csv: str = '') -> int:
-    """Every job output folder under parent (one holding RUN_MANIFEST.csv or
-    TRUTH_RANKING.csv, up to two levels down): the full cross-check when its
-    match files are there, and the replay on TRUTH_POINTS.csv when that is.
-    One row per job and channel in parent/CROSS_ALL.csv."""
+          tol_m: Optional[float] = None, truth_csv: str = '', jobs: str = '') -> int:
+    """Every finished automatch job in parent or one level below it
+    (output/output359), or only the numbers in jobs ('335-363, 370'): the
+    full cross-check when its match files are there, and the replay on
+    TRUTH_POINTS.csv when that is. Running jobs and folders that are not
+    automatch outputs (other users', other tools') are left alone. One row
+    per job and channel in parent/CROSS_ALL.csv."""
     import glob as _glob
-    found = sorted({os.path.dirname(p) for pat in ('RUN_MANIFEST.csv', 'TRUTH_RANKING.csv')
-                    for p in _glob.glob(os.path.join(parent, pat)) + _glob.glob(os.path.join(parent, '*', pat))
-                    + _glob.glob(os.path.join(parent, '*', '*', pat))})
+    found, skipped = find_jobs(parent, parse_jobs(jobs))
+    for name, why in skipped.items():
+        print(f'[Cross] {name}: skipped, {why}')
+    print(f'[Cross] {len(found)} finished job(s) to check under {parent}')
     rows = []
     for d in found:
         job = os.path.relpath(d, parent)
@@ -327,11 +391,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument('--truth', default='', help='ground-truth CSV, to score the result')
     ap.add_argument('--batch', action='store_true',
                     help='output_dir holds many job output folders: cross-check each, results in CROSS_ALL.csv')
+    ap.add_argument('--jobs', default='', help="with --batch: only these job numbers, e.g. '335-363, 370'")
     ap.add_argument('--from-truth-points', action='store_true',
                     help='replay on output_dir/TRUTH_POINTS.csv + TRUTH_RANKING.csv only (no match files)')
     a = ap.parse_args(argv)
     if a.batch:
-        return batch(a.output_dir, a.top, a.min_agree, a.cell_km, a.tolerance_m, a.truth)
+        return batch(a.output_dir, a.top, a.min_agree, a.cell_km, a.tolerance_m, a.truth, a.jobs)
     if a.from_truth_points:
         t = from_truth_points(os.path.join(a.output_dir, 'TRUTH_POINTS.csv'),
                               os.path.join(a.output_dir, 'TRUTH_RANKING.csv'), a.top, a.min_agree, a.tolerance_m)
