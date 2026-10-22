@@ -753,110 +753,6 @@ class TruthDialog(QtWidgets.QDialog):
         lay.addWidget(close)
 
 
-class CrossDialog(QtWidgets.QDialog):
-    """Cross-check finished jobs (automatch_cross --batch): a job output folder,
-    or a folder holding many, and the settings of the check."""
-
-    def __init__(self, settings, defaults, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle('Cross-check between detectors')
-        self.settings = settings
-        f = QtWidgets.QFormLayout(self)
-        head = QtWidgets.QLabel('Keeps the matches where most of the best detector + matcher configurations '
-                                'agree. Choose one job output folder, or a folder of job output folders (every '
-                                'job is checked; one table, CROSS_ALL.csv). Jobs with ground truth are also '
-                                'replayed at the truth points (TRUTH_POINTS.csv), which shows whether the '
-                                'cross-checked estimate beats the best single configuration.')
-        head.setWordWrap(True)
-        f.addRow(head)
-        self.folder = PathRow('dir')
-        self.folder.setText(settings.value('cross_folder', '') or defaults.get('output_dir', ''))
-        f.addRow('Job output folder(s)', self.folder)
-        self.jobs = QtWidgets.QLineEdit(settings.value('cross_jobs', '') or '')
-        self.jobs.setPlaceholderText('all finished automatch jobs (or e.g. 335-363, 370)')
-        self.jobs.setToolTip('Job numbers to check in a shared output folder (output/output359 is job 359). '
-                             'Running jobs and other users\' folders are always skipped.')
-        f.addRow('Jobs', self.jobs)
-        self.top = QtWidgets.QSpinBox()
-        self.top.setRange(2, 30)
-        self.top.setValue(max(2, int(defaults.get('cross_top_n') or 5)))
-        f.addRow('Top detectors compared', self.top)
-        self.agree = QtWidgets.QSpinBox()
-        self.agree.setRange(0, 30)
-        self.agree.setSpecialValueText('more than half')
-        self.agree.setValue(int(defaults.get('cross_min_agree') or 0))
-        f.addRow('Must agree', self.agree)
-        self.keep = QtWidgets.QSpinBox()
-        self.keep.setRange(1, 30)
-        self.keep.setValue(int(defaults.get('cross_keep_per_cell') or 3))
-        self.keep.setToolTip('Of the configurations that agree in a cell, keep this many: those whose matches '
-                             'there scatter least (the least local distortion).')
-        f.addRow('Keep per cell (least distorted)', self.keep)
-        self.cell = QtWidgets.QDoubleSpinBox()
-        self.cell.setRange(1, 500)
-        self.cell.setSuffix(' km')
-        self.cell.setValue(float(defaults.get('cross_cell_km') or 25.0))
-        f.addRow('Cell size', self.cell)
-        self.tol = QtWidgets.QDoubleSpinBox()
-        self.tol.setRange(0, 100000)
-        self.tol.setSuffix(' m')
-        self.tol.setSpecialValueText('automatic (1.5 x the RANSAC threshold, 3 px)')
-        f.addRow('Agreement tolerance', self.tol)
-        self.recompute = QtWidgets.QCheckBox('compute again where a cross-check with these settings exists')
-        self.recompute.setToolTip('Off: folders already cross-checked with the same settings are read back '
-                                  '(CROSS_SUMMARY.csv, CROSS_FROM_TRUTH_POINTS.csv), which is quick.')
-        f.addRow(self.recompute)
-        note = QtWidgets.QLabel('Ground truth: each job\'s own truth CSV, from its settings (job_used.json). '
-                                'Server paths are translated through the share mapping (as in Pack for server).')
-        note.setWordWrap(True)
-        f.addRow(note)
-        self.share_local = QtWidgets.QLineEdit(settings.value('pack/share_local', 'V:\\'))
-        self.share_server = QtWidgets.QLineEdit(settings.value('pack/share_server', '/maintenance/'))
-        row = QtWidgets.QHBoxLayout()
-        row.addWidget(self.share_local)
-        row.addWidget(QtWidgets.QLabel('here  =  on the server'))
-        row.addWidget(self.share_server)
-        f.addRow('Share mapping', row)
-        bb = QtWidgets.QDialogButtonBox()
-        bb.addButton('Run cross-check', QtWidgets.QDialogButtonBox.ButtonRole.AcceptRole
-                     if QT_API != 'PyQt5' else QtWidgets.QDialogButtonBox.AcceptRole)
-        bb.addButton(QtWidgets.QDialogButtonBox.StandardButton.Cancel if QT_API != 'PyQt5'
-                     else QtWidgets.QDialogButtonBox.Cancel)
-        bb.accepted.connect(self._ok)
-        bb.rejected.connect(self.reject)
-        f.addRow(bb)
-
-    def _ok(self):
-        if not self.folder.text() or not os.path.isdir(self.folder.text()):
-            QtWidgets.QMessageBox.warning(self, 'Cross-check', 'Choose an existing folder.')
-            return
-        try:
-            import automatch_cross as X
-            X.parse_jobs(self.jobs.text())
-        except ValueError as e:
-            QtWidgets.QMessageBox.warning(self, 'Cross-check', str(e))
-            return
-        self.settings.setValue('cross_folder', self.folder.text())
-        self.settings.setValue('cross_jobs', self.jobs.text())
-        self.settings.setValue('pack/share_local', self.share_local.text().strip())
-        self.settings.setValue('pack/share_server', self.share_server.text().strip())
-        self.accept()
-
-    def args(self):
-        a = ['cross', self.folder.text(), '--batch', '--top', str(self.top.value()),
-             '--min-agree', str(self.agree.value()), '--keep', str(self.keep.value()),
-             '--cell-km', f'{self.cell.value():g}']
-        if self.tol.value() > 0:
-            a += ['--tolerance-m', f'{self.tol.value():g}']
-        if self.jobs.text().strip():
-            a += ['--jobs', self.jobs.text().strip()]
-        if self.recompute.isChecked():
-            a += ['--recompute']
-        if self.share_local.text().strip() and self.share_server.text().strip():
-            a += ['--share-local', self.share_local.text().strip(), '--share-server', self.share_server.text().strip()]
-        return a
-
-
 class CrossResultDialog(QtWidgets.QDialog):
     """CROSS_ALL.csv as a table: each job and channel, cross-checked against
     the best single configuration."""
@@ -945,13 +841,15 @@ class BenchDialog(QtWidgets.QDialog):
 
     def __init__(self, settings, defaults, parent=None):
         super().__init__(parent)
-        self.setWindowTitle('Benchmark detectors over finished jobs')
+        self.setWindowTitle('Benchmark & cross-check over finished jobs')
         self.settings = settings
         f = QtWidgets.QFormLayout(self)
-        head = QtWidgets.QLabel('Reads every finished job (nothing is matched again): its sensor and band, its error '
-                                'from its own ground truth, a cloud estimate of the band it ran (SCENE_CLOUD.png '
-                                'shows it) and every detector\'s result. Writes BENCH_JOBS / BENCH_DETECTORS / '
-                                'BENCH_SUMMARY.csv in the folder.')
+        head = QtWidgets.QLabel('Reads every finished job (nothing is matched again; of several jobs on one scene the '
+                                'newest): cross-checks its top detectors (where most agree, per cell), then records '
+                                'its sensor and band, its error from its own ground truth, a cloud estimate of the '
+                                'band it ran (SCENE_CLOUD.png) and every detector\'s result. Writes BENCH_JOBS / '
+                                'BENCH_DETECTORS / BENCH_SUMMARY / CROSS_ALL.csv in the folder. Results already made '
+                                'with the same settings are read back.')
         head.setWordWrap(True)
         f.addRow(head)
         self.folder = PathRow('dir')
@@ -967,6 +865,35 @@ class BenchDialog(QtWidgets.QDialog):
         self.success.setValue(3.0)
         self.success.setToolTip('A detector succeeds on a job when it reaches half of the truth points within this')
         f.addRow('Success within', self.success)
+        self.cross_on = QtWidgets.QCheckBox('cross-check the top detectors of each job')
+        self.cross_on.setChecked(True)
+        f.addRow(self.cross_on)
+        self.top = QtWidgets.QSpinBox()
+        self.top.setRange(2, 30)
+        self.top.setValue(max(2, int(defaults.get('cross_top_n') or 5)))
+        self.agree = QtWidgets.QSpinBox()
+        self.agree.setRange(0, 30)
+        self.agree.setSpecialValueText('more than half')
+        self.agree.setValue(int(defaults.get('cross_min_agree') or 0))
+        self.keep = QtWidgets.QSpinBox()
+        self.keep.setRange(1, 30)
+        self.keep.setValue(int(defaults.get('cross_keep_per_cell') or 3))
+        self.cell = QtWidgets.QDoubleSpinBox()
+        self.cell.setRange(1, 500)
+        self.cell.setSuffix(' km')
+        self.cell.setValue(float(defaults.get('cross_cell_km') or 25.0))
+        self.tol = QtWidgets.QDoubleSpinBox()
+        self.tol.setRange(0, 100000)
+        self.tol.setSuffix(' m')
+        self.tol.setSpecialValueText('auto (1.5 x RANSAC threshold)')
+        hl = QtWidgets.QHBoxLayout()
+        for lab, wdg in (('top', self.top), ('agreeing', self.agree), ('keep', self.keep), ('cell', self.cell),
+                         ('tolerance', self.tol)):
+            hl.addWidget(QtWidgets.QLabel(lab))
+            hl.addWidget(wdg)
+        f.addRow('Cross-check', hl)
+        self.cross_on.toggled.connect(lambda on: [w.setEnabled(on) for w in (self.top, self.agree, self.keep,
+                                                                            self.cell, self.tol)])
         self.share_local = QtWidgets.QLineEdit(settings.value('pack/share_local', 'V:\\'))
         self.share_server = QtWidgets.QLineEdit(settings.value('pack/share_server', '/maintenance/'))
         row = QtWidgets.QHBoxLayout()
@@ -1015,6 +942,13 @@ class BenchDialog(QtWidgets.QDialog):
             a += ['--recompute']
         if self.all_jobs.isChecked():
             a += ['--all-jobs']
+        if self.cross_on.isChecked():
+            a += ['--top', str(self.top.value()), '--min-agree', str(self.agree.value()), '--keep',
+                  str(self.keep.value()), '--cell-km', f'{self.cell.value():g}']
+            if self.tol.value() > 0:
+                a += ['--tolerance-m', f'{self.tol.value():g}']
+        else:
+            a += ['--no-cross']
         return a
 
 
@@ -1025,6 +959,8 @@ class BenchResultDialog(QtWidgets.QDialog):
                 ('error_km', 'error km'), ('error_spread_km', 'error spread km'), ('cloud_pct', 'cloud %'),
                 ('texture', 'texture'), ('truth_points', 'truth pts'), ('best_detector', 'best detector'),
                 ('best_rmse_m', 'best RMSE m'), ('best_rmse_px', 'best RMSE px'), ('cross_reliable', 'cross reliable'),
+                ('cross_kept_share', 'cells agreeing'), ('cross_rmse_m', 'cross RMSE m'),
+                ('cross_points_rmse_m', 'cross RMSE m (truth pts)'),
                 ('automatch', 'version'), ('used', 'used'), ('superseded_by', 'superseded by')]
     SUM_COLS = [('detector', 'detector'), ('jobs', 'jobs'), ('success_rate', 'success rate'),
                 ('median_rmse_px', 'median px'), ('median_rmse_m', 'median m'), ('times_first', 'first')]
@@ -1062,6 +998,8 @@ class BenchResultDialog(QtWidgets.QDialog):
         self.group.currentTextChanged.connect(self._show_group)
         self._show_group(self.group.currentText())
         tabs.addTab(w, 'Detectors')
+        self.cross_table = csv_table(os.path.join(folder, 'CROSS_ALL.csv'), CrossResultDialog.COLS)
+        tabs.addTab(self.cross_table, 'Cross-check')
         lay.addWidget(tabs, 1)
         row = QtWidgets.QHBoxLayout()
         b = QtWidgets.QPushButton('Open folder')
@@ -1122,8 +1060,8 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
                             ('Preflight', self.preflight), ('Run', self.run_job),
                             ('Queue run', self.queue_run),
                             ('Stop', self.stop), ('Open output', self.open_output),
-                            ('Pack for server…', self.pack_dialog), ('Cross-check…', self.cross_dialog),
-                            ('Benchmark…', self.bench_dialog)):
+                            ('Pack for server…', self.pack_dialog),
+                            ('Benchmark & cross-check…', self.bench_dialog)):
             b = QtWidgets.QPushButton(label)
             b.clicked.connect(slot)
             btns.addWidget(b)
@@ -1846,10 +1784,10 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.proc_buffer = ''
         self._events = []
         self.proc.start(sys.executable, [JOB_SCRIPT] + args)
-        busy = kind in ('run', 'preflight', 'pack', 'cross', 'bench')
+        busy = kind in ('run', 'preflight', 'pack', 'bench')
         self.btn_run.setEnabled(not busy)
         self.btn_preflight.setEnabled(not busy)
-        self.btn_stop.setEnabled(kind in ('run', 'pack', 'cross', 'bench'))
+        self.btn_stop.setEnabled(kind in ('run', 'pack', 'bench'))
         self.lbl_status.setText(f'{kind} …')
         return True
 
@@ -1934,15 +1872,6 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
                 self.lbl_status.setText(f'Benchmark written in {folder}')
             else:
                 self.lbl_status.setText('Benchmark found no finished job — see Log.')
-        elif kind == 'cross':
-            path = os.path.join(getattr(self, '_cross_dir', ''), 'CROSS_ALL.csv')
-            if code == 0 and os.path.exists(path):
-                dlg = CrossResultDialog(path, self)
-                dlg.show()
-                self._last_cross_dialog = dlg
-                self.lbl_status.setText(f'Cross-check written: {path}')
-            else:
-                self.lbl_status.setText('Cross-check found nothing to check — see Log.')
         elif kind == 'weights':
             tmp_job = getattr(self, '_weights_job_file', None)
             if tmp_job:
@@ -2132,25 +2061,6 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         args = dlg.args()
         self.log.appendPlainText('--- ' + ' '.join(args))
         self._start(args, 'bench')
-
-    def cross_dialog(self, *_, run=True):
-        """Cross-check finished jobs from a dialog; run=False returns the
-        dialog without showing it (tests)."""
-        try:
-            job = self.get_job()
-        except ValueError:
-            job = dict(DEFAULT_JOB)
-        dlg = CrossDialog(self.settings, job, self)
-        dlg.accepted.connect(lambda: self._start_cross(dlg))
-        if run:
-            dlg.exec() if hasattr(dlg, 'exec') else dlg.exec_()
-        return dlg
-
-    def _start_cross(self, dlg):
-        self._cross_dir = dlg.folder.text()
-        args = dlg.args()
-        self.log.appendPlainText('--- ' + ' '.join(args))
-        self._start(args, 'cross')
 
     def pack_dialog(self, *_, run=True):
         """Pack the current job for the GPU server (automatch_pack) from a

@@ -436,7 +436,8 @@ are checked against each other:
     truth RMSE of the cross-checked points.
 
 GUI: *Cross-check top detectors* (Output & run tab) sets it for runs; 0
-turns it off. The **Cross-check…** button runs it on finished jobs. Choose a
+turns it off. On finished jobs it runs as part of **Benchmark & cross-check…**
+(see Benchmark below). Choose a
 job output folder, or a folder of them, then the top N, the agreement, the
 cell size. Each job's ground truth is taken from its own settings
 (`truth_csv` in `job_used.json`), with the server path translated to the
@@ -475,7 +476,11 @@ writes. Its tolerance defaults to 1.5 × the RANSAC threshold.
 ## Benchmark: which detector on which kind of image
 
 `python automatch_job.py bench <folder of job outputs> [--jobs 335-366]`
-(GUI: **Benchmark…**) reads every finished job; nothing is matched again.
+(GUI: **Benchmark & cross-check…**) reads every finished job; nothing is
+matched again. Each job is cross-checked first, with its results read back
+when they were made with the same settings. The cross-check's reliability
+and RMSE go into `BENCH_JOBS.csv`, and its rows into `CROSS_ALL.csv`;
+`--no-cross` skips it.
 For each job it records:
 - the sensor (MV / HS / HV from the G1A name), the band run and the pixel size;
 - the image's error from the job's own ground truth: the mean In − Ref, and
@@ -494,11 +499,12 @@ superseded; `--all-jobs` (GUI: *count every job*) counts them all.
 It writes three files:
 - `BENCH_JOBS.csv`: one row per job.
 - `BENCH_DETECTORS.csv`: one row per job × detector.
-- `BENCH_SUMMARY.csv`: per detector, the number of jobs, the success rate
-  (half of the truth points reached within `--success-px`, default 3 px),
-  the median error and how often it was first. These are given overall,
-  per sensor, per cloud class (<10 %, 10–30 %, >30 %) and per error class
-  (<20 km, 20–80 km, >80 km).
+- `BENCH_SUMMARY.csv`: per detector **and sensor**, the number of jobs, the
+  success rate (half of the truth points reached within `--success-px`,
+  default 3 px), the median error and how often it was first. Detectors are
+  never ranked across sensors, because MV, HS and HV favour different
+  detectors. Within each sensor the table is also split per cloud class
+  (<10 %, 10–30 %, >30 %) and per error class (<20 km, 20–80 km, >80 km).
 
 The GUI shows the jobs and, per group, the detector table, sortable by
 column.

@@ -21,9 +21,10 @@ and writes, in that folder:
 
   BENCH_JOBS.csv       one row per job: the scene, its error, clouds, best detector
   BENCH_DETECTORS.csv  one row per job x detector
-  BENCH_SUMMARY.csv    per detector: jobs, success rate (reached half of the
-                       truth points within --success-px pixels), median error;
-                       overall, per sensor, per cloud class and per error class
+  BENCH_SUMMARY.csv    per detector and sensor (never across sensors): jobs,
+                       success rate (reached half of the truth points within
+                       --success-px pixels), median error; and within each
+                       sensor per cloud class and per error class
 
 Cloud estimate (no cloud mask comes with G1A): on an overview of the band,
 the valid pixels' brightness is split in two (Otsu); when the two groups are
@@ -34,6 +35,11 @@ SCENE_CLOUD.png. The result is kept in SCENE_INFO.json and read back on later
 runs (--recompute redoes it).
 
     python automatch_job.py bench <folder of job outputs> [--jobs 335-366] [--success-px 3]
+                                 [--top 5 --min-agree 0 --keep 3 --cell-km 25]   # the cross-check
+
+Every job used is cross-checked first (automatch_cross: the top detectors'
+agreement per cell), read back where done with the same settings; its
+reliability and RMSE go into BENCH_JOBS.csv and every row into CROSS_ALL.csv.
 """
 from __future__ import annotations
 
@@ -242,6 +248,17 @@ def bench_job(d: str, recompute: bool = False) -> Tuple[Dict, pd.DataFrame]:
                 row['cross_reliable'] = bool(c['reliable'].astype(str).str.lower().eq('true').all())
             if 'kept_share' in c.columns:
                 row['cross_kept_share'] = float(c['kept_share'].min())
+            if 'truth_rmse_m' in c.columns and c['truth_rmse_m'].notna().any():
+                row['cross_rmse_m'] = float(c['truth_rmse_m'].dropna().iloc[0])
+                row['cross_reached'] = c['truth_reached'].dropna().iloc[0] if 'truth_reached' in c.columns else None
+        except Exception:
+            pass
+    ct = os.path.join(d, 'CROSS_FROM_TRUTH_POINTS.csv')
+    if os.path.exists(ct):
+        try:
+            c = pd.read_csv(ct)
+            if len(c) and c['cross_rmse_m'].notna().any():
+                row['cross_points_rmse_m'] = float(c['cross_rmse_m'].dropna().iloc[0])
         except Exception:
             pass
     det = detectors_of(d)
@@ -267,18 +284,24 @@ def _class(v, classes) -> str:
 
 
 def summarize(dets: pd.DataFrame, success_px: float = 3.0) -> pd.DataFrame:
-    """Per detector, overall and per sensor / cloud class / error class: jobs,
-    success rate (reached at least half of the truth points within
-    success_px pixels), median RMSE (m and px), times ranked first."""
+    """Per detector and sensor (detectors are never ranked across sensors:
+    MV, HS and HV differ), and within each sensor per cloud class and per
+    error class: jobs, success rate (reached at least half of the truth
+    points within success_px pixels), median RMSE (m and px), times first."""
     if dets.empty:
         return pd.DataFrame()
     d = dets.copy()
     d['success'] = (d['truth_reached'] >= d['truth_total'] / 2.0) & (d['rmse_px'] <= success_px)
     d['first'] = d['detector_rank'] == 1
     rows = []
-    groups = [('all', None), ('sensor', 'sensor'), ('cloud', 'cloud_class'), ('error', 'error_class')]
+    groups = [('sensor', None), ('sensor + cloud', 'cloud_class'), ('sensor + error', 'error_class')]
     for gname, col in groups:
-        parts = [('all', d)] if col is None else list(d.groupby(col))
+        parts = []
+        for sensor, gs in d.groupby('sensor'):
+            if col is None:
+                parts.append((sensor, gs))
+            else:
+                parts += [(f'{sensor} / {v}', g) for v, g in gs.groupby(col)]
         for gval, g in parts:
             for det, h in g.groupby('detector'):
                 ok = h[h['truth_reached'] >= h['truth_total'] / 2.0]
@@ -336,9 +359,12 @@ def newest_per_scene(metas: List[Dict]) -> Dict[str, Optional[str]]:
 
 
 def batch(parent: str, jobs: str = '', success_px: float = 3.0, recompute: bool = False,
-          all_jobs: bool = False) -> int:
+          all_jobs: bool = False, cross: Optional[Dict] = None) -> int:
     """Benchmark the finished jobs under parent; of several jobs on one scene
-    only the newest counts (newest_per_scene) unless all_jobs."""
+    only the newest counts (newest_per_scene) unless all_jobs. Each job used
+    is cross-checked first (automatch_cross.cross_job with the settings in
+    cross; read back when done with the same settings; cross=None skips it),
+    and its result goes into BENCH_JOBS.csv and CROSS_ALL.csv."""
     import automatch_cross as X
     found, skipped = X.find_jobs(parent, X.parse_jobs(jobs))
     for n, why in skipped.items():
@@ -346,7 +372,7 @@ def batch(parent: str, jobs: str = '', success_px: float = 3.0, recompute: bool 
     print(f'[Bench] {len(found)} finished job(s) under {parent}')
     metas = {d: job_meta(d) for d in found}
     sup = {} if all_jobs else newest_per_scene(list(metas.values()))
-    jrows, drows = [], []
+    jrows, drows, xrows = [], [], []
     for d in found:
         m = metas[d]
         if sup.get(m['job']):
@@ -354,6 +380,8 @@ def batch(parent: str, jobs: str = '', success_px: float = 3.0, recompute: bool 
             jrows.append({'job': m['job'], 'scene': m['scene'], 'automatch': m['version'], 'code': m['code'],
                           'used': False, 'superseded_by': sup[m['job']]})
             continue
+        if cross is not None:
+            xrows += X.cross_job(d, m['job'], recompute=recompute, **cross)
         row, det = bench_job(d, recompute)
         row.update({'automatch': m['version'], 'code': m['code'], 'used': True, 'superseded_by': ''})
         jrows.append(row)
@@ -368,6 +396,8 @@ def batch(parent: str, jobs: str = '', success_px: float = 3.0, recompute: bool 
         return 1
     jobs_df = pd.DataFrame(jrows)
     jobs_df.to_csv(os.path.join(parent, 'BENCH_JOBS.csv'), index=False)
+    if xrows:
+        pd.DataFrame(xrows).to_csv(os.path.join(parent, 'CROSS_ALL.csv'), index=False)
     if drows:
         dets = pd.concat(drows, ignore_index=True)
         dets['cloud_class'] = [_class(v, CLOUD_CLASSES) for v in dets['cloud_pct']]
@@ -379,12 +409,12 @@ def batch(parent: str, jobs: str = '', success_px: float = 3.0, recompute: bool 
         dets.to_csv(os.path.join(parent, 'BENCH_DETECTORS.csv'), index=False)
         s = summarize(dets, success_px)
         s.to_csv(os.path.join(parent, 'BENCH_SUMMARY.csv'), index=False)
-        top = s[s['group_by'] == 'all'].head(10)
-        print(f'[Bench] best detectors over {jobs_df["job"].nunique()} job(s) (success: half of the truth '
-              f'points within {success_px:g} px):')
-        for r in top.itertuples():
-            print(f'         {r.detector:<28} success {100 * r.success_rate:5.1f} % of {r.jobs} job(s), '
-                  f'median {r.median_rmse_px} px, first {r.times_first}x')
+        print(f'[Bench] best detectors per sensor (success: half of the truth points within {success_px:g} px):')
+        for sensor, g in s[s['group_by'] == 'sensor'].groupby('group'):
+            print(f'  {sensor}:')
+            for r in g.head(8).itertuples():
+                print(f'         {r.detector:<28} success {100 * r.success_rate:5.1f} % of {r.jobs} job(s), '
+                      f'median {r.median_rmse_px} px, first {r.times_first}x')
     print(f'[Bench] written: BENCH_JOBS.csv' + (', BENCH_DETECTORS.csv, BENCH_SUMMARY.csv' if drows else '')
           + f' in {parent}')
     return 0
@@ -397,13 +427,22 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument('--jobs', default='', help="only these job numbers, e.g. '335-366, 370'")
     ap.add_argument('--success-px', type=float, default=3.0, help='success: half the truth points within this (px)')
     ap.add_argument('--recompute', action='store_true', help='measure the scenes again (SCENE_INFO.json)')
+    ap.add_argument('--top', type=int, default=5, help='cross-check: configurations compared, one per detector')
+    ap.add_argument('--min-agree', type=int, default=0, help='cross-check: how many must agree (0: more than half)')
+    ap.add_argument('--keep', type=int, default=3, help='cross-check: agreeing configurations kept per cell')
+    ap.add_argument('--cell-km', type=float, default=25.0, help='cross-check: cell size')
+    ap.add_argument('--tolerance-m', type=float, default=None, help='cross-check: tolerance (default 1.5 x RANSAC '
+                                                                    'threshold)')
+    ap.add_argument('--no-cross', action='store_true', help='skip the cross-check')
     ap.add_argument('--all-jobs', action='store_true',
                     help='count every job; by default only the newest job of each scene counts')
     ap.add_argument('--share-local', default='', help="where the server's share is mounted here, e.g. V:\\")
     ap.add_argument('--share-server', default='', help='the same share on the server, e.g. /maintenance/')
     a = ap.parse_args(argv)
     X.SHARE = (a.share_local, a.share_server)
-    return batch(a.folder, a.jobs, a.success_px, a.recompute, a.all_jobs)
+    cross = None if a.no_cross else {'top_n': a.top, 'min_agree': a.min_agree, 'keep': a.keep,
+                                     'cell_km': a.cell_km, 'tol_m': a.tolerance_m}
+    return batch(a.folder, a.jobs, a.success_px, a.recompute, a.all_jobs, cross)
 
 
 if __name__ == '__main__':

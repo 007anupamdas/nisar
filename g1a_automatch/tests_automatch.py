@@ -744,57 +744,30 @@ def test_weights_and_failfast(tmp):
 
 
 def test_gui_cross():
-    """Cross-check dialog: the command it builds, and the results table read
-    from CROSS_ALL.csv."""
+    """Benchmark & cross-check is one tool: the dialog builds one command with
+    the cross-check settings; the results show a Cross-check tab."""
     try:
         os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
         import DPQED_automatch as G
     except Exception as e:
         print(f'SKIP  GUI cross ({type(e).__name__}: {e})')
         return
-    import contextlib
-    import io
-    import pandas as pd
-    import automatch_cross as X
     app = G.QtWidgets.QApplication.instance() or G.QtWidgets.QApplication([])
     w = G.AutoMatchWindow()
     fmt = G.QtCore.QSettings.IniFormat if G.QT_API == 'PyQt5' else G.QtCore.QSettings.Format.IniFormat
     w.settings = G.QtCore.QSettings(os.path.join(tempfile.mkdtemp(), 'cross.ini'), fmt)
     try:
-        parent = tempfile.mkdtemp()
-        job = os.path.join(parent, 'output359')
-        os.makedirs(job)
-        pd.DataFrame([{'rank': i + 1, 'channel': 'band70', 'sweep': 'win384_nfauto', 'detector': d, 'matcher': 'nn',
-                       'ransac': 'magsac630', 'truth_rmse_m': 300.0 + i, 'truth_reached': 2}
-                      for i, d in enumerate(['sift', 'disk_depth', 'hessian'])]).to_csv(
-            os.path.join(job, 'TRUTH_RANKING.csv'), index=False)
-        pd.DataFrame([{'channel': 'band70', 'sweep': 'win384_nfauto', 'detector': d, 'matcher': 'nn',
-                       'ransac': 'magsac630', 'truth_id': t, 'truth_dE_m': 64000.0, 'truth_dN_m': -6000.0,
-                       'tool_dE_m': 64000.0 + 50 * i, 'tool_dN_m': -6000.0, 'method': 'local'}
-                      for i, d in enumerate(['sift', 'disk_depth', 'hessian']) for t in (1, 2)]).to_csv(
-            os.path.join(job, 'TRUTH_POINTS.csv'), index=False)
-        dlg = w.cross_dialog(run=False)
-        dlg.folder.setText(parent)
-        dlg.top.setValue(3)
-        dlg.cell.setValue(30)
+        check('gui: one button for benchmark and cross-check, no separate cross-check button',
+              (w.btn_benchmark.text(), hasattr(w, 'btn_cross_check')), ('Benchmark & cross-check…', False))
+        dlg = w.bench_dialog(run=False)
+        dlg.folder.setText(tempfile.mkdtemp())
+        dlg.top.setValue(4)
+        dlg.keep.setValue(2)
         a = dlg.args()
-        check('gui cross: the dialog builds the batch command',
-              (a[:3], a[a.index('--top') + 1], a[a.index('--cell-km') + 1]), (['cross', parent, '--batch'], '3', '30'))
-        with contextlib.redirect_stdout(io.StringIO()):
-            rc = X.main(a[1:])
-        res = G.CrossResultDialog(os.path.join(parent, 'CROSS_ALL.csv'), w)
-        check('gui cross: the results table shows each job, cross-checked beside the best single',
-              (rc, res.table.rowCount(), res.table.item(0, 0).text()), (0, 1, 'output359'))
-        w._cross_dir = parent
-        w.proc_kind, w._events, w.proc_buffer, w.proc = 'cross', [], '', None
-        w._finished(0)
-        check('gui cross: the table opens when the check finishes', hasattr(w, '_last_cross_dialog'), True)
-        check('gui cross: the button is there', w.btn_cross_check.text(), 'Cross-check…')
-        dlg.share_local.setText('V:\\')
-        dlg.share_server.setText('/maintenance/')
-        a = dlg.args()
-        check('gui cross: the share mapping (Pack\'s) reaches the command',
-              (a[a.index('--share-local') + 1], a[a.index('--share-server') + 1]), ('V:\\', '/maintenance/'))
+        check('gui: the cross-check settings go into the benchmark command',
+              (a[0], a[a.index('--top') + 1], a[a.index('--keep') + 1], '--no-cross' in a), ('bench', '4', '2', False))
+        dlg.cross_on.setChecked(False)
+        check('gui: cross-check can be switched off', ('--no-cross' in dlg.args(), dlg.top.isEnabled()), (True, False))
     finally:
         w.close()
 
@@ -2458,8 +2431,17 @@ def test_bench(tmp):
                   for i, (d, m, r, rc) in enumerate([('dog_hynet', 'mnn', 170.0, 3), ('dog_hynet', 'snn', 199.0, 3),
                                                       ('hessian', 'snn', 195.0, 2), ('gftt', 'nn', 33000.0, 3)])]
                  ).to_csv(os.path.join(jd, 'TRUTH_RANKING.csv'), index=False)
+    pd.DataFrame([{'channel': 'band1', 'sweep': 'win512_nfauto', 'detector': d, 'matcher': m, 'ransac': 'magsac630',
+                   'truth_id': t, 'truth_dE_m': 64000.0, 'truth_dN_m': -6000.0, 'tool_dE_m': 64000.0 + off,
+                   'tool_dN_m': -6000.0, 'method': 'local'}
+                  for d, m, off in (('dog_hynet', 'mnn', 100.0), ('hessian', 'snn', 150.0), ('gftt', 'nn', 33000.0))
+                  for t in (1, 2, 3)]).to_csv(os.path.join(jd, 'TRUTH_POINTS.csv'), index=False)
     with contextlib.redirect_stdout(io.StringIO()) as buf:
-        rc = B.main([parent])
+        rc = B.main([parent, '--top', '3'])
+    check('bench: the cross-check runs with the benchmark (CROSS_ALL.csv, its RMSE in the job row)',
+          (os.path.exists(os.path.join(parent, 'CROSS_ALL.csv')),
+           abs(float(pd.read_csv(os.path.join(parent, 'BENCH_JOBS.csv'))['cross_points_rmse_m'].iloc[0]) - 125) < 30),
+          (True, True))
     jobs = pd.read_csv(os.path.join(parent, 'BENCH_JOBS.csv'))
     dets = pd.read_csv(os.path.join(parent, 'BENCH_DETECTORS.csv'))
     summ = pd.read_csv(os.path.join(parent, 'BENCH_SUMMARY.csv'))
@@ -2470,12 +2452,14 @@ def test_bench(tmp):
     check('bench: one row per detector (its best configuration), errors in pixels too',
           (sorted(dets['detector']), round(float(dets.loc[dets.detector == 'dog_hynet', 'rmse_px'].iloc[0]), 2)),
           (['dog_hynet', 'gftt', 'hessian'], round(170 / 315, 2)))
-    allg = summ[summ['group_by'] == 'all'].set_index('detector')
+    allg = summ[(summ['group_by'] == 'sensor') & (summ['group'] == 'HV')].set_index('detector')
     check('bench: success needs half the truth points within 3 px (gftt 33 km fails)',
           (allg.loc['dog_hynet', 'success_rate'], allg.loc['hessian', 'success_rate'], allg.loc['gftt', 'success_rate']),
           (1.0, 1.0, 0.0))
-    check('bench: grouped per sensor, cloud class and error class',
-          sorted(summ['group_by'].unique()), ['all', 'cloud', 'error', 'sensor'])
+    check('bench: ranked per sensor only, cloud and error classes within each sensor, never across sensors',
+          (sorted(summ['group_by'].unique()), 'all' in set(summ['group']),
+           all(str(g).startswith('HV') for g in summ['group'])),
+          (['sensor', 'sensor + cloud', 'sensor + error'], False, True))
     # an older job on the same scene is superseded by the newer one
     old = os.path.join(parent, 'output343')
     os.makedirs(old, exist_ok=True)

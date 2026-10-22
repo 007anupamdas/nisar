@@ -489,6 +489,57 @@ def _remember(d: str, kind: str, want: Dict) -> None:
         pass
 
 
+def cross_job(d: str, job: str, top_n: int = 5, min_agree: int = 0, cell_km: float = 25.0,
+              tol_m: Optional[float] = None, truth_csv: str = '', recompute: bool = False,
+              keep: int = KEEP_PER_CELL) -> List[Dict]:
+    """One finished job: the cross-check on its match files and its replay at
+    the truth points, each read back when made with the same settings. Rows
+    as in CROSS_ALL.csv."""
+    import glob as _glob
+    rows: List[Dict] = []
+    print(f'[Cross] ===== {job}')
+    want = {'top_n': top_n, 'min_agree': min_agree, 'keep': keep, 'cell_km': cell_km, 'tolerance_m': tol_m,
+            'truth_csv': truth_csv or ''}
+    if not recompute and _reusable(d, 'matches', want, 'CROSS_SUMMARY.csv', ['TRUTH_RANKING.csv',
+                                                                              'RUN_MANIFEST.csv']):
+        for r in pd.read_csv(os.path.join(d, 'CROSS_SUMMARY.csv')).to_dict('records'):
+            rows.append({'job': job, 'mode': 'matches', 'reused': True, **r})
+        print(f'[Cross] {job}: cross-check on the matches read back from CROSS_SUMMARY.csv (same settings)')
+    elif _glob.glob(os.path.join(d, '**', 'filtered_*'), recursive=True):
+        try:
+            tcsv = truth_csv or job_truth_csv(d)
+            print(f'[Cross] {job}: ground truth ' + (tcsv if tcsv else 'none found in its settings'))
+            res = run(d, top_n, min_agree, cell_km, tol_m, tcsv, keep=keep)
+            for ch, r in res.items():
+                rows.append({'job': job, 'mode': 'matches', 'reused': False,
+                             **{k: v for k, v in r.items() if k != 'channel'}, 'channel': ch})
+            if res:
+                _remember(d, 'matches', want)
+        except Exception as e:
+            print(f'[Cross] {job}: {type(e).__name__}: {e}')
+    tp, tr = os.path.join(d, 'TRUTH_POINTS.csv'), os.path.join(d, 'TRUTH_RANKING.csv')
+    want_t = {k: want[k] for k in ('top_n', 'min_agree', 'tolerance_m')}
+    if os.path.exists(tp) and os.path.exists(tr):
+        try:
+            reuse = not recompute and _reusable(d, 'truth points', want_t, 'CROSS_FROM_TRUTH_POINTS.csv',
+                                                ['TRUTH_POINTS.csv', 'TRUTH_RANKING.csv'])
+            if reuse:
+                t = pd.read_csv(os.path.join(d, 'CROSS_FROM_TRUTH_POINTS.csv'))
+                print(f'[Cross] {job}: truth-point replay read back from CROSS_FROM_TRUTH_POINTS.csv')
+            else:
+                t = from_truth_points(tp, tr, top_n, min_agree, tol_m)
+                t.to_csv(os.path.join(d, 'CROSS_FROM_TRUTH_POINTS.csv'), index=False)
+                _remember(d, 'truth points', want_t)
+            for r in t.to_dict('records'):
+                rows.append({'job': job, 'mode': 'truth points', 'reused': reuse, **r})
+                print(f"[Cross] {job} {r['channel']}: cross-checked {r['cross_rmse_m'] or float('nan'):.0f} m at "
+                      f"{r['cross_reached']}/{r['truth_total']} points; best single "
+                      f"{r['best_single_rmse_m']:.0f} m ({r['best_single']})")
+        except Exception as e:
+            print(f'[Cross] {job} truth points: {type(e).__name__}: {e}')
+    return rows
+
+
 def batch(parent: str, top_n: int = 5, min_agree: int = 0, cell_km: float = 25.0,
           tol_m: Optional[float] = None, truth_csv: str = '', jobs: str = '', recompute: bool = False,
           keep: int = KEEP_PER_CELL) -> int:
@@ -500,54 +551,13 @@ def batch(parent: str, top_n: int = 5, min_agree: int = 0, cell_km: float = 25.0
     already cross-checked with the same settings is read back, not computed
     again (recompute=True redoes it). One row per job and channel in
     parent/CROSS_ALL.csv, with 'reused' marking the rows read back."""
-    import glob as _glob
     found, skipped = find_jobs(parent, parse_jobs(jobs))
     for name, why in skipped.items():
         print(f'[Cross] {name}: skipped, {why}')
     print(f'[Cross] {len(found)} finished job(s) to check under {parent}')
     rows = []
     for d in found:
-        job = os.path.relpath(d, parent)
-        print(f'[Cross] ===== {job}')
-        want = {'top_n': top_n, 'min_agree': min_agree, 'keep': keep, 'cell_km': cell_km, 'tolerance_m': tol_m,
-                'truth_csv': truth_csv or ''}
-        if not recompute and _reusable(d, 'matches', want, 'CROSS_SUMMARY.csv', ['TRUTH_RANKING.csv',
-                                                                                  'RUN_MANIFEST.csv']):
-            for r in pd.read_csv(os.path.join(d, 'CROSS_SUMMARY.csv')).to_dict('records'):
-                rows.append({'job': job, 'mode': 'matches', 'reused': True, **r})
-            print(f'[Cross] {job}: cross-check on the matches read back from CROSS_SUMMARY.csv (same settings)')
-        elif _glob.glob(os.path.join(d, '**', 'filtered_*'), recursive=True):
-            try:
-                tcsv = truth_csv or job_truth_csv(d)
-                print(f'[Cross] {job}: ground truth ' + (tcsv if tcsv else 'none found in its settings'))
-                res = run(d, top_n, min_agree, cell_km, tol_m, tcsv, keep=keep)
-                for ch, r in res.items():
-                    rows.append({'job': job, 'mode': 'matches', 'reused': False,
-                                 **{k: v for k, v in r.items() if k != 'channel'}, 'channel': ch})
-                if res:
-                    _remember(d, 'matches', want)
-            except Exception as e:
-                print(f'[Cross] {job}: {type(e).__name__}: {e}')
-        tp, tr = os.path.join(d, 'TRUTH_POINTS.csv'), os.path.join(d, 'TRUTH_RANKING.csv')
-        want_t = {k: want[k] for k in ('top_n', 'min_agree', 'tolerance_m')}
-        if os.path.exists(tp) and os.path.exists(tr):
-            try:
-                reuse = not recompute and _reusable(d, 'truth points', want_t, 'CROSS_FROM_TRUTH_POINTS.csv',
-                                                    ['TRUTH_POINTS.csv', 'TRUTH_RANKING.csv'])
-                if reuse:
-                    t = pd.read_csv(os.path.join(d, 'CROSS_FROM_TRUTH_POINTS.csv'))
-                    print(f'[Cross] {job}: truth-point replay read back from CROSS_FROM_TRUTH_POINTS.csv')
-                else:
-                    t = from_truth_points(tp, tr, top_n, min_agree, tol_m)
-                    t.to_csv(os.path.join(d, 'CROSS_FROM_TRUTH_POINTS.csv'), index=False)
-                    _remember(d, 'truth points', want_t)
-                for r in t.to_dict('records'):
-                    rows.append({'job': job, 'mode': 'truth points', 'reused': reuse, **r})
-                    print(f"[Cross] {job} {r['channel']}: cross-checked {r['cross_rmse_m'] or float('nan'):.0f} m at "
-                          f"{r['cross_reached']}/{r['truth_total']} points; best single "
-                          f"{r['best_single_rmse_m']:.0f} m ({r['best_single']})")
-            except Exception as e:
-                print(f'[Cross] {job} truth points: {type(e).__name__}: {e}')
+        rows += cross_job(d, os.path.relpath(d, parent), top_n, min_agree, cell_km, tol_m, truth_csv, recompute, keep)
     if rows:
         out = os.path.join(parent, 'CROSS_ALL.csv')
         pd.DataFrame(rows).to_csv(out, index=False)
