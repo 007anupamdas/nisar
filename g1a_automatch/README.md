@@ -486,6 +486,11 @@ For each job it records:
 - every detector's best result against the truth, in metres and pixels;
 - the cross-check's reliability, when the job has one.
 
+Of several jobs on one scene, only the newest counts. Newest means the
+newest automatch version in its log, then the latest finish, then the
+highest job number. The older ones are listed in `BENCH_JOBS.csv` as
+superseded; `--all-jobs` (GUI: *count every job*) counts them all.
+
 It writes three files:
 - `BENCH_JOBS.csv`: one row per job.
 - `BENCH_DETECTORS.csv`: one row per job × detector.

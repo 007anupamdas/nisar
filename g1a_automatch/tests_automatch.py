@@ -2476,6 +2476,30 @@ def test_bench(tmp):
           (1.0, 1.0, 0.0))
     check('bench: grouped per sensor, cloud class and error class',
           sorted(summ['group_by'].unique()), ['all', 'cloud', 'error', 'sensor'])
+    # an older job on the same scene is superseded by the newer one
+    old = os.path.join(parent, 'output343')
+    os.makedirs(old, exist_ok=True)
+    for n in ('job_used.json', 'RUN_MANIFEST.csv', 'TRUTH_RANKING.csv'):
+        shutil.copyfile(os.path.join(jd, n), os.path.join(old, n))
+    with open(os.path.join(old, 'automatch.log'), 'w') as f:
+        f.write('[Job] automatch 2026.10.05, code b17d90f9 (x)\n[Job] done in 3 min\n')
+    with open(os.path.join(jd, 'automatch.log'), 'w') as f:
+        f.write('[Job] automatch 2026.10.15, code da860f29 (x)\n[Job] done in 9 min\n')
+    with contextlib.redirect_stdout(io.StringIO()):
+        B.main([parent])
+    jobs = pd.read_csv(os.path.join(parent, 'BENCH_JOBS.csv')).set_index('job')
+    dets = pd.read_csv(os.path.join(parent, 'BENCH_DETECTORS.csv'))
+    check('bench: of two jobs on one scene the newer version counts, the older is listed as superseded',
+          (bool(jobs.loc['output366', 'used']), bool(jobs.loc['output343', 'used']), jobs.loc['output343', 'superseded_by'],
+           sorted(dets['job'].unique())), (True, False, 'output366', ['output366']))
+    check('bench: newest by version first, then finish time, then number',
+          B.newest_per_scene([{'job': 'a', 'scene': 's', 'version': '2026.10.15', 'finished': 1.0, 'number': 1},
+                              {'job': 'b', 'scene': 's', 'version': '2026.10.05', 'finished': 9.0, 'number': 9}]),
+          {'a': None, 'b': 'a'})
+    with contextlib.redirect_stdout(io.StringIO()):
+        B.main([parent, '--all-jobs'])
+    check('bench: --all-jobs counts both', sorted(pd.read_csv(os.path.join(parent, 'BENCH_DETECTORS.csv'))['job'].unique()),
+          ['output343', 'output366'])
     calls = []
     orig = B.scene_info
     B.scene_info = lambda *a, **k: (calls.append(1), orig(*a, **k))[1]
@@ -2503,8 +2527,8 @@ def test_bench(tmp):
         check('bench gui: the dialog builds the command', (a[:2], a[a.index('--jobs') + 1]), (['bench', parent], '360-370'))
         res = G.BenchResultDialog(parent, w)
         res.group.setCurrentText('sensor: HV')
-        check('bench gui: jobs and the per-group detector table are shown',
-              (res.jobs_table.rowCount(), res.sum_table.rowCount() >= 3), (1, True))
+        check('bench gui: jobs (superseded ones listed too) and the per-group detector table are shown',
+              (res.jobs_table.rowCount(), res.sum_table.rowCount() >= 3), (2, True))
         w._bench_dir = parent
         w.proc_kind, w._events, w.proc_buffer, w.proc = 'bench', [], '', None
         w._finished(0)

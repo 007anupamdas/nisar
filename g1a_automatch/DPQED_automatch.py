@@ -976,6 +976,10 @@ class BenchDialog(QtWidgets.QDialog):
         f.addRow('Share mapping', row)
         self.recompute = QtWidgets.QCheckBox('measure the scenes again (else SCENE_INFO.json is read back)')
         f.addRow(self.recompute)
+        self.all_jobs = QtWidgets.QCheckBox('count every job (else only the newest job of each scene)')
+        self.all_jobs.setToolTip('Newest: the newest automatch version in its log, then the latest finish, '
+                                 'then the highest job number. The others are listed as superseded.')
+        f.addRow(self.all_jobs)
         bb = QtWidgets.QDialogButtonBox()
         bb.addButton('Run benchmark', QtWidgets.QDialogButtonBox.ButtonRole.AcceptRole
                      if QT_API != 'PyQt5' else QtWidgets.QDialogButtonBox.AcceptRole)
@@ -1009,6 +1013,8 @@ class BenchDialog(QtWidgets.QDialog):
             a += ['--share-local', self.share_local.text().strip(), '--share-server', self.share_server.text().strip()]
         if self.recompute.isChecked():
             a += ['--recompute']
+        if self.all_jobs.isChecked():
+            a += ['--all-jobs']
         return a
 
 
@@ -1018,7 +1024,8 @@ class BenchResultDialog(QtWidgets.QDialog):
     JOB_COLS = [('job', 'job'), ('sensor', 'sensor'), ('band', 'band'), ('pixel_m', 'pixel m'),
                 ('error_km', 'error km'), ('error_spread_km', 'error spread km'), ('cloud_pct', 'cloud %'),
                 ('texture', 'texture'), ('truth_points', 'truth pts'), ('best_detector', 'best detector'),
-                ('best_rmse_m', 'best RMSE m'), ('best_rmse_px', 'best RMSE px'), ('cross_reliable', 'cross reliable')]
+                ('best_rmse_m', 'best RMSE m'), ('best_rmse_px', 'best RMSE px'), ('cross_reliable', 'cross reliable'),
+                ('automatch', 'version'), ('used', 'used'), ('superseded_by', 'superseded by')]
     SUM_COLS = [('detector', 'detector'), ('jobs', 'jobs'), ('success_rate', 'success rate'),
                 ('median_rmse_px', 'median px'), ('median_rmse_m', 'median m'), ('times_first', 'first')]
 

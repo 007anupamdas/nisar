@@ -13,6 +13,10 @@ records, without matching anything again:
   detectors every detector's best result against the ground truth
             (TRUTH_RANKING.csv), in metres and in pixels
 
+Of several jobs on one scene only the newest counts: the newest automatch
+version in its log, then the latest finish, then the highest job number; the
+others are listed as superseded (--all-jobs counts them all).
+
 and writes, in that folder:
 
   BENCH_JOBS.csv       one row per job: the scene, its error, clouds, best detector
@@ -288,15 +292,70 @@ def summarize(dets: pd.DataFrame, success_px: float = 3.0) -> pd.DataFrame:
                            ascending=[True, True, False, True])
 
 
-def batch(parent: str, jobs: str = '', success_px: float = 3.0, recompute: bool = False) -> int:
+def job_meta(d: str) -> Dict:
+    """What decides which of several jobs on one scene is the newest: the
+    automatch version in its log's first lines, when it finished
+    (RUN_MANIFEST.csv), its number."""
+    job = _job_used(d)
+    name = os.path.basename(os.path.normpath(d))
+    scene = os.path.splitext(os.path.basename(str(job.get('input_path') or '').replace('\\', '/')))[0]
+    version, code = '', ''
+    lp = os.path.join(d, 'automatch.log')
+    if os.path.exists(lp):
+        try:
+            with open(lp, encoding='utf-8', errors='replace') as f:
+                head = f.read(20000)
+            m = re.search(r'automatch (\d{4}\.\d{2}\.\d{2}), code (\w+)', head)
+            if m:
+                version, code = m.group(1), m.group(2)
+        except OSError:
+            pass
+    done = 0.0
+    for n in ('RUN_MANIFEST.csv', 'TRUTH_RANKING.csv', 'job_used.json'):
+        if os.path.exists(os.path.join(d, n)):
+            done = os.path.getmtime(os.path.join(d, n))
+            break
+    num = re.search(r'(\d+)\D*$', name)
+    return {'job': name, 'scene': scene or name, 'version': version, 'code': code, 'finished': done,
+            'number': int(num.group(1)) if num else 0}
+
+
+def newest_per_scene(metas: List[Dict]) -> Dict[str, Optional[str]]:
+    """{job: None when it is the one used for its scene, else the job that
+    supersedes it}: per scene the newest automatch version, then the latest
+    finish, then the highest job number."""
+    out: Dict[str, Optional[str]] = {}
+    by: Dict[str, List[Dict]] = {}
+    for m in metas:
+        by.setdefault(m['scene'], []).append(m)
+    for ms in by.values():
+        best = max(ms, key=lambda m: (m['version'], m['finished'], m['number']))
+        for m in ms:
+            out[m['job']] = None if m is best else best['job']
+    return out
+
+
+def batch(parent: str, jobs: str = '', success_px: float = 3.0, recompute: bool = False,
+          all_jobs: bool = False) -> int:
+    """Benchmark the finished jobs under parent; of several jobs on one scene
+    only the newest counts (newest_per_scene) unless all_jobs."""
     import automatch_cross as X
     found, skipped = X.find_jobs(parent, X.parse_jobs(jobs))
     for n, why in skipped.items():
         print(f'[Bench] {n}: skipped, {why}')
     print(f'[Bench] {len(found)} finished job(s) under {parent}')
+    metas = {d: job_meta(d) for d in found}
+    sup = {} if all_jobs else newest_per_scene(list(metas.values()))
     jrows, drows = [], []
     for d in found:
+        m = metas[d]
+        if sup.get(m['job']):
+            print(f"[Bench] {m['job']}: {m['scene']} superseded by {sup[m['job']]} (newer job on the same scene)")
+            jrows.append({'job': m['job'], 'scene': m['scene'], 'automatch': m['version'], 'code': m['code'],
+                          'used': False, 'superseded_by': sup[m['job']]})
+            continue
         row, det = bench_job(d, recompute)
+        row.update({'automatch': m['version'], 'code': m['code'], 'used': True, 'superseded_by': ''})
         jrows.append(row)
         print(f"[Bench] {row['job']}: {row['sensor']} {row['band']}, error {row.get('error_km', '?')} km, "
               f"clouds {row.get('cloud_pct', '?')} %, best {row.get('best_detector', '-')} "
@@ -338,11 +397,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument('--jobs', default='', help="only these job numbers, e.g. '335-366, 370'")
     ap.add_argument('--success-px', type=float, default=3.0, help='success: half the truth points within this (px)')
     ap.add_argument('--recompute', action='store_true', help='measure the scenes again (SCENE_INFO.json)')
+    ap.add_argument('--all-jobs', action='store_true',
+                    help='count every job; by default only the newest job of each scene counts')
     ap.add_argument('--share-local', default='', help="where the server's share is mounted here, e.g. V:\\")
     ap.add_argument('--share-server', default='', help='the same share on the server, e.g. /maintenance/')
     a = ap.parse_args(argv)
     X.SHARE = (a.share_local, a.share_server)
-    return batch(a.folder, a.jobs, a.success_px, a.recompute)
+    return batch(a.folder, a.jobs, a.success_px, a.recompute, a.all_jobs)
 
 
 if __name__ == '__main__':
