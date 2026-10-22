@@ -12,8 +12,8 @@ more likely right. So:
    by how well each agrees with all the others (no truth needed);
 2. the scene is cut into cells (cross_cell_km); in each cell every top
    configuration with matches gives its median offset, and the cell counts
-   when at least cross_min_agree of them lie within the consensus tolerance
-   of their common median;
+   when at least cross_min_agree of them lie within 1.5 x the RANSAC
+   threshold (3 px by default) of their common median;
 3. the matches of the agreeing configurations in those cells, each within
    the tolerance of that median, are written as RIVAL_CROSS_<channel>.csv
    (+ _detail.csv naming the detector of every point), and CROSS_SUMMARY.csv
@@ -166,7 +166,9 @@ def run(output_dir: str, top_n: int = 5, min_agree: int = 0, cell_km: float = 25
         settings = T.consensus_settings(output_dir) or {}
     except Exception:                      # a folder copied off the server: input paths do not resolve here
         settings = {}
-    tol = float(tol_m or settings.get('tolerance_m') or 0.0)
+    # not the chip-consensus tolerance: jobs set that loosely (job 364: 31.5 km), and
+    # then nothing was filtered; 1.5 x the RANSAC threshold (3 px by default) instead
+    tol = float(tol_m or 0.0)
     cell_m = float(cell_km) * 1000.0
     cfgs = cfgs if cfgs is not None else _configs(output_dir)
     rank_path = os.path.join(output_dir, 'TRUTH_RANKING.csv')
@@ -510,8 +512,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument('--top', type=int, default=5, help='configurations compared, one per detector (default 5)')
     ap.add_argument('--min-agree', type=int, default=0, help='how many must agree in a cell (default: more than half)')
     ap.add_argument('--cell-km', type=float, default=25.0, help='cell size (default 25 km)')
-    ap.add_argument('--tolerance-m', type=float, default=None, help='agreement tolerance (default: the job\'s '
-                                                                         'consensus tolerance)')
+    ap.add_argument('--tolerance-m', type=float, default=None, help='agreement tolerance (default: 1.5 x the '
+                                                                         'RANSAC threshold, 3 px)')
     ap.add_argument('--truth', default='', help="ground-truth CSV, to score the result (default: each job's "
                                                  "own truth_csv, from its job_used.json)")
     ap.add_argument('--batch', action='store_true',

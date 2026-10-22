@@ -794,7 +794,7 @@ class CrossDialog(QtWidgets.QDialog):
         self.tol = QtWidgets.QDoubleSpinBox()
         self.tol.setRange(0, 100000)
         self.tol.setSuffix(' m')
-        self.tol.setSpecialValueText('automatic (the job\'s consensus tolerance)')
+        self.tol.setSpecialValueText('automatic (1.5 x the RANSAC threshold, 3 px)')
         f.addRow('Agreement tolerance', self.tol)
         self.recompute = QtWidgets.QCheckBox('compute again where a cross-check with these settings exists')
         self.recompute.setToolTip('Off: folders already cross-checked with the same settings are read back '

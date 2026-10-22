@@ -411,7 +411,9 @@ are checked against each other:
 - **Agreement per cell:** the scene is cut into `cross_cell_km` cells
   (default 25 km). In each cell every top configuration with matches gives
   its median offset. The cell counts when `cross_min_agree` of them (default
-  more than half) lie within the consensus tolerance of their common median.
+  more than half) lie within 1.5 × the RANSAC threshold (3 px by default) of
+  their common median. The chip-consensus tolerance is not used, because
+  jobs set it loosely (job 364: 31.5 km) and then nothing would be filtered.
 - **Output:**
   - `RIVAL_CROSS_<channel>.csv` (+ `_detail.csv` naming each point's
     detector): the matches of the agreeing configurations in the kept cells.
