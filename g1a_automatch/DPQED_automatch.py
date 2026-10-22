@@ -912,6 +912,169 @@ class CrossResultDialog(QtWidgets.QDialog):
         lay.addLayout(row)
 
 
+def csv_table(path, cols=None, where=None):
+    """A read-only table of a CSV (all columns, or [(key, header)]), rows
+    filtered by where(row) when given."""
+    import csv as _csv
+    rows = list(_csv.DictReader(open(path, encoding='utf-8'))) if os.path.exists(path) else []
+    if where:
+        rows = [r for r in rows if where(r)]
+    if cols is None:
+        cols = [(k, k) for k in (rows[0].keys() if rows else [])]
+    t = QtWidgets.QTableWidget(len(rows), len(cols))
+    t.setHorizontalHeaderLabels([c[1] for c in cols])
+    t.setEditTriggers(NO_EDIT)
+    t.setSelectionBehavior(SEL_ROWS)
+    for r, row in enumerate(rows):
+        for c, (key, _) in enumerate(cols):
+            v = row.get(key) or ''
+            try:
+                if v and ('rmse' in key or key.endswith('_pct') or key.endswith('_km') or key.endswith('_rate')):
+                    v = f'{float(v):.3g}' if abs(float(v)) < 10 else f'{float(v):.0f}'
+            except ValueError:
+                pass
+            t.setItem(r, c, QtWidgets.QTableWidgetItem(str(v)))
+    t.setSortingEnabled(True)
+    t.resizeColumnsToContents()
+    return t
+
+
+class BenchDialog(QtWidgets.QDialog):
+    """Benchmark finished jobs (automatch_bench): which detector does best on
+    which kind of image (sensor, clouds, error level)."""
+
+    def __init__(self, settings, defaults, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('Benchmark detectors over finished jobs')
+        self.settings = settings
+        f = QtWidgets.QFormLayout(self)
+        head = QtWidgets.QLabel('Reads every finished job (nothing is matched again): its sensor and band, its error '
+                                'from its own ground truth, a cloud estimate of the band it ran (SCENE_CLOUD.png '
+                                'shows it) and every detector\'s result. Writes BENCH_JOBS / BENCH_DETECTORS / '
+                                'BENCH_SUMMARY.csv in the folder.')
+        head.setWordWrap(True)
+        f.addRow(head)
+        self.folder = PathRow('dir')
+        self.folder.setText(settings.value('bench_folder', '') or settings.value('cross_folder', '')
+                            or defaults.get('output_dir', ''))
+        f.addRow('Job output folder(s)', self.folder)
+        self.jobs = QtWidgets.QLineEdit(settings.value('bench_jobs', '') or '')
+        self.jobs.setPlaceholderText('all finished automatch jobs (or e.g. 335-366, 370)')
+        f.addRow('Jobs', self.jobs)
+        self.success = QtWidgets.QDoubleSpinBox()
+        self.success.setRange(0.5, 50)
+        self.success.setSuffix(' px')
+        self.success.setValue(3.0)
+        self.success.setToolTip('A detector succeeds on a job when it reaches half of the truth points within this')
+        f.addRow('Success within', self.success)
+        self.share_local = QtWidgets.QLineEdit(settings.value('pack/share_local', 'V:\\'))
+        self.share_server = QtWidgets.QLineEdit(settings.value('pack/share_server', '/maintenance/'))
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(self.share_local)
+        row.addWidget(QtWidgets.QLabel('here  =  on the server'))
+        row.addWidget(self.share_server)
+        f.addRow('Share mapping', row)
+        self.recompute = QtWidgets.QCheckBox('measure the scenes again (else SCENE_INFO.json is read back)')
+        f.addRow(self.recompute)
+        bb = QtWidgets.QDialogButtonBox()
+        bb.addButton('Run benchmark', QtWidgets.QDialogButtonBox.ButtonRole.AcceptRole
+                     if QT_API != 'PyQt5' else QtWidgets.QDialogButtonBox.AcceptRole)
+        bb.addButton(QtWidgets.QDialogButtonBox.StandardButton.Cancel if QT_API != 'PyQt5'
+                     else QtWidgets.QDialogButtonBox.Cancel)
+        bb.accepted.connect(self._ok)
+        bb.rejected.connect(self.reject)
+        f.addRow(bb)
+
+    def _ok(self):
+        if not self.folder.text() or not os.path.isdir(self.folder.text()):
+            QtWidgets.QMessageBox.warning(self, 'Benchmark', 'Choose an existing folder.')
+            return
+        try:
+            import automatch_cross as X
+            X.parse_jobs(self.jobs.text())
+        except ValueError as e:
+            QtWidgets.QMessageBox.warning(self, 'Benchmark', str(e))
+            return
+        self.settings.setValue('bench_folder', self.folder.text())
+        self.settings.setValue('bench_jobs', self.jobs.text())
+        self.settings.setValue('pack/share_local', self.share_local.text().strip())
+        self.settings.setValue('pack/share_server', self.share_server.text().strip())
+        self.accept()
+
+    def args(self):
+        a = ['bench', self.folder.text(), '--success-px', f'{self.success.value():g}']
+        if self.jobs.text().strip():
+            a += ['--jobs', self.jobs.text().strip()]
+        if self.share_local.text().strip() and self.share_server.text().strip():
+            a += ['--share-local', self.share_local.text().strip(), '--share-server', self.share_server.text().strip()]
+        if self.recompute.isChecked():
+            a += ['--recompute']
+        return a
+
+
+class BenchResultDialog(QtWidgets.QDialog):
+    """BENCH_JOBS.csv and BENCH_SUMMARY.csv: the jobs, and the detectors per group."""
+
+    JOB_COLS = [('job', 'job'), ('sensor', 'sensor'), ('band', 'band'), ('pixel_m', 'pixel m'),
+                ('error_km', 'error km'), ('error_spread_km', 'error spread km'), ('cloud_pct', 'cloud %'),
+                ('texture', 'texture'), ('truth_points', 'truth pts'), ('best_detector', 'best detector'),
+                ('best_rmse_m', 'best RMSE m'), ('best_rmse_px', 'best RMSE px'), ('cross_reliable', 'cross reliable')]
+    SUM_COLS = [('detector', 'detector'), ('jobs', 'jobs'), ('success_rate', 'success rate'),
+                ('median_rmse_px', 'median px'), ('median_rmse_m', 'median m'), ('times_first', 'first')]
+
+    def __init__(self, folder, parent=None):
+        super().__init__(parent)
+        import csv as _csv
+        self.setWindowTitle('Detector benchmark')
+        self.resize(1250, 640)
+        self.folder = folder
+        lay = QtWidgets.QVBoxLayout(self)
+        tabs = QtWidgets.QTabWidget()
+        self.jobs_table = csv_table(os.path.join(folder, 'BENCH_JOBS.csv'), self.JOB_COLS)
+        self.jobs_table.cellDoubleClicked.connect(lambda r, c: QtGui.QDesktopServices.openUrl(
+            QtCore.QUrl.fromLocalFile(os.path.join(folder, self.jobs_table.item(r, 0).text()))))
+        tabs.addTab(self.jobs_table, 'Jobs')
+        w = QtWidgets.QWidget()
+        wl = QtWidgets.QVBoxLayout(w)
+        top = QtWidgets.QHBoxLayout()
+        top.addWidget(QtWidgets.QLabel('Group'))
+        self.group = QtWidgets.QComboBox()
+        sp = os.path.join(folder, 'BENCH_SUMMARY.csv')
+        groups = []
+        if os.path.exists(sp):
+            for r in _csv.DictReader(open(sp, encoding='utf-8')):
+                g = f"{r['group_by']}: {r['group']}"
+                if g not in groups:
+                    groups.append(g)
+        self.group.addItems(groups or ['all: all'])
+        top.addWidget(self.group, 1)
+        wl.addLayout(top)
+        self.sum_holder = QtWidgets.QVBoxLayout()
+        wl.addLayout(self.sum_holder, 1)
+        self.sum_table = None
+        self.group.currentTextChanged.connect(self._show_group)
+        self._show_group(self.group.currentText())
+        tabs.addTab(w, 'Detectors')
+        lay.addWidget(tabs, 1)
+        row = QtWidgets.QHBoxLayout()
+        b = QtWidgets.QPushButton('Open folder')
+        b.clicked.connect(lambda: QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(folder)))
+        row.addWidget(b)
+        row.addStretch(1)
+        close = QtWidgets.QPushButton('Close')
+        close.clicked.connect(self.accept)
+        row.addWidget(close)
+        lay.addLayout(row)
+
+    def _show_group(self, text):
+        gb, _, gv = text.partition(': ')
+        if self.sum_table is not None:
+            self.sum_table.setParent(None)
+        self.sum_table = csv_table(os.path.join(self.folder, 'BENCH_SUMMARY.csv'), self.SUM_COLS,
+                                   lambda r: r['group_by'] == gb and r['group'] == gv)
+        self.sum_holder.addWidget(self.sum_table)
+
+
 class AutoMatchWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
@@ -952,7 +1115,8 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
                             ('Preflight', self.preflight), ('Run', self.run_job),
                             ('Queue run', self.queue_run),
                             ('Stop', self.stop), ('Open output', self.open_output),
-                            ('Pack for server…', self.pack_dialog), ('Cross-check…', self.cross_dialog)):
+                            ('Pack for server…', self.pack_dialog), ('Cross-check…', self.cross_dialog),
+                            ('Benchmark…', self.bench_dialog)):
             b = QtWidgets.QPushButton(label)
             b.clicked.connect(slot)
             btns.addWidget(b)
@@ -1675,10 +1839,10 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.proc_buffer = ''
         self._events = []
         self.proc.start(sys.executable, [JOB_SCRIPT] + args)
-        busy = kind in ('run', 'preflight', 'pack', 'cross')
+        busy = kind in ('run', 'preflight', 'pack', 'cross', 'bench')
         self.btn_run.setEnabled(not busy)
         self.btn_preflight.setEnabled(not busy)
-        self.btn_stop.setEnabled(kind in ('run', 'pack', 'cross'))
+        self.btn_stop.setEnabled(kind in ('run', 'pack', 'cross', 'bench'))
         self.lbl_status.setText(f'{kind} …')
         return True
 
@@ -1754,6 +1918,15 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             self._show_preflight(ev)
         elif kind == 'pack':
             self._pack_finished(code)
+        elif kind == 'bench':
+            folder = getattr(self, '_bench_dir', '')
+            if code == 0 and os.path.exists(os.path.join(folder, 'BENCH_JOBS.csv')):
+                dlg = BenchResultDialog(folder, self)
+                dlg.show()
+                self._last_bench_dialog = dlg
+                self.lbl_status.setText(f'Benchmark written in {folder}')
+            else:
+                self.lbl_status.setText('Benchmark found no finished job — see Log.')
         elif kind == 'cross':
             path = os.path.join(getattr(self, '_cross_dir', ''), 'CROSS_ALL.csv')
             if code == 0 and os.path.exists(path):
@@ -1934,6 +2107,24 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             n = max(1000, min(want, cap))
             parts.append(f'{w} px: {n:,}' + (f' (capped; {want:,} at this density)' if want > cap else ''))
         self.lbl_kp.setText('auto gives ' + ' · '.join(parts) if parts else '')
+
+    def bench_dialog(self, *_, run=True):
+        """Benchmark finished jobs from a dialog; run=False returns it unshown (tests)."""
+        try:
+            job = self.get_job()
+        except ValueError:
+            job = dict(DEFAULT_JOB)
+        dlg = BenchDialog(self.settings, job, self)
+        dlg.accepted.connect(lambda: self._start_bench(dlg))
+        if run:
+            dlg.exec() if hasattr(dlg, 'exec') else dlg.exec_()
+        return dlg
+
+    def _start_bench(self, dlg):
+        self._bench_dir = dlg.folder.text()
+        args = dlg.args()
+        self.log.appendPlainText('--- ' + ' '.join(args))
+        self._start(args, 'bench')
 
     def cross_dialog(self, *_, run=True):
         """Cross-check finished jobs from a dialog; run=False returns the

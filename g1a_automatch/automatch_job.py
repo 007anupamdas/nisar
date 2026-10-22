@@ -52,7 +52,7 @@ PROGRESS_PREFIX = '@@AUTOMATCH '
 AUTOMATCH_VERSION = '2026.10.15'
 CODE_FILES = ('automatch_engine.py', 'automatch_job.py', 'automatch_imcui.py', 'automatch_refs.py',
               'automatch_rival.py', 'automatch_truth.py', 'automatch_weights.py', 'automatch_gpuaas.py',
-              'automatch_native.py', 'imw_configs.py', 'automatch_cross.py')
+              'automatch_native.py', 'imw_configs.py', 'automatch_cross.py', 'automatch_bench.py')
 
 
 def code_fingerprint() -> str:
@@ -1088,6 +1088,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     c.add_argument('rest', nargs=argparse.REMAINDER)
     sub.add_parser('cross', help='keep the matches the top configurations agree on '
                                  '(options: python automatch_cross.py -h)').add_argument('rest', nargs=argparse.REMAINDER)
+    sub.add_parser('bench', help='how each detector does on which kind of image, from finished jobs '
+                                 '(options: python automatch_bench.py -h)').add_argument('rest', nargs=argparse.REMAINDER)
     k = sub.add_parser('pack', help='copy a scene, the references it needs and server settings for the '
                                     'GPU server (options: python automatch_pack.py -h)')
     k.add_argument('rest', nargs=argparse.REMAINDER)
@@ -1099,6 +1101,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     if argv and argv[0] == 'cross':
         import automatch_cross as X
         return X.main(list(argv[1:]))
+    if argv and argv[0] == 'bench':
+        import automatch_bench as B
+        return B.main(list(argv[1:]))
     if argv and argv[0] == 'pack':
         import automatch_pack as P
         return P.main(list(argv[1:]))

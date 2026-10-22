@@ -472,6 +472,42 @@ configurations' estimates are compared, and their median is used where
 enough agree. It needs only the two small CSVs each job with ground truth
 writes. Its tolerance defaults to 1.5 × the RANSAC threshold.
 
+## Benchmark: which detector on which kind of image
+
+`python automatch_job.py bench <folder of job outputs> [--jobs 335-366]`
+(GUI: **Benchmark…**) reads every finished job; nothing is matched again.
+For each job it records:
+- the sensor (MV / HS / HV from the G1A name), the band run and the pixel size;
+- the image's error from the job's own ground truth: the mean In − Ref, and
+  how much it changes across the scene;
+- a cloud estimate of the band that ran, with `SCENE_CLOUD.png` showing the
+  mask in red so you can check it by eye;
+- a ground-texture measure;
+- every detector's best result against the truth, in metres and pixels;
+- the cross-check's reliability, when the job has one.
+
+It writes three files:
+- `BENCH_JOBS.csv`: one row per job.
+- `BENCH_DETECTORS.csv`: one row per job × detector.
+- `BENCH_SUMMARY.csv`: per detector, the number of jobs, the success rate
+  (half of the truth points reached within `--success-px`, default 3 px),
+  the median error and how often it was first. These are given overall,
+  per sensor, per cloud class (<10 %, 10–30 %, >30 %) and per error class
+  (<20 km, 20–80 km, >80 km).
+
+The GUI shows the jobs and, per group, the detector table, sortable by
+column.
+
+The cloud estimate is needed because G1A comes with no cloud mask.
+- How it works: the band's brightness is split in two (Otsu). When the two
+  groups are clearly apart (4 standard deviations), the bright pixels that
+  are at least twice as smooth as the land count as cloud.
+- Its limit: bright smooth ground (sand, snow, salt flats) can pass for
+  cloud, so check `SCENE_CLOUD.png`.
+- Scene measures are kept in `SCENE_INFO.json` and read back on later runs;
+  *measure again* (`--recompute`) redoes them.
+- Input and truth paths go through the same share mapping as Pack.
+
 ## GPU service (gpuaas submit_job): step by step
 
 The GPU server already has the packages and weights the NISAR runs use, but

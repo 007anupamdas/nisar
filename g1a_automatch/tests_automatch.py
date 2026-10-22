@@ -2397,6 +2397,122 @@ def test_cross_check(tmp):
         X.SHARE = ('', '')
 
 
+def test_bench(tmp):
+    """Benchmark over finished jobs: scene measures (cloud estimate checked on
+    synthetic clouds over textured land), the job's error from its truth,
+    detectors per job and the summary per detector and class."""
+    import contextlib
+    import io
+    import cv2
+    import numpy as np
+    import pandas as pd
+    import rasterio
+    from rasterio.transform import from_origin
+    from pyproj import Transformer
+    import automatch_bench as B
+    rng = np.random.default_rng(11)
+    H, W = 600, 800
+
+    def land():
+        a = cv2.GaussianBlur(rng.normal(size=(H, W)).astype(np.float32), (0, 0), 2)
+        return 800 + 120 * a / a.std() + rng.normal(0, 10, (H, W))
+
+    def write(path, a):
+        with rasterio.open(path, 'w', driver='GTiff', height=H, width=W, count=1, dtype='uint16', crs='EPSG:32643',
+                           transform=from_origin(500000, 1700000, 315, 315)) as d:
+            d.write(np.clip(a, 1, 65535).astype('uint16'), 1)
+    clear = land()
+    cloudy = land()
+    yy, xx = np.mgrid[0:H, 0:W]
+    blob = np.zeros((H, W), bool)
+    for cy, cx, r in ((150, 200, 110), (420, 560, 140), (480, 150, 70)):
+        blob |= (yy - cy) ** 2 + (xx - cx) ** 2 < r * r
+    cloudy[blob] = 2600 + rng.normal(0, 15, blob.sum())
+    pc, pk = os.path.join(tmp, 'clear.tif'), os.path.join(tmp, 'G1A_HV_G_TEST_cloudy.tif')
+    write(pc, clear)
+    write(pk, cloudy)
+    ic = B.scene_info(pc, 1)
+    ik = B.scene_info(pk, 1, png=os.path.join(tmp, 'q.png'))
+    truth_pct = 100.0 * blob.mean()
+    check('bench: no cloud on a clear textured scene', ic['cloud_pct'] < 3, True)
+    check(f'bench: synthetic clouds ({truth_pct:.0f} %) estimated within 8 points',
+          abs(ik['cloud_pct'] - truth_pct) < 8, True)
+    check('bench: the quicklook is written', os.path.exists(os.path.join(tmp, 'q.png')), True)
+    # one finished job folder, as on the share
+    parent = os.path.join(tmp, 'bench_out')
+    jd = os.path.join(parent, 'output366')
+    os.makedirs(jd, exist_ok=True)
+    to_ll = Transformer.from_crs('EPSG:32643', 'EPSG:4326', always_xy=True)
+    e, n = np.array([520000.0, 560000.0, 600000.0]), np.array([1650000.0, 1620000.0, 1600000.0])
+    ilo, ila = to_ll.transform(e, n)
+    rlo, rla = to_ll.transform(e - 64000.0, n + 6000.0)
+    tp = os.path.join(tmp, 'gt.csv')
+    pd.DataFrame({'Row': [1, 2, 3], 'In_Lon': ilo, 'In_Lat': ila, 'Ref_Lon': rlo, 'Ref_Lat': rla}).to_csv(tp, index=False)
+    with open(os.path.join(jd, 'job_used.json'), 'w') as f:
+        json.dump({'input_path': pk, 'truth_csv': tp, 'output_dir': jd, 'max_expected_error_m': 150000}, f)
+    pd.DataFrame({'channel': ['band1'], 'detector': ['sift']}).to_csv(os.path.join(jd, 'RUN_MANIFEST.csv'), index=False)
+    with open(os.path.join(jd, 'automatch.log'), 'w') as f:
+        f.write('[Job] done in 9 min\n')
+    pd.DataFrame([{'rank': i + 1, 'channel': 'band1', 'sweep': 'win512_nfauto', 'detector': d, 'matcher': m,
+                   'ransac': 'magsac630', 'truth_rmse_m': r, 'truth_reached': rc, 'truth_total': 3}
+                  for i, (d, m, r, rc) in enumerate([('dog_hynet', 'mnn', 170.0, 3), ('dog_hynet', 'snn', 199.0, 3),
+                                                      ('hessian', 'snn', 195.0, 2), ('gftt', 'nn', 33000.0, 3)])]
+                 ).to_csv(os.path.join(jd, 'TRUTH_RANKING.csv'), index=False)
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        rc = B.main([parent])
+    jobs = pd.read_csv(os.path.join(parent, 'BENCH_JOBS.csv'))
+    dets = pd.read_csv(os.path.join(parent, 'BENCH_DETECTORS.csv'))
+    summ = pd.read_csv(os.path.join(parent, 'BENCH_SUMMARY.csv'))
+    j = jobs.iloc[0]
+    check('bench: the job row: sensor, band, error from its truth, clouds, best detector',
+          (rc, j['sensor'], j['band'], abs(j['error_km'] - 64.3) < 1.5, j['cloud_pct'] > 15, j['best_detector']),
+          (0, 'HV', 'band1', True, True, 'dog_hynet + mnn'))
+    check('bench: one row per detector (its best configuration), errors in pixels too',
+          (sorted(dets['detector']), round(float(dets.loc[dets.detector == 'dog_hynet', 'rmse_px'].iloc[0]), 2)),
+          (['dog_hynet', 'gftt', 'hessian'], round(170 / 315, 2)))
+    allg = summ[summ['group_by'] == 'all'].set_index('detector')
+    check('bench: success needs half the truth points within 3 px (gftt 33 km fails)',
+          (allg.loc['dog_hynet', 'success_rate'], allg.loc['hessian', 'success_rate'], allg.loc['gftt', 'success_rate']),
+          (1.0, 1.0, 0.0))
+    check('bench: grouped per sensor, cloud class and error class',
+          sorted(summ['group_by'].unique()), ['all', 'cloud', 'error', 'sensor'])
+    calls = []
+    orig = B.scene_info
+    B.scene_info = lambda *a, **k: (calls.append(1), orig(*a, **k))[1]
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            B.main([parent])
+        check('bench: scene measures read back from SCENE_INFO.json, not measured again', len(calls), 0)
+    finally:
+        B.scene_info = orig
+    try:
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+        import DPQED_automatch as G
+    except Exception as e:
+        print(f'SKIP  bench GUI ({type(e).__name__}: {e})')
+        return
+    app = G.QtWidgets.QApplication.instance() or G.QtWidgets.QApplication([])
+    w = G.AutoMatchWindow()
+    fmt = G.QtCore.QSettings.IniFormat if G.QT_API == 'PyQt5' else G.QtCore.QSettings.Format.IniFormat
+    w.settings = G.QtCore.QSettings(os.path.join(tmp, 'bench.ini'), fmt)
+    try:
+        dlg = w.bench_dialog(run=False)
+        dlg.folder.setText(parent)
+        dlg.jobs.setText('360-370')
+        a = dlg.args()
+        check('bench gui: the dialog builds the command', (a[:2], a[a.index('--jobs') + 1]), (['bench', parent], '360-370'))
+        res = G.BenchResultDialog(parent, w)
+        res.group.setCurrentText('sensor: HV')
+        check('bench gui: jobs and the per-group detector table are shown',
+              (res.jobs_table.rowCount(), res.sum_table.rowCount() >= 3), (1, True))
+        w._bench_dir = parent
+        w.proc_kind, w._events, w.proc_buffer, w.proc = 'bench', [], '', None
+        w._finished(0)
+        check('bench gui: the results open when the benchmark ends', hasattr(w, '_last_bench_dialog'), True)
+    finally:
+        w.close()
+
+
 def test_partial_cover():
     """Jobs 336 and 343: a warning when the first-ranked configuration is km
     off while one reaching fewer points is close (343, matches on part of the
@@ -2847,6 +2963,7 @@ def main():
         test_shared_coarse(tmp)
         test_coarse_trend()
         test_cross_check(tmp)
+        test_bench(tmp)
         test_auto_bands(tmp)
         test_kornia_versions(tmp)
         test_warmup_and_padding()
