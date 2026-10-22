@@ -2237,6 +2237,23 @@ def test_cross_check(tmp):
     check('cross: every kept point agrees with the true offset (the wrong one is outvoted in each cell)',
           (len(pts) > 0, float(err.max()) < 1000.0, 'gftt' in set(pts['cross_detector'])), (True, True, False))
     check('cross: all six cells kept, by the agreeing detectors', int(cells['kept'].sum()), 6)
+    # of the agreeing configurations in a cell, the three least distorted give the points
+    def noisy(det, sigma):
+        c = cfg(det, lambda ci: true)
+        p = c['points']
+        n = len(p)
+        de, dn = true[0] + rng.normal(0, sigma, n), true[1] + rng.normal(0, sigma, n)
+        p['x2-map'], p['y2-map'] = p['x1-map'] - de, p['y1-map'] - dn
+        p['dE'], p['dN'] = de, dn
+        return c
+    mixed = [noisy('imw-xoftr', 40), noisy('hessian', 50), noisy('disk_epipolar', 60),
+             noisy('sift', 350), noisy('gftt', 380)]
+    pts, cells = X.cross_check(mixed, 25000.0, 1000.0, 3, keep=3)
+    kept_dets = set(pts['cross_detector'])
+    check('cross: per cell the 3 least distorted agreeing configurations give the points',
+          kept_dets, {'imw-xoftr', 'hessian', 'disk_epipolar'})
+    check('cross: the cells report the kept spreads and how far apart the kept medians are',
+          (cells['kept_detectors'].str.count(',').max(), float(cells['kept_max_gap_m'].max()) < 200), (2, True))
     lonely = [cfg('a', lambda c: true if c == 0 else None), cfg('b', lambda c: true if c == 5 else None)]
     _, cells = X.cross_check(lonely, 25000.0, 1000.0, 2)
     check('cross: a cell only one configuration reaches is not kept', int(cells['kept'].sum()), 0)
@@ -2259,6 +2276,13 @@ def test_cross_check(tmp):
     check('cross: the cross-checked points meet the truth within 100 m at all 3 points',
           (r.get('truth_reached'), (r.get('truth_rmse_m') or 1e9) < 100), (3, True))
     check('cross: the log names the configurations used', 'imw-xoftr' in buf.getvalue(), True)
+    check('cross: a job where the top detectors agree is flagged reliable', (r.get('reliable'), r.get('kept_share') >= 0.15),
+          (True, True))
+    scattered = [cfg(d, (lambda o: (lambda c: (o + 5000.0 * c, 0.0)))(3000.0 * i)) for i, d in enumerate('abcde')]
+    with contextlib.redirect_stdout(io.StringIO()) as buf2:
+        bad = X.run(out, 5, 0, 25.0, 1000.0, working_crs='EPSG:32643', cfgs=scattered).get('band49', {})
+    check('cross: a job where they disagree everywhere is flagged NOT reliable',
+          (bad.get('reliable'), 'NOT reliable' in buf2.getvalue()), (False, True))
     check('cross: off below 2 configurations', X.run(out, 1, cfgs=cfgs, working_crs='EPSG:32643'), {})
     # replay on a finished job's TRUTH_POINTS.csv + TRUTH_RANKING.csv (the uploaded jobs)
     rows, rk = [], []

@@ -152,6 +152,7 @@ DEFAULT_JOB: Dict = {
     'cross_top_n': 5,            # configurations compared, one per detector (0 = off)
     'cross_min_agree': 0,        # how many must agree in a cell; 0 = more than half
     'cross_cell_km': 25.0,       # cell size of the comparison
+    'cross_keep_per_cell': 3,    # of those agreeing in a cell, the least distorted kept
 
     # RIVAL export
     'rival_max_points_per_chip': 200,   # 0 = all inliers
@@ -637,7 +638,7 @@ def _config_for(job: Dict, win: int, nf: Optional[int], res: float, out_dir: str
 # Job keys that cannot change what the matcher computes for a sweep point.
 _RESULT_NEUTRAL_KEYS = {'output_dir', 'temp_dir', 'resume', 'debug', 'rival_max_points_per_chip',
                         'save_match_images', 'weights_cache_dir', 'truth_csv', 'truth_radius_m',
-                        'cross_top_n', 'cross_min_agree', 'cross_cell_km'}
+                        'cross_top_n', 'cross_min_agree', 'cross_cell_km', 'cross_keep_per_cell'}
 
 
 def _sweep_key(job: Dict, win: int, nf: Optional[int]) -> str:
@@ -759,10 +760,11 @@ def run_cross(job: Dict, out_root: str, working_crs: str) -> Dict:
     try:
         res = X.run(out_root, int(job['cross_top_n']), int(job.get('cross_min_agree') or 0),
                     float(job.get('cross_cell_km') or 25.0), truth_csv=job.get('truth_csv') or '',
-                    working_crs=working_crs)
+                    working_crs=working_crs, keep=int(job.get('cross_keep_per_cell') or 3))
         if res:      # the batch cross-check reads this back instead of computing it again
             X._remember(out_root, 'matches', {'top_n': int(job['cross_top_n']),
                                               'min_agree': int(job.get('cross_min_agree') or 0),
+                                              'keep': int(job.get('cross_keep_per_cell') or 3),
                                               'cell_km': float(job.get('cross_cell_km') or 25.0),
                                               'tolerance_m': None, 'truth_csv': ''})
         return res

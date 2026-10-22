@@ -786,6 +786,12 @@ class CrossDialog(QtWidgets.QDialog):
         self.agree.setSpecialValueText('more than half')
         self.agree.setValue(int(defaults.get('cross_min_agree') or 0))
         f.addRow('Must agree', self.agree)
+        self.keep = QtWidgets.QSpinBox()
+        self.keep.setRange(1, 30)
+        self.keep.setValue(int(defaults.get('cross_keep_per_cell') or 3))
+        self.keep.setToolTip('Of the configurations that agree in a cell, keep this many: those whose matches '
+                             'there scatter least (the least local distortion).')
+        f.addRow('Keep per cell (least distorted)', self.keep)
         self.cell = QtWidgets.QDoubleSpinBox()
         self.cell.setRange(1, 500)
         self.cell.setSuffix(' km')
@@ -838,7 +844,8 @@ class CrossDialog(QtWidgets.QDialog):
 
     def args(self):
         a = ['cross', self.folder.text(), '--batch', '--top', str(self.top.value()),
-             '--min-agree', str(self.agree.value()), '--cell-km', f'{self.cell.value():g}']
+             '--min-agree', str(self.agree.value()), '--keep', str(self.keep.value()),
+             '--cell-km', f'{self.cell.value():g}']
         if self.tol.value() > 0:
             a += ['--tolerance-m', f'{self.tol.value():g}']
         if self.jobs.text().strip():
@@ -858,7 +865,7 @@ class CrossResultDialog(QtWidgets.QDialog):
             ('cells_kept', 'cells kept'), ('cells_with_matches', 'of'), ('points', 'points'),
             ('cross_rmse_m', 'cross RMSE m'), ('truth_rmse_m', 'cross RMSE m (matches)'),
             ('cross_reached', 'reached'), ('truth_total', 'of'), ('best_single_rmse_m', 'best single m'),
-            ('reused', 'read back'),
+            ('reliable', 'reliable'), ('kept_share', 'share of cells'), ('reused', 'read back'),
             ('best_single', 'best single'), ('configs', 'configurations compared'), ('csv', 'RIVAL_CROSS')]
 
     def __init__(self, path, parent=None):
@@ -1100,6 +1107,11 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         hl.addWidget(self.cross_top)
         hl.addWidget(QtWidgets.QLabel('agreeing'))
         hl.addWidget(self.cross_agree)
+        self.cross_keep = QtWidgets.QSpinBox()
+        self.cross_keep.setRange(1, 30)
+        self.cross_keep.setToolTip('Of those agreeing in a cell, keep the least distorted')
+        hl.addWidget(QtWidgets.QLabel('keep'))
+        hl.addWidget(self.cross_keep)
         hl.addWidget(QtWidgets.QLabel('per cell of'))
         hl.addWidget(self.cross_cell)
         f.addRow('Cross-check top detectors', hl)
@@ -1336,6 +1348,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.cross_top.setValue(int(j.get('cross_top_n', 5) or 0))
         self.cross_agree.setValue(int(j.get('cross_min_agree') or 0))
         self.cross_cell.setValue(float(j.get('cross_cell_km') or 25.0))
+        self.cross_keep.setValue(int(j.get('cross_keep_per_cell') or 3))
         self.channels.set_checked(list(j['channels'] or []))
         self.detector_params = {k: {p: list(v) for p, v in d.items()}
                                 for k, d in (j.get('detector_params') or {}).items()}
@@ -1423,6 +1436,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             'cross_top_n': self.cross_top.value(),
             'cross_min_agree': self.cross_agree.value(),
             'cross_cell_km': self.cross_cell.value(),
+            'cross_keep_per_cell': self.cross_keep.value(),
             'detectors': dets,
             'matchers': matchers,
             'detector_params': {k: v for k, v in self.detector_params.items() if v},

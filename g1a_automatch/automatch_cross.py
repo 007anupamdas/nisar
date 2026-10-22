@@ -42,6 +42,19 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
 MAX_POINTS_PER_CELL = 200      # per configuration and cell, in the RIVAL file
+KEEP_PER_CELL = 3              # agreeing configurations kept per cell: the least distorted there
+RELIABLE_SHARE = 0.15          # share of cells that must pass for a job to count as reliable
+# (CROSS_ALL of 34 jobs: every km-off job kept 0-4 % of its cells, the good ones 17-85 %)
+
+
+def _spread(p: pd.DataFrame) -> float:
+    """Robust scatter (m) of one configuration's offsets in one cell: how
+    much its matches there disagree among themselves (local distortion,
+    noise, mixed wrong matches). 1.4826 x the median distance to its median."""
+    if len(p) < 3:
+        return float('inf')
+    d = np.hypot(p['dE'] - p['dE'].median(), p['dN'] - p['dN'].median())
+    return float(1.4826 * np.median(d))
 
 
 def _configs(output_dir: str, chips: str = 'consensus') -> List[Dict]:
@@ -115,9 +128,13 @@ def pick_top(cfgs: List[Dict], top_n: int, cell_m: float, tol_m: float,
     return top, how
 
 
-def cross_check(top: List[Dict], cell_m: float, tol_m: float, min_agree: int) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def cross_check(top: List[Dict], cell_m: float, tol_m: float, min_agree: int,
+                keep: int = KEEP_PER_CELL) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """(points kept, one row per cell). A cell is kept when min_agree of the
-    top configurations with matches there lie within tol_m of their median."""
+    top configurations with matches there lie within tol_m of their median.
+    Of those, the keep with the least scatter in the cell (_spread: the least
+    local distortion) give the points, within tol_m of their own median; the
+    cell row reports their spreads and how far apart their medians are."""
     meds = [_cell_medians(c['points'], cell_m) for c in top]
     cells = sorted(set().union(*[set(m) for m in meds])) if meds else []
     kept, rows = [], []
@@ -137,10 +154,22 @@ def cross_check(top: List[Dict], cell_m: float, tol_m: float, min_agree: int) ->
                      'detectors': ', '.join(top[i]['detector'] for i in agree)})
         if not ok:
             continue
+        inside = {}
         for i in agree:
             p = top[i]['points']
             ij = np.floor(p[['E', 'N']].to_numpy() / cell_m).astype(int)
-            sel = p[(ij[:, 0] == k[0]) & (ij[:, 1] == k[1])]
+            inside[i] = p[(ij[:, 0] == k[0]) & (ij[:, 1] == k[1])]
+        spread = {i: _spread(inside[i]) for i in agree}
+        best = sorted(agree, key=lambda i: spread[i])[:max(1, keep)]
+        bm = [meds[i][k] for i in best]
+        cde = float(np.median([v[0] for v in bm]))
+        cdn = float(np.median([v[1] for v in bm]))
+        gap = max((math.hypot(a[0] - b[0], a[1] - b[1]) for a in bm for b in bm), default=0.0)
+        rows[-1].update({'kept_detectors': ', '.join(top[i]['detector'] for i in best),
+                         'kept_spreads_m': ', '.join(f'{spread[i]:.0f}' for i in best),
+                         'kept_max_gap_m': round(gap, 1), 'median_dE_m': cde, 'median_dN_m': cdn})
+        for i in best:
+            sel = inside[i]
             sel = sel[np.hypot(sel['dE'] - cde, sel['dN'] - cdn) <= tol_m]
             if len(sel) > MAX_POINTS_PER_CELL:
                 sel = sel.sample(MAX_POINTS_PER_CELL, random_state=0)
@@ -152,7 +181,7 @@ def cross_check(top: List[Dict], cell_m: float, tol_m: float, min_agree: int) ->
 
 def run(output_dir: str, top_n: int = 5, min_agree: int = 0, cell_km: float = 25.0,
         tol_m: Optional[float] = None, truth_csv: str = '', working_crs: Optional[str] = None,
-        cfgs: Optional[List[Dict]] = None, quiet: bool = False) -> Dict[str, Dict]:
+        cfgs: Optional[List[Dict]] = None, quiet: bool = False, keep: int = KEEP_PER_CELL) -> Dict[str, Dict]:
     """Cross-check every channel of an output folder; returns per channel
     {'csv', 'summary', 'configs', 'cells', 'points', 'truth_rmse_m'}."""
     import automatch_rival as R
@@ -189,11 +218,14 @@ def run(output_dir: str, top_n: int = 5, min_agree: int = 0, cell_km: float = 25
             print(f'[Cross] {ch}: fewer than 2 configurations to compare; skipped')
             continue
         req = min(need, len(top))
-        pts, cells = cross_check(top, cell_m, tol, req)
+        pts, cells = cross_check(top, cell_m, tol, req, keep)
         kept = int(cells['kept'].sum()) if not cells.empty else 0
-        res = {'channel': ch, 'chosen_by': how, 'top_n': len(top), 'min_agree': req, 'cell_km': cell_km,
-               'tolerance_m': tol, 'cells_with_matches': int((cells['configs_with_matches'] >= 2).sum())
-               if not cells.empty else 0, 'cells_kept': kept, 'points': int(len(pts)),
+        n_cells = int((cells['configs_with_matches'] >= 2).sum()) if not cells.empty else 0
+        share = kept / n_cells if n_cells else 0.0
+        res = {'channel': ch, 'chosen_by': how, 'top_n': len(top), 'min_agree': req, 'keep_per_cell': keep,
+               'cell_km': cell_km, 'tolerance_m': tol, 'cells_with_matches': n_cells, 'cells_kept': kept,
+               'kept_share': round(share, 3), 'reliable': bool(share >= RELIABLE_SHARE and len(pts) > 0),
+               'points': int(len(pts)),
                'configs': ' | '.join(f"{c['detector']} {c['matcher']} {c['ransac']} {c['sweep']}" for c in top)}
         if len(pts):
             res['mean_dE_m'] = float(pts['dE'].mean())
@@ -210,8 +242,9 @@ def run(output_dir: str, top_n: int = 5, min_agree: int = 0, cell_km: float = 25
         summary_rows.append(res)
         out[ch] = res
         if not quiet:
-            msg = (f"[Cross] {ch}: top {len(top)} by {how}; {kept} of {res['cells_with_matches']} cells where "
-                   f"{req}+ agree within {tol:.0f} m; {len(pts)} points")
+            msg = (f"[Cross] {ch}: top {len(top)} by {how}; {kept} of {n_cells} cells ({100 * share:.0f} %) where "
+                   f"{req}+ agree within {tol:.0f} m, the {keep} least distorted kept; {len(pts)} points; "
+                   + ('reliable' if res['reliable'] else f"NOT reliable (under {100 * RELIABLE_SHARE:.0f} % of cells agree)"))
             if res.get('truth_rmse_m') is not None:
                 msg += f"; truth RMSE {res['truth_rmse_m']:.0f} m at {res['truth_reached']}/{res['truth_total']}"
             print(msg + (f" -> {res['csv']}" if res.get('csv') else ''))
@@ -440,7 +473,8 @@ def _remember(d: str, kind: str, want: Dict) -> None:
 
 
 def batch(parent: str, top_n: int = 5, min_agree: int = 0, cell_km: float = 25.0,
-          tol_m: Optional[float] = None, truth_csv: str = '', jobs: str = '', recompute: bool = False) -> int:
+          tol_m: Optional[float] = None, truth_csv: str = '', jobs: str = '', recompute: bool = False,
+          keep: int = KEEP_PER_CELL) -> int:
     """Every finished automatch job in parent or one level below it
     (output/output359), or only the numbers in jobs ('335-363, 370'): the
     full cross-check when its match files are there, and the replay on
@@ -458,7 +492,7 @@ def batch(parent: str, top_n: int = 5, min_agree: int = 0, cell_km: float = 25.0
     for d in found:
         job = os.path.relpath(d, parent)
         print(f'[Cross] ===== {job}')
-        want = {'top_n': top_n, 'min_agree': min_agree, 'cell_km': cell_km, 'tolerance_m': tol_m,
+        want = {'top_n': top_n, 'min_agree': min_agree, 'keep': keep, 'cell_km': cell_km, 'tolerance_m': tol_m,
                 'truth_csv': truth_csv or ''}
         if not recompute and _reusable(d, 'matches', want, 'CROSS_SUMMARY.csv', ['TRUTH_RANKING.csv',
                                                                                   'RUN_MANIFEST.csv']):
@@ -469,7 +503,7 @@ def batch(parent: str, top_n: int = 5, min_agree: int = 0, cell_km: float = 25.0
             try:
                 tcsv = truth_csv or job_truth_csv(d)
                 print(f'[Cross] {job}: ground truth ' + (tcsv if tcsv else 'none found in its settings'))
-                res = run(d, top_n, min_agree, cell_km, tol_m, tcsv)
+                res = run(d, top_n, min_agree, cell_km, tol_m, tcsv, keep=keep)
                 for ch, r in res.items():
                     rows.append({'job': job, 'mode': 'matches', 'reused': False,
                                  **{k: v for k, v in r.items() if k != 'channel'}, 'channel': ch})
@@ -511,6 +545,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument('output_dir')
     ap.add_argument('--top', type=int, default=5, help='configurations compared, one per detector (default 5)')
     ap.add_argument('--min-agree', type=int, default=0, help='how many must agree in a cell (default: more than half)')
+    ap.add_argument('--keep', type=int, default=KEEP_PER_CELL,
+                    help='agreeing configurations kept per cell, the least distorted there (default 3)')
     ap.add_argument('--cell-km', type=float, default=25.0, help='cell size (default 25 km)')
     ap.add_argument('--tolerance-m', type=float, default=None, help='agreement tolerance (default: 1.5 x the '
                                                                          'RANSAC threshold, 3 px)')
@@ -529,14 +565,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     global SHARE
     SHARE = (a.share_local, a.share_server)
     if a.batch:
-        return batch(a.output_dir, a.top, a.min_agree, a.cell_km, a.tolerance_m, a.truth, a.jobs, a.recompute)
+        return batch(a.output_dir, a.top, a.min_agree, a.cell_km, a.tolerance_m, a.truth, a.jobs, a.recompute,
+                     a.keep)
     if a.from_truth_points:
         t = from_truth_points(os.path.join(a.output_dir, 'TRUTH_POINTS.csv'),
                               os.path.join(a.output_dir, 'TRUTH_RANKING.csv'), a.top, a.min_agree, a.tolerance_m)
         print(t.to_string(index=False))
         t.to_csv(os.path.join(a.output_dir, 'CROSS_FROM_TRUTH_POINTS.csv'), index=False)
         return 0 if len(t) else 1
-    res = run(a.output_dir, a.top, a.min_agree, a.cell_km, a.tolerance_m, a.truth)
+    res = run(a.output_dir, a.top, a.min_agree, a.cell_km, a.tolerance_m, a.truth, keep=a.keep)
     return 0 if res else 1
 
 

@@ -414,6 +414,15 @@ are checked against each other:
   more than half) lie within 1.5 × the RANSAC threshold (3 px by default) of
   their common median. The chip-consensus tolerance is not used, because
   jobs set it loosely (job 364: 31.5 km) and then nothing would be filtered.
+- **The least distorted per cell:** of the configurations that agree in a
+  cell, only the `cross_keep_per_cell` (default 3) whose matches scatter
+  least there give the points; that scatter reflects local distortion, noise
+  and stray wrong matches. `CROSS_CELLS` lists their scatter and how far
+  apart their medians are.
+- **Reliable or not:** a job counts as reliable when at least 15 % of its
+  cells pass. In 34 earlier jobs, every job whose best single configuration
+  was kilometres off kept 0–4 % of its cells, and the good ones 17–85 %.
+  `CROSS_SUMMARY`, `CROSS_ALL` and the GUI table carry the flag.
 - **Output:**
   - `RIVAL_CROSS_<channel>.csv` (+ `_detail.csv` naming each point's
     detector): the matches of the agreeing configurations in the kept cells.
