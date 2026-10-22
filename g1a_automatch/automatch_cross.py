@@ -43,6 +43,7 @@ import pandas as pd  # noqa: E402
 
 MAX_POINTS_PER_CELL = 200      # per configuration and cell, in the RIVAL file
 KEEP_PER_CELL = 3              # agreeing configurations kept per cell: the least distorted there
+OUTLIER_K = 3.0                # points further than this many x the cell's own scatter are dropped
 RELIABLE_SHARE = 0.15          # share of cells that must pass for a job to count as reliable
 # (CROSS_ALL of 34 jobs: every km-off job kept 0-4 % of its cells, the good ones 17-85 %)
 
@@ -133,8 +134,11 @@ def cross_check(top: List[Dict], cell_m: float, tol_m: float, min_agree: int,
     """(points kept, one row per cell). A cell is kept when min_agree of the
     top configurations with matches there lie within tol_m of their median.
     Of those, the keep with the least scatter in the cell (_spread: the least
-    local distortion) give the points, within tol_m of their own median; the
-    cell row reports their spreads and how far apart their medians are."""
+    local distortion) give the points, within tol_m of their own median; of
+    these, points further than OUTLIER_K x the cell's own scatter from the
+    cell's centre are dropped (distortion differs from cell to cell, so each
+    cell is judged by itself). The cell row reports the kept spreads, how far
+    apart their medians are, the cell's scatter and the points dropped."""
     meds = [_cell_medians(c['points'], cell_m) for c in top]
     cells = sorted(set().union(*[set(m) for m in meds])) if meds else []
     kept, rows = [], []
@@ -168,13 +172,26 @@ def cross_check(top: List[Dict], cell_m: float, tol_m: float, min_agree: int,
         rows[-1].update({'kept_detectors': ', '.join(top[i]['detector'] for i in best),
                          'kept_spreads_m': ', '.join(f'{spread[i]:.0f}' for i in best),
                          'kept_max_gap_m': round(gap, 1), 'median_dE_m': cde, 'median_dN_m': cdn})
+        cell_pts = []
         for i in best:
             sel = inside[i]
             sel = sel[np.hypot(sel['dE'] - cde, sel['dN'] - cdn) <= tol_m]
+            cell_pts.append(sel.assign(cross_detector=top[i]['detector'], cross_matcher=top[i]['matcher'],
+                                       cross_sweep=top[i]['sweep']))
+        pool = pd.concat(cell_pts, ignore_index=True)
+        # points that stray from this cell's own centre, judged by this cell's own
+        # scatter (distortion differs from cell to cell)
+        n0 = len(pool)
+        if n0 >= 5:
+            mde, mdn = float(pool['dE'].median()), float(pool['dN'].median())
+            dist = np.hypot(pool['dE'] - mde, pool['dN'] - mdn)
+            sig = max(float(1.4826 * np.median(dist)), 1.0)
+            pool = pool[dist <= OUTLIER_K * sig]
+            rows[-1].update({'cell_scatter_m': round(sig, 1), 'outliers_dropped': int(n0 - len(pool))})
+        for _, sel in pool.groupby('cross_detector', sort=False):
             if len(sel) > MAX_POINTS_PER_CELL:
                 sel = sel.sample(MAX_POINTS_PER_CELL, random_state=0)
-            kept.append(sel.assign(cross_detector=top[i]['detector'], cross_matcher=top[i]['matcher'],
-                                   cross_sweep=top[i]['sweep']))
+            kept.append(sel)
     pts = pd.concat(kept, ignore_index=True) if kept else pd.DataFrame()
     return pts, pd.DataFrame(rows)
 

@@ -419,6 +419,11 @@ are checked against each other:
   least there give the points; that scatter reflects local distortion, noise
   and stray wrong matches. `CROSS_CELLS` lists their scatter and how far
   apart their medians are.
+- **Stray points:** within each kept cell, points further than 3 × that
+  cell's own scatter from the cell's centre are dropped. Distortion differs
+  from cell to cell, so each cell is judged against itself, not against one
+  scene-wide limit. `CROSS_CELLS` lists the cell's scatter and the points
+  dropped.
 - **Reliable or not:** a job counts as reliable when at least 15 % of its
   cells pass. In 34 earlier jobs, every job whose best single configuration
   was kilometres off kept 0–4 % of its cells, and the good ones 17–85 %.

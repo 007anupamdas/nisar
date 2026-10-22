@@ -2254,6 +2254,16 @@ def test_cross_check(tmp):
           kept_dets, {'imw-xoftr', 'hessian', 'disk_epipolar'})
     check('cross: the cells report the kept spreads and how far apart the kept medians are',
           (cells['kept_detectors'].str.count(',').max(), float(cells['kept_max_gap_m'].max()) < 200), (2, True))
+    # stray points are dropped by each cell's own scatter, not by one fixed rule
+    stray = [noisy('imw-xoftr', 40), noisy('hessian', 50), noisy('disk_epipolar', 60)]
+    for c in stray:
+        p = c['points']
+        idx = p.index[::10]                       # 10 % of points 600 m off: inside the 1 km tolerance
+        p.loc[idx, 'dE'] += 600.0
+        p.loc[idx, 'x2-map'] -= 600.0
+    pts, cells = X.cross_check(stray, 25000.0, 1000.0, 3, keep=3)
+    check('cross: points straying from the cell centre by more than 3x the cell scatter are dropped',
+          (float(np.abs(pts['dE'] - true[0]).max()) < 400, int(cells['outliers_dropped'].sum()) > 0), (True, True))
     lonely = [cfg('a', lambda c: true if c == 0 else None), cfg('b', lambda c: true if c == 5 else None)]
     _, cells = X.cross_check(lonely, 25000.0, 1000.0, 2)
     check('cross: a cell only one configuration reaches is not kept', int(cells['kept'].sum()), 0)
