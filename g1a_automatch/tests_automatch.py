@@ -2286,6 +2286,29 @@ def test_cross_check(tmp):
     allc = pd.read_csv(os.path.join(parent, 'CROSS_ALL.csv'))
     check('cross batch: every job folder found, one row per job and channel in CROSS_ALL.csv',
           (rc, allc['job'].tolist(), allc['mode'].tolist()), (0, ['output359'], ['truth points']))
+    calls = []
+    orig = X.from_truth_points
+    X.from_truth_points = lambda *a, **k: (calls.append(1), orig(*a, **k))[1]
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            X.main([parent, '--batch'])
+        again = pd.read_csv(os.path.join(parent, 'CROSS_ALL.csv'))
+        check('cross batch: a folder already cross-checked with the same settings is read back, not recomputed',
+              (len(calls), bool(again['reused'].iloc[0])), (0, True))
+        with contextlib.redirect_stdout(io.StringIO()):
+            X.main([parent, '--batch', '--top', '4'])
+        check('cross batch: other settings compute again', len(calls), 1)
+        with contextlib.redirect_stdout(io.StringIO()):
+            X.main([parent, '--batch', '--top', '4', '--recompute'])
+        check('cross batch: --recompute computes again', len(calls), 2)
+        import time as _t
+        _t.sleep(0.05)
+        os.utime(os.path.join(parent, 'output359', 'TRUTH_RANKING.csv'))     # a later compare
+        with contextlib.redirect_stdout(io.StringIO()):
+            X.main([parent, '--batch', '--top', '4'])
+        check('cross batch: a newer TRUTH_RANKING.csv (a later compare) computes again', len(calls), 3)
+    finally:
+        X.from_truth_points = orig
     # a shared output folder: finished, running, other users' and filtered jobs
     def mk(name, files):
         d = os.path.join(parent, name)

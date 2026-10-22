@@ -444,6 +444,13 @@ count too. Running jobs are listed as skipped, and other users' or other
 tools' folders are ignored. `--jobs "335-363, 370"` (GUI: *Jobs*) limits the
 check to those job numbers.
 
+A folder that already holds a cross-check made with the same settings
+(`CROSS_SETTINGS.json` beside `CROSS_SUMMARY.csv` /
+`CROSS_FROM_TRUTH_POINTS.csv`) is read back instead of computed again. Runs
+record theirs. It is computed again when the settings differ, when
+`TRUTH_RANKING.csv` is newer (a later compare), or with `--recompute` (GUI:
+*compute again*). CROSS_ALL.csv marks the rows read back.
+
 `--from-truth-points` replays the check at the truth points: there the top
 configurations' estimates are compared, and their median is used where
 enough agree. It needs only the two small CSVs each job with ground truth

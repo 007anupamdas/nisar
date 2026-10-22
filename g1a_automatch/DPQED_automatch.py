@@ -796,6 +796,10 @@ class CrossDialog(QtWidgets.QDialog):
         self.tol.setSuffix(' m')
         self.tol.setSpecialValueText('automatic (the job\'s consensus tolerance)')
         f.addRow('Agreement tolerance', self.tol)
+        self.recompute = QtWidgets.QCheckBox('compute again where a cross-check with these settings exists')
+        self.recompute.setToolTip('Off: folders already cross-checked with the same settings are read back '
+                                  '(CROSS_SUMMARY.csv, CROSS_FROM_TRUTH_POINTS.csv), which is quick.')
+        f.addRow(self.recompute)
         note = QtWidgets.QLabel('Ground truth: each job\'s own truth CSV, from its settings (job_used.json). '
                                 'Server paths are translated through the share mapping (as in Pack for server).')
         note.setWordWrap(True)
@@ -839,6 +843,8 @@ class CrossDialog(QtWidgets.QDialog):
             a += ['--tolerance-m', f'{self.tol.value():g}']
         if self.jobs.text().strip():
             a += ['--jobs', self.jobs.text().strip()]
+        if self.recompute.isChecked():
+            a += ['--recompute']
         if self.share_local.text().strip() and self.share_server.text().strip():
             a += ['--share-local', self.share_local.text().strip(), '--share-server', self.share_server.text().strip()]
         return a
@@ -852,6 +858,7 @@ class CrossResultDialog(QtWidgets.QDialog):
             ('cells_kept', 'cells kept'), ('cells_with_matches', 'of'), ('points', 'points'),
             ('cross_rmse_m', 'cross RMSE m'), ('truth_rmse_m', 'cross RMSE m (matches)'),
             ('cross_reached', 'reached'), ('truth_total', 'of'), ('best_single_rmse_m', 'best single m'),
+            ('reused', 'read back'),
             ('best_single', 'best single'), ('configs', 'configurations compared'), ('csv', 'RIVAL_CROSS')]
 
     def __init__(self, path, parent=None):

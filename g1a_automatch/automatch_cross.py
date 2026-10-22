@@ -399,14 +399,54 @@ def job_truth_csv(job_dir: str) -> str:
     return ''
 
 
+SETTINGS_FILE = 'CROSS_SETTINGS.json'
+
+
+def _reusable(d: str, kind: str, want: Dict, result: str, inputs: List[str]) -> bool:
+    """True when the folder already holds this kind of cross-check result,
+    made with the same settings and newer than what it was computed from
+    (a later compare rewrites TRUTH_RANKING.csv, and then it is redone)."""
+    import json
+    sp, rp = os.path.join(d, SETTINGS_FILE), os.path.join(d, result)
+    if not (os.path.exists(sp) and os.path.exists(rp)):
+        return False
+    try:
+        with open(sp, encoding='utf-8') as f:
+            got = json.load(f).get(kind)
+    except (OSError, ValueError):
+        return False
+    if got != want:
+        return False
+    t = os.path.getmtime(rp)
+    return all(not os.path.exists(os.path.join(d, n)) or os.path.getmtime(os.path.join(d, n)) <= t for n in inputs)
+
+
+def _remember(d: str, kind: str, want: Dict) -> None:
+    import json
+    sp = os.path.join(d, SETTINGS_FILE)
+    try:
+        with open(sp, encoding='utf-8') as f:
+            allk = json.load(f)
+    except (OSError, ValueError):
+        allk = {}
+    allk[kind] = want
+    try:
+        with open(sp, 'w', encoding='utf-8') as f:
+            json.dump(allk, f, indent=1)
+    except OSError:
+        pass
+
+
 def batch(parent: str, top_n: int = 5, min_agree: int = 0, cell_km: float = 25.0,
-          tol_m: Optional[float] = None, truth_csv: str = '', jobs: str = '') -> int:
+          tol_m: Optional[float] = None, truth_csv: str = '', jobs: str = '', recompute: bool = False) -> int:
     """Every finished automatch job in parent or one level below it
     (output/output359), or only the numbers in jobs ('335-363, 370'): the
     full cross-check when its match files are there, and the replay on
     TRUTH_POINTS.csv when that is. Running jobs and folders that are not
-    automatch outputs (other users', other tools') are left alone. One row
-    per job and channel in parent/CROSS_ALL.csv."""
+    automatch outputs (other users', other tools') are left alone. A folder
+    already cross-checked with the same settings is read back, not computed
+    again (recompute=True redoes it). One row per job and channel in
+    parent/CROSS_ALL.csv, with 'reused' marking the rows read back."""
     import glob as _glob
     found, skipped = find_jobs(parent, parse_jobs(jobs))
     for name, why in skipped.items():
@@ -416,22 +456,40 @@ def batch(parent: str, top_n: int = 5, min_agree: int = 0, cell_km: float = 25.0
     for d in found:
         job = os.path.relpath(d, parent)
         print(f'[Cross] ===== {job}')
-        if _glob.glob(os.path.join(d, '**', 'filtered_*'), recursive=True):
+        want = {'top_n': top_n, 'min_agree': min_agree, 'cell_km': cell_km, 'tolerance_m': tol_m,
+                'truth_csv': truth_csv or ''}
+        if not recompute and _reusable(d, 'matches', want, 'CROSS_SUMMARY.csv', ['TRUTH_RANKING.csv',
+                                                                                  'RUN_MANIFEST.csv']):
+            for r in pd.read_csv(os.path.join(d, 'CROSS_SUMMARY.csv')).to_dict('records'):
+                rows.append({'job': job, 'mode': 'matches', 'reused': True, **r})
+            print(f'[Cross] {job}: cross-check on the matches read back from CROSS_SUMMARY.csv (same settings)')
+        elif _glob.glob(os.path.join(d, '**', 'filtered_*'), recursive=True):
             try:
                 tcsv = truth_csv or job_truth_csv(d)
                 print(f'[Cross] {job}: ground truth ' + (tcsv if tcsv else 'none found in its settings'))
-                for ch, r in run(d, top_n, min_agree, cell_km, tol_m, tcsv).items():
-                    rows.append({'job': job, 'mode': 'matches', **{k: v for k, v in r.items() if k != 'channel'},
-                                 'channel': ch})
+                res = run(d, top_n, min_agree, cell_km, tol_m, tcsv)
+                for ch, r in res.items():
+                    rows.append({'job': job, 'mode': 'matches', 'reused': False,
+                                 **{k: v for k, v in r.items() if k != 'channel'}, 'channel': ch})
+                if res:
+                    _remember(d, 'matches', want)
             except Exception as e:
                 print(f'[Cross] {job}: {type(e).__name__}: {e}')
         tp, tr = os.path.join(d, 'TRUTH_POINTS.csv'), os.path.join(d, 'TRUTH_RANKING.csv')
+        want_t = {k: want[k] for k in ('top_n', 'min_agree', 'tolerance_m')}
         if os.path.exists(tp) and os.path.exists(tr):
             try:
-                t = from_truth_points(tp, tr, top_n, min_agree, tol_m)
-                t.to_csv(os.path.join(d, 'CROSS_FROM_TRUTH_POINTS.csv'), index=False)
+                reuse = not recompute and _reusable(d, 'truth points', want_t, 'CROSS_FROM_TRUTH_POINTS.csv',
+                                                    ['TRUTH_POINTS.csv', 'TRUTH_RANKING.csv'])
+                if reuse:
+                    t = pd.read_csv(os.path.join(d, 'CROSS_FROM_TRUTH_POINTS.csv'))
+                    print(f'[Cross] {job}: truth-point replay read back from CROSS_FROM_TRUTH_POINTS.csv')
+                else:
+                    t = from_truth_points(tp, tr, top_n, min_agree, tol_m)
+                    t.to_csv(os.path.join(d, 'CROSS_FROM_TRUTH_POINTS.csv'), index=False)
+                    _remember(d, 'truth points', want_t)
                 for r in t.to_dict('records'):
-                    rows.append({'job': job, 'mode': 'truth points', **r})
+                    rows.append({'job': job, 'mode': 'truth points', 'reused': reuse, **r})
                     print(f"[Cross] {job} {r['channel']}: cross-checked {r['cross_rmse_m'] or float('nan'):.0f} m at "
                           f"{r['cross_reached']}/{r['truth_total']} points; best single "
                           f"{r['best_single_rmse_m']:.0f} m ({r['best_single']})")
@@ -460,6 +518,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help='output_dir holds many job output folders: cross-check each, results in CROSS_ALL.csv')
     ap.add_argument('--share-local', default='', help="where the server's share is mounted here, e.g. V:\\")
     ap.add_argument('--share-server', default='', help='the same share on the server, e.g. /maintenance/')
+    ap.add_argument('--recompute', action='store_true',
+                    help='with --batch: compute again even where a cross-check with the same settings exists')
     ap.add_argument('--jobs', default='', help="with --batch: only these job numbers, e.g. '335-363, 370'")
     ap.add_argument('--from-truth-points', action='store_true',
                     help='replay on output_dir/TRUTH_POINTS.csv + TRUTH_RANKING.csv only (no match files)')
@@ -467,7 +527,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     global SHARE
     SHARE = (a.share_local, a.share_server)
     if a.batch:
-        return batch(a.output_dir, a.top, a.min_agree, a.cell_km, a.tolerance_m, a.truth, a.jobs)
+        return batch(a.output_dir, a.top, a.min_agree, a.cell_km, a.tolerance_m, a.truth, a.jobs, a.recompute)
     if a.from_truth_points:
         t = from_truth_points(os.path.join(a.output_dir, 'TRUTH_POINTS.csv'),
                               os.path.join(a.output_dir, 'TRUTH_RANKING.csv'), a.top, a.min_agree, a.tolerance_m)

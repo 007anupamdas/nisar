@@ -757,9 +757,15 @@ def run_cross(job: Dict, out_root: str, working_crs: str) -> Dict:
         return {}
     import automatch_cross as X
     try:
-        return X.run(out_root, int(job['cross_top_n']), int(job.get('cross_min_agree') or 0),
-                     float(job.get('cross_cell_km') or 25.0), truth_csv=job.get('truth_csv') or '',
-                     working_crs=working_crs)
+        res = X.run(out_root, int(job['cross_top_n']), int(job.get('cross_min_agree') or 0),
+                    float(job.get('cross_cell_km') or 25.0), truth_csv=job.get('truth_csv') or '',
+                    working_crs=working_crs)
+        if res:      # the batch cross-check reads this back instead of computing it again
+            X._remember(out_root, 'matches', {'top_n': int(job['cross_top_n']),
+                                              'min_agree': int(job.get('cross_min_agree') or 0),
+                                              'cell_km': float(job.get('cross_cell_km') or 25.0),
+                                              'tolerance_m': None, 'truth_csv': ''})
+        return res
     except Exception as e:
         print(f'[Cross] not written: {type(e).__name__}: {e}')
         traceback.print_exc()
