@@ -95,8 +95,14 @@ def rgn_from_wavelengths(wl: Optional[List[float]]) -> Optional[List[int]]:
     return out
 
 
-def choose_bands(path: str, sensor: str, override: Optional[List[str]] = None) -> Tuple[List[int], str, List]:
-    """(the three bands, how they were chosen, their wavelengths)."""
+def choose_bands(path: str, sensor: str, override: Optional[List[str]] = None,
+                 choice: str = 'spec') -> Tuple[List[int], str, List]:
+    """(the three bands, how they were chosen, their wavelengths).
+    choice 'spec': red / green / nir by the sensor's band centres (default);
+    'quality': the three crispest bands (band_quality), short to long
+    wavelength, whatever their wavelength. OmniCloudMask takes exactly three
+    bands (it was trained on red, green, nir), so not four. cloud_bands
+    (override) wins over both."""
     import automatch_engine as E
     wl = band_wavelengths(path, sensor)
     if override:
@@ -104,12 +110,23 @@ def choose_bands(path: str, sensor: str, override: Optional[List[str]] = None) -
         if len(b) != 3 or min(b) < 1:
             raise ValueError(f'cloud_bands must name three bands, e.g. ["band3", "band2", "band6"]; got {override}')
         return b, 'cloud_bands', [wl[i - 1] if wl else None for i in b]
+    if str(choice).lower() == 'quality':
+        picked = [int(c[4:]) for c in E.pick_bands(E.band_quality(path), 3)]
+        if len(picked) < 3:
+            raise ValueError(f'no three usable bands for cloud masking in {os.path.basename(path)}')
+        picked.sort(key=lambda b: (wl[b - 1] if wl else b))
+        out_wl = [wl[i - 1] if wl else None for i in picked]
+        how = 'the three crispest bands'
+        if wl and rgn_from_wavelengths(wl) is None:
+            how += ' (no red / green / nir here: the model was not trained on such bands)'
+        return picked, how, out_wl
     rgn = rgn_from_wavelengths(wl)
     if rgn:
         return rgn, 'red, green, nir by wavelength', [wl[i - 1] for i in rgn]
     raise ValueError(f'{os.path.basename(path)} ({sensor}) has no red / green / nir bands, and OmniCloudMask '
                      f'finds no clouds from SWIR-only bands (IoU 0.00-0.04 on Sentinel-2). Set cloud_mask_from '
-                     f'to the VNIR (HV / MV) product of the same pass, or cloud_bands to force three bands.')
+                     f'to the VNIR (HV / MV) product of the same pass, cloud_band_choice to quality (the three crispest '
+                     f'bands; untested there) or cloud_bands to force three bands.')
 
 
 def weight_files() -> List[str]:
@@ -262,7 +279,8 @@ def prepare(job: Dict, scene, channels: List[str], cache_dir: str, out_dir: str,
                 'wavelengths_nm': sinfo.get('wavelengths_nm'), 'model': 'OmniCloudMask',
                 'key': hashlib.sha1(json.dumps([sinfo['key'], os.path.abspath(path), grow]).encode()).hexdigest()}
         return _finish(job, path, info, channels, cache_dir, out_dir)
-    bands, how, wl = choose_bands(path, sensor, job.get('cloud_bands') or None)
+    bands, how, wl = choose_bands(path, sensor, job.get('cloud_bands') or None,
+                                  job.get('cloud_band_choice') or 'spec')
     st = os.stat(path)
     key = hashlib.sha1(json.dumps({'v': MASK_VERSION, 'path': os.path.abspath(path), 'size': st.st_size,
                                    'mtime': int(st.st_mtime), 'bands': bands}, sort_keys=True).encode()).hexdigest()

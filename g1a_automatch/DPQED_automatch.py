@@ -1165,8 +1165,14 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
                                    'package and its weights in <weights folder>/omnicloudmask.')
         self.cloud_bands = QtWidgets.QLineEdit()
         self.cloud_bands.setPlaceholderText('red, green, nir bands: automatic (or e.g. band3, band2, band6)')
+        self.cloud_choice = QtWidgets.QComboBox()
+        self.cloud_choice.addItems(['bands: red / green / NIR by the band specs', 'bands: the 3 crispest (quality)'])
+        self.cloud_choice.setToolTip('By the band specs (MV B3/B2/B6; HV nearest 650/560/860 nm) is what the model '
+                                     'was trained on. The 3 crispest bands: whatever their wavelength (the model '
+                                     'takes exactly three). Bands typed beside it win over both.')
         hl2 = QtWidgets.QHBoxLayout()
         hl2.addWidget(self.cloud_mask)
+        hl2.addWidget(self.cloud_choice)
         hl2.addWidget(self.cloud_bands, 1)
         f.addRow('Clouds', hl2)
         self.cloud_from = PathRow('file', 'Rasters (*.tif *.tiff *.vrt);;All (*)')
@@ -1505,6 +1511,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         r = j.get('auto_bands_range') or []
         self.cloud_mask.setChecked(str(j.get('cloud_mask') or 'none').lower() == 'omnicloudmask')
         self.cloud_bands.setText(', '.join(j.get('cloud_bands') or []))
+        self.cloud_choice.setCurrentIndex(1 if str(j.get('cloud_band_choice') or 'spec') == 'quality' else 0)
         self.cloud_from.setText(j.get('cloud_mask_from') or '')
         self.auto_range.setText(f'{r[0]}-{r[1]}' if len(r) == 2 else '')
         self._update_kp_label()
@@ -1594,6 +1601,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             'cloud_mask': 'omnicloudmask' if self.cloud_mask.isChecked() else 'none',
             'cloud_bands': [t for t in re.split(r'[,;\s]+', self.cloud_bands.text().strip()) if t],
             'cloud_mask_from': self.cloud_from.text(),
+            'cloud_band_choice': 'quality' if self.cloud_choice.currentIndex() == 1 else 'spec',
             'target_resolution': float(tr) if tr else None,
             'max_expected_error_m': self.max_err.value() * 1000.0,
             'coarse_method': self.coarse.currentText(),

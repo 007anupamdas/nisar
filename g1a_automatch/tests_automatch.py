@@ -1047,6 +1047,9 @@ def test_gui_dialog():
         cp.edit.clear()
         cp.set_names([])
         w.cloud_mask.setChecked(True)
+        w.cloud_choice.setCurrentIndex(1)
+        check('gui: cloud band choice reaches the job', w.get_job()['cloud_band_choice'], 'quality')
+        w.cloud_choice.setCurrentIndex(0)
         w.cloud_bands.setText('band3, band2, band6')
         w.cloud_from.setText('/x/G1A_HV.tif')
         jj = w.get_job()
@@ -2645,6 +2648,26 @@ def test_cloud_mask(tmp):
     except ValueError as e:
         refused = str(e)
     check('cloud: HS (SWIR only) is refused, pointing to cloud_mask_from', 'cloud_mask_from' in refused, True)
+    import cv2
+
+    def textured(path, n, px):
+        H, W = 160, 200
+        base = cv2.GaussianBlur(rng.normal(size=(H, W)).astype(np.float32), (0, 0), 2)
+        base /= base.std()
+        with rasterio.open(path, 'w', driver='GTiff', height=H, width=W, count=n, dtype='uint16', crs='EPSG:32643',
+                           transform=from_origin(500000, 1700000, px, px), nodata=0) as d:
+            for b in range(1, n + 1):
+                gain = 200.0 * np.exp(-0.5 * ((b - n * 0.6) / (n * 0.15)) ** 2)
+                d.write(np.clip(800 + gain * base + rng.normal(0, 8, (H, W)), 1, 65535).astype('uint16'), b)
+        return path
+    hvq = textured(os.path.join(tmp, 'G1A_HV_G_Q.tif'), 40, 315.0)
+    hsq = textured(os.path.join(tmp, 'G1A_HS_G_Q.tif'), 40, 180.0)
+    q, how, _ = C.choose_bands(hvq, 'HV', choice='quality')
+    check('cloud: quality choice takes the 3 crispest bands, short to long wavelength',
+          (len(q), q == sorted(q), how.startswith('the three crispest')), (3, True, True))
+    q, how, _ = C.choose_bands(hsq, 'HS', choice='quality')
+    check('cloud: on HS the quality choice runs but says the model was not trained on such bands',
+          (len(q), 'not trained' in how), (3, True))
     named = raster(os.path.join(tmp, 'named.tif'), 3, desc=['560 nm', '660 nm', '870 nm'])
     check('cloud: band centres from the band descriptions', C.choose_bands(named, 'other')[0], [2, 1, 3])
 

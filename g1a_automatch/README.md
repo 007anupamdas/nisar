@@ -480,8 +480,11 @@ thin cloud and cloud shadow with OmniCloudMask (Wright et al., *Remote
 Sensing of Environment* 2025; sensor-agnostic, MIT licence). Those pixels
 are left out of matching: each band the job matches is copied with them set
 to no data, and the job matches that copy.
-- **Bands:** the model needs Red, Green and NIR. They are chosen by
-  wavelength, or named in `cloud_bands`:
+- **Bands:** `cloud_band_choice` picks how. `spec` (the default) takes Red,
+  Green and NIR by the band specs, which is what the model was trained on.
+  `quality` takes the three crispest bands, whatever their wavelength; the
+  model takes exactly three bands, so not four. `cloud_bands` names three
+  bands and wins over both. By the specs:
   - **MV** (MX-VNIR: B1 485, B2 555, B3 650, B4 815, B5 725, B6 860 nm):
     B3, B2, B6.
   - **HV** (Hysis-VNIR, 375–1000 nm): the bands nearest 650, 560 and 860 nm.
@@ -489,6 +492,10 @@ to no data, and the job matches that copy.
     (or MV) product of the same pass. Its mask is computed there and laid
     onto the HS image by map coordinates, grown by `cloud_from_margin_px`
     (10) for the few km their geolocation differs.
+- **Contrast normalisation:** OmniCloudMask standardises each band per
+  patch, so raw DN works. Before matching, each window is stretched (log,
+  then the 1st–99th percentile) over its valid pixels only. Masked cloud is
+  no data, so it neither flattens the land's contrast nor yields keypoints.
 - **Resolution:** the model runs at the image's own resolution, as its
   documentation asks. It is trained at 10–50 m; 180 m and 315 m are outside
   that range but work (below).

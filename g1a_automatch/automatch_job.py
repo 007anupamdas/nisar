@@ -85,7 +85,8 @@ DEFAULT_JOB: Dict = {
     'auto_bands_range': [],
     # Clouds: OmniCloudMask (thick / thin cloud, shadow) masked out before matching
     'cloud_mask': 'none',        # none | omnicloudmask
-    'cloud_bands': [],           # three bands for red, green, nir; [] = by wavelength per sensor
+    'cloud_band_choice': 'spec', # spec: red / green / nir by the band specs; quality: the 3 crispest bands
+    'cloud_bands': [],           # three bands named explicitly (wins over cloud_band_choice)
     'cloud_mask_classes': [1, 2, 3],   # 1 thick cloud, 2 thin cloud, 3 shadow
     'cloud_dilate_px': 2,        # grow the mask by this much (cloud edges)
     'cloud_mask_from': '',       # HS (SWIR): the VNIR product of the same pass, whose mask is laid on
@@ -467,7 +468,11 @@ def preflight(job: Dict, check_weights: bool = True) -> Dict:
                         errors.append(f"cloud_mask_from not found: {job['cloud_mask_from']}")
                     info['cloud_mask'] = {'sensor': sensor, 'from': job['cloud_mask_from']}
                 else:
-                    bands, how, wl = C.choose_bands(scene.raster_path, sensor, job.get('cloud_bands') or None)
+                    bands, how, wl = C.choose_bands(scene.raster_path, sensor, job.get('cloud_bands') or None,
+                                                    job.get('cloud_band_choice') or 'spec')
+                    if 'not trained' in how:
+                        warnings.append(f'cloud_mask: {how}; on Sentinel-2 SWIR-only bands the model found almost '
+                                        f'no cloud (IoU 0.00-0.04): prefer cloud_mask_from')
                     info['cloud_mask'] = {'sensor': sensor, 'bands': bands, 'how': how, 'wavelengths_nm': wl}
                 if (scene.native_res or 0) > 50:
                     warnings.append(f'cloud_mask: OmniCloudMask is validated at 10-50 m; this image is '
