@@ -54,7 +54,7 @@ SENSOR_BANDS_NM = {
 TARGET_NM = {'red': 650.0, 'green': 560.0, 'nir': 860.0}
 MAX_OFFSET_NM = 40.0                  # a band further than this from the target does not stand in for it
 CLASS_NAMES = {0: 'clear', 1: 'thick cloud', 2: 'thin cloud', 3: 'cloud shadow'}
-MASK_VERSION = 1
+MASK_VERSION = 2                      # 2: confidence threshold, brightness check, quicklook
 
 
 def band_wavelengths(path: str, sensor: str) -> Optional[List[float]]:
@@ -164,24 +164,65 @@ def check(job: Dict) -> List[str]:
 
 
 def predict(rgn: np.ndarray, nodata: float, model_dir: str = '', device: Optional[str] = None) -> np.ndarray:
-    """OmniCloudMask classes (0..3) for a (3, H, W) array."""
+    """OmniCloudMask class probabilities (4, H, W: clear, thick, thin, shadow)
+    for a (3, H, W) array."""
     from omnicloudmask import predict_from_array
-    kw = {'no_data_value': nodata, 'inference_device': device}
+    kw = {'no_data_value': nodata, 'inference_device': device, 'export_confidence': True, 'softmax_output': True}
     if model_dir:
         kw['destination_model_dir'] = model_dir
-    return np.asarray(predict_from_array(rgn.astype(np.float32), **kw))[0]
+    return np.asarray(predict_from_array(rgn.astype(np.float32), **kw))
+
+
+def classify(out: np.ndarray, min_conf: float = 0.7) -> np.ndarray:
+    """Classes from the model's output: probabilities (4, H, W) or classes
+    (H, W). With probabilities a pixel is cloud only when P(thick) + P(thin)
+    >= min_conf (thick or thin by the larger), shadow only when P(shadow) >=
+    min_conf; otherwise clear. Thin cloud took haze and bright ground for
+    cloud on G1A MV with the plain most-likely class."""
+    out = np.asarray(out)
+    if out.ndim == 2:
+        return out.astype(np.uint8)
+    p = out.astype(np.float32)
+    cloud = (p[1] + p[2]) >= min_conf
+    cls = np.zeros(p.shape[1:], np.uint8)
+    cls[cloud & (p[1] >= p[2])] = 1
+    cls[cloud & (p[1] < p[2])] = 2
+    cls[~cloud & (p[3] >= min_conf)] = 3
+    return cls
+
+
+def quicklook(arr: np.ndarray, cls: np.ndarray, valid: np.ndarray, path: str, max_side: int = 1600) -> None:
+    """False colour (NIR, red, green) with thick cloud in red, thin cloud in
+    yellow and shadow in blue, for looking at locally."""
+    import cv2
+    step = max(1, int(np.ceil(max(cls.shape) / float(max_side))))
+    a, c, v = arr[:, ::step, ::step], cls[::step, ::step], valid[::step, ::step]
+    chans = []
+    for b in (2, 0, 1):                       # NIR, red, green -> R, G, B
+        x = a[b][v]
+        lo, hi = (np.percentile(x, [2, 98]) if x.size else (0.0, 1.0))
+        chans.append(np.clip((a[b] - lo) / max(hi - lo, 1e-9) * 255, 0, 255).astype(np.uint8))
+    rgb = np.dstack(chans[::-1])              # OpenCV wants B, G, R
+    for k, colour in ((1, (0, 0, 255)), (2, (0, 255, 255)), (3, (255, 0, 0))):
+        m = c == k
+        rgb[m] = (0.45 * rgb[m] + 0.55 * np.array(colour)).astype(np.uint8)
+    rgb[~v] = (40, 40, 40)
+    cv2.imwrite(path, rgb)
 
 
 def compute(path: str, bands: List[int], out_dir: str, model_dir: str = '', device: Optional[str] = None,
-            predictor=None) -> Dict:
-    """CLOUD_MASK.tif in out_dir for the image, and its statistics."""
+            predictor=None, min_conf: float = 0.7) -> Dict:
+    """CLOUD_MASK.tif and CLOUD_QUICKLOOK.png in out_dir for the image, and its
+    statistics, with a check that the clouds are bright: dark_cloud_pct is the
+    share of cloud pixels darker in red than the median clear pixel (real
+    clouds are brighter; a large share means ground taken for cloud)."""
     import rasterio as rio
     with rio.open(path) as src:
         prof = src.profile.copy()
         nd = src.nodata if src.nodata is not None else 0
         arr = np.stack([src.read(b).astype(np.float32) for b in bands])
     valid = np.all(np.isfinite(arr) & (arr != nd), axis=0)
-    cls = (predictor or predict)(np.where(valid, arr, nd), float(nd), model_dir, device)
+    cls = classify((predictor or predict)(np.where(valid, arr, nd), float(nd), model_dir, device), min_conf)
     cls = np.where(valid, cls, 255).astype(np.uint8)
     os.makedirs(out_dir, exist_ok=True)
     prof.update(count=1, dtype='uint8', nodata=255, compress='deflate')
@@ -192,8 +233,17 @@ def compute(path: str, bands: List[int], out_dir: str, model_dir: str = '', devi
         dst.write(cls, 1)
     nv = max(int(valid.sum()), 1)
     pct = {k: round(100.0 * int((cls == k).sum()) / nv, 2) for k in (1, 2, 3)}
+    cloud = np.isin(cls, (1, 2))
+    clear = cls == 0
+    dark = None
+    if cloud.any() and clear.any():
+        dark = round(100.0 * float((arr[0][cloud] < np.median(arr[0][clear])).mean()), 1)
+    try:
+        quicklook(arr, cls, valid, os.path.join(out_dir, 'CLOUD_QUICKLOOK.png'))
+    except Exception as e:
+        print(f'[Cloud] quicklook not written: {type(e).__name__}: {e}')
     return {'mask': mask_path, 'thick_pct': pct[1], 'thin_pct': pct[2], 'shadow_pct': pct[3],
-            'cloud_pct': round(pct[1] + pct[2], 2)}
+            'cloud_pct': round(pct[1] + pct[2], 2), 'dark_cloud_pct': dark, 'min_confidence': min_conf}
 
 
 def masked_band(path: str, band: int, mask_path: str, out_path: str, classes: List[int], dilate_px: int) -> str:
@@ -282,8 +332,10 @@ def prepare(job: Dict, scene, channels: List[str], cache_dir: str, out_dir: str,
     bands, how, wl = choose_bands(path, sensor, job.get('cloud_bands') or None,
                                   job.get('cloud_band_choice') or 'spec')
     st = os.stat(path)
+    conf = float(job.get('cloud_min_confidence') or 0.7)
     key = hashlib.sha1(json.dumps({'v': MASK_VERSION, 'path': os.path.abspath(path), 'size': st.st_size,
-                                   'mtime': int(st.st_mtime), 'bands': bands}, sort_keys=True).encode()).hexdigest()
+                                   'mtime': int(st.st_mtime), 'bands': bands, 'conf': conf},
+                                  sort_keys=True).encode()).hexdigest()
     info_path = os.path.join(cache_dir, 'CLOUD_INFO.json')
     info = None
     try:
@@ -296,7 +348,7 @@ def prepare(job: Dict, scene, channels: List[str], cache_dir: str, out_dir: str,
     if info is None:
         print(f'[Cloud] OmniCloudMask on bands {bands} ({how}; {", ".join(f"{w:.0f} nm" for w in wl if w)}) ...',
               flush=True)
-        info = compute(path, bands, cache_dir, model_dir_for(job), job.get('cloud_device') or None, predictor)
+        info = compute(path, bands, cache_dir, model_dir_for(job), job.get('cloud_device') or None, predictor, conf)
         info.update({'key': key, 'bands': bands, 'band_choice': how, 'wavelengths_nm': wl, 'sensor': sensor,
                      'model': 'OmniCloudMask'})
         os.makedirs(cache_dir, exist_ok=True)
@@ -313,8 +365,17 @@ def _finish(job: Dict, path: str, info: Dict, channels: List[str], cache_dir: st
     dilate = int(job.get('cloud_dilate_px') or 0)
     key = info['key']
     print(f"[Cloud] {info['cloud_pct']:.1f} % cloud (thick {info['thick_pct']:.1f}, thin {info['thin_pct']:.1f}), "
-          f"{info['shadow_pct']:.1f} % shadow ({info.get('band_choice')}); masking classes {classes}, "
-          f"grown by {dilate} px", flush=True)
+          f"{info['shadow_pct']:.1f} % shadow ({info.get('band_choice')}; confidence >= "
+          f"{info.get('min_confidence', '?')}); masking classes {classes}, grown by {dilate} px", flush=True)
+    if info.get('dark_cloud_pct') is not None and info['dark_cloud_pct'] > 20:
+        print(f"[Cloud] CHECK: {info['dark_cloud_pct']:.0f} % of the 'cloud' pixels are darker than the median "
+              f"clear ground -- ground is probably taken for cloud. Raise cloud_min_confidence (e.g. 0.85) or "
+              f"mask thick cloud only (cloud_mask_classes [1]); see CLOUD_QUICKLOOK.png", flush=True)
+    ql = os.path.join(os.path.dirname(info['mask']), 'CLOUD_QUICKLOOK.png')
+    if out_dir and os.path.exists(ql):
+        import shutil
+        os.makedirs(out_dir, exist_ok=True)
+        shutil.copyfile(ql, os.path.join(out_dir, 'CLOUD_QUICKLOOK.png'))
     out = {}
     for ch in channels:
         b = int(re.sub(r'\D', '', ch) or 1)

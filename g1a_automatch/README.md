@@ -504,6 +504,19 @@ to no data, and the job matches that copy.
   that range but work (below).
 - **Masked classes:** `cloud_mask_classes` (default 1, 2, 3: thick cloud,
   thin cloud, shadow). The mask is grown by `cloud_dilate_px` (2).
+- **Confidence:** a pixel is cloud only when the model gives
+  P(thick) + P(thin) ≥ `cloud_min_confidence` (0.7), and shadow only when
+  P(shadow) reaches it; otherwise the pixel is clear. The plain most-likely
+  class took haze and bright ground for thin cloud on G1A MV. On the
+  Sentinel-2 test, false clouds fell from 5.3 % at 0.5 to 2.7 % at 0.7 and
+  1.2 % at 0.85, at the cost of missing more thin cloud edges.
+- **Checks:** `CLOUD_INFO.json` gives `dark_cloud_pct`, the share of cloud
+  pixels darker in red than the median clear pixel. Real clouds are
+  brighter, so above 20 % the log warns that ground is probably being taken
+  for cloud. Then raise `cloud_min_confidence` to about 0.85, or mask thick
+  cloud only with `cloud_mask_classes: [1]`. `CLOUD_QUICKLOOK.png` in the
+  output folder shows false colour (NIR, red, green) with thick cloud red,
+  thin yellow and shadow blue.
 - **Outputs and reuse:** the mask (`CLOUD_MASK.tif`) and its statistics are
   kept in the job's cache and reused for the same image. `CLOUD_INFO.json`
   in the output folder gives the cloud and shadow %.

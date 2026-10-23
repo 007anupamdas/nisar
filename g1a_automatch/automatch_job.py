@@ -89,6 +89,7 @@ DEFAULT_JOB: Dict = {
     'cloud_band_choice': 'spec', # spec: red / green / nir by the band specs; quality: the 3 crispest bands
     'cloud_bands': [],           # three bands named explicitly (wins over cloud_band_choice)
     'cloud_mask_classes': [1, 2, 3],   # 1 thick cloud, 2 thin cloud, 3 shadow
+    'cloud_min_confidence': 0.7, # a pixel is cloud / shadow only when the model is this sure
     'cloud_dilate_px': 2,        # grow the mask by this much (cloud edges)
     'cloud_mask_from': '',       # HS (SWIR): the VNIR product of the same pass, whose mask is laid on
     'cloud_from_margin_px': 10,  # extra growth for the mask laid on (their geolocation differs by km)

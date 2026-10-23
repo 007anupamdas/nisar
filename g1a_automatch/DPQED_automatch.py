@@ -1174,6 +1174,16 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         hl2.addWidget(self.cloud_mask)
         hl2.addWidget(self.cloud_choice)
         hl2.addWidget(self.cloud_bands, 1)
+        self.cloud_conf = QtWidgets.QDoubleSpinBox()
+        self.cloud_conf.setRange(0.3, 0.99)
+        self.cloud_conf.setSingleStep(0.05)
+        self.cloud_conf.setPrefix('sure ≥ ')
+        self.cloud_conf.setToolTip('A pixel is cloud / shadow only when the model is this sure. Raise it (0.85) '
+                                   'when ground is taken for cloud (see CLOUD_QUICKLOOK.png and dark_cloud_pct).')
+        hl2.addWidget(self.cloud_conf)
+        self.cloud_thin = QtWidgets.QCheckBox('mask thin cloud')
+        self.cloud_thin.setToolTip('Off: mask thick cloud and shadow only')
+        hl2.addWidget(self.cloud_thin)
         f.addRow('Clouds', hl2)
         self.cloud_from = PathRow('file', 'Rasters (*.tif *.tiff *.vrt);;All (*)')
         self.cloud_from.edit.setPlaceholderText('HS (SWIR) only: the HV / MV product of the same pass, whose cloud '
@@ -1527,6 +1537,8 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.cloud_mask.setChecked(str(j.get('cloud_mask') or 'none').lower() == 'omnicloudmask')
         self.cloud_bands.setText(', '.join(j.get('cloud_bands') or []))
         self.cloud_choice.setCurrentIndex(1 if str(j.get('cloud_band_choice') or 'spec') == 'quality' else 0)
+        self.cloud_conf.setValue(float(j.get('cloud_min_confidence') or 0.7))
+        self.cloud_thin.setChecked(2 in [int(c) for c in (j.get('cloud_mask_classes') or [1, 2, 3])])
         self.cloud_from.setText(j.get('cloud_mask_from') or '')
         self.auto_range.setText(f'{r[0]}-{r[1]}' if len(r) == 2 else '')
         self._update_kp_label()
@@ -1620,6 +1632,8 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             'cloud_bands': [t for t in re.split(r'[,;\s]+', self.cloud_bands.text().strip()) if t],
             'cloud_mask_from': self.cloud_from.text(),
             'cloud_band_choice': 'quality' if self.cloud_choice.currentIndex() == 1 else 'spec',
+            'cloud_min_confidence': round(self.cloud_conf.value(), 2),
+            'cloud_mask_classes': [1, 2, 3] if self.cloud_thin.isChecked() else [1, 3],
             'target_resolution': float(tr) if tr else None,
             'max_expected_error_m': self.max_err.value() * 1000.0,
             'coarse_method': self.coarse.currentText(),

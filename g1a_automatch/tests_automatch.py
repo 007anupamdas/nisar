@@ -1052,6 +1052,11 @@ def test_gui_dialog():
         w.cloud_mask.setChecked(True)
         w.cloud_choice.setCurrentIndex(1)
         check('gui: cloud band choice reaches the job', w.get_job()['cloud_band_choice'], 'quality')
+        w.cloud_conf.setValue(0.85)
+        w.cloud_thin.setChecked(False)
+        check('gui: cloud confidence and thin-cloud choice reach the job',
+              (w.get_job()['cloud_min_confidence'], w.get_job()['cloud_mask_classes']), (0.85, [1, 3]))
+        w.cloud_thin.setChecked(True)
         w.cloud_choice.setCurrentIndex(0)
         w.cloud_bands.setText('band3, band2, band6')
         w.cloud_from.setText('/x/G1A_HV.tif')
@@ -2697,6 +2702,23 @@ def test_cloud_mask(tmp):
     with contextlib.redirect_stdout(io.StringIO()) as buf:
         C.prepare({'cloud_dilate_px': 1}, Sc(), ['band3'], cache, out, 'MV', lambda *a: 1 / 0)
     check('cloud: the mask is reused from the cache, not predicted again', 'reused' in buf.getvalue(), True)
+    # confidence threshold: an unsure 'thin cloud' stays clear
+    probs = np.zeros((4, 2, 2), np.float32)
+    probs[:, 0, 0] = (0.1, 0.8, 0.1, 0.0)     # sure thick cloud
+    probs[:, 0, 1] = (0.45, 0.05, 0.5, 0.0)   # most likely thin cloud, but only 55 % cloud
+    probs[:, 1, 0] = (0.1, 0.0, 0.0, 0.9)     # sure shadow
+    probs[:, 1, 1] = (0.9, 0.05, 0.05, 0.0)   # clear
+    check('cloud: cloud only when the model is sure (P(thick)+P(thin) >= 0.7), else clear',
+          C.classify(probs, 0.7).tolist(), [[1, 0], [3, 0]])
+    check('cloud: at 0.5 the unsure pixel is thin cloud', C.classify(probs, 0.5).tolist(), [[1, 2], [3, 0]])
+
+    def dark_fake(arr, nodata, model_dir, device):       # 'cloud' on the darkest pixels: ground taken for cloud
+        return (arr[0] < np.percentile(arr[0], 30)).astype(np.uint8)
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        _, dinfo = C.prepare({}, Sc(), [], os.path.join(tmp, 'cache_dark'), os.path.join(tmp, 'out_dark'), 'MV', dark_fake)
+    check('cloud: dark "clouds" are flagged (brightness check), with a quicklook to look at',
+          (dinfo['dark_cloud_pct'] > 90, 'CHECK' in buf.getvalue(),
+           os.path.exists(os.path.join(tmp, 'out_dark', 'CLOUD_QUICKLOOK.png'))), (True, True, True))
     # HS takes the mask of the HV product of the same pass, laid on by map coordinates
     hv2 = raster(os.path.join(tmp, 'G1A_HV_G_PASS.tif'), 158, px=315.0, H=60, W=80, x0=500000.0)
     hs2 = raster(os.path.join(tmp, 'G1A_HS_G_PASS.tif'), 256, px=180.0, H=100, W=140, x0=500000.0)
@@ -2728,9 +2750,11 @@ def test_cloud_mask(tmp):
         have = False
     if have:
         with contextlib.redirect_stdout(io.StringIO()):
-            cls = C.predict(np.stack([rng.random((256, 256)) * 1000 + 100 for _ in range(3)]), 0.0, wdir, 'cpu')
-        check('cloud: OmniCloudMask runs (classes 0-3)', (cls.shape, set(np.unique(cls)) <= {0, 1, 2, 3}),
-              ((256, 256), True))
+            probs = C.predict(np.stack([rng.random((256, 256)) * 1000 + 100 for _ in range(3)]), 0.0, wdir, 'cpu')
+        cls = C.classify(probs, 0.7)
+        check('cloud: OmniCloudMask gives class probabilities, turned into classes 0-3',
+              (probs.shape, bool(np.allclose(probs.sum(0), 1, atol=0.01)), cls.shape, set(np.unique(cls)) <= {0, 1, 2, 3}),
+              ((4, 256, 256), True, (256, 256), True))
         check('cloud: preflight finds the weights', C.check({'cloud_model_dir': wdir}), [])
     else:
         print('SKIP  cloud: OmniCloudMask or its weights not here (set AUTOMATCH_OCM_WEIGHTS)')
