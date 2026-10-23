@@ -148,6 +148,55 @@ def _run_job(job, tmp, want_output=False):
     return (out.returncode, out.stdout) if want_output else out.returncode
 
 
+def test_e2e_cloud(tmp):
+    """A job with cloud masking: the mask is made (a stand-in model here,
+    clouding the west third), the matched band is the masked copy, and no
+    matched point lies under the cloud."""
+    import contextlib
+    import io
+    import numpy as np
+    import rasterio
+    import automatch_cloud as C
+    import automatch_job as J
+    import synthetic_data as S
+    data = os.path.join(tmp, 'synth')
+    if not os.path.exists(os.path.join(data, 'G1A_SYNTH_L1.tif')):
+        S.make_all(data, 4013.0, -2487.0)
+    inp = os.path.join(data, 'G1A_SYNTH_L1.tif')
+    with rasterio.open(inp) as s:
+        west = s.transform.c + s.width * s.transform.a / 3.0
+
+    def fake(arr, nodata, model_dir, device):
+        cls = np.zeros(arr.shape[1:], np.uint8)
+        cls[:, :arr.shape[2] // 3] = 1
+        return cls
+    real = C.predict
+    C.predict = fake
+    real_check = C.check
+    C.check = lambda job: []
+    out = os.path.join(tmp, 'out_cloud')
+    try:
+        job = J.normalize({'input_path': inp, 'reference_dir': os.path.join(data, 'C1'), 'output_dir': out,
+                           'channels': ['band1'], 'detectors': ['sift'], 'window_sizes': [1024],
+                           'max_expected_error_m': 10000, 'smnn_thresholds': [0.95], 'use_amp': False,
+                           'cloud_mask': 'omnicloudmask', 'cloud_bands': ['band1', 'band2', 'band3'],
+                           'cloud_dilate_px': 0, 'cross_top_n': 0})
+        os.makedirs(out, exist_ok=True)
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            J.run_job(job)
+    finally:
+        C.predict, C.check = real, real_check
+    info = json.load(open(os.path.join(out, 'CLOUD_INFO.json')))
+    check('cloud e2e: the job made the mask and reports its cloud %', round(info['cloud_pct']), 33)
+    check('cloud e2e: the log names the masking', '[Cloud]' in buf.getvalue(), True)
+    best = [p for p in os.listdir(out) if p.startswith('RIVAL_BEST_') and not p.endswith('_detail.csv')]
+    import automatch_rival as R
+    pts = R.read_rival_csv(os.path.join(out, best[0])) if best else None
+    check('cloud e2e: points found, none under the cloud (west third)',
+          (pts is not None and len(pts) > 0, bool(pts is not None and (pts['ix'] < west).any())),
+          (True, False))
+
+
 def test_e2e_rerun(tmp):
     """Rerun in the same output folder: identical settings reuse the results;
     changed settings run again on the cached preprocessing, and the previous
@@ -997,6 +1046,16 @@ def test_gui_dialog():
               (['HH', 'HV'], ['HH', 'HV']))
         cp.edit.clear()
         cp.set_names([])
+        w.cloud_mask.setChecked(True)
+        w.cloud_bands.setText('band3, band2, band6')
+        w.cloud_from.setText('/x/G1A_HV.tif')
+        jj = w.get_job()
+        check('gui: cloud masking options reach the job',
+              (jj['cloud_mask'], jj['cloud_bands'], jj['cloud_mask_from']),
+              ('omnicloudmask', ['band3', 'band2', 'band6'], '/x/G1A_HV.tif'))
+        w.cloud_mask.setChecked(False)
+        w.cloud_bands.setText('')
+        w.cloud_from.setText('')
         w.coarse_shared.setChecked(False)
         w.coarse_dets.setText('imw-topicfm, loftr')
         check('gui: shared coarse fields reach the job', (w.get_job()['coarse_shared'], w.get_job()['coarse_detectors']),
@@ -2504,6 +2563,15 @@ def test_bench(tmp):
     check('bench: SCENE_NOTES.csv replaces the cloud estimate (job row and detector classes)',
           (jrow['cloud_pct'], jrow['cloud_source'], drow['cloud_class'].iloc[0]), (55.0, 'manual', 'cloudy (>30 %)'))
     os.remove(os.path.join(parent, 'SCENE_NOTES.csv'))
+    # a job that ran with cloud masking reports the model's cloud %
+    with open(os.path.join(jd, 'CLOUD_INFO.json'), 'w') as f:
+        json.dump({'cloud_pct': 37.5, 'shadow_pct': 4.0, 'band_choice': 'red, green, nir by wavelength'}, f)
+    with contextlib.redirect_stdout(io.StringIO()):
+        B.main([parent, '--no-cross'])
+    jrow = pd.read_csv(os.path.join(parent, 'BENCH_JOBS.csv')).set_index('job').loc['output366']
+    check('bench: a run with cloud masking gives the model\'s cloud % (OmniCloudMask)',
+          (jrow['cloud_pct'], jrow['cloud_source'], bool(jrow['cloud_masked_in_run'])), (37.5, 'omnicloudmask', True))
+    os.remove(os.path.join(jd, 'CLOUD_INFO.json'))
     calls = []
     orig = B.scene_info
     B.scene_info = lambda *a, **k: (calls.append(1), orig(*a, **k))[1]
@@ -2539,6 +2607,109 @@ def test_bench(tmp):
         check('bench gui: the results open when the benchmark ends', hasattr(w, '_last_bench_dialog'), True)
     finally:
         w.close()
+
+
+def test_cloud_mask(tmp):
+    """OmniCloudMask cloud masking: bands per G1A sensor by wavelength, HS
+    refused (SWIR-only) unless the VNIR product of the same pass lends its
+    mask, masked copies of the matched bands, the cache, the engine reading
+    the masked copy, and the benchmark taking the model's cloud %."""
+    import contextlib
+    import io
+    import numpy as np
+    import pandas as pd
+    import rasterio
+    from rasterio.transform import from_origin
+    import automatch_cloud as C
+    import automatch_engine as E
+    rng = np.random.default_rng(2)
+
+    def raster(path, n, H=300, W=400, px=45.0, x0=500000.0, desc=None):
+        with rasterio.open(path, 'w', driver='GTiff', height=H, width=W, count=n, dtype='uint16', crs='EPSG:32643',
+                           transform=from_origin(x0, 1700000, px, px), nodata=0) as d:
+            for b in range(1, n + 1):
+                d.write((500 + 100 * rng.random((H, W))).astype('uint16'), b)
+                if desc:
+                    d.set_band_description(b, desc[b - 1])
+        return path
+    mv = raster(os.path.join(tmp, 'G1A_MV_G_TEST.tif'), 6)
+    hv = raster(os.path.join(tmp, 'G1A_HV_G_TEST.tif'), 158, px=315.0, H=60, W=80)
+    hs = raster(os.path.join(tmp, 'G1A_HS_G_TEST.tif'), 256, px=180.0, H=100, W=140)
+    check('cloud: MV red / green / nir are B3, B2, B6 (650, 555, 860 nm)', C.choose_bands(mv, 'MV')[0], [3, 2, 6])
+    b, how, wl = C.choose_bands(hv, 'HV')
+    check('cloud: HV bands nearest 650 / 560 / 860 nm over 375-1000 nm',
+          (all(abs(w - t) < 5 for w, t in zip(wl, (650, 560, 860))), how.startswith('red')), (True, True))
+    try:
+        C.choose_bands(hs, 'HS')
+        refused = ''
+    except ValueError as e:
+        refused = str(e)
+    check('cloud: HS (SWIR only) is refused, pointing to cloud_mask_from', 'cloud_mask_from' in refused, True)
+    named = raster(os.path.join(tmp, 'named.tif'), 3, desc=['560 nm', '660 nm', '870 nm'])
+    check('cloud: band centres from the band descriptions', C.choose_bands(named, 'other')[0], [2, 1, 3])
+
+    def fake(arr, nodata, model_dir, device):           # thick cloud in a square, shadow beside it
+        cls = np.zeros(arr.shape[1:], np.uint8)
+        h, w = cls.shape
+        cls[h // 4:h // 2, w // 4:w // 2] = 1
+        cls[h // 2:h // 2 + 10, w // 4:w // 2] = 3
+        return cls
+
+    class Sc:
+        raster_path = mv
+    cache, out = os.path.join(tmp, 'cache_cloud'), os.path.join(tmp, 'out_cloud')
+    with contextlib.redirect_stdout(io.StringIO()):
+        rasters, info = C.prepare({'cloud_dilate_px': 1}, Sc(), ['band3', 'band5'], cache, out, 'MV', fake)
+    with rasterio.open(rasters['band5'][0]) as m, rasterio.open(mv) as o:
+        a, orig = m.read(1), o.read(5)
+    H, W = a.shape
+    check('cloud: the matched bands are copied with cloud and shadow (grown 1 px) set to no data',
+          (int(a[H // 3, W // 3]), int(a[H // 2 + 5, W // 3]), int(a[H // 4 - 1, W // 3]), int(a[5, 5]) == int(orig[5, 5])),
+          (0, 0, 0, True))
+    check('cloud: statistics and CLOUD_INFO.json in the job folder',
+          (round(info['thick_pct']), os.path.exists(os.path.join(out, 'CLOUD_INFO.json'))), (6, True))
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        C.prepare({'cloud_dilate_px': 1}, Sc(), ['band3'], cache, out, 'MV', lambda *a: 1 / 0)
+    check('cloud: the mask is reused from the cache, not predicted again', 'reused' in buf.getvalue(), True)
+    # HS takes the mask of the HV product of the same pass, laid on by map coordinates
+    hv2 = raster(os.path.join(tmp, 'G1A_HV_G_PASS.tif'), 158, px=315.0, H=60, W=80, x0=500000.0)
+    hs2 = raster(os.path.join(tmp, 'G1A_HS_G_PASS.tif'), 256, px=180.0, H=100, W=140, x0=500000.0)
+
+    class Hs:
+        raster_path = hs2
+    with contextlib.redirect_stdout(io.StringIO()):
+        rasters, info = C.prepare({'cloud_mask_from': hv2, 'cloud_from_margin_px': 0, 'cloud_dilate_px': 0}, Hs(),
+                                  ['band40'], os.path.join(tmp, 'cache_hs'), '', 'HS', fake)
+    with rasterio.open(info['mask']) as m:
+        cls = m.read(1)
+    # HV square: rows 15-30, cols 20-40 at 315 m -> HS rows ~26-52, cols ~35-70 at 180 m
+    check('cloud: HS gets the HV mask at the same ground (map coordinates)',
+          (int(cls[40, 50]), int(cls[5, 5]), 'from G1A_HV_G_PASS' in info['band_choice']), (1, 0, True))
+    # the engine reads the masked copy, and the pair cache follows it
+    sc = E.InputScene(mv, E.PipelineConfig())
+    sc.channel_override = {'band3': ['/x/band3_cloudmasked.tif', 1]}
+    check('cloud: the engine reads the masked copy of a channel', sc.channel_raster('band3', ''),
+          ('/x/band3_cloudmasked.tif', 1))
+    k1 = E.pair_cache_key(sc, 'band3', tmp, E.PipelineConfig())
+    k2 = E.pair_cache_key(sc, 'band3', tmp, E.PipelineConfig(channel_rasters={'band3': ['/x/m.tif', 1]}))
+    check('cloud: masked and unmasked runs keep separate pair caches', k1 != k2, True)
+    # the real model, when installed with its weights (AUTOMATCH_OCM_WEIGHTS)
+    wdir = os.environ.get('AUTOMATCH_OCM_WEIGHTS', '')
+    try:
+        import omnicloudmask  # noqa: F401
+        have = bool(wdir) and all(os.path.exists(os.path.join(wdir, n)) for n in C.weight_files())
+    except Exception:
+        have = False
+    if have:
+        with contextlib.redirect_stdout(io.StringIO()):
+            cls = C.predict(np.stack([rng.random((256, 256)) * 1000 + 100 for _ in range(3)]), 0.0, wdir, 'cpu')
+        check('cloud: OmniCloudMask runs (classes 0-3)', (cls.shape, set(np.unique(cls)) <= {0, 1, 2, 3}),
+              ((256, 256), True))
+        check('cloud: preflight finds the weights', C.check({'cloud_model_dir': wdir}), [])
+    else:
+        print('SKIP  cloud: OmniCloudMask or its weights not here (set AUTOMATCH_OCM_WEIGHTS)')
+    check('cloud: preflight names missing weights',
+          any('weights missing' in p or 'not installed' in p for p in C.check({'cloud_model_dir': tmp})), True)
 
 
 def test_partial_cover():
@@ -2992,6 +3163,7 @@ def main():
         test_coarse_trend()
         test_cross_check(tmp)
         test_bench(tmp)
+        test_cloud_mask(tmp)
         test_auto_bands(tmp)
         test_kornia_versions(tmp)
         test_warmup_and_padding()
@@ -3008,6 +3180,7 @@ def main():
             test_e2e_distortion(tmp)
             test_e2e_missing_weights(tmp)
             test_e2e_truth(tmp)
+            test_e2e_cloud(tmp)
             test_pack(tmp)
     finally:
         if not a.keep:

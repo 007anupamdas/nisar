@@ -546,6 +546,9 @@ class PipelineConfig:
     # and given to every detector (the offset belongs to the image). Off: each
     # detector measures its own, as before job 342.
     coarse_shared: bool = True
+    # {channel: [raster, band]} read instead of the input's own band (e.g. the
+    # cloud-masked copy automatch_cloud writes); None = the input itself
+    channel_rasters: Optional[Dict[str, List]] = None
     coarse_detectors: Optional[List[str]] = None   # the panel; None = automatic
 
     def __post_init__(self):
@@ -1456,6 +1459,9 @@ class InputScene:
         if self.kind == 'nisar':
             tif = os.path.join(cache_dir, f'{self.name}_{channel}_amp.tif')
             return NISARH5Reader.amplitude_geotiff(self.info, channel, tif), 1
+        over = getattr(self, 'channel_override', None) or {}
+        if channel in over:                     # e.g. the band with clouds masked
+            return str(over[channel][0]), int(over[channel][1])
         return self.raster_path, int(channel[len('band'):])
 
     def footprint_lonlat(self, channel_path: str, band_index: int) -> Tuple[Polygon, str]:
@@ -1530,6 +1536,7 @@ def pair_cache_key(scene: 'InputScene', channel: str, reference_dir: str,
         'ref_band': config.reference_band, 'fill': list(config.reference_fill_values or ()),
         'res': config.target_resolution, 'min_area': config.min_area,
         'max_err': config.max_expected_error_m, 'v': 3,
+        'channel_raster': (config.channel_rasters or {}).get(channel),
     }, sort_keys=True, default=str)
     return hashlib.sha1(blob.encode()).hexdigest()[:16]
 
@@ -5817,6 +5824,7 @@ class AutoMatchPipeline:
         for d in detector_types:  # fail before any preprocessing on a bad parameter
             expand_variants(d, (self.config.detector_params or {}).get(d))
         self.scene = InputScene(scene_dir, self.config)
+        self.scene.channel_override = dict(self.config.channel_rasters or {})
         available = self.scene.channels
         wanted = self.config.pols or available
         missing = [c for c in wanted if c not in available]

@@ -52,7 +52,8 @@ PROGRESS_PREFIX = '@@AUTOMATCH '
 AUTOMATCH_VERSION = '2026.10.15'
 CODE_FILES = ('automatch_engine.py', 'automatch_job.py', 'automatch_imcui.py', 'automatch_refs.py',
               'automatch_rival.py', 'automatch_truth.py', 'automatch_weights.py', 'automatch_gpuaas.py',
-              'automatch_native.py', 'imw_configs.py', 'automatch_cross.py', 'automatch_bench.py')
+              'automatch_native.py', 'imw_configs.py', 'automatch_cross.py', 'automatch_bench.py',
+              'automatch_cloud.py')
 
 
 def code_fingerprint() -> str:
@@ -81,7 +82,16 @@ DEFAULT_JOB: Dict = {
     'channels': [],              # [] = all; raster: "band1".., NISAR: "HH"..
     'auto_bands': 0,             # rasters with channels []: match only the N bands with the best
                                  # crispness: fine detail above noise (hyperspectral); 0 = off
-    'auto_bands_range': [],      # [first, last] band searched by auto_bands, e.g. [1, 70]; [] = all
+    'auto_bands_range': [],
+    # Clouds: OmniCloudMask (thick / thin cloud, shadow) masked out before matching
+    'cloud_mask': 'none',        # none | omnicloudmask
+    'cloud_bands': [],           # three bands for red, green, nir; [] = by wavelength per sensor
+    'cloud_mask_classes': [1, 2, 3],   # 1 thick cloud, 2 thin cloud, 3 shadow
+    'cloud_dilate_px': 2,        # grow the mask by this much (cloud edges)
+    'cloud_mask_from': '',       # HS (SWIR): the VNIR product of the same pass, whose mask is laid on
+    'cloud_from_margin_px': 10,  # extra growth for the mask laid on (their geolocation differs by km)
+    'cloud_model_dir': '',       # OmniCloudMask weights; '' = <weights folder>/omnicloudmask
+    'cloud_device': '',          # '' = GPU when there is one      # [first, last] band searched by auto_bands, e.g. [1, 70]; [] = all
     'reference_dir': '',         # L8_ref / C1 / any RIVAL-readable collection
     'reference_label': '',       # tag in file names; default from folder name
     'reference_mode': 'auto',    # auto | index-shp | sidecar | degree-tile
@@ -446,6 +456,24 @@ def preflight(job: Dict, check_weights: bool = True) -> Dict:
         cfg = E.PipelineConfig(nisar_band=job['nisar_band'], nisar_frequency=job['nisar_frequency'])
         scene = E.InputScene(job['input_path'], cfg)
         info['input'] = scene.describe()
+        if str(job.get('cloud_mask') or 'none').lower() == 'omnicloudmask' and scene.kind == 'raster':
+            import automatch_bench as B
+            import automatch_cloud as C
+            errors += C.check(job)
+            try:
+                sensor = B.sensor_of(scene.name, scene.native_res)
+                if job.get('cloud_mask_from'):
+                    if not os.path.exists(job['cloud_mask_from']):
+                        errors.append(f"cloud_mask_from not found: {job['cloud_mask_from']}")
+                    info['cloud_mask'] = {'sensor': sensor, 'from': job['cloud_mask_from']}
+                else:
+                    bands, how, wl = C.choose_bands(scene.raster_path, sensor, job.get('cloud_bands') or None)
+                    info['cloud_mask'] = {'sensor': sensor, 'bands': bands, 'how': how, 'wavelengths_nm': wl}
+                if (scene.native_res or 0) > 50:
+                    warnings.append(f'cloud_mask: OmniCloudMask is validated at 10-50 m; this image is '
+                                    f'{scene.native_res:g} m (run as it is, not upsampled)')
+            except Exception as e:
+                errors.append(f'cloud_mask: {type(e).__name__}: {e}')
         if scene.kind == 'raster':
             picked, note = resolve_auto_bands(job, scene, E)
             if note:
@@ -626,6 +654,7 @@ def _config_for(job: Dict, win: int, nf: Optional[int], res: float, out_dir: str
         coarse_local=bool(job['coarse_local']),
         coarse_cell_m=(float(job['coarse_cell_km']) * 1000.0) if job['coarse_cell_km'] else None,
         coarse_shared=bool(job['coarse_shared']),
+        channel_rasters=job.get('_channel_rasters') or None,
         coarse_detectors=list(job['coarse_detectors']) or None,
         consensus_model=job['consensus_model'], consensus_surface_degree=job['consensus_surface'],
         save_match_images=job['save_match_images'], weights_cache_dir=job['weights_cache_dir'],
@@ -900,6 +929,25 @@ def resolve_auto_bands(job: Dict, scene, E, out_dir: str = '') -> Tuple[List[str
     return picked, ''
 
 
+def prepare_cloud_mask(job: Dict, scene, out_root: str) -> Dict[str, List]:
+    """OmniCloudMask on the input (automatch_cloud): {channel: [cloud-masked
+    copy, 1]} for the channels the job matches. Stops the job when it cannot
+    be done (rather than matching clouds without saying so)."""
+    import automatch_bench as B
+    import automatch_cloud as C
+    if scene.kind != 'raster':
+        print('[Cloud] cloud masking is for raster inputs; NISAR channels are matched as they are')
+        return {}
+    probs = C.check(job)
+    if probs:
+        raise RuntimeError('; '.join(probs))
+    chans = list(job['channels'] or scene.channels)
+    sensor = B.sensor_of(scene.name, scene.native_res)
+    cache = os.path.join(scene.cache_dir(job['temp_dir']), 'cloud')
+    rasters, _ = C.prepare(job, scene, chans, cache, out_root, sensor)
+    return rasters
+
+
 def run_job(job: Dict) -> Dict:
     job = expand_selection(normalize(job))
     pf = preflight(job, check_weights=False)   # warmup stops a detector whose weights are missing
@@ -934,6 +982,8 @@ def run_job(job: Dict) -> Dict:
             print(f'[Job] auto_bands {job["auto_bands"]}: matching {picked}')
             with open(os.path.join(out_root, 'job_used.json'), 'w', encoding='utf-8') as f:
                 json.dump(job, f, indent=2)
+    if str(job.get('cloud_mask') or 'none').lower() == 'omnicloudmask':
+        job = dict(job, _channel_rasters=prepare_cloud_mask(job, scene, out_root))
     res = job['target_resolution'] or scene.native_res or 10.0
     detectors = job['detectors']
     sweep = [(w, nf) for w in job['window_sizes'] for nf in job['num_features']]

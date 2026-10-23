@@ -238,7 +238,33 @@ def detectors_of(d: str) -> pd.DataFrame:
     return best
 
 
-def bench_job(d: str, recompute: bool = False) -> Tuple[Dict, pd.DataFrame]:
+def _ocm_cloud(d: str, loc_in: str, scene: str, pixel_m, recompute: bool, model_dir: str) -> Optional[Dict]:
+    """OmniCloudMask's cloud statistics for a job: from its run (CLOUD_INFO.json,
+    when it ran with cloud masking), else measured now on its input with the
+    model and kept in <job>/cloud_mask/ (model_dir None: not measured)."""
+    run = os.path.join(d, 'CLOUD_INFO.json')
+    if os.path.exists(run):
+        try:
+            with open(run, encoding='utf-8') as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            pass
+    if model_dir is None or not loc_in or not os.path.exists(loc_in):
+        return None
+    import automatch_cloud as C
+
+    class _S:
+        raster_path = loc_in
+    try:
+        _, info = C.prepare({'cloud_model_dir': model_dir}, _S(), [], os.path.join(d, 'cloud_mask'), '',
+                            sensor_of(scene, pixel_m))
+        return info
+    except Exception as e:
+        print(f'[Bench] {os.path.basename(d)}: OmniCloudMask failed ({type(e).__name__}: {e})')
+        return None
+
+
+def bench_job(d: str, recompute: bool = False, cloud_model_dir: Optional[str] = None) -> Tuple[Dict, pd.DataFrame]:
     """(job row, detector rows) for one finished job."""
     import automatch_cross as X
     job = _job_used(d)
@@ -280,6 +306,13 @@ def bench_job(d: str, recompute: bool = False) -> Tuple[Dict, pd.DataFrame]:
         row['pixel_m'] = row.get('pixel_m') or info.get('pixel_m')
         row['cloud_source'] = 'estimate'
     row['sensor'] = sensor_of(scene, row.get('pixel_m'))
+    ocm = _ocm_cloud(d, loc_in, scene, row.get('pixel_m'), recompute, cloud_model_dir)
+    if ocm:
+        row['cloud_pct_estimate'] = row.get('cloud_pct')
+        row.update({'cloud_pct': ocm.get('cloud_pct'), 'shadow_pct': ocm.get('shadow_pct'),
+                    'cloud_source': 'omnicloudmask' + (' (fallback bands)' if str(ocm.get('band_choice', '')
+                                                                                 ).startswith('fallback') else ''),
+                    'cloud_masked_in_run': os.path.exists(os.path.join(d, 'CLOUD_INFO.json'))})
     tcsv = X.job_truth_csv(d)
     if tcsv:
         try:
@@ -405,7 +438,7 @@ def newest_per_scene(metas: List[Dict]) -> Dict[str, Optional[str]]:
 
 
 def batch(parent: str, jobs: str = '', success_px: float = 3.0, recompute: bool = False,
-          all_jobs: bool = False, cross: Optional[Dict] = None) -> int:
+          all_jobs: bool = False, cross: Optional[Dict] = None, cloud_model_dir: Optional[str] = None) -> int:
     """Benchmark the finished jobs under parent; of several jobs on one scene
     only the newest counts (newest_per_scene) unless all_jobs. Each job used
     is cross-checked first (automatch_cross.cross_job with the settings in
@@ -439,7 +472,7 @@ def batch(parent: str, jobs: str = '', success_px: float = 3.0, recompute: bool 
             continue
         if cross is not None:
             xrows += X.cross_job(d, m['job'], recompute=recompute, **cross)
-        row, det = bench_job(d, recompute)
+        row, det = bench_job(d, recompute, cloud_model_dir)
         row.update({'automatch': m['version'], 'code': m['code'], 'used': True, 'superseded_by': ''})
         note = notes.get(row['job']) or notes.get(row['scene'])
         if note is not None:
@@ -504,6 +537,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument('--tolerance-m', type=float, default=None, help='cross-check: tolerance (default 1.5 x RANSAC '
                                                                     'threshold)')
     ap.add_argument('--no-cross', action='store_true', help='skip the cross-check')
+    ap.add_argument('--cloud', choices=('quick', 'omnicloudmask'), default='quick',
+                    help='cloud estimate: quick (brightness heuristic) or omnicloudmask (the model, on each input)')
+    ap.add_argument('--cloud-model-dir', default='', help="OmniCloudMask weights ('' = its own folder)")
     ap.add_argument('--all-jobs', action='store_true',
                     help='count every job; by default only the newest job of each scene counts')
     ap.add_argument('--share-local', default='', help="where the server's share is mounted here, e.g. V:\\")
@@ -512,7 +548,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     X.SHARE = (a.share_local, a.share_server)
     cross = None if a.no_cross else {'top_n': a.top, 'min_agree': a.min_agree, 'keep': a.keep,
                                      'cell_km': a.cell_km, 'tol_m': a.tolerance_m}
-    return batch(a.folder, a.jobs, a.success_px, a.recompute, a.all_jobs, cross)
+    return batch(a.folder, a.jobs, a.success_px, a.recompute, a.all_jobs, cross,
+                 a.cloud_model_dir if a.cloud == 'omnicloudmask' else None)
 
 
 if __name__ == '__main__':

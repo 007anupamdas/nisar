@@ -903,6 +903,12 @@ class BenchDialog(QtWidgets.QDialog):
         f.addRow('Share mapping', row)
         self.recompute = QtWidgets.QCheckBox('measure the scenes again (else SCENE_INFO.json is read back)')
         f.addRow(self.recompute)
+        self.cloud = QtWidgets.QComboBox()
+        self.cloud.addItems(['quick estimate (brightness)', 'OmniCloudMask (the model, on each input)'])
+        self.cloud.setToolTip('Jobs that ran with cloud masking always report the model\'s cloud %. For the '
+                              'others: a quick brightness estimate, or the model run now on their input.')
+        f.addRow('Cloud estimate', self.cloud)
+        self.weights = defaults.get('weights_cache_dir') or ''
         self.all_jobs = QtWidgets.QCheckBox('count every job (else only the newest job of each scene)')
         self.all_jobs.setToolTip('Newest: the newest automatch version in its log, then the latest finish, '
                                  'then the highest job number. The others are listed as superseded.')
@@ -942,6 +948,10 @@ class BenchDialog(QtWidgets.QDialog):
             a += ['--recompute']
         if self.all_jobs.isChecked():
             a += ['--all-jobs']
+        if self.cloud.currentIndex() == 1:
+            a += ['--cloud', 'omnicloudmask']
+            if self.weights:
+                a += ['--cloud-model-dir', os.path.join(self.weights, 'omnicloudmask')]
         if self.cross_on.isChecked():
             a += ['--top', str(self.top.value()), '--min-agree', str(self.agree.value()), '--keep',
                   str(self.keep.value()), '--cell-km', f'{self.cell.value():g}']
@@ -960,7 +970,8 @@ class BenchResultDialog(QtWidgets.QDialog):
                 ('texture', 'texture'), ('truth_points', 'truth pts'), ('best_detector', 'best detector'),
                 ('best_rmse_m', 'best RMSE m'), ('best_rmse_px', 'best RMSE px'), ('cross_reliable', 'cross reliable'),
                 ('cross_kept_share', 'cells agreeing'), ('cross_rmse_m', 'cross RMSE m'),
-                ('cross_points_rmse_m', 'cross RMSE m (truth pts)'),
+                ('cross_points_rmse_m', 'cross RMSE m (truth pts)'), ('cloud_source', 'cloud from'),
+                ('shadow_pct', 'shadow %'),
                 ('automatch', 'version'), ('used', 'used'), ('superseded_by', 'superseded by')]
     SUM_COLS = [('detector', 'detector'), ('jobs', 'jobs'), ('success_rate', 'success rate'),
                 ('median_rmse_px', 'median px'), ('median_rmse_m', 'median m'), ('times_first', 'first')]
@@ -1146,6 +1157,25 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         hl.addWidget(QtWidgets.QLabel('within bands'))
         hl.addWidget(self.auto_range)
         f.addRow('Auto bands (N crispest)', hl)
+        self.cloud_mask = QtWidgets.QCheckBox('mask clouds and cloud shadow before matching (OmniCloudMask)')
+        self.cloud_mask.setToolTip('OmniCloudMask (sensor-agnostic, 2025) finds thick / thin cloud and shadow from '
+                                   'red, green and NIR bands, chosen by wavelength (MV: B3, B2, B6; HV: nearest '
+                                   'to 650 / 560 / 860 nm; HS has none: its three crispest bands stand in, '
+                                   'experimental). Those pixels are left out of matching. Needs the omnicloudmask '
+                                   'package and its weights in <weights folder>/omnicloudmask.')
+        self.cloud_bands = QtWidgets.QLineEdit()
+        self.cloud_bands.setPlaceholderText('red, green, nir bands: automatic (or e.g. band3, band2, band6)')
+        hl2 = QtWidgets.QHBoxLayout()
+        hl2.addWidget(self.cloud_mask)
+        hl2.addWidget(self.cloud_bands, 1)
+        f.addRow('Clouds', hl2)
+        self.cloud_from = PathRow('file', 'Rasters (*.tif *.tiff *.vrt);;All (*)')
+        self.cloud_from.edit.setPlaceholderText('HS (SWIR) only: the HV / MV product of the same pass, whose cloud '
+                                                'mask is laid onto this image')
+        self.cloud_from.edit.setToolTip('SWIR has no red / green / NIR, and OmniCloudMask finds no clouds from SWIR '
+                                        'bands (tested on Sentinel-2). HS and HV are acquired together: the mask is '
+                                        'made on the HV product and laid on by map coordinates.')
+        f.addRow('Cloud mask from', self.cloud_from)
 
         self.ref_path = PathRow('dir')
         f.addRow('Reference folder (L8_ref / C1 / …)', self.ref_path)
@@ -1473,6 +1503,9 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.gpu_win.setValue(int(j.get('gpu_window_px') or 0))
         self.auto_bands.setValue(int(j.get('auto_bands') or 0))
         r = j.get('auto_bands_range') or []
+        self.cloud_mask.setChecked(str(j.get('cloud_mask') or 'none').lower() == 'omnicloudmask')
+        self.cloud_bands.setText(', '.join(j.get('cloud_bands') or []))
+        self.cloud_from.setText(j.get('cloud_mask_from') or '')
         self.auto_range.setText(f'{r[0]}-{r[1]}' if len(r) == 2 else '')
         self._update_kp_label()
         self.target_res.setText('' if j['target_resolution'] is None else f"{j['target_resolution']:g}")
@@ -1558,6 +1591,9 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             'gpu_window_px': self.gpu_win.value(),
             'auto_bands': self.auto_bands.value(),
             'auto_bands_range': self._auto_range(),
+            'cloud_mask': 'omnicloudmask' if self.cloud_mask.isChecked() else 'none',
+            'cloud_bands': [t for t in re.split(r'[,;\s]+', self.cloud_bands.text().strip()) if t],
+            'cloud_mask_from': self.cloud_from.text(),
             'target_resolution': float(tr) if tr else None,
             'max_expected_error_m': self.max_err.value() * 1000.0,
             'coarse_method': self.coarse.currentText(),

@@ -473,6 +473,54 @@ configurations' estimates are compared, and their median is used where
 enough agree. It needs only the two small CSVs each job with ground truth
 writes. Its tolerance defaults to 1.5 × the RANSAC threshold.
 
+## Clouds (OmniCloudMask)
+
+`cloud_mask: omnicloudmask` (GUI: *Clouds*, Data tab) finds thick cloud,
+thin cloud and cloud shadow with OmniCloudMask (Wright et al., *Remote
+Sensing of Environment* 2025; sensor-agnostic, MIT licence). Those pixels
+are left out of matching: each band the job matches is copied with them set
+to no data, and the job matches that copy.
+- **Bands:** the model needs Red, Green and NIR. They are chosen by
+  wavelength, or named in `cloud_bands`:
+  - **MV** (MX-VNIR: B1 485, B2 555, B3 650, B4 815, B5 725, B6 860 nm):
+    B3, B2, B6.
+  - **HV** (Hysis-VNIR, 375–1000 nm): the bands nearest 650, 560 and 860 nm.
+  - **HS** (Hysis-SWIR, 900–2500 nm): none. Set `cloud_mask_from` to the HV
+    (or MV) product of the same pass. Its mask is computed there and laid
+    onto the HS image by map coordinates, grown by `cloud_from_margin_px`
+    (10) for the few km their geolocation differs.
+- **Resolution:** the model runs at the image's own resolution, as its
+  documentation asks. It is trained at 10–50 m; 180 m and 315 m are outside
+  that range but work (below).
+- **Masked classes:** `cloud_mask_classes` (default 1, 2, 3: thick cloud,
+  thin cloud, shadow). The mask is grown by `cloud_dilate_px` (2).
+- **Outputs and reuse:** the mask (`CLOUD_MASK.tif`) and its statistics are
+  kept in the job's cache and reused for the same image. `CLOUD_INFO.json`
+  in the output folder gives the cloud and shadow %.
+- **Installation:** `pip install omnicloudmask==1.8.0` in the job's
+  environment. Its two weight files go into `<weights folder>/omnicloudmask`
+  (or `cloud_model_dir`), from https://huggingface.co/NickWright/OmniCloudMask:
+  - `PM_model_OCM_7.97_R_G_NIR_3_smp_regnety_004.pycls_in1k_PT_state.safetensors`
+  - `PM_model_OCM_7.97_R_G_NIR_3_smp_edgenext_small.usi_in1k_PT_state.safetensors`
+
+  Preflight names anything missing, and a job never matches clouds without
+  saying so.
+
+Checked here on two cloudy Sentinel-2 scenes over India (tile 43QGU,
+52–59 % cloud), against the scenes' own cloud classification:
+
+| Bands | 40 m | 180 m | 320 m |
+|---|---|---|---|
+| Red / Green / NIR | IoU 0.71 | IoU 0.68–0.81 | IoU 0.82 |
+| SWIR only (945, 1610, 2190 nm, as HS has) | | IoU 0.00–0.04 | |
+
+With SWIR only, the model found 0–3 % cloud. Hence `cloud_mask_from` for HS.
+
+The benchmark reports the model's cloud % for jobs that ran with masking.
+`--cloud omnicloudmask` (GUI: *Cloud estimate*) runs the model on the other
+jobs' inputs too, so their cloud classes come from the model instead of
+the rough brightness estimate.
+
 ## Benchmark: which detector on which kind of image
 
 `python automatch_job.py bench <folder of job outputs> [--jobs 335-366]`
