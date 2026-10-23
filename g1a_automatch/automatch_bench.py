@@ -13,6 +13,11 @@ records, without matching anything again:
   detectors every detector's best result against the ground truth
             (TRUTH_RANKING.csv), in metres and in pixels
 
+Your own cloud (and water) estimates replace the automatic ones: fill in
+SCENE_NOTES_TEMPLATE.csv (written on the first run) and save it as
+SCENE_NOTES.csv in the same folder (columns job or scene, cloud_pct,
+water_pct, notes).
+
 Of several jobs on one scene only the newest counts: the newest automatch
 version in its log, then the latest finish, then the highest job number; the
 others are listed as superseded (--all-jobs counts them all).
@@ -145,6 +150,45 @@ def scene_info(path: str, band: int, max_side: int = 1024, png: str = '') -> Dic
 # ─────────────────────────────────────────────────────────────────────────────
 # one job
 # ─────────────────────────────────────────────────────────────────────────────
+SENSOR_BY_PIXEL = ((60.0, 'MV'), (250.0, 'HS'), (1e9, 'HV'))     # 45 m, 180 m, 315 m
+
+
+def scene_id(input_path: str) -> str:
+    """The scene a job ran on: the G1A product name when the file carries
+    it, else the packed set folder with the file name ('267403461/cog'):
+    jobs 297-334 all read a file called cog.tif, which alone is no scene."""
+    p = str(input_path or '').replace('\\', '/')
+    stem = os.path.splitext(os.path.basename(p))[0]
+    if re.search(r'G1A_[A-Z]{2}_', stem):
+        return stem
+    parts = [x for x in p.split('/') if x]
+    if len(parts) >= 3 and parts[-2].lower() == 'input':
+        return f'{parts[-3]}/{stem}'
+    return '/'.join(parts[-2:-1] + [stem]) if len(parts) >= 2 else stem
+
+
+def sensor_of(scene: str, pixel_m: Optional[float]) -> str:
+    """MV / HS / HV from the G1A name, else from the pixel size."""
+    m = re.search(r'G1A_([A-Z]{2})_', scene or '')
+    if m:
+        return m.group(1)
+    if pixel_m:
+        for lim, name in SENSOR_BY_PIXEL:
+            if float(pixel_m) < lim:
+                return name
+    return 'other'
+
+
+def _log_resolution(d: str) -> Optional[float]:
+    lp = os.path.join(d, 'automatch.log')
+    try:
+        with open(lp, encoding='utf-8', errors='replace') as f:
+            m = re.search(r'working resolution ([\d.]+) m', f.read(200000))
+        return float(m.group(1)) if m else None
+    except OSError:
+        return None
+
+
 def _job_used(d: str) -> Dict:
     p = os.path.join(d, 'job_used.json')
     try:
@@ -203,10 +247,9 @@ def bench_job(d: str, recompute: bool = False) -> Tuple[Dict, pd.DataFrame]:
     loc_in = X.local_path(inp, d, job.get('output_dir') or '')
     if inp and not os.path.exists(loc_in):
         loc_in = X._by_share(inp)
-    scene = os.path.splitext(os.path.basename(str(inp).replace('\\', '/')))[0]
-    m = re.search(r'G1A_([A-Z]{2})_', scene)
+    scene = scene_id(inp)
     band = _band_run(d, job)
-    row = {'job': name, 'scene': scene, 'sensor': m.group(1) if m else 'other', 'band': band,
+    row = {'job': name, 'scene': scene, 'band': band, 'pixel_m': _log_resolution(d),
            'max_expected_error_km': (job.get('max_expected_error_m') or 0) / 1000.0}
     # scene measures: read back, or measured on the input as this machine sees it
     info_p = os.path.join(d, 'SCENE_INFO.json')
@@ -233,7 +276,10 @@ def bench_job(d: str, recompute: bool = False) -> Tuple[Dict, pd.DataFrame]:
     elif info is None:
         print(f'[Bench] {name}: input {inp} not reachable from here (set the share mapping); no cloud estimate')
     if info:
-        row.update({k: info.get(k) for k in ('cloud_pct', 'valid_pct', 'texture', 'pixel_m', 'separation')})
+        row.update({k: info.get(k) for k in ('cloud_pct', 'valid_pct', 'texture', 'separation')})
+        row['pixel_m'] = row.get('pixel_m') or info.get('pixel_m')
+        row['cloud_source'] = 'estimate'
+    row['sensor'] = sensor_of(scene, row.get('pixel_m'))
     tcsv = X.job_truth_csv(d)
     if tcsv:
         try:
@@ -321,7 +367,7 @@ def job_meta(d: str) -> Dict:
     (RUN_MANIFEST.csv), its number."""
     job = _job_used(d)
     name = os.path.basename(os.path.normpath(d))
-    scene = os.path.splitext(os.path.basename(str(job.get('input_path') or '').replace('\\', '/')))[0]
+    scene = scene_id(job.get('input_path') or '')
     version, code = '', ''
     lp = os.path.join(d, 'automatch.log')
     if os.path.exists(lp):
@@ -371,6 +417,17 @@ def batch(parent: str, jobs: str = '', success_px: float = 3.0, recompute: bool 
         print(f'[Bench] {n}: skipped, {why}')
     print(f'[Bench] {len(found)} finished job(s) under {parent}')
     metas = {d: job_meta(d) for d in found}
+    notes = {}
+    np_ = os.path.join(parent, 'SCENE_NOTES.csv')
+    if os.path.exists(np_):
+        try:
+            for r in pd.read_csv(np_).to_dict('records'):
+                key = str(r.get('job') or r.get('scene') or '').strip()
+                if key:
+                    notes[key] = r
+            print(f'[Bench] {len(notes)} scene note(s) from {np_} (your cloud estimates replace the automatic ones)')
+        except Exception as e:
+            print(f'[Bench] SCENE_NOTES.csv unreadable: {type(e).__name__}: {e}')
     sup = {} if all_jobs else newest_per_scene(list(metas.values()))
     jrows, drows, xrows = [], [], []
     for d in found:
@@ -384,6 +441,14 @@ def batch(parent: str, jobs: str = '', success_px: float = 3.0, recompute: bool 
             xrows += X.cross_job(d, m['job'], recompute=recompute, **cross)
         row, det = bench_job(d, recompute)
         row.update({'automatch': m['version'], 'code': m['code'], 'used': True, 'superseded_by': ''})
+        note = notes.get(row['job']) or notes.get(row['scene'])
+        if note is not None:
+            if pd.notna(note.get('cloud_pct')):
+                row['cloud_pct_estimate'] = row.get('cloud_pct')
+                row['cloud_pct'], row['cloud_source'] = float(note['cloud_pct']), 'manual'
+            for k in ('water_pct', 'notes'):
+                if k in note and pd.notna(note.get(k)):
+                    row[k] = note[k]
         jrows.append(row)
         print(f"[Bench] {row['job']}: {row['sensor']} {row['band']}, error {row.get('error_km', '?')} km, "
               f"clouds {row.get('cloud_pct', '?')} %, best {row.get('best_detector', '-')} "
@@ -396,6 +461,11 @@ def batch(parent: str, jobs: str = '', success_px: float = 3.0, recompute: bool 
         return 1
     jobs_df = pd.DataFrame(jrows)
     jobs_df.to_csv(os.path.join(parent, 'BENCH_JOBS.csv'), index=False)
+    if not os.path.exists(np_):          # a form for your own cloud estimates
+        used = jobs_df[jobs_df['used'].astype(bool)] if 'used' in jobs_df.columns else jobs_df
+        pd.DataFrame({'job': used['job'], 'scene': used.get('scene'), 'sensor': used.get('sensor'),
+                      'cloud_pct_estimate': used.get('cloud_pct'), 'cloud_pct': '', 'water_pct': '', 'notes': ''}
+                     ).to_csv(os.path.join(parent, 'SCENE_NOTES_TEMPLATE.csv'), index=False)
     if xrows:
         pd.DataFrame(xrows).to_csv(os.path.join(parent, 'CROSS_ALL.csv'), index=False)
     if drows:

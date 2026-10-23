@@ -2484,6 +2484,26 @@ def test_bench(tmp):
         B.main([parent, '--all-jobs'])
     check('bench: --all-jobs counts both', sorted(pd.read_csv(os.path.join(parent, 'BENCH_DETECTORS.csv'))['job'].unique()),
           ['output343', 'output366'])
+    # jobs 297-334 all read 'cog.tif': the packed set folder tells the scenes apart
+    check('bench: scenes named by the G1A product, else by the packed set folder',
+          (B.scene_id('/maintenance/x/g1a/267403461/input/cog.tif'), B.scene_id('/m/g1a/267419411/input/cog.tif'),
+           B.scene_id('/m/g1a/267522911/input/G1A_HS_G_06OCT2026_261006064217_26100603_SPLC00GTD_3_1.tif')),
+          ('267403461/cog', '267419411/cog', 'G1A_HS_G_06OCT2026_261006064217_26100603_SPLC00GTD_3_1'))
+    check('bench: the sensor from the name, else from the pixel size',
+          (B.sensor_of('267403461/cog', 315.0), B.sensor_of('x/cog', 180.0), B.sensor_of('x/cog', 45.0),
+           B.sensor_of('G1A_MV_G_X', 315.0)), ('HV', 'HS', 'MV', 'MV'))
+    # your own cloud estimates replace the automatic ones
+    check('bench: a form for your own cloud estimates is written', os.path.exists(os.path.join(parent, 'SCENE_NOTES_TEMPLATE.csv')),
+          True)
+    pd.DataFrame([{'job': 'output366', 'cloud_pct': 55, 'notes': 'thick cumulus in the north'}]).to_csv(
+        os.path.join(parent, 'SCENE_NOTES.csv'), index=False)
+    with contextlib.redirect_stdout(io.StringIO()):
+        B.main([parent, '--no-cross'])
+    jrow = pd.read_csv(os.path.join(parent, 'BENCH_JOBS.csv')).set_index('job').loc['output366']
+    drow = pd.read_csv(os.path.join(parent, 'BENCH_DETECTORS.csv'))
+    check('bench: SCENE_NOTES.csv replaces the cloud estimate (job row and detector classes)',
+          (jrow['cloud_pct'], jrow['cloud_source'], drow['cloud_class'].iloc[0]), (55.0, 'manual', 'cloudy (>30 %)'))
+    os.remove(os.path.join(parent, 'SCENE_NOTES.csv'))
     calls = []
     orig = B.scene_info
     B.scene_info = lambda *a, **k: (calls.append(1), orig(*a, **k))[1]

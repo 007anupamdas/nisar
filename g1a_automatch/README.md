@@ -491,6 +491,17 @@ For each job it records:
 - every detector's best result against the truth, in metres and pixels;
 - the cross-check's reliability, when the job has one.
 
+A scene is named by its G1A product name, or else by the packed set folder
+plus the file name (`267403461/cog`). Jobs packed as `cog.tif` would
+otherwise all look like one scene. Without a G1A name, the sensor comes
+from the pixel size: 45 m is MV, 180 m HS, 315 m HV.
+
+The automatic cloud estimate is rough. Your own values replace it: fill in
+`SCENE_NOTES_TEMPLATE.csv`, which the first run writes, and save it as
+`SCENE_NOTES.csv` in the same folder. Its columns are `job` or `scene`,
+`cloud_pct`, `water_pct` and `notes`. `BENCH_JOBS.csv` marks the source in
+`cloud_source` (manual or estimate).
+
 Of several jobs on one scene, only the newest counts. Newest means the
 newest automatch version in its log, then the latest finish, then the
 highest job number. The older ones are listed in `BENCH_JOBS.csv` as
