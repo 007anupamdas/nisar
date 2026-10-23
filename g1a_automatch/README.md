@@ -494,7 +494,10 @@ to no data, and the job matches that copy.
     (10) for the few km their geolocation differs.
 - **Contrast normalisation:** OmniCloudMask standardises each band per
   patch, so raw DN works. Before matching, each window is stretched (log,
-  then the 1st–99th percentile) over its valid pixels only. Masked cloud is
+  then `stretch_percentiles`, default the 1st–99th percentile) over its valid
+  pixels only. With [1, 90] or [1, 85] (GUI: *Contrast stretch*, Output &
+  run tab), the brightest tenth or more saturates, and the darker ground is
+  spread over more grey levels. Masked cloud is
   no data, so it neither flattens the land's contrast nor yields keypoints.
 - **Resolution:** the model runs at the image's own resolution, as its
   documentation asks. It is trained at 10–50 m; 180 m and 315 m are outside

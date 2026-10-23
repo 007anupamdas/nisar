@@ -1444,6 +1444,21 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.min_valid.setRange(0.01, 1.0)
         self.min_valid.setSingleStep(0.05)
         f.addRow('Min valid fraction per window', self.min_valid)
+        self.stretch_lo = QtWidgets.QDoubleSpinBox()
+        self.stretch_lo.setRange(0, 49)
+        self.stretch_lo.setSuffix(' %')
+        self.stretch_hi = QtWidgets.QDoubleSpinBox()
+        self.stretch_hi.setRange(51, 100)
+        self.stretch_hi.setSuffix(' %')
+        self.stretch_hi.setToolTip('Each window is stretched so that these percentiles of its valid pixels '
+                                   '(after log) become black and white. Lower the high end (e.g. 90 or 85) to '
+                                   'spread the darker ground over more grey levels; brighter pixels saturate.')
+        hl = QtWidgets.QHBoxLayout()
+        hl.addWidget(self.stretch_lo)
+        hl.addWidget(QtWidgets.QLabel('to'))
+        hl.addWidget(self.stretch_hi)
+        hl.addStretch(1)
+        f.addRow('Contrast stretch (percentiles)', hl)
         self.amp = QtWidgets.QCheckBox('mixed precision (AMP)')
         self.resume = QtWidgets.QCheckBox('resume finished sweep points')
         self.save_imgs = QtWidgets.QCheckBox('save match preview images (imcui)')
@@ -1543,6 +1558,9 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.min_gpu.setValue(float(j['min_gpu_free_gb']))
         self.min_area.setValue(float(j['min_area_km2']))
         self.min_valid.setValue(float(j['min_valid_fraction']))
+        sp = list(j.get('stretch_percentiles') or [1, 99])
+        self.stretch_lo.setValue(float(sp[0]))
+        self.stretch_hi.setValue(float(sp[1]))
         self.amp.setChecked(bool(j['use_amp']))
         self.resume.setChecked(bool(j['resume']))
         self.save_imgs.setChecked(bool(j['save_match_images']))
@@ -1627,6 +1645,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             'min_gpu_free_gb': self.min_gpu.value(),
             'min_area_km2': self.min_area.value(),
             'min_valid_fraction': self.min_valid.value(),
+            'stretch_percentiles': [self.stretch_lo.value(), self.stretch_hi.value()],
             'use_amp': self.amp.isChecked(),
             'resume': self.resume.isChecked(),
             'save_match_images': self.save_imgs.isChecked(),

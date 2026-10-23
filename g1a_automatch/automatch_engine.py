@@ -546,6 +546,9 @@ class PipelineConfig:
     # and given to every detector (the offset belongs to the image). Off: each
     # detector measures its own, as before job 342.
     coarse_shared: bool = True
+    # Contrast stretch of each window before matching: these low / high
+    # percentiles of its valid pixels (after log1p) map to 0 / 1
+    stretch_percentiles: Tuple[float, float] = (1.0, 99.0)
     # {channel: [raster, band]} read instead of the input's own band (e.g. the
     # cloud-masked copy automatch_cloud writes); None = the input itself
     channel_rasters: Optional[Dict[str, List]] = None
@@ -2317,6 +2320,12 @@ class BaseMatcher(ABC):
         out[valid] = out[valid] * factor
         return out
 
+    def _stretch_kw(self) -> Dict[str, float]:
+        """The contrast stretch of every window before matching: the low and
+        high percentiles of its valid pixels (stretch_percentiles)."""
+        lo, hi = (getattr(self.config, 'stretch_percentiles', None) or (1.0, 99.0))[:2]
+        return {'plo': float(lo), 'phi': float(hi)}
+
     @staticmethod
     def _norm_img(img: np.ndarray, nodata=None, plo: float = 1, phi: float = 99,
                   return_mask: bool = False):
@@ -3137,8 +3146,8 @@ class DiskBasedMatcher(BaseMatcher):
                                nisar_nodata=None, s1_nodata=None):
         try:
             # ── Level 0: normalise + extract masks ──────────────────────────
-            img1, mask1 = self._norm_img(nisar_data, nodata=nisar_nodata, return_mask=True)
-            img2, mask2 = self._norm_img(s1_data, nodata=s1_nodata, return_mask=True)
+            img1, mask1 = self._norm_img(nisar_data, nodata=nisar_nodata, return_mask=True, **self._stretch_kw())
+            img2, mask2 = self._norm_img(s1_data, nodata=s1_nodata, return_mask=True, **self._stretch_kw())
 
             if img1.max() == 0.0 or img2.max() == 0.0:
                 return None
@@ -3588,8 +3597,8 @@ class LoFTRMatcher(DiskBasedMatcher):
                                metadata, matcher_name, matcher_param,
                                nisar_nodata=None, s1_nodata=None):
         try:
-            img1, mask1 = self._norm_img(nisar_data, nodata=nisar_nodata, return_mask=True)  # was: self.norm_img
-            img2, mask2 = self._norm_img(s1_data, nodata=s1_nodata, return_mask=True)  # was: self.norm_img
+            img1, mask1 = self._norm_img(nisar_data, nodata=nisar_nodata, return_mask=True, **self._stretch_kw())  # was: self.norm_img
+            img2, mask2 = self._norm_img(s1_data, nodata=s1_nodata, return_mask=True, **self._stretch_kw())  # was: self.norm_img
 
             if img1.max() == 0.0 or img2.max() == 0.0:
                 return None
@@ -3948,8 +3957,8 @@ class DenseWindowMatcher(DiskBasedMatcher):
                                nisar_x, nisar_y, s1_x, s1_y,
                                metadata, matcher_name, matcher_param,
                                nisar_nodata=None, s1_nodata=None):
-        img1, mask1 = self._norm_img(nisar_data, nodata=nisar_nodata, return_mask=True)
-        img2, mask2 = self._norm_img(s1_data, nodata=s1_nodata, return_mask=True)
+        img1, mask1 = self._norm_img(nisar_data, nodata=nisar_nodata, return_mask=True, **self._stretch_kw())
+        img2, mask2 = self._norm_img(s1_data, nodata=s1_nodata, return_mask=True, **self._stretch_kw())
         if img1.max() == 0.0 or img2.max() == 0.0:
             return None
         if (mask1.mean() < self.config.min_valid_fraction

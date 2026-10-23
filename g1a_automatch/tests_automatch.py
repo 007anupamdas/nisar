@@ -1046,6 +1046,9 @@ def test_gui_dialog():
               (['HH', 'HV'], ['HH', 'HV']))
         cp.edit.clear()
         cp.set_names([])
+        w.stretch_hi.setValue(90)
+        check('gui: the contrast stretch reaches the job', w.get_job()['stretch_percentiles'], [1.0, 90.0])
+        w.stretch_hi.setValue(99)
         w.cloud_mask.setChecked(True)
         w.cloud_choice.setCurrentIndex(1)
         check('gui: cloud band choice reaches the job', w.get_job()['cloud_band_choice'], 'quality')
@@ -2735,6 +2738,35 @@ def test_cloud_mask(tmp):
           any('weights missing' in p or 'not installed' in p for p in C.check({'cloud_model_dir': tmp})), True)
 
 
+def test_stretch():
+    """The contrast stretch before matching follows stretch_percentiles: at 90
+    the brightest tenth saturates and the rest spreads over more grey levels."""
+    import numpy as np
+    import automatch_engine as E
+    import automatch_job as J
+    rng = np.random.default_rng(4)
+    img = (rng.gamma(2.0, 200.0, (200, 200)) + 50).astype(np.float32)
+    a99 = E.BaseMatcher._norm_img(img, nodata=0, plo=1, phi=99)
+    a90 = E.BaseMatcher._norm_img(img, nodata=0, plo=1, phi=90)
+    check('stretch: at 90 about a tenth saturates, at 99 about a hundredth',
+          (abs(float((a90 >= 0.999).mean()) - 0.10) < 0.02, abs(float((a99 >= 0.999).mean()) - 0.01) < 0.01), (True, True))
+    check('stretch: the darker ground gets more grey levels at 90', float(np.median(a90)) > float(np.median(a99)), True)
+    cfg = J._config_for(J.normalize({'stretch_percentiles': [1, 85]}), 512, None, 45.0, '/tmp/x')
+
+    class M(E.BaseMatcher):
+        def __init__(self, config):
+            self.config = config
+        def detect_and_describe(self, *a):
+            pass
+        def match(self, *a):
+            pass
+    try:
+        kw = M(cfg)._stretch_kw()
+    except TypeError:                     # other abstract methods: read it the way the matchers do
+        kw = E.BaseMatcher._stretch_kw(type('X', (), {'config': cfg})())
+    check('stretch: the job setting reaches the matchers', kw, {'plo': 1.0, 'phi': 85.0})
+
+
 def test_partial_cover():
     """Jobs 336 and 343: a warning when the first-ranked configuration is km
     off while one reaching fewer points is close (343, matches on part of the
@@ -3187,6 +3219,7 @@ def main():
         test_cross_check(tmp)
         test_bench(tmp)
         test_cloud_mask(tmp)
+        test_stretch()
         test_auto_bands(tmp)
         test_kornia_versions(tmp)
         test_warmup_and_padding()
