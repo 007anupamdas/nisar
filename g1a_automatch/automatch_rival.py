@@ -67,6 +67,51 @@ def collect_points(filtered_dir: str, filenames: List[str]) -> pd.DataFrame:
     return out.drop_duplicates(subset=['x1-map', 'y1-map', 'x2-map', 'y2-map'])
 
 
+def parallel_share(filtered_dir: str) -> Dict[str, Dict]:
+    """How parallel the match lines are, per matcher pass of one detector run:
+    in each window, the share of its matches whose displacement lies within
+    the RANSAC threshold of the window's median displacement. Good matches
+    all move the same way (parallel lines in a match image); bad ones point
+    anywhere. {matcher label: {'parallel_share': share over all matches,
+    'windows_parallel': share of windows where most are parallel,
+    'matches': n}}. Each window is counted once, whatever the RANSAC
+    variants."""
+    import glob as _glob
+    import automatch_engine as E
+    import numpy as np
+    out: Dict[str, Dict] = {}
+    seen = set()
+    acc: Dict[str, list] = {}
+    for path in sorted(_glob.glob(os.path.join(filtered_dir, '*.csv'))):
+        p = E.MatchStatistics._parse_filename(os.path.basename(path)) or {}
+        if not p:
+            continue
+        m, prm = str(p.get('match_method')), p.get('match_parameter')
+        lab = f'smnn{float(prm):g}' if m == 'smnn' and prm not in (None, '') and str(prm) != 'nan' else m
+        win = (lab, p.get('pair_id'), p.get('scan'), p.get('pix'))
+        if win in seen:
+            continue
+        seen.add(win)
+        try:
+            df = pd.read_csv(path, usecols=['x1-map', 'y1-map', 'x2-map', 'y2-map', 'threshold'])
+        except Exception:
+            continue
+        if len(df) < 3:
+            continue
+        de = (df['x1-map'] - df['x2-map']).to_numpy()
+        dn = (df['y1-map'] - df['y2-map']).to_numpy()
+        tol = float(df['threshold'].max()) if df['threshold'].notna().any() else 0.0
+        if tol <= 0:
+            continue
+        ok = np.hypot(de - np.median(de), dn - np.median(dn)) <= tol
+        acc.setdefault(lab, []).append((int(ok.sum()), len(ok)))
+    for lab, v in acc.items():
+        good, tot = sum(a for a, _ in v), sum(b for _, b in v)
+        out[lab] = {'parallel_share': round(good / max(tot, 1), 3),
+                    'windows_parallel': round(sum(1 for a, b in v if a >= 0.5 * b) / len(v), 3), 'matches': tot}
+    return out
+
+
 def thin_per_chip(df: pd.DataFrame, max_per_chip: int, seed: int = 0) -> pd.DataFrame:
     """At most max_per_chip points per chip, spread over the chip: points are
     binned on a grid and taken one per cell in turn. 0 keeps everything."""

@@ -748,9 +748,17 @@ def _performance_table(out_root: str, manifest: List[Dict]) -> Optional[str]:
                 if cur is None or (r['surviving_chips'], r['agg_inliers']) > (cur['surviving_chips'],
                                                                                cur['agg_inliers']):
                     best[lab] = r
+        par = {}
+        if isinstance(row.get('filtered_dir'), str) and os.path.isdir(row['filtered_dir']):
+            try:
+                import automatch_rival as _R
+                par = _R.parallel_share(row['filtered_dir'])
+            except Exception as e:
+                print(f"[Job] parallel share not measured for {row.get('detector')}: {type(e).__name__}: {e}")
         for t in timing:
             lab = t['matcher']
             b = best.get(lab) or {}
+            pv = par.get(lab) or {}
             k = (str(row.get('channel')), str(row.get('sweep')), str(row.get('detector')), lab)
             tru = truth.get(k)
             rows.append({
@@ -759,6 +767,7 @@ def _performance_table(out_root: str, manifest: List[Dict]) -> Optional[str]:
                 'windows': t.get('windows'),
                 'chips_kept': b.get('surviving_chips'), 'inliers': b.get('agg_inliers'),
                 'surface_rmse_m': b.get('surface_rmse_m'),
+                'parallel_share': pv.get('parallel_share'), 'windows_parallel': pv.get('windows_parallel'),
                 'best_ransac': (f"{b.get('ransac_method')}{float(b['ransac_threshold']):g}"
                                 if b.get('ransac_threshold') is not None else None),
                 'truth_rank': None if tru is None else tru.get('rank'),

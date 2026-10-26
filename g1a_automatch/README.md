@@ -473,6 +473,20 @@ configurations' estimates are compared, and their median is used where
 enough agree. It needs only the two small CSVs each job with ground truth
 writes. Its tolerance defaults to 1.5 × the RANSAC threshold.
 
+## Parallel match lines (a quality check without ground truth)
+
+In a match image, good matches all move the same way and their lines run
+parallel; bad matches point anywhere. `PERFORMANCE.csv` measures this per
+detector and matcher:
+- `parallel_share`: of all matches, the share whose displacement lies within
+  the RANSAC threshold of their window's median displacement.
+- `windows_parallel`: the share of windows where most are parallel.
+
+The benchmark adds both to `BENCH_DETECTORS.csv`, with
+`median_parallel_share` per detector in `BENCH_SUMMARY.csv`, so it can be
+checked against the truth error. On the synthetic scene, 90–94 % of
+matches are parallel; random matches give about 0 %.
+
 ## Clouds (OmniCloudMask)
 
 `cloud_mask: omnicloudmask` (GUI: *Clouds*, Data tab) finds thick cloud,

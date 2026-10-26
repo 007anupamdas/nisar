@@ -341,6 +341,16 @@ def bench_job(d: str, recompute: bool = False, cloud_model_dir: Optional[str] = 
         except Exception:
             pass
     det = detectors_of(d)
+    pp = os.path.join(d, 'PERFORMANCE.csv')
+    if not det.empty and os.path.exists(pp):          # how parallel each one's match lines were
+        try:
+            perf = pd.read_csv(pp)
+            if 'parallel_share' in perf.columns:
+                perf = perf[['sweep', 'detector', 'matcher', 'parallel_share', 'windows_parallel']]
+                det = det.merge(perf.astype({'sweep': str, 'detector': str, 'matcher': str}), how='left',
+                                on=['sweep', 'detector', 'matcher'])
+        except Exception:
+            pass
     if not det.empty:
         px = row.get('pixel_m')
         det = det.assign(job=name, rmse_px=(det['truth_rmse_m'] / px) if px else np.nan)
@@ -384,7 +394,9 @@ def summarize(dets: pd.DataFrame, success_px: float = 3.0) -> pd.DataFrame:
         for gval, g in parts:
             for det, h in g.groupby('detector'):
                 ok = h[h['truth_reached'] >= h['truth_total'] / 2.0]
+                par = h['parallel_share'] if 'parallel_share' in h.columns else pd.Series(dtype=float)
                 rows.append({'group_by': gname, 'group': gval, 'detector': det, 'jobs': int(h['job'].nunique()),
+                             'median_parallel_share': (round(float(par.median()), 3) if par.notna().any() else None),
                              'success_rate': round(float(h['success'].mean()), 3),
                              'median_rmse_px': round(float(ok['rmse_px'].median()), 2) if len(ok) else None,
                              'median_rmse_m': round(float(ok['truth_rmse_m'].median()), 1) if len(ok) else None,
@@ -507,7 +519,7 @@ def batch(parent: str, jobs: str = '', success_px: float = 3.0, recompute: bool 
         dets['error_class'] = [_class(v, ERROR_CLASSES) for v in dets['error_km']]
         keep = ['job', 'sensor', 'band', 'pixel_m', 'cloud_pct', 'cloud_class', 'error_km', 'error_class',
                 'detector', 'matcher', 'sweep', 'ransac', 'truth_rmse_m', 'rmse_px', 'truth_reached', 'truth_total',
-                'detector_rank']
+                'detector_rank', 'parallel_share', 'windows_parallel']
         dets = dets[[c for c in keep if c in dets.columns]]
         dets.to_csv(os.path.join(parent, 'BENCH_DETECTORS.csv'), index=False)
         s = summarize(dets, success_px)

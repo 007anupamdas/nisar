@@ -974,7 +974,8 @@ class BenchResultDialog(QtWidgets.QDialog):
                 ('shadow_pct', 'shadow %'),
                 ('automatch', 'version'), ('used', 'used'), ('superseded_by', 'superseded by')]
     SUM_COLS = [('detector', 'detector'), ('jobs', 'jobs'), ('success_rate', 'success rate'),
-                ('median_rmse_px', 'median px'), ('median_rmse_m', 'median m'), ('times_first', 'first')]
+                ('median_rmse_px', 'median px'), ('median_rmse_m', 'median m'), ('times_first', 'first'),
+                ('median_parallel_share', 'parallel lines')]
 
     def __init__(self, folder, parent=None):
         super().__init__(parent)

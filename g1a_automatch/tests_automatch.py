@@ -2814,6 +2814,37 @@ def test_stretch():
           E.BaseMatcher._stretch_kw(type('X', (), {'config': cfg2})()).get('clahe'), True)
 
 
+def test_parallel_share(tmp):
+    """Parallel match lines (a common displacement) mean good matches: the
+    share of a window's matches within the RANSAC threshold of its median
+    displacement, per matcher pass."""
+    import numpy as np
+    import pandas as pd
+    import automatch_rival as R
+    rng = np.random.default_rng(9)
+    d = os.path.join(tmp, 'filtered_par')
+    os.makedirs(d, exist_ok=True)
+
+    def write(name, de, dn):
+        n = len(de)
+        x1, y1 = rng.uniform(0, 20000, n), rng.uniform(0, 20000, n)
+        pd.DataFrame({'x1': 0, 'y1': 0, 'x2': 0, 'y2': 0, 'x1-map': x1, 'y1-map': y1, 'x2-map': x1 - de,
+                      'y2-map': y1 - dn, 'Distance': 0, 'along': 0, 'across': 0, 'model-type': 'magsac',
+                      'threshold': 40.0, 'confidence': 0.99, 'inliers': True}).to_csv(os.path.join(d, name), index=False)
+    for pix in (0, 1024):
+        write(f'sift_band1_toC1_pair001_scan0_pix{pix}_ada_aff_magsac_40.0_0.99_.csv',
+              4013 + rng.normal(0, 8, 200), -2487 + rng.normal(0, 8, 200))          # good: parallel
+        write(f'sift_band1_toC1_pair001_scan0_pix{pix}_ada_aff_magsac_20.0_0.99_.csv',
+              4013 + rng.normal(0, 8, 200), -2487 + rng.normal(0, 8, 200))          # same window, other RANSAC
+        write(f'sift_band1_toC1_pair001_scan0_pix{pix}_smnn_0.95_aff_magsac_40.0_0.99_.csv',
+              rng.uniform(-20000, 20000, 200), rng.uniform(-20000, 20000, 200))     # bad: any direction
+    got = R.parallel_share(d)
+    check('parallel: good matches are parallel, bad ones are not',
+          (got['ada']['parallel_share'] > 0.95, got['smnn0.95']['parallel_share'] < 0.05,
+           got['ada']['windows_parallel'], got['smnn0.95']['windows_parallel']), (True, True, 1.0, 0.0))
+    check('parallel: each window counted once whatever the RANSAC variants', got['ada']['matches'], 400)
+
+
 def test_partial_cover():
     """Jobs 336 and 343: a warning when the first-ranked configuration is km
     off while one reaching fewer points is close (343, matches on part of the
@@ -3267,6 +3298,7 @@ def main():
         test_bench(tmp)
         test_cloud_mask(tmp)
         test_stretch()
+        test_parallel_share(tmp)
         test_auto_bands(tmp)
         test_kornia_versions(tmp)
         test_warmup_and_padding()
