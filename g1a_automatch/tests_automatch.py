@@ -1049,6 +1049,9 @@ def test_gui_dialog():
         w.stretch_hi.setValue(90)
         check('gui: the contrast stretch reaches the job', w.get_job()['stretch_percentiles'], [1.0, 90.0])
         w.stretch_hi.setValue(99)
+        w.stretch_mode.setCurrentIndex(1)
+        check('gui: CLAHE choice reaches the job', w.get_job()['stretch_mode'], 'clahe')
+        w.stretch_mode.setCurrentIndex(0)
         w.cloud_mask.setChecked(True)
         w.cloud_choice.setCurrentIndex(1)
         check('gui: cloud band choice reaches the job', w.get_job()['cloud_band_choice'], 'quality')
@@ -2789,6 +2792,26 @@ def test_stretch():
     except TypeError:                     # other abstract methods: read it the way the matchers do
         kw = E.BaseMatcher._stretch_kw(type('X', (), {'config': cfg})())
     check('stretch: the job setting reaches the matchers', kw, {'plo': 1.0, 'phi': 85.0})
+    # job 369: bright cloud took the grey levels; the ground went black
+    import cv2
+    tex = cv2.GaussianBlur(rng.normal(size=(256, 256)).astype(np.float32), (0, 0), 2)
+    win = 300 + 40 * tex / tex.std()
+    win[:, :128] = 4000 + rng.normal(0, 30, (256, 128))          # cloud on the west half
+    land = (slice(None), slice(140, 256))
+    flat = E.BaseMatcher._norm_img(win, nodata=0, plo=1, phi=99)
+    local = E.BaseMatcher._norm_img(win, nodata=0, plo=1, phi=99, clahe=True)
+    masked = win.copy()
+    masked[:, :128] = 0                                          # what cloud masking hands the stretch
+    clear = E.BaseMatcher._norm_img(masked, nodata=0, plo=1, phi=99)
+    check('stretch: beside cloud the ground is nearly black with one stretch per window',
+          float(flat[land].std()) < 0.05, True)
+    check('stretch: CLAHE brings the ground\'s texture up (x3 or more)',
+          float(local[land].std()) > 3 * float(flat[land].std()), True)
+    check('stretch: with the cloud masked the ground gets the whole grey range',
+          float(clear[land].std()) > 0.15, True)
+    cfg2 = J._config_for(J.normalize({'stretch_mode': 'clahe'}), 512, None, 45.0, '/tmp/x')
+    check('stretch: stretch_mode clahe reaches the matchers',
+          E.BaseMatcher._stretch_kw(type('X', (), {'config': cfg2})()).get('clahe'), True)
 
 
 def test_partial_cover():

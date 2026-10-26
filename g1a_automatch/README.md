@@ -497,7 +497,13 @@ to no data, and the job matches that copy.
   then `stretch_percentiles`, default the 1st–99th percentile) over its valid
   pixels only. With [1, 90] or [1, 85] (GUI: *Contrast stretch*, Output &
   run tab), the brightest tenth or more saturates, and the darker ground is
-  spread over more grey levels. Masked cloud is
+  spread over more grey levels. `stretch_mode: clahe` (GUI: *+ local contrast*)
+  adds contrast-limited adaptive histogram equalisation after the stretch,
+  so each part of a window gets its own contrast. In job 369 the bright
+  clouds took the grey levels, the ground went nearly black, and most
+  matches landed on cloud. CLAHE brings that ground up, but it also brings
+  up texture inside clouds. Cloud masking, which takes the clouds out of
+  the stretch altogether, is the main remedy. Masked cloud is
   no data, so it neither flattens the land's contrast nor yields keypoints.
 - **Resolution:** the model runs at the image's own resolution, as its
   documentation asks. It is trained at 10–50 m; 180 m and 315 m are outside

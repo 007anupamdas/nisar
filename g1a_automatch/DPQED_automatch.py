@@ -1467,6 +1467,12 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         hl.addWidget(self.stretch_lo)
         hl.addWidget(QtWidgets.QLabel('to'))
         hl.addWidget(self.stretch_hi)
+        self.stretch_mode = QtWidgets.QComboBox()
+        self.stretch_mode.addItems(['one stretch per window', '+ local contrast (CLAHE)'])
+        self.stretch_mode.setToolTip('CLAHE gives each part of a window its own contrast: dark ground next to bright '
+                                     'cloud is brought up (job 369 matched on clouds because the ground went black). '
+                                     'Cloud masking removes the clouds from the stretch altogether.')
+        hl.addWidget(self.stretch_mode)
         hl.addStretch(1)
         f.addRow('Contrast stretch (percentiles)', hl)
         self.amp = QtWidgets.QCheckBox('mixed precision (AMP)')
@@ -1573,6 +1579,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         sp = list(j.get('stretch_percentiles') or [1, 99])
         self.stretch_lo.setValue(float(sp[0]))
         self.stretch_hi.setValue(float(sp[1]))
+        self.stretch_mode.setCurrentIndex(1 if str(j.get('stretch_mode') or '') == 'clahe' else 0)
         self.amp.setChecked(bool(j['use_amp']))
         self.resume.setChecked(bool(j['resume']))
         self.save_imgs.setChecked(bool(j['save_match_images']))
@@ -1660,6 +1667,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             'min_area_km2': self.min_area.value(),
             'min_valid_fraction': self.min_valid.value(),
             'stretch_percentiles': [self.stretch_lo.value(), self.stretch_hi.value()],
+            'stretch_mode': 'clahe' if self.stretch_mode.currentIndex() == 1 else 'percentile',
             'use_amp': self.amp.isChecked(),
             'resume': self.resume.isChecked(),
             'save_match_images': self.save_imgs.isChecked(),

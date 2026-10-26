@@ -549,6 +549,7 @@ class PipelineConfig:
     # Contrast stretch of each window before matching: these low / high
     # percentiles of its valid pixels (after log1p) map to 0 / 1
     stretch_percentiles: Tuple[float, float] = (1.0, 99.0)
+    stretch_mode: str = 'percentile'    # percentile | clahe (local contrast after the stretch)
     # {channel: [raster, band]} read instead of the input's own band (e.g. the
     # cloud-masked copy automatch_cloud writes); None = the input itself
     channel_rasters: Optional[Dict[str, List]] = None
@@ -2324,11 +2325,14 @@ class BaseMatcher(ABC):
         """The contrast stretch of every window before matching: the low and
         high percentiles of its valid pixels (stretch_percentiles)."""
         lo, hi = (getattr(self.config, 'stretch_percentiles', None) or (1.0, 99.0))[:2]
-        return {'plo': float(lo), 'phi': float(hi)}
+        kw = {'plo': float(lo), 'phi': float(hi)}
+        if str(getattr(self.config, 'stretch_mode', 'percentile') or 'percentile').lower() == 'clahe':
+            kw['clahe'] = True
+        return kw
 
     @staticmethod
     def _norm_img(img: np.ndarray, nodata=None, plo: float = 1, phi: float = 99,
-                  return_mask: bool = False):
+                  return_mask: bool = False, clahe: bool = False):
         x = img.astype(np.float32)
         if nodata is not None:
             x[x == nodata] = np.nan
@@ -2355,9 +2359,29 @@ class BaseMatcher(ABC):
 
         y = np.clip(x, lo, hi)
         y = (y - lo) / (hi - lo + 1e-6)
+        if clahe:
+            y = BaseMatcher._clahe(y, valid_mask)
         y[~valid_mask] = 0.0  # zero out nodata
 
         return (y, valid_mask) if return_mask else y
+
+    @staticmethod
+    def _clahe(y: np.ndarray, valid: np.ndarray, clip: float = 2.0, tiles: int = 8) -> np.ndarray:
+        """Contrast-limited adaptive histogram equalisation of a 0..1 window
+        (stretch_mode 'clahe'): each tile gets its own contrast, so dark ground
+        next to bright cloud is brought up (job 369: with one stretch per
+        window the clouds took the grey levels and the ground went black).
+        No-data is filled with the valid median first, so its edge adds no
+        contrast."""
+        import cv2
+        if not valid.any():
+            return y
+        fill = float(np.median(y[valid]))
+        u = (np.where(valid, y, fill) * 65535.0).astype(np.uint16)
+        h, w = u.shape
+        g = max(1, min(tiles, h // 32, w // 32))
+        out = cv2.createCLAHE(clipLimit=clip, tileGridSize=(g, g)).apply(u)
+        return out.astype(np.float32) / 65535.0
 
     # @staticmethod
     # def _norm_img(img: np.ndarray, nodata=None, plo: float = 1, phi: float = 99) -> np.ndarray:

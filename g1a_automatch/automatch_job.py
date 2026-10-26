@@ -85,6 +85,7 @@ DEFAULT_JOB: Dict = {
     'auto_bands_range': [],
     # Clouds: OmniCloudMask (thick / thin cloud, shadow) masked out before matching
     'stretch_percentiles': [1, 99],   # contrast stretch of each window: low / high percentile (e.g. [1, 90])
+    'stretch_mode': 'percentile',     # percentile | clahe: local contrast too (dark ground beside bright cloud)
     'cloud_mask': 'none',        # none | omnicloudmask
     'cloud_band_choice': 'spec', # spec: red / green / nir by the band specs; quality: the 3 crispest bands
     'cloud_bands': [],           # three bands named explicitly (wins over cloud_band_choice)
@@ -662,6 +663,7 @@ def _config_for(job: Dict, win: int, nf: Optional[int], res: float, out_dir: str
         coarse_cell_m=(float(job['coarse_cell_km']) * 1000.0) if job['coarse_cell_km'] else None,
         coarse_shared=bool(job['coarse_shared']),
         stretch_percentiles=tuple(float(v) for v in (job.get('stretch_percentiles') or [1, 99])[:2]),
+        stretch_mode=str(job.get('stretch_mode') or 'percentile'),
         channel_rasters=job.get('_channel_rasters') or None,
         coarse_detectors=list(job['coarse_detectors']) or None,
         consensus_model=job['consensus_model'], consensus_surface_degree=job['consensus_surface'],
