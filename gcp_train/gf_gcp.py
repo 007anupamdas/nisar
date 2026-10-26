@@ -8,6 +8,7 @@ BaseDataset loaders; the samples come from dataset.PairDataset.
         index: /path/to/pairs/pairs.csv
         channels: 3
         sensors: null          # or a list, e.g. [MicroSat, G1A_MV]
+        modalities: null       # or a list of input modalities, e.g. [lwir]
         batch_size: 16
         num_workers: 8
 """
@@ -30,6 +31,7 @@ class GcpPairs(BaseDataset):
         'index': '???',
         'channels': 3,
         'sensors': None,
+        'modalities': None,
         'max_pairs': None,
         'augment': True,
         'train_batch_size': 16,
@@ -44,10 +46,11 @@ class GcpPairs(BaseDataset):
 
     def get_dataset(self, split):
         sensors = list(self.conf.sensors) if self.conf.sensors else None
+        modalities = list(self.conf.modalities) if self.conf.modalities else None
         return PairDataset(self.conf.index, split, channels=self.conf.channels,
                            augment=(self.conf.augment if split == 'train' else False),
                            swap=(split == 'train'), seed=self.conf.seed, sensors=sensors,
-                           max_pairs=self.conf.max_pairs)
+                           max_pairs=self.conf.max_pairs, modalities=modalities)
 
 
 __main_dataset__ = GcpPairs

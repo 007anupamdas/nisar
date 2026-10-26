@@ -7,9 +7,11 @@ Per pair (its true homography H_0to1 is known):
     precision     correct / matches
     h_ok          a homography estimated from the matches (RANSAC, thr px)
                   moves the crop's corners less than thr px from H's
-Summaries per sensor and overall go to EVAL_<label>.csv. Run it on the test
-split (scenes never used for training), once with the official weights and
-once with the fine-tuned checkpoint, through Glue Factory's own model code:
+Summaries go to EVAL_<label>.csv: overall, per sensor, per modality pair
+(input -> reference, e.g. lwir -> visible) and per pixel-size band. Run it on
+the test split (scenes never used for training), once with the official
+weights and once with the fine-tuned checkpoint, through Glue Factory's own
+model code:
 
     python evaluate.py --conf configs/aliked_lightglue_gcp.yaml --index pairs/pairs.csv \\
         --checkpoint outputs/training/<experiment>/checkpoint_best.tar --label finetuned
@@ -60,13 +62,31 @@ def pair_metrics(k0: np.ndarray, k1: np.ndarray, m0: np.ndarray, H: np.ndarray, 
     return out
 
 
+RES_BANDS = [(0, 10, '<10 m'), (10, 30, '10-30 m'), (30, 100, '30-100 m'), (100, 300, '100-300 m'),
+             (300, float('inf'), '>=300 m')]
+
+
+def res_band(px: float) -> str:
+    for lo, hi, name in RES_BANDS:
+        if lo <= px < hi:
+            return name
+    return 'unknown'
+
+
 def summarize(rows: List[Dict]) -> pd.DataFrame:
     df = pd.DataFrame(rows)
     if df.empty:
         return df
+    groups = [('all', 'all', df)] + [('sensor', k, d) for k, d in df.groupby('sensor')]
+    if 'modality0' in df:
+        mp = df['modality0'].astype(str) + ' -> ' + df['modality1'].astype(str)
+        groups += [('modality', k, d) for k, d in df.groupby(mp)]
+    if 'px_m' in df:
+        groups += [('resolution', name, df[df['px_m'].map(res_band) == name]) for _, _, name in RES_BANDS
+                   if (df['px_m'].map(res_band) == name).any()]
     g = []
-    for key, d in [('all', df)] + list(df.groupby('sensor')):
-        g.append({'sensor': key, 'pairs': len(d), 'mean_matches': round(float(d['matches'].mean()), 1),
+    for by, key, d in groups:
+        g.append({'by': by, 'group': key, 'pairs': len(d), 'mean_matches': round(float(d['matches'].mean()), 1),
                   'mean_correct': round(float(d['correct'].mean()), 1),
                   'precision': round(float(d['correct'].sum() / max(d['matches'].sum(), 1)), 4),
                   'h_success': round(float(d['h_ok'].mean()), 4)})
@@ -74,12 +94,16 @@ def summarize(rows: List[Dict]) -> pd.DataFrame:
 
 
 def run_gluefactory(conf_path: str, index: str, checkpoint: Optional[str], split: str = 'test',
-                    thr: float = 3.0, device: Optional[str] = None, max_pairs: Optional[int] = None) -> List[Dict]:
+                    thr: float = 3.0, device: Optional[str] = None, max_pairs: Optional[int] = None,
+                    overrides: Optional[List[str]] = None) -> List[Dict]:
     import torch
     from omegaconf import OmegaConf
     from gluefactory.models import get_model
     from dataset import PairDataset
+    from modality import MODALITIES
     conf = OmegaConf.load(conf_path)
+    if overrides:
+        conf = OmegaConf.merge(conf, OmegaConf.from_dotlist(list(overrides)))
     mconf = conf.model
     if checkpoint:
         cp = torch.load(checkpoint, map_location='cpu', weights_only=False)
@@ -97,13 +121,18 @@ def run_gluefactory(conf_path: str, index: str, checkpoint: Optional[str], split
             s = ds[i]
             batch = {'view0': {k: v[None].to(dev) for k, v in s['view0'].items()},
                      'view1': {k: v[None].to(dev) for k, v in s['view1'].items()},
-                     'H_0to1': s['H_0to1'][None].to(dev)}
+                     'H_0to1': s['H_0to1'][None].to(dev),
+                     'modality0': torch.tensor([s['modality0']], device=dev),
+                     'modality1': torch.tensor([s['modality1']], device=dev),
+                     'px_m': torch.tensor([s['px_m']], device=dev)}
             pred = model(batch)
             k0 = pred['keypoints0'][0].cpu().numpy()
             k1 = pred['keypoints1'][0].cpu().numpy()
             m0 = pred['matches0'][0].cpu().numpy()
             size = tuple(s['view0']['image_size'].numpy().astype(int))
             rows.append({'name': s['name'], 'scene': s['scene'], 'sensor': s['sensor'],
+                         'modality0': MODALITIES[s['modality0']], 'modality1': MODALITIES[s['modality1']],
+                         'px_m': s['px_m'],
                          **pair_metrics(k0, k1, m0, s['H_0to1'].numpy().astype(np.float64), size, thr)})
     return rows
 
@@ -118,8 +147,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument('--label', default='')
     ap.add_argument('--out', default='')
     ap.add_argument('--max-pairs', type=int, default=0)
+    ap.add_argument('--set', action='append', default=[], help='config override, e.g. model.matcher.condition=false')
     a = ap.parse_args(argv)
-    rows = run_gluefactory(a.conf, a.index, a.checkpoint or None, a.split, a.thr, max_pairs=a.max_pairs or None)
+    rows = run_gluefactory(a.conf, a.index, a.checkpoint or None, a.split, a.thr, max_pairs=a.max_pairs or None,
+                           overrides=a.set)
     label = a.label or ('finetuned' if a.checkpoint else 'official')
     out = a.out or os.path.dirname(os.path.abspath(a.index))
     pd.DataFrame(rows).to_csv(os.path.join(out, f'EVAL_{label}_pairs.csv'), index=False)

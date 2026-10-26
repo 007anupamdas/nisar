@@ -6,21 +6,27 @@ GPU-service entry for gcp_train (the same calling convention as automatch's):
 The JSON files merge in order; "mode" picks the step:
 
   pairs   {"mode": "pairs", "manifest": "/maintenance/.../scenes.csv",
-           "crop": 512, "per_scene": 40, "max_loo_px": 1.5, "work_res_m": 45}
+           "crop": 512, "per_scene": 40, "max_loo_px": 1.5}
+          pixel sizes come from each scene's images (pairs.py); "res_m": 45
+          fixes them, "res_m": [45, 315] limits them
           -> <output>/pairs/ (pairs.csv, scenes_fit.csv, splits.csv, images)
   train   {"mode": "train", "index": "/maintenance/.../pairs/pairs.csv",
            "config": "aliked" | "disk" | "/path/to/config.yaml",
-           "experiment": "aliked_lg_microsat", "epochs": 20, "batch_size": 16,
-           "sensors": ["MicroSat"], "set": ["train.lr=5e-6"]}
+           "experiment": "aliked_lg_all", "epochs": 20, "batch_size": 16,
+           "sensors": ["MicroSat"], "modalities": ["lwir"], "set": ["train.lr=5e-6"]}
           "smoke": true runs one short epoch on 64 pairs first (minutes): it
-          proves Glue Factory, the weights and the data before a long run
+          proves Glue Factory, the weights and the data before a long run.
+          The matcher is told each view's modality and the pixel size
+          (gf_cond_lightglue); "condition": false trains plain LightGlue.
+          "train_extractor": true also fine-tunes the keypoint network
+          (thermal, SAR: what it looks at, not only how it matches).
           -> Glue Factory training (gluefactory must be installed in the job's
              environment); checkpoint_best.tar and <experiment>_lightglue.pth
-             copied to <output>
-  export  {"mode": "export", "checkpoint": ".../checkpoint_best.tar", "name": "aliked_lg_microsat"}
+             (+ _condition.pth, + _extractor.pth) copied to <output>
+  export  {"mode": "export", "checkpoint": ".../checkpoint_best.tar", "name": "aliked_lg_all"}
   eval    {"mode": "eval", "index": ".../pairs.csv", "config": "aliked",
            "checkpoint": ".../checkpoint_best.tar" (empty: official weights)}
-          -> <output>/EVAL_<label>.csv per sensor
+          -> <output>/EVAL_<label>.csv per sensor, modality pair and pixel-size band
 
 Offline servers: Glue Factory downloads the ALIKED / DISK and official
 LightGlue weights through torch.hub; put them in the torch hub cache
@@ -79,6 +85,12 @@ def run_train(job: Dict, out_dir: str) -> int:
         args += [f'data.train_batch_size={b}', f'data.val_batch_size={b}']
     if job.get('sensors'):
         args.append('data.sensors=' + json.dumps([str(s) for s in job['sensors']]))   # YAML reads JSON lists
+    if job.get('modalities'):
+        args.append('data.modalities=' + json.dumps([str(s) for s in job['modalities']]))
+    if job.get('condition') is False:
+        args.append('model.matcher.name=matchers.lightglue')
+    if job.get('train_extractor'):
+        args += ['model.extractor.trainable=True', 'model.extractor.freeze_batch_normalization=True']
     args += [str(s) for s in (job.get('set') or [])]
     env = dict(os.environ, PYTHONPATH=HERE + os.pathsep + os.environ.get('PYTHONPATH', ''))
     print('[gcp_train] ' + ' '.join(args), flush=True)
@@ -109,7 +121,7 @@ def main(argv: List[str] = None) -> int:
                     min_valid=float(job.get('min_valid', 0.6)), max_cloud=float(job.get('max_cloud', 0.5)),
                     max_loo_px=float(job.get('max_loo_px', 1.5)), val=float(job.get('val', 0.1)),
                     test=float(job.get('test', 0.2)), seed=int(job.get('seed', 0)),
-                    work_res_m=(float(job['work_res_m']) if job.get('work_res_m') else None))
+                    res_m=job.get('res_m', job.get('work_res_m')), max_scale=float(job.get('max_scale', 16)))
         return 0 if r['pairs'] else 1
     if mode == 'train':
         return run_train(job, out_dir)
@@ -125,6 +137,8 @@ def main(argv: List[str] = None) -> int:
             a += ['--checkpoint', job['checkpoint']]
         if job.get('label'):
             a += ['--label', job['label']]
+        if job.get('condition') is False:
+            a += ['--set', 'model.matcher.name=matchers.lightglue']
         return V.main(a)
     print(f'[gcp_train] unknown mode {mode!r}: pairs, train, export or eval')
     return 2

@@ -4,12 +4,14 @@ two-view pipeline reads:
 
     {'name', 'H_0to1' (3 x 3 float32),
      'view0': {'image': (C, H, W) float32 in 0..1, 'image_size': (W, H)},
-     'view1': {...}, 'scene', 'sensor'}
+     'view1': {...}, 'scene', 'sensor',
+     'modality0', 'modality1' (int: modality.MODALITIES), 'px_m' (float)}
 
 C is 3 (the band repeated) for ALIKED / DISK, which expect RGB, or 1.
 Training samples are lightly augmented (brightness, contrast, gamma, noise,
 blur, each view on its own) and, half of the time, swapped (view1 first,
-with H inverted), so the matcher does not learn which side is the reference.
+with H inverted and the modalities exchanged), so the matcher does not
+learn which side is the reference.
 """
 from __future__ import annotations
 
@@ -18,6 +20,8 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+
+import modality as M
 
 
 def _augment(img: np.ndarray, rng: np.random.Generator) -> np.ndarray:
@@ -37,12 +41,14 @@ class PairDataset:
 
     def __init__(self, index: str, split: str = 'train', channels: int = 3, augment: Optional[bool] = None,
                  swap: Optional[bool] = None, seed: int = 0, sensors: Optional[List[str]] = None,
-                 max_pairs: Optional[int] = None):
+                 max_pairs: Optional[int] = None, modalities: Optional[List[str]] = None):
         self.root = os.path.dirname(os.path.abspath(index))
         df = pd.read_csv(index)
         df = df[df['split'].astype(str) == split]
         if sensors:
             df = df[df['sensor'].astype(str).isin([str(s) for s in sensors])]
+        if modalities and 'modality0' in df:
+            df = df[df['modality0'].astype(str).isin([M.resolve(m) for m in modalities])]
         if max_pairs:
             df = df.head(int(max_pairs))
         self.rows = df.to_dict('records')
@@ -67,10 +73,13 @@ class PairDataset:
         rng = np.random.default_rng(self.seed * 1000003 + i + (np.random.randint(0, 1 << 30) if self.augment else 0))
         im0, im1 = self._image(r['img0']), self._image(r['img1'])
         H = np.asarray([float(v) for v in str(r['H']).split()], np.float64).reshape(3, 3)
+        m0, m1 = M.index(r.get('modality0')), M.index(r.get('modality1'))
+        px = float(r.get('px_m') or 0)
+        px = px if np.isfinite(px) and px > 0 else 30.0
         if self.augment:
             im0, im1 = _augment(im0, rng), _augment(im1, rng)
         if self.swap and rng.random() < 0.5:
-            im0, im1, H = im1, im0, np.linalg.inv(H)
+            im0, im1, H, m0, m1 = im1, im0, np.linalg.inv(H), m1, m0
         H = H / H[2, 2]
 
         def view(a: np.ndarray) -> Dict:
@@ -80,4 +89,4 @@ class PairDataset:
             return {'image': t.float(), 'image_size': torch.tensor([a.shape[1], a.shape[0]], dtype=torch.float32)}
         return {'name': f"{r['scene_id']}/{os.path.basename(r['img0'])}", 'scene': str(r['scene_id']),
                 'sensor': str(r.get('sensor', '')), 'H_0to1': torch.from_numpy(H.astype(np.float32)),
-                'view0': view(im0), 'view1': view(im1)}
+                'view0': view(im0), 'view1': view(im1), 'modality0': m0, 'modality1': m1, 'px_m': px}

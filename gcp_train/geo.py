@@ -72,9 +72,11 @@ def read_scaled(src, band: int, col0: float, row0: float, size: int, factor: flo
 
 def reproject_to_grid(paths_bands: List[Tuple[str, int]], crs, x0: float, y1: float, px: float, size: int
                       ) -> Tuple[np.ndarray, np.ndarray]:
-    """The reference rasters resampled (bilinear) onto a north-up size x size
-    grid of px metres whose top-left corner is (x0, y1) in crs; the first
-    raster with data wins where several cover a pixel. (data, valid)."""
+    """The reference rasters resampled onto a north-up size x size grid of px
+    metres whose top-left corner is (x0, y1) in crs; the first raster with data
+    wins where several cover a pixel. (data, valid). Bilinear near the
+    raster's own pixel size; averaged where the grid is coarser (bilinear
+    would alias: it reads 4 of the many pixels a coarse pixel covers)."""
     import rasterio as rio
     from rasterio.transform import from_origin
     from rasterio.warp import Resampling, reproject
@@ -85,14 +87,21 @@ def reproject_to_grid(paths_bands: List[Tuple[str, int]], crs, x0: float, y1: fl
         with rio.open(path) as s:
             nd = s.nodata if s.nodata is not None else 0
             buf = np.full((size, size), np.nan, np.float32)
+            how = Resampling.average if px > 1.5 * ground_pixel_m(s) else Resampling.bilinear
             reproject(rio.band(s, band), buf, src_nodata=nd, dst_nodata=np.nan,
-                      dst_transform=dst_t, dst_crs=crs, resampling=Resampling.bilinear)
+                      dst_transform=dst_t, dst_crs=crs, resampling=how)
         new = ~have & np.isfinite(buf) & (buf != nd)
         out[new] = buf[new]
         have |= new
         if have.all():
             break
     return out, have
+
+
+def pixel_m(path: str) -> float:
+    import rasterio as rio
+    with rio.open(path) as s:
+        return ground_pixel_m(s)
 
 
 def footprint_lonlat(path: str) -> Tuple[float, float, float, float]:

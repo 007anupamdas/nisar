@@ -1,4 +1,5 @@
-# Fine-tune LightGlue (on frozen DISK keypoints) on the tie-point pairs.
+# Fine-tune LightGlue (on frozen DISK keypoints) on the tie-point pairs,
+# told each view's modality and the pair's pixel size (gf_cond_lightglue).
 # Based on Glue Factory's disk+lightglue_homography.yaml; starts from the
 # official DISK LightGlue weights instead of from scratch.
 data:
@@ -6,6 +7,7 @@ data:
     index: ???                     # pairs/pairs.csv, set on the command line: data.index=...
     channels: 3
     sensors: null                  # e.g. [MicroSat] to train on one sensor
+    modalities: null               # e.g. [lwir] to train on thermal inputs only
     augment: true
     train_batch_size: 16
     val_batch_size: 16
@@ -27,7 +29,8 @@ model:
         th_positive: 3
         th_negative: 3
     matcher:
-        name: matchers.lightglue
+        name: gf_cond_lightglue      # gcp_train/gf_cond_lightglue.py: LightGlue told modality and pixel size
+        condition: true              # false (or matcher name matchers.lightglue): plain LightGlue
         filter_threshold: 0.1
         flash: false
         checkpointed: true
@@ -39,6 +42,7 @@ train:
     log_every_iter: 50
     eval_every_iter: 500
     lr: 1e-5
+    lr_scaling: [[100, [matcher.condition.]]]    # the condition starts at zero and learns faster (1e-3)
     lr_schedule:
         start: 10
         type: exp

@@ -15,6 +15,7 @@ max_loo_px: supervision any worse would teach the matcher wrong positions.
 """
 from __future__ import annotations
 
+import math
 from typing import Dict, Optional
 
 import numpy as np
@@ -42,6 +43,12 @@ class SceneModel:
         A = _design(col.ravel(), row.ravel(), self.quad, self.c0, self.r0, self.s)
         en = A @ self.coef
         return en[:, 0].reshape(col.shape), en[:, 1].reshape(col.shape)
+
+    def pixel_m(self, col: float, row: float) -> float:
+        """The true ground size of an input pixel at (col, row): the square
+        root of the model's local area scale."""
+        E, N = self(np.array([col, col + 1.0, col]), np.array([row, row, row + 1.0]))
+        return float(math.sqrt(abs((E[1] - E[0]) * (N[2] - N[0]) - (E[2] - E[0]) * (N[1] - N[0]))))
 
     def to_dict(self) -> Dict:
         return {'coef': self.coef.tolist(), 'quad': self.quad, 'c0': self.c0, 'r0': self.r0, 's': self.s,
