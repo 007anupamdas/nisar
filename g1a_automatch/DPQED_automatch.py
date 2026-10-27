@@ -1032,6 +1032,155 @@ class BenchResultDialog(QtWidgets.QDialog):
         self.sum_holder.addWidget(self.sum_table)
 
 
+class CloudTestDialog(QtWidgets.QDialog):
+    """The cloud mask of one image at several confidence thresholds, without
+    a matching run (automatch_cloud.standalone)."""
+
+    def __init__(self, settings, job, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('Cloud mask test')
+        self.settings = settings
+        f = QtWidgets.QFormLayout(self)
+        head = QtWidgets.QLabel('Runs OmniCloudMask once on one image and makes a mask and a quicklook for each '
+                                'confidence threshold (thick cloud red, thin yellow, shadow blue), with their cloud '
+                                '% side by side. Nothing is matched.')
+        head.setWordWrap(True)
+        f.addRow(head)
+        self.image = PathRow('file', 'Rasters (*.tif *.tiff *.vrt *.img);;All (*)')
+        self.image.setText(job.get('input_path') or settings.value('cloud_test/image', ''))
+        f.addRow('Image', self.image)
+        self.out = PathRow('dir')
+        self.out.edit.setPlaceholderText('<image folder>/cloud_test_<image>')
+        self.out.setText(settings.value('cloud_test/out', '') or '')
+        f.addRow('Output folder', self.out)
+        self.conf = QtWidgets.QLineEdit(settings.value('cloud_test/conf', '') or
+                                        f"0.5, {float(job.get('cloud_min_confidence') or 0.7):g}, 0.85")
+        self.conf.setToolTip('A pixel is cloud when P(thick) + P(thin) is at least this; one mask per value')
+        f.addRow('Confidence thresholds', self.conf)
+        self.sensor = QtWidgets.QComboBox()
+        self.sensor.addItems(['from the file name / pixel size', 'MV', 'HV', 'HS', 'other'])
+        f.addRow('Sensor', self.sensor)
+        self.choice = QtWidgets.QComboBox()
+        self.choice.addItems(['red / green / NIR by the band specs', 'the 3 crispest bands'])
+        self.choice.setCurrentIndex(1 if job.get('cloud_band_choice') == 'quality' else 0)
+        f.addRow('Bands', self.choice)
+        self.bands = QtWidgets.QLineEdit(' '.join(str(b) for b in (job.get('cloud_bands') or [])))
+        self.bands.setPlaceholderText('or three bands: red green nir, e.g. 3 2 6')
+        f.addRow('', self.bands)
+        self.mask_from = PathRow('file', 'Rasters (*.tif *.tiff *.vrt *.img);;All (*)')
+        self.mask_from.edit.setPlaceholderText('HS (SWIR) only: the HV / MV image of the same pass')
+        self.mask_from.setText(job.get('cloud_mask_from') or '')
+        f.addRow('Mask from', self.mask_from)
+        wdir = job.get('cloud_model_dir') or (os.path.join(job['weights_cache_dir'], 'omnicloudmask')
+                                              if job.get('weights_cache_dir') else '')
+        self.model_dir = PathRow('dir')
+        self.model_dir.setText(wdir)
+        self.model_dir.edit.setPlaceholderText("OmniCloudMask's own folder")
+        f.addRow('Model weights', self.model_dir)
+        self.device = QtWidgets.QComboBox()
+        self.device.addItems(['GPU when there is one', 'cpu'])
+        f.addRow('Device', self.device)
+        bb = QtWidgets.QDialogButtonBox()
+        bb.addButton('Run cloud test', QtWidgets.QDialogButtonBox.ButtonRole.AcceptRole
+                     if QT_API != 'PyQt5' else QtWidgets.QDialogButtonBox.AcceptRole)
+        bb.addButton(QtWidgets.QDialogButtonBox.StandardButton.Cancel if QT_API != 'PyQt5'
+                     else QtWidgets.QDialogButtonBox.Cancel)
+        bb.accepted.connect(self._ok)
+        bb.rejected.connect(self.reject)
+        f.addRow(bb)
+
+    def thresholds(self):
+        vals = [float(v) for v in re.split(r'[,;\s]+', self.conf.text().strip()) if v]
+        if not vals or any(not 0 < v < 1 for v in vals):
+            raise ValueError('confidence thresholds are numbers between 0 and 1, e.g. 0.5, 0.7, 0.85')
+        return vals
+
+    def out_dir(self):
+        img = self.image.text()
+        return self.out.text() or os.path.join(os.path.dirname(os.path.abspath(img)),
+                                               'cloud_test_' + os.path.splitext(os.path.basename(img))[0])
+
+    def _ok(self):
+        if not os.path.isfile(self.image.text()):
+            QtWidgets.QMessageBox.warning(self, 'Cloud mask test', 'Choose an existing image.')
+            return
+        try:
+            self.thresholds()
+            if self.bands.text().strip() and len(self.bands.text().split()) != 3:
+                raise ValueError('name three bands (red green nir), or leave the field empty')
+        except ValueError as e:
+            QtWidgets.QMessageBox.warning(self, 'Cloud mask test', str(e))
+            return
+        self.settings.setValue('cloud_test/image', self.image.text())
+        self.settings.setValue('cloud_test/out', self.out.text())
+        self.settings.setValue('cloud_test/conf', self.conf.text())
+        self.accept()
+
+    def args(self):
+        a = ['cloud', self.image.text(), '--out', self.out_dir(), '--conf'] + [f'{v:g}' for v in self.thresholds()]
+        if self.sensor.currentIndex() > 0:
+            a += ['--sensor', self.sensor.currentText()]
+        if self.bands.text().strip():
+            a += ['--bands'] + self.bands.text().split()
+        elif self.choice.currentIndex() == 1:
+            a += ['--choice', 'quality']
+        if self.mask_from.text():
+            a += ['--from', self.mask_from.text()]
+        if self.model_dir.text():
+            a += ['--model-dir', self.model_dir.text()]
+        if self.device.currentIndex() == 1:
+            a += ['--device', 'cpu']
+        return a
+
+
+class CloudResultDialog(QtWidgets.QDialog):
+    """CLOUD_TEST.csv and each threshold's quicklook."""
+
+    COLS = [('confidence', 'confidence'), ('cloud_pct', 'cloud %'), ('thick_pct', 'thick %'),
+            ('thin_pct', 'thin %'), ('shadow_pct', 'shadow %'), ('dark_cloud_pct', 'dark cloud %'),
+            ('bands', 'bands'), ('band_choice', 'bands from'), ('model_seconds', 'model s')]
+
+    def __init__(self, folder, parent=None):
+        super().__init__(parent)
+        import csv as _csv
+        self.setWindowTitle('Cloud mask test')
+        self.resize(1100, 820)
+        lay = QtWidgets.QVBoxLayout(self)
+        note = QtWidgets.QLabel('dark cloud %: the share of "cloud" darker than the median clear ground -- over 20 % '
+                                'means ground is taken for cloud; prefer a threshold where it is low.')
+        note.setWordWrap(True)
+        lay.addWidget(note)
+        table = csv_table(os.path.join(folder, 'CLOUD_TEST.csv'), self.COLS)
+        table.setMaximumHeight(150)
+        lay.addWidget(table)
+        tabs = QtWidgets.QTabWidget()
+        rows = list(_csv.DictReader(open(os.path.join(folder, 'CLOUD_TEST.csv'), encoding='utf-8')))
+        for r in rows:
+            ql = r.get('quicklook') or ''
+            lab = QtWidgets.QLabel()
+            lab.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter if QT_API != 'PyQt5' else QtCore.Qt.AlignCenter)
+            pm = QtGui.QPixmap(ql) if os.path.exists(ql) else QtGui.QPixmap()
+            if pm.isNull():
+                lab.setText('no quicklook (HS: see the VNIR image\'s, in from_<image>/)')
+            else:
+                lab.setPixmap(pm.scaled(1040, 600, QtCore.Qt.AspectRatioMode.KeepAspectRatio
+                                        if QT_API != 'PyQt5' else QtCore.Qt.KeepAspectRatio))
+            sc = QtWidgets.QScrollArea()
+            sc.setWidget(lab)
+            sc.setWidgetResizable(True)
+            tabs.addTab(sc, f"confidence {float(r['confidence']):g}: {float(r['cloud_pct']):.1f} % cloud")
+        lay.addWidget(tabs, 1)
+        row = QtWidgets.QHBoxLayout()
+        b = QtWidgets.QPushButton('Open folder')
+        b.clicked.connect(lambda: QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(folder)))
+        row.addWidget(b)
+        row.addStretch(1)
+        close = QtWidgets.QPushButton('Close')
+        close.clicked.connect(self.accept)
+        row.addWidget(close)
+        lay.addLayout(row)
+
+
 class AutoMatchWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1073,7 +1222,8 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
                             ('Queue run', self.queue_run),
                             ('Stop', self.stop), ('Open output', self.open_output),
                             ('Pack for server…', self.pack_dialog),
-                            ('Benchmark & cross-check…', self.bench_dialog)):
+                            ('Benchmark & cross-check…', self.bench_dialog),
+                            ('Cloud mask test…', self.cloud_dialog)):
             b = QtWidgets.QPushButton(label)
             b.clicked.connect(slot)
             btns.addWidget(b)
@@ -1889,10 +2039,10 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.proc_buffer = ''
         self._events = []
         self.proc.start(sys.executable, [JOB_SCRIPT] + args)
-        busy = kind in ('run', 'preflight', 'pack', 'bench')
+        busy = kind in ('run', 'preflight', 'pack', 'bench', 'cloud')
         self.btn_run.setEnabled(not busy)
         self.btn_preflight.setEnabled(not busy)
-        self.btn_stop.setEnabled(kind in ('run', 'pack', 'bench'))
+        self.btn_stop.setEnabled(kind in ('run', 'pack', 'bench', 'cloud'))
         self.lbl_status.setText(f'{kind} …')
         return True
 
@@ -1977,6 +2127,15 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
                 self.lbl_status.setText(f'Benchmark written in {folder}')
             else:
                 self.lbl_status.setText('Benchmark found no finished job — see Log.')
+        elif kind == 'cloud':
+            folder = getattr(self, '_cloud_dir', '')
+            if code == 0 and os.path.exists(os.path.join(folder, 'CLOUD_TEST.csv')):
+                dlg = CloudResultDialog(folder, self)
+                dlg.show()
+                self._last_cloud_dialog = dlg
+                self.lbl_status.setText(f'Cloud test written in {folder}')
+            else:
+                self.lbl_status.setText('Cloud test failed — see Log.')
         elif kind == 'weights':
             tmp_job = getattr(self, '_weights_job_file', None)
             if tmp_job:
@@ -2160,6 +2319,26 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         if run:
             dlg.exec() if hasattr(dlg, 'exec') else dlg.exec_()
         return dlg
+
+    def cloud_dialog(self, *_, run=True):
+        """Test the cloud mask of one image; run=False returns the dialog unshown (tests).
+        Its settings come straight from the controls, so an unfinished job
+        elsewhere in the window does not matter."""
+        job = dict(DEFAULT_JOB, input_path=self.in_path.text(), weights_cache_dir=self.weights_cache.text(),
+                   cloud_min_confidence=self.cloud_conf.value(), cloud_mask_from=self.cloud_from.text(),
+                   cloud_bands=[t for t in re.split(r'[,;\s]+', self.cloud_bands.text().strip()) if t],
+                   cloud_band_choice='quality' if self.cloud_choice.currentIndex() == 1 else 'spec')
+        dlg = CloudTestDialog(self.settings, job, self)
+        dlg.accepted.connect(lambda: self._start_cloud(dlg))
+        if run:
+            dlg.exec() if hasattr(dlg, 'exec') else dlg.exec_()
+        return dlg
+
+    def _start_cloud(self, dlg):
+        self._cloud_dir = dlg.out_dir()
+        args = dlg.args()
+        self.log.appendPlainText('--- ' + ' '.join(args))
+        self._start(args, 'cloud')
 
     def _start_bench(self, dlg):
         self._bench_dir = dlg.folder.text()

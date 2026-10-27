@@ -830,6 +830,70 @@ def test_gui_cross():
         w.close()
 
 
+def test_gui_cloud():
+    """Cloud mask test from the GUI: the dialog builds the stand-alone
+    command from the job's cloud settings; the result shows the table and a
+    quicklook per threshold."""
+    try:
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+        import DPQED_automatch as G
+    except Exception as e:
+        print(f'SKIP  GUI cloud ({type(e).__name__}: {e})')
+        return
+    import contextlib
+    import io
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_origin
+    import automatch_cloud as C
+    app = G.QtWidgets.QApplication.instance() or G.QtWidgets.QApplication([])
+    tmp = tempfile.mkdtemp()
+    img = os.path.join(tmp, 'G1A_MV_G_GUI.tif')
+    with rasterio.open(img, 'w', driver='GTiff', height=80, width=100, count=6, dtype='uint16', crs='EPSG:32643',
+                       transform=from_origin(500000, 1700000, 45, 45), nodata=0) as d:
+        for b in range(1, 7):
+            d.write((500 + 100 * np.random.default_rng(b).random((80, 100))).astype('uint16'), b)
+    w = G.AutoMatchWindow()
+    fmt = G.QtCore.QSettings.IniFormat if G.QT_API == 'PyQt5' else G.QtCore.QSettings.Format.IniFormat
+    w.settings = G.QtCore.QSettings(os.path.join(tmp, 'cloud.ini'), fmt)
+    try:
+        check('gui: a Cloud mask test button', w.btn_cloud.text(), 'Cloud mask test…')
+        w.in_path.setText(img)
+        w.cloud_conf.setValue(0.8)
+        w.cloud_bands.setText('band3, band2, band6')
+        dlg = w.cloud_dialog(run=False)
+        dlg.out.setText(os.path.join(tmp, 'ct'))
+        dlg.device.setCurrentIndex(1)
+        a = dlg.args()
+        check('gui: the cloud test command takes the image, the thresholds (with the job\'s) and the job\'s bands',
+              (a[:4], a[a.index('--conf') + 1:a.index('--conf') + 4], a[a.index('--bands') + 1:a.index('--bands') + 4],
+               a[a.index('--device') + 1]),
+              (['cloud', img, '--out', os.path.join(tmp, 'ct')], ['0.5', '0.8', '0.85'], ['band3', 'band2', 'band6'],
+               'cpu'))
+        dlg.conf.setText('0.5, 1.5')
+        try:
+            dlg.thresholds()
+            bad = False
+        except ValueError:
+            bad = True
+        check('gui: a threshold outside 0-1 is refused', bad, True)
+
+        def fake(arr, nodata, model_dir, device):
+            p = np.zeros((4,) + arr.shape[1:], np.float32)
+            p[0] = 1.0
+            p[:, 10:40, 10:50] = np.array([0.1, 0.85, 0.05, 0.0])[:, None, None]
+            return p
+        with contextlib.redirect_stdout(io.StringIO()):
+            C.standalone(img, os.path.join(tmp, 'ct'), '', None, 'spec', [0.5, 0.8], predictor=fake)
+        res = G.CloudResultDialog(os.path.join(tmp, 'ct'), w)
+        tabs = res.findChild(G.QtWidgets.QTabWidget)
+        check('gui: the cloud result shows each threshold\'s quicklook and the table',
+              (tabs.count(), tabs.tabText(1).startswith('confidence 0.8'),
+               res.findChild(G.QtWidgets.QTableWidget).rowCount()), (2, True, 2))
+    finally:
+        w.close()
+
+
 def test_gui_queue():
     """Queued runs on one workstation GPU: a run queued while another runs
     waits, starts when that one finishes, keeps its own copy of the settings,
@@ -3513,6 +3577,7 @@ def main():
             test_gui_dialog()
             test_gui_queue()
             test_gui_cross()
+            test_gui_cloud()
         if a.e2e:
             test_e2e(tmp)
             test_e2e_variants(tmp)
