@@ -188,7 +188,10 @@ def test_e2e_cloud(tmp):
         C.predict, C.check = real, real_check
     info = json.load(open(os.path.join(out, 'CLOUD_INFO.json')))
     check('cloud e2e: the job made the mask and reports its cloud %', round(info['cloud_pct']), 33)
-    check('cloud e2e: the log names the masking', '[Cloud]' in buf.getvalue(), True)
+    logp = os.path.join(out, 'automatch.log')       # the job mirrors its output there, past redirect_stdout
+    check('cloud e2e: the log names the masking',
+          '[Cloud]' in buf.getvalue() or (os.path.exists(logp) and '[Cloud]' in open(logp, encoding='utf-8').read()),
+          True)
     best = [p for p in os.listdir(out) if p.startswith('RIVAL_BEST_') and not p.endswith('_detail.csv')]
     import automatch_rival as R
     pts = R.read_rival_csv(os.path.join(out, best[0])) if best else None
