@@ -548,6 +548,19 @@ to no data, and the job matches that copy.
 
   Preflight names anything missing, and a job never matches clouds without
   saying so.
+- **Testing the mask alone, without a matching run:**
+
+      python automatch_job.py cloud <image> --out <folder> --conf 0.5 0.7 0.85
+          [--bands 3 2 6 | --choice quality] [--from <HV image of the same pass>]
+          [--model-dir <weights>/omnicloudmask] [--device cpu]
+
+  The model runs once. Each threshold gets its own `conf_<c>/CLOUD_MASK.tif`
+  and `CLOUD_QUICKLOOK.png`, and `CLOUD_TEST.csv` compares their cloud,
+  thick, thin and shadow % and `dark_cloud_pct`. On the GPU service, use
+  `<image>,<reference folder>,<mode_cloud.json>` with
+  `{"mode": "cloud", "cloud_test_confidences": [0.5, 0.7, 0.85]}`. The
+  job's other `cloud_*` settings apply (`cloud_mask_from` for HS), and the
+  results go to `<output>/cloud_test/`.
 
 Checked here on two cloudy Sentinel-2 scenes over India (tile 43QGU,
 52–59 % cloud), against the scenes' own cloud classification:

@@ -96,6 +96,7 @@ DEFAULT_JOB: Dict = {
     'cloud_from_margin_px': 10,  # extra growth for the mask laid on (their geolocation differs by km)
     'cloud_model_dir': '',       # OmniCloudMask weights; '' = <weights folder>/omnicloudmask
     'cloud_device': '',          # '' = GPU when there is one      # [first, last] band searched by auto_bands, e.g. [1, 70]; [] = all
+    'cloud_test_confidences': [],  # mode "cloud" only: thresholds to compare; [] = 0.5, cloud_min_confidence, 0.85
     'reference_dir': '',         # L8_ref / C1 / any RIVAL-readable collection
     'reference_label': '',       # tag in file names; default from folder name
     'reference_mode': 'auto',    # auto | index-shp | sidecar | degree-tile
@@ -1159,6 +1160,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                                  '(options: python automatch_cross.py -h)').add_argument('rest', nargs=argparse.REMAINDER)
     sub.add_parser('bench', help='how each detector does on which kind of image, from finished jobs '
                                  '(options: python automatch_bench.py -h)').add_argument('rest', nargs=argparse.REMAINDER)
+    sub.add_parser('cloud', help='test the cloud mask of one image at several confidence thresholds, without '
+                                 'a matching run (options: python automatch_cloud.py -h)'
+                   ).add_argument('rest', nargs=argparse.REMAINDER)
     k = sub.add_parser('pack', help='copy a scene, the references it needs and server settings for the '
                                     'GPU server (options: python automatch_pack.py -h)')
     k.add_argument('rest', nargs=argparse.REMAINDER)
@@ -1173,6 +1177,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     if argv and argv[0] == 'bench':
         import automatch_bench as B
         return B.main(list(argv[1:]))
+    if argv and argv[0] == 'cloud':
+        import automatch_cloud as C
+        return C.main(list(argv[1:]))
     if argv and argv[0] == 'pack':
         import automatch_pack as P
         return P.main(list(argv[1:]))

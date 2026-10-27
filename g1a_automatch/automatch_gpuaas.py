@@ -36,6 +36,11 @@ A job file may hold "mode":
                {"mode": "compare", "compare_dir": "/maintenance/.../output297"};
                TRUTH_*.csv and RIVAL_TRUTH_BEST_*.csv go into that folder and
                into this job's output folder
+    cloud      the cloud mask alone, no matching: OmniCloudMask runs once on
+               input_path (with the job's cloud_* settings, cloud_mask_from
+               for HS) and each threshold in cloud_test_confidences (default
+               0.5, cloud_min_confidence, 0.85) gets its mask and quicklook in
+               cloud_test/conf_<c>/; CLOUD_TEST.csv compares them
 A job file may also hold "env": {"NAME": "value"}: environment variables set
 before anything is imported (e.g. NISAR_IMW_RESIZE_MAX, NISAR_IMW_ONLY).
 The output folder of the request replaces the job file's output_dir.
@@ -43,7 +48,7 @@ The output folder of the request replaces the job file's output_dir.
 Outputs (in the output folder): RUN_MANIFEST.csv, PERFORMANCE.csv (speed and
 accuracy of every detector + matcher), TRUTH_*.csv (with a truth file),
 rival/*.csv, automatch.log; ENVIRONMENT.txt / WEIGHTS_REPORT.txt /
-PREFLIGHT.json in the other modes.
+PREFLIGHT.json / cloud_test/ in the other modes.
 """
 
 import json
@@ -56,7 +61,7 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 import automatch_native  # noqa: F401,E402  (rasterio's C++ runtime before any other)
 
-MODES = ('run', 'preflight', 'weights', 'env', 'compare')
+MODES = ('run', 'preflight', 'weights', 'env', 'compare', 'cloud')
 
 
 def _value(text: str):
@@ -271,6 +276,18 @@ def main(argv: List[str] = None) -> int:
         with open(os.path.join(job['output_dir'], 'WEIGHTS_REPORT.json'), 'w', encoding='utf-8') as f:
             json.dump(rep, f, indent=2, default=str)
         return 1 if rep['summary']['missing'] else 0
+    if mode == 'cloud':                    # the cloud mask alone, at several confidence thresholds
+        import automatch_cloud as C
+        problems = C.check(job)
+        if problems:
+            print('\n'.join(problems))
+            return 2
+        confs = job.get('cloud_test_confidences') or [0.5, float(job.get('cloud_min_confidence') or 0.7), 0.85]
+        C.standalone(job['input_path'], os.path.join(job['output_dir'], 'cloud_test'), '',
+                     job.get('cloud_bands') or None, job.get('cloud_band_choice') or 'spec', confs,
+                     C.model_dir_for(job), job.get('cloud_device') or None, job.get('cloud_mask_from') or '',
+                     int(job.get('cloud_from_margin_px') or 0) + int(job.get('cloud_dilate_px') or 0))
+        return 0
     if mode == 'preflight':
         res = J.preflight(job)
         print(json.dumps(res, indent=2, default=str))

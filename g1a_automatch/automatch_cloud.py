@@ -29,6 +29,19 @@ while the image, bands and settings are the same. With cloud masking on, each
 band the job matches is copied with the masked pixels (cloud_mask_classes,
 grown by cloud_dilate_px) set to no data, and the job matches that copy, so no
 keypoint comes from a cloud.
+
+Testing the mask alone, without a matching run (the model runs once; each
+confidence threshold gets its own mask and quicklook):
+
+    python automatch_cloud.py <image> --out <folder> [--conf 0.5 0.7 0.85]
+        [--sensor MV] [--bands 3 2 6 | --choice quality] [--from <VNIR image>]
+        [--model-dir <weights>] [--device cpu]
+    (also: automatch_job.py cloud ..., and the GPU service's mode "cloud")
+
+writes <folder>/conf_<c>/CLOUD_MASK.tif and CLOUD_QUICKLOOK.png per threshold,
+and CLOUD_TEST.csv: cloud / thick / thin / shadow %, and dark_cloud_pct (the
+share of "cloud" darker than the median clear ground: high means ground
+taken for cloud).
 """
 from __future__ import annotations
 
@@ -37,6 +50,7 @@ import json
 import os
 import re
 import sys
+import time
 from typing import Dict, List, Optional, Tuple
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -390,3 +404,96 @@ def _finish(job: Dict, path: str, info: Dict, channels: List[str], cache_dir: st
         with open(os.path.join(out_dir, 'CLOUD_INFO.json'), 'w', encoding='utf-8') as f:
             json.dump(run_info, f, indent=1)
     return out, run_info
+
+
+def standalone(path: str, out_dir: str, sensor: str = '', bands: Optional[List[str]] = None, choice: str = 'spec',
+               confidences=(0.5, 0.7, 0.85), model_dir: str = '', device: Optional[str] = None,
+               mask_from: str = '', margin_px: int = 10, predictor=None) -> List[Dict]:
+    """The cloud mask of one image at each confidence threshold, without a
+    matching run (module docstring). Rows of CLOUD_TEST.csv."""
+    import rasterio as rio
+    import automatch_bench as B
+    stem = os.path.splitext(os.path.basename(path))[0]
+    if not sensor:
+        with rio.open(path) as s:
+            px = abs(s.transform.a) if s.crs is not None and s.crs.is_projected else None
+        sensor = B.sensor_of(stem, px)
+    os.makedirs(out_dir, exist_ok=True)
+    confs = sorted({round(float(c), 3) for c in confidences}) or [0.7]
+    if mask_from:              # HS: the mask is made on the VNIR product of the same pass and laid on
+        src_rows = standalone(mask_from, os.path.join(out_dir, 'from_' + os.path.splitext(
+            os.path.basename(mask_from))[0]), '', bands, choice, confs, model_dir, device, '', 0, predictor)
+        rows = []
+        for r in src_rows:
+            sub = os.path.join(out_dir, f"conf_{r['confidence']:g}")
+            os.makedirs(sub, exist_ok=True)
+            mask = transfer(r['mask'], path, os.path.join(sub, 'CLOUD_MASK.tif'), int(margin_px))
+            with rio.open(mask) as m:
+                cls = m.read(1)
+            nv = max(int((cls != 255).sum()), 1)
+            pct = {k: round(100.0 * int((cls == k).sum()) / nv, 2) for k in (1, 2, 3)}
+            rows.append(dict(r, image=path, sensor=sensor, mask=mask, quicklook=r['quicklook'],
+                             thick_pct=pct[1], thin_pct=pct[2], shadow_pct=pct[3],
+                             cloud_pct=round(pct[1] + pct[2], 2), dark_cloud_pct=None,
+                             band_choice=f"from {os.path.basename(mask_from)} ({r['band_choice']}), "
+                                         f"grown {int(margin_px)} px"))
+    else:
+        bsel, how, wl = choose_bands(path, sensor, bands or None, choice)
+        print(f'[Cloud] {os.path.basename(path)} ({sensor}): OmniCloudMask on bands {bsel} ({how}; '
+              f'{", ".join(f"{w:.0f} nm" for w in wl if w)})', flush=True)
+        memo: Dict = {}
+
+        def once(arr, nd, md, dev):          # the model runs once; each threshold reads its output
+            if 'p' not in memo:
+                t = time.time()
+                memo['p'] = (predictor or predict)(arr, nd, md, dev)
+                memo['s'] = round(time.time() - t, 1)
+            return memo['p']
+        rows = []
+        for c in confs:
+            sub = os.path.join(out_dir, f'conf_{c:g}')
+            info = compute(path, bsel, sub, model_dir, device, once, c)
+            rows.append({'image': path, 'sensor': sensor, 'confidence': c, 'cloud_pct': info['cloud_pct'],
+                         'thick_pct': info['thick_pct'], 'thin_pct': info['thin_pct'],
+                         'shadow_pct': info['shadow_pct'], 'dark_cloud_pct': info['dark_cloud_pct'],
+                         'bands': ' '.join(str(b) for b in bsel), 'band_choice': how,
+                         'model_seconds': memo.get('s'), 'mask': info['mask'],
+                         'quicklook': os.path.join(sub, 'CLOUD_QUICKLOOK.png')})
+    import pandas as pd
+    pd.DataFrame(rows).to_csv(os.path.join(out_dir, 'CLOUD_TEST.csv'), index=False)
+    print(f"[Cloud] {'confidence':>10} {'cloud %':>8} {'thick':>6} {'thin':>6} {'shadow':>7} {'dark cloud %':>13}")
+    for r in rows:
+        dk = '-' if r['dark_cloud_pct'] is None else f"{r['dark_cloud_pct']:.0f}"
+        print(f"[Cloud] {r['confidence']:>10g} {r['cloud_pct']:>8.1f} {r['thick_pct']:>6.1f} {r['thin_pct']:>6.1f} "
+              f"{r['shadow_pct']:>7.1f} {dk:>13}" + ('   <- ground taken for cloud?' if r['dark_cloud_pct']
+                                                     and r['dark_cloud_pct'] > 20 else ''))
+    print(f"[Cloud] masks and quicklooks: {out_dir}/conf_<c>/ ; table: CLOUD_TEST.csv", flush=True)
+    return rows
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    import argparse
+    ap = argparse.ArgumentParser(description='Test the cloud mask of one image, without a matching run')
+    ap.add_argument('image')
+    ap.add_argument('--out', default='', help='output folder (default: <image folder>/cloud_test_<image>)')
+    ap.add_argument('--conf', type=float, nargs='+', default=[0.5, 0.7, 0.85], help='confidence thresholds')
+    ap.add_argument('--sensor', default='', help='MV / HV / HS / ...; default from the file name or pixel size')
+    ap.add_argument('--bands', nargs=3, default=None, help='three bands (red green nir), e.g. 3 2 6')
+    ap.add_argument('--choice', default='spec', choices=['spec', 'quality'])
+    ap.add_argument('--from', dest='mask_from', default='', help='VNIR image of the same pass (for HS)')
+    ap.add_argument('--margin', type=int, default=10, help='growth (px) of a mask laid on from --from')
+    ap.add_argument('--model-dir', default='', help='OmniCloudMask weights folder')
+    ap.add_argument('--device', default=None, help='cpu / cuda; default: GPU when there is one')
+    a = ap.parse_args(argv)
+    out = a.out or os.path.join(os.path.dirname(os.path.abspath(a.image)),
+                                'cloud_test_' + os.path.splitext(os.path.basename(a.image))[0])
+    problems = check({'cloud_model_dir': a.model_dir})
+    if problems:
+        print('\n'.join(problems))
+        return 2
+    standalone(a.image, out, a.sensor, a.bands, a.choice, a.conf, a.model_dir, a.device, a.mask_from, a.margin)
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

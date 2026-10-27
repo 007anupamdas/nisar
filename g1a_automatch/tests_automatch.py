@@ -2763,6 +2763,58 @@ def test_cloud_mask(tmp):
         print('SKIP  cloud: OmniCloudMask or its weights not here (set AUTOMATCH_OCM_WEIGHTS)')
     check('cloud: preflight names missing weights',
           any('weights missing' in p or 'not installed' in p for p in C.check({'cloud_model_dir': tmp})), True)
+    # the mask alone, without a run: the model once, a mask and quicklook per threshold
+    calls = []
+
+    def prob_fake(arr, nodata, model_dir, device):     # a sure cloud square, an unsure ring around it
+        calls.append(1)
+        h, w = arr.shape[1:]
+        p = np.zeros((4, h, w), np.float32)
+        p[0] = 1.0
+        p[:, h // 4 - 10:h // 2 + 10, w // 4 - 10:w // 2 + 10] = np.array([0.4, 0.0, 0.6, 0.0])[:, None, None]
+        p[:, h // 4:h // 2, w // 4:w // 2] = np.array([0.05, 0.9, 0.05, 0.0])[:, None, None]
+        return p
+    tdir = os.path.join(tmp, 'cloud_test')
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        rows = C.standalone(mv, tdir, '', None, 'spec', [0.5, 0.7, 0.85], predictor=prob_fake)
+    pct = [r['cloud_pct'] for r in rows]
+    check('cloud test: the model runs once; each threshold has its mask, quicklook and row in CLOUD_TEST.csv',
+          (len(calls), [r['confidence'] for r in rows], all(os.path.exists(r['mask']) and os.path.exists(r['quicklook'])
+                                                             for r in rows),
+           len(pd.read_csv(os.path.join(tdir, 'CLOUD_TEST.csv'))), rows[0]['sensor'], rows[0]['bands']),
+          (1, [0.5, 0.7, 0.85], True, 3, 'MV', '3 2 6'))
+    check('cloud test: a stricter threshold drops the unsure ring', (pct[0] > pct[1], pct[1] == pct[2]), (True, True))
+    calls.clear()
+    with contextlib.redirect_stdout(io.StringIO()):
+        hrows = C.standalone(hs2, os.path.join(tmp, 'cloud_test_hs'), '', None, 'spec', [0.7], mask_from=hv2,
+                             margin_px=0, predictor=prob_fake)
+    with rasterio.open(hrows[0]['mask']) as m:
+        hcls = m.read(1)
+    check('cloud test: HS takes the mask of its VNIR pass, on its own grid',
+          (len(calls), hcls.shape, hrows[0]['cloud_pct'] > 0, 'from G1A_HV_G_PASS' in hrows[0]['band_choice']),
+          (1, (100, 140), True, True))
+    import automatch_job as J
+    import automatch_gpuaas as G
+    real = C.predict
+    C.predict = prob_fake
+    try:
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            rc = J.main(['cloud', mv, '--out', os.path.join(tmp, 'cloud_cli'), '--conf', '0.7', '--model-dir', ''])
+        cli_ok = os.path.exists(os.path.join(tmp, 'cloud_cli', 'conf_0.7', 'CLOUD_MASK.tif'))
+        mf = os.path.join(tmp, 'mode_cloud.json')
+        with open(mf, 'w') as f:
+            json.dump({'mode': 'cloud', 'cloud_test_confidences': [0.6, 0.9]}, f)
+        with contextlib.redirect_stdout(io.StringIO()) as buf2:
+            rc2 = G.main(['gpuaas', '.', os.path.join(tmp, 'svc_cloud'), f'{mv},{tmp},{mf}'])
+    finally:
+        C.predict = real
+    have_ocm = not C.check({})
+    if have_ocm:
+        check('cloud test: command line (automatch_job.py cloud) and service mode "cloud"',
+              (rc, cli_ok, rc2, sorted(os.listdir(os.path.join(tmp, 'svc_cloud', 'cloud_test')))),
+              (0, True, 0, ['CLOUD_TEST.csv', 'conf_0.6', 'conf_0.9']))
+    else:
+        check('cloud test: without omnicloudmask the command line and service mode say so (exit 2)', (rc, rc2), (2, 2))
 
 
 def test_stretch():
