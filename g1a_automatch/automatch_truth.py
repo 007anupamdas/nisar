@@ -497,7 +497,8 @@ def field_covers(field: Dict, E: np.ndarray, N: np.ndarray, radius_m: float) -> 
     return out
 
 
-def match_accuracy(filtered_dir: str, field: Dict, radius_m: float = 5000.0) -> List[Dict]:
+def match_accuracy(filtered_dir: str, field: Dict, radius_m: float = 5000.0,
+                   raw_dir: Optional[str] = None) -> List[Dict]:
     """Per configuration (channel, detector, matcher, RANSAC) of one run, how
     many of each window's matches are right: a match is good when its
     displacement is within tolerance of the truth field at its position;
@@ -549,8 +550,8 @@ def match_accuracy(filtered_dir: str, field: Dict, radius_m: float = 5000.0) -> 
         filt.setdefault(win, {})[ran] = (path, thr)
         cfg_of[win] = cfg
         ransacs.setdefault(cfg, {})[ran] = thr
-    raw_dir = os.path.join(os.path.dirname(filtered_dir),
-                           'raw_matches_' + os.path.basename(filtered_dir)[len('filtered_'):])
+    raw_dir = raw_dir or os.path.join(os.path.dirname(filtered_dir),
+                                      'raw_matches_' + os.path.basename(filtered_dir)[len('filtered_'):])
     raws = {os.path.basename(p)[:-len('_raw.csv')]: p
             for p in glob.glob(os.path.join(raw_dir, '*_raw.csv'))} if os.path.isdir(raw_dir) else {}
     every_thr = sorted({t for d in ransacs.values() for t in d.values()})
@@ -664,9 +665,41 @@ def find_runs(output_dir: str) -> List[Dict]:
         if not os.path.isdir(final):
             continue
         rel = os.path.relpath(filt, output_dir).split(os.sep)
+        if rel[0].startswith('SUBCELLS_'):          # made afterwards from this job's matches (automatch_accuracy)
+            continue
         runs.append({'filtered_dir': filt, 'final_dir': final,
                      'sweep': rel[0] if rel[0].startswith('win') else ''})
     return runs
+
+
+def job_resolution(output_dir: str) -> Optional[float]:
+    """The working pixel size of a finished job: its target_resolution, else
+    the 'working resolution' its log names (the input may not be reachable
+    from here), else the input's own."""
+    import re
+    job = {}
+    try:
+        with open(os.path.join(output_dir, 'job_used.json'), encoding='utf-8') as f:
+            job = json.load(f)
+    except (OSError, ValueError):
+        pass
+    if job.get('target_resolution'):
+        return float(job['target_resolution'])
+    try:
+        with open(os.path.join(output_dir, 'automatch.log'), encoding='utf-8', errors='replace') as f:
+            m = re.search(r'working resolution ([\d.]+) m', f.read(400000))
+        if m:
+            return float(m.group(1))
+    except OSError:
+        pass
+    if job.get('input_path'):
+        try:
+            import automatch_engine as E
+            return float(E.InputScene(job['input_path'], E.PipelineConfig(
+                nisar_band=job.get('nisar_band', 'auto'), nisar_frequency=job.get('nisar_frequency', 'A'))).native_res)
+        except Exception:
+            pass
+    return None
 
 
 def consensus_settings(output_dir: str) -> Optional[Dict]:
@@ -675,18 +708,10 @@ def consensus_settings(output_dir: str) -> Optional[Dict]:
     path = os.path.join(output_dir, 'job_used.json')
     if not os.path.exists(path):
         return None
-    import automatch_engine as E
     import automatch_job as J
     with open(path, encoding='utf-8') as f:
         job = J.normalize(json.load(f))
-    res = job['target_resolution']
-    if not res:
-        try:
-            res = E.InputScene(job['input_path'], E.PipelineConfig(
-                nisar_band=job['nisar_band'], nisar_frequency=job['nisar_frequency'])).native_res
-        except Exception:
-            res = None
-    res = float(res or 10.0)
+    res = float(job_resolution(output_dir) or 10.0)
     return {'tolerance_m': job['consensus_tolerance_m'] or job['consensus_tolerance_px'] * res,
             'mode_bin_m': max(0.1, job['consensus_mode_bin_px'] * res),
             'min_inliers_per_chip': job['min_inliers_per_chip'],
@@ -733,7 +758,7 @@ def compare(output_dir: str, truth_csv: str, radius_m: float = 5000.0, chips: st
             win, nf = sweep_parts(run['sweep'])
             try:
                 acc_rows += [{'sweep': run['sweep'], 'window_size': win, 'num_features': nf, **r}
-                             for r in match_accuracy(run['filtered_dir'], field, radius_m)]
+                             for r in match_accuracy(run['filtered_dir'], field, radius_m, run.get('raw_dir'))]
             except Exception as e:
                 print(f"[Truth] match accuracy of {run['filtered_dir']}: {type(e).__name__}: {e}")
         timing = {}

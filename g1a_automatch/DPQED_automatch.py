@@ -909,6 +909,27 @@ class BenchDialog(QtWidgets.QDialog):
                               'others: a quick brightness estimate, or the model run now on their input.')
         f.addRow('Cloud estimate', self.cloud)
         self.weights = defaults.get('weights_cache_dir') or ''
+        self.accuracy = QtWidgets.QCheckBox('match accuracy: score every job\'s saved matches against its truth, by '
+                                            'window size and keypoints (slower; nothing matched again)')
+        self.subcell = QtWidgets.QSpinBox()
+        self.subcell.setRange(0, 8192)
+        self.subcell.setSingleStep(128)
+        self.subcell.setSpecialValueText('off')
+        self.subcell.setToolTip('Also judge the saved large windows in sub-cells of this size, keeping the least '
+                                'distorted matches per cell (written into <job>/SUBCELLS_<px>/)')
+        self.subcell_keep = QtWidgets.QSpinBox()
+        self.subcell_keep.setRange(1, 1000)
+        self.subcell_keep.setValue(int(defaults.get('subcell_keep') or 10))
+        ha = QtWidgets.QHBoxLayout()
+        ha.addWidget(self.accuracy, 1)
+        ha.addWidget(QtWidgets.QLabel('sub-cells'))
+        ha.addWidget(self.subcell)
+        ha.addWidget(QtWidgets.QLabel('keep'))
+        ha.addWidget(self.subcell_keep)
+        f.addRow(ha)
+        self.accuracy.toggled.connect(lambda on: [w.setEnabled(on) for w in (self.subcell, self.subcell_keep)])
+        self.subcell.setEnabled(False)
+        self.subcell_keep.setEnabled(False)
         self.all_jobs = QtWidgets.QCheckBox('count every job (else only the newest job of each scene)')
         self.all_jobs.setToolTip('Newest: the newest automatch version in its log, then the latest finish, '
                                  'then the highest job number. The others are listed as superseded.')
@@ -948,6 +969,10 @@ class BenchDialog(QtWidgets.QDialog):
             a += ['--recompute']
         if self.all_jobs.isChecked():
             a += ['--all-jobs']
+        if self.accuracy.isChecked():
+            a += ['--accuracy']
+            if self.subcell.value():
+                a += ['--subcell-px', str(self.subcell.value()), '--subcell-keep', str(self.subcell_keep.value())]
         if self.cloud.currentIndex() == 1:
             a += ['--cloud', 'omnicloudmask']
             if self.weights:
@@ -973,6 +998,11 @@ class BenchResultDialog(QtWidgets.QDialog):
                 ('cross_points_rmse_m', 'cross RMSE m (truth pts)'), ('cloud_source', 'cloud from'),
                 ('shadow_pct', 'shadow %'),
                 ('automatch', 'version'), ('used', 'used'), ('superseded_by', 'superseded by')]
+    ACC_COLS = [('level', 'level'), ('sensor', 'sensor'), ('window_size', 'window px'),
+                ('num_features', 'keypoints'), ('subcells', 'sub-cells'), ('configuration', 'detector + matcher'),
+                ('jobs', 'jobs'), ('precision_inliers', 'good share (inliers)'),
+                ('good_inliers_per_window', 'good per window'), ('windows_90pct_good', 'windows >= 90 % good'),
+                ('windows_mostly_wrong', 'windows mostly wrong'), ('truth_rmse_m', 'truth RMSE m')]
     SUM_COLS = [('detector', 'detector'), ('jobs', 'jobs'), ('success_rate', 'success rate'),
                 ('median_rmse_px', 'median px'), ('median_rmse_m', 'median m'), ('times_first', 'first'),
                 ('median_parallel_share', 'parallel lines')]
@@ -1012,6 +1042,9 @@ class BenchResultDialog(QtWidgets.QDialog):
         tabs.addTab(w, 'Detectors')
         self.cross_table = csv_table(os.path.join(folder, 'CROSS_ALL.csv'), CrossResultDialog.COLS)
         tabs.addTab(self.cross_table, 'Cross-check')
+        if os.path.exists(os.path.join(folder, 'ACCURACY_SUMMARY.csv')):
+            self.acc_table = csv_table(os.path.join(folder, 'ACCURACY_SUMMARY.csv'), self.ACC_COLS)
+            tabs.addTab(self.acc_table, 'Match accuracy')
         lay.addWidget(tabs, 1)
         row = QtWidgets.QHBoxLayout()
         b = QtWidgets.QPushButton('Open folder')

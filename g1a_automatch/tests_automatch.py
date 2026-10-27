@@ -826,6 +826,12 @@ def test_gui_cross():
               (a[0], a[a.index('--top') + 1], a[a.index('--keep') + 1], '--no-cross' in a), ('bench', '4', '2', False))
         dlg.cross_on.setChecked(False)
         check('gui: cross-check can be switched off', ('--no-cross' in dlg.args(), dlg.top.isEnabled()), (True, False))
+        check('gui: match accuracy off by default', ('--accuracy' in dlg.args(), dlg.subcell.isEnabled()), (False, False))
+        dlg.accuracy.setChecked(True)
+        dlg.subcell.setValue(512)
+        a = dlg.args()
+        check('gui: match accuracy with 512 px sub-cells goes into the benchmark command',
+              ('--accuracy' in a, a[a.index('--subcell-px') + 1], a[a.index('--subcell-keep') + 1]), (True, '512', '10'))
     finally:
         w.close()
 
@@ -3112,6 +3118,95 @@ def test_subcells(tmp):
               [md], os.path.join(tmp, 'filtered_plain'))), 1)
 
 
+def test_accuracy_finished_job(tmp):
+    """Finished jobs scored again, nothing matched: per window size, and the
+    512 px sub-cell variant made afterwards from the saved matches into
+    SUBCELLS_512/ (the job's own folders and ranking untouched)."""
+    import contextlib
+    import glob
+    import io
+    import numpy as np
+    import pandas as pd
+    import cv2
+    from pyproj import Transformer
+    import automatch_accuracy as A
+    import automatch_engine as E
+    import automatch_truth as T
+    rng = np.random.default_rng(21)
+    crs, res, E0, N0 = 'EPSG:32643', 45.0, 500000.0, 1700000.0
+    jd = os.path.join(tmp, 'output999')
+    os.makedirs(jd, exist_ok=True)
+    with open(os.path.join(jd, 'job_used.json'), 'w') as f:
+        json.dump({'input_path': '/srv/in/G1A_MV_G_TEST.tif', 'output_dir': '/srv/out/output999',
+                   'target_resolution': res, 'min_inliers_per_chip': 4}, f)
+    pd.DataFrame([{'working_crs': crs}]).to_csv(os.path.join(jd, 'RUN_MANIFEST.csv'), index=False)
+
+    def true_d(e):
+        return np.column_stack([4000 + 0.03 * e + 6e-8 * e * e, -2500 - 0.01 * e])
+    for win in (1024, 2048):
+        base = os.path.join(jd, f'win{win}_nfauto', 'band1_toC1')
+        for k in ('raw_matches_sift', 'filtered_sift', 'final_sift'):
+            os.makedirs(os.path.join(base, k), exist_ok=True)
+        for pix in (0, 1):
+            n = 900
+            p1 = rng.uniform(0, 2048 * res, (n, 2)) + np.array([E0, N0])
+            d = true_d(p1[:, 0] - E0) + rng.normal(0, 4, (n, 2))
+            bad = rng.random(n) < 0.15
+            d[bad] += rng.uniform(-3000, 3000, (bad.sum(), 2))
+            p2 = p1 - d
+            fid = f'sift_band1_toC1_pair001_scan0_pix{pix}_smnn_0.95'
+            raw = pd.DataFrame({'x1': 0, 'y1': 0, 'x2': 0, 'y2': 0, 'x1_map': p1[:, 0], 'y1_map': p1[:, 1],
+                                'x2_map': p2[:, 0], 'y2_map': p2[:, 1], 'distance': 0.1, 'along': d[:, 0],
+                                'across': d[:, 1]})
+            raw.to_csv(os.path.join(base, 'raw_matches_sift', f'{fid}_raw.csv'), index=False)
+            _, inl = cv2.estimateAffine2D(p1, p2, method=E.ransac_flag('magsac'), ransacReprojThreshold=90.0,
+                                          confidence=0.99)
+            inl = inl.ravel() > 0
+            r = raw[inl]
+            pd.DataFrame({'x1': r.x1, 'y1': r.y1, 'x2': r.x2, 'y2': r.y2, 'x1-map': r.x1_map, 'y1-map': r.y1_map,
+                          'x2-map': r.x2_map, 'y2-map': r.y2_map, 'Distance': r.distance, 'along': r.along,
+                          'across': r.across, 'model-type': 'magsac', 'threshold': 90.0, 'confidence': 0.99,
+                          'inliers': True}).to_csv(os.path.join(base, 'filtered_sift',
+                                                                f'{fid}_aff_magsac_90.0_0.99_.csv'), index=False)
+    te = E0 + np.r_[0, 92160, 0, 92160, rng.uniform(0, 92160, 8)]
+    tn = N0 + np.r_[0, 0, 92160, 92160, rng.uniform(0, 92160, 8)]
+    td = true_d(te - E0)
+    to_ll = Transformer.from_crs(crs, 'EPSG:4326', always_xy=True)
+    ilo, ila = to_ll.transform(te, tn)
+    rlo, rla = to_ll.transform(te - td[:, 0], tn - td[:, 1])
+    tcsv = os.path.join(tmp, 'acc_job_truth.csv')
+    pd.DataFrame({'In_Lon': ilo, 'In_Lat': ila, 'Ref_Lon': rlo, 'Ref_Lat': rla}).to_csv(tcsv, index=False)
+    with contextlib.redirect_stdout(io.StringIO()):
+        acc = A.job_accuracy(jd, tcsv, subcell_px=512, keep=5)
+    kinds = sorted(set(zip(acc['window_size'], acc['ransac'])))
+    check('accuracy (finished job): every window size, plain and 512 px sub-cells made from the saved matches',
+          kinds, [(1024, 'magsac90'), (1024, 'magsac90-sc512'), (2048, 'magsac90'), (2048, 'magsac90-sc512')])
+    own = glob.glob(os.path.join(jd, 'win*', '*', 'filtered_sift', '*-sc*'))
+    check('accuracy (finished job): sub-cells in SUBCELLS_512/, the job\'s folders and TRUTH_RANKING untouched',
+          (bool(glob.glob(os.path.join(jd, 'SUBCELLS_512', 'win2048_nfauto', 'band1_toC1', 'filtered_sift', '*'))),
+           own, os.path.exists(os.path.join(jd, 'TRUTH_RANKING.csv')),
+           os.path.exists(os.path.join(jd, 'TRUTH_RANKING_SUBCELLS_512.csv'))), (True, [], False, True))
+    a = acc.set_index(['window_size', 'ransac'])
+    check('accuracy (finished job): the sub-cell picks are right at least as often, at most 5 per cell',
+          (bool(a.loc[(2048, 'magsac90-sc512'), 'precision_inliers'] >= a.loc[(2048, 'magsac90'),
+                                                                               'precision_inliers'] - 0.01),
+           float(a.loc[(2048, 'magsac90-sc512'), 'inliers_per_window']) <= 16 * 5), (True, True))
+    real = T.compare
+    T.compare = lambda *a_, **k: 1 / 0
+    try:
+        again = A.job_accuracy(jd, tcsv, subcell_px=512, keep=5)
+        reused = len(again) == len(acc)
+    except ZeroDivisionError:
+        reused = False
+    finally:
+        T.compare = real
+    check('accuracy (finished job): read back when made with the same settings', reused, True)
+    s = A.summarize(acc.assign(job='output999', sensor='MV'))
+    txt = A.format_summary(s)
+    check('accuracy (finished job): summary per sensor x window size, plain and sub-cells',
+          (len(s[s['level'] == 'sensor']), 'sub-cells' in txt, '2048 px' in txt), (4, True, True))
+
+
 def test_partial_cover():
     """Jobs 336 and 343: a warning when the first-ranked configuration is km
     off while one reaching fewer points is close (343, matches on part of the
@@ -3568,6 +3663,7 @@ def main():
         test_parallel_share(tmp)
         test_match_accuracy(tmp)
         test_subcells(tmp)
+        test_accuracy_finished_job(tmp)
         test_auto_bands(tmp)
         test_kornia_versions(tmp)
         test_warmup_and_padding()

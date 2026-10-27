@@ -450,12 +450,15 @@ def newest_per_scene(metas: List[Dict]) -> Dict[str, Optional[str]]:
 
 
 def batch(parent: str, jobs: str = '', success_px: float = 3.0, recompute: bool = False,
-          all_jobs: bool = False, cross: Optional[Dict] = None, cloud_model_dir: Optional[str] = None) -> int:
+          all_jobs: bool = False, cross: Optional[Dict] = None, cloud_model_dir: Optional[str] = None,
+          accuracy: Optional[Dict] = None) -> int:
     """Benchmark the finished jobs under parent; of several jobs on one scene
     only the newest counts (newest_per_scene) unless all_jobs. Each job used
     is cross-checked first (automatch_cross.cross_job with the settings in
     cross; read back when done with the same settings; cross=None skips it),
-    and its result goes into BENCH_JOBS.csv and CROSS_ALL.csv."""
+    and its result goes into BENCH_JOBS.csv and CROSS_ALL.csv. With accuracy
+    ({'subcell_px', 'keep'}), each job's matches are scored match by match
+    against its truth (automatch_accuracy): ACCURACY_ALL / ACCURACY_SUMMARY.csv."""
     import automatch_cross as X
     found, skipped = X.find_jobs(parent, X.parse_jobs(jobs))
     for n, why in skipped.items():
@@ -474,7 +477,7 @@ def batch(parent: str, jobs: str = '', success_px: float = 3.0, recompute: bool 
         except Exception as e:
             print(f'[Bench] SCENE_NOTES.csv unreadable: {type(e).__name__}: {e}')
     sup = {} if all_jobs else newest_per_scene(list(metas.values()))
-    jrows, drows, xrows = [], [], []
+    jrows, drows, xrows, arows = [], [], [], []
     for d in found:
         m = metas[d]
         if sup.get(m['job']):
@@ -501,6 +504,19 @@ def batch(parent: str, jobs: str = '', success_px: float = 3.0, recompute: bool 
         if not det.empty:
             drows.append(det.assign(sensor=row['sensor'], band=row['band'], cloud_pct=row.get('cloud_pct'),
                                     error_km=row.get('error_km'), pixel_m=row.get('pixel_m')))
+        if accuracy is not None:
+            tcsv = X.job_truth_csv(d)
+            if not tcsv:
+                print(f"[Bench] {row['job']}: no ground truth, no match accuracy")
+            else:
+                import automatch_accuracy as A
+                try:
+                    acc = A.job_accuracy(d, tcsv, recompute=recompute, **accuracy)
+                    if not acc.empty:
+                        arows.append(acc.assign(job=row['job'], sensor=row['sensor'], band=row['band'],
+                                                pixel_m=row.get('pixel_m'), cloud_pct=row.get('cloud_pct')))
+                except Exception as e:
+                    print(f"[Bench] {row['job']}: match accuracy failed ({type(e).__name__}: {e})")
     if not jrows:
         print(f'[Bench] no finished automatch job under {parent}')
         return 1
@@ -530,8 +546,17 @@ def batch(parent: str, jobs: str = '', success_px: float = 3.0, recompute: bool 
             for r in g.head(8).itertuples():
                 print(f'         {r.detector:<28} success {100 * r.success_rate:5.1f} % of {r.jobs} job(s), '
                       f'median {r.median_rmse_px} px, first {r.times_first}x')
+    if arows:
+        import automatch_accuracy as A
+        acc = pd.concat(arows, ignore_index=True)
+        first = ['job', 'sensor', 'band', 'pixel_m', 'cloud_pct']
+        acc = acc[first + [c for c in acc.columns if c not in first]]
+        acc.to_csv(os.path.join(parent, 'ACCURACY_ALL.csv'), index=False)
+        s = A.summarize(acc)
+        s.to_csv(os.path.join(parent, 'ACCURACY_SUMMARY.csv'), index=False)
+        print(A.format_summary(s))
     print(f'[Bench] written: BENCH_JOBS.csv' + (', BENCH_DETECTORS.csv, BENCH_SUMMARY.csv' if drows else '')
-          + f' in {parent}')
+          + (', ACCURACY_ALL.csv, ACCURACY_SUMMARY.csv' if arows else '') + f' in {parent}')
     return 0
 
 
@@ -556,12 +581,19 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help='count every job; by default only the newest job of each scene counts')
     ap.add_argument('--share-local', default='', help="where the server's share is mounted here, e.g. V:\\")
     ap.add_argument('--share-server', default='', help='the same share on the server, e.g. /maintenance/')
+    ap.add_argument('--accuracy', action='store_true',
+                    help='score every job match by match against its truth, per window size and keypoint count '
+                         '(ACCURACY_ALL / ACCURACY_SUMMARY.csv); nothing is matched again')
+    ap.add_argument('--subcell-px', type=int, default=0,
+                    help='with --accuracy: also the sub-cell variant (e.g. 512), made from the saved matches')
+    ap.add_argument('--subcell-keep', type=int, default=10, help='matches kept per sub-cell')
     a = ap.parse_args(argv)
     X.SHARE = (a.share_local, a.share_server)
     cross = None if a.no_cross else {'top_n': a.top, 'min_agree': a.min_agree, 'keep': a.keep,
                                      'cell_km': a.cell_km, 'tol_m': a.tolerance_m}
+    accuracy = {'subcell_px': a.subcell_px, 'keep': a.subcell_keep} if (a.accuracy or a.subcell_px) else None
     return batch(a.folder, a.jobs, a.success_px, a.recompute, a.all_jobs, cross,
-                 a.cloud_model_dir if a.cloud == 'omnicloudmask' else None)
+                 a.cloud_model_dir if a.cloud == 'omnicloudmask' else None, accuracy)
 
 
 if __name__ == '__main__':

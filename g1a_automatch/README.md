@@ -624,6 +624,22 @@ It writes three files:
 The GUI shows the jobs and, per group, the detector table, sortable by
 column.
 
+**Match accuracy of finished jobs** (`--accuracy`; GUI: *match accuracy*).
+Every job's saved matches are scored again against its own truth: the share
+of each window's matches that are right (see *Few but right*), by window
+size, keypoint count and RANSAC setting. Nothing is matched again.
+- **Sub-cells afterwards:** `--subcell-px 512` (`--subcell-keep 10`) also
+  makes the sub-cell variant of the jobs' large windows from the saved raw
+  matches and RANSAC inliers. It goes into `<job>/SUBCELLS_512/`, never into
+  the job's own folders, and is scored beside the plain results.
+- **Per job:** `TRUTH_MATCH_ACCURACY.csv`, and with sub-cells
+  `TRUTH_RANKING_SUBCELLS_512.csv`. The job's own `TRUTH_RANKING.csv` stays
+  as it was. Results made with the same settings are read back.
+- **Over the jobs:** `ACCURACY_ALL.csv` (every job × configuration × window
+  size) and `ACCURACY_SUMMARY.csv` (medians per sensor × window size ×
+  keypoints × plain or sub-cells, then per detector + matcher). The log
+  prints the per-sensor table, and the GUI adds a *Match accuracy* tab.
+
 The cloud estimate is needed because G1A comes with no cloud mask.
 - How it works: the band's brightness is split in two (Otsu). When the two
   groups are clearly apart (4 standard deviations), the bright pixels that
