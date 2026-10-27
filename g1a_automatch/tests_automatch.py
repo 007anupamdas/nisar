@@ -828,10 +828,11 @@ def test_gui_cross():
         check('gui: cross-check can be switched off', ('--no-cross' in dlg.args(), dlg.top.isEnabled()), (True, False))
         check('gui: match accuracy off by default', ('--accuracy' in dlg.args(), dlg.subcell.isEnabled()), (False, False))
         dlg.accuracy.setChecked(True)
-        dlg.subcell.setValue(512)
+        dlg.subcell.setText('256, 512')
         a = dlg.args()
-        check('gui: match accuracy with 512 px sub-cells goes into the benchmark command',
-              ('--accuracy' in a, a[a.index('--subcell-px') + 1], a[a.index('--subcell-keep') + 1]), (True, '512', '10'))
+        check('gui: match accuracy with 256 and 512 px sub-cells goes into the benchmark command',
+              ('--accuracy' in a, a[a.index('--subcell-px') + 1:a.index('--subcell-px') + 3],
+               a[a.index('--subcell-keep') + 1]), (True, ['256', '512'], '10'))
     finally:
         w.close()
 
@@ -1131,10 +1132,11 @@ def test_gui_dialog():
         w.stretch_mode.setCurrentIndex(1)
         check('gui: CLAHE choice reaches the job', w.get_job()['stretch_mode'], 'clahe')
         w.stretch_mode.setCurrentIndex(0)
-        w.subcell.setValue(512)
+        w.subcell.setText('256, 512')
         w.subcell_keep.setValue(7)
-        check('gui: sub-cells reach the job', (w.get_job()['subcell_px'], w.get_job()['subcell_keep']), (512, 7))
-        w.subcell.setValue(0)
+        check('gui: sub-cell sizes reach the job', (w.get_job()['subcell_px'], w.get_job()['subcell_keep']),
+              ([256, 512], 7))
+        w.subcell.setText('')
         w.cloud_mask.setChecked(True)
         w.cloud_choice.setCurrentIndex(1)
         check('gui: cloud band choice reaches the job', w.get_job()['cloud_band_choice'], 'quality')
@@ -3100,18 +3102,26 @@ def test_subcells(tmp):
           (float(good[sc].mean()) >= float(good[inl].mean()), float(good[sc].mean()) > 0.97), (True, True))
     # in the RANSAC filter: both results written, the sub-cell one as magsac-sc512
     cfg = E.PipelineConfig(ransac_methods=['magsac'], ransac_thresholds=[thr], ransac_confidences=[0.99],
-                           subcell_m=512 * res, subcell_px=512, subcell_keep=5)
+                           subcell_sizes=[(256, 256 * res), (512, 512 * res)], subcell_keep=5)
     md = {'X1': list(p1[:, 0]), 'Y1': list(p1[:, 1]), 'X2': list(p2[:, 0]), 'Y2': list(p2[:, 1]),
           'x1': [0] * n, 'y1': [0] * n, 'x2': [0] * n, 'y2': [0] * n, 'distance': [0] * n, 'along': [0] * n,
           'across': [0] * n, 'file_id': 'sift_band1_toC1_pair001_scan0_pix0_smnn_0.95'}
     out = os.path.join(tmp, 'filtered_subcells')
     files = sorted(os.path.basename(f) for f in E.RANSACFilter(cfg).filter_matches_in_memory([md], out))
-    sub = [f for f in files if '-sc' in f]
+    sub = [f for f in files if '-sc512' in f]
     p = E.MatchStatistics._parse_filename(sub[0]) if sub else {}
-    check('subcells: the RANSAC filter writes the plain and the sub-cell result, ranked apart',
-          (len(files), p.get('ransac_method'), T.ransac_label(p.get('ransac_method'), p.get('ransac_threshold')),
+    check('subcells: the RANSAC filter writes the plain result and one per sub-cell size, ranked apart',
+          (len(files), sum('-sc256_' in f for f in files), p.get('ransac_method'),
+           T.ransac_label(p.get('ransac_method'), p.get('ransac_threshold')),
            len(pd.read_csv(os.path.join(out, sub[0]))) <= 16 * 5 if sub else None),
-          (2, 'magsac-sc512', 'magsac90-sc512', True))
+          (3, 1, 'magsac-sc512', 'magsac90-sc512', True))
+    import automatch_job as J
+    check('subcells: a job takes one size or a list',
+          (J.normalize({'subcell_px': 512})['subcell_px'], J.normalize({'subcell_px': [512, 256, 0]})['subcell_px'],
+           J.normalize({})['subcell_px'],
+           [p_ for p_, _ in J._config_for(J.normalize({'subcell_px': [256, 512, 2048]}), 2048, None, 45.0,
+                                          tmp).subcell_sizes]),
+          ([512], [256, 512], [], [256, 512]))
     check('subcells: off by default (no sub-cell file)',
           len(E.RANSACFilter(E.PipelineConfig(ransac_methods=['magsac'], ransac_thresholds=[thr],
                                               ransac_confidences=[0.99])).filter_matches_in_memory(
@@ -3185,7 +3195,7 @@ def test_accuracy_finished_job(tmp):
     check('accuracy (finished job): sub-cells in SUBCELLS_512/, the job\'s folders and TRUTH_RANKING untouched',
           (bool(glob.glob(os.path.join(jd, 'SUBCELLS_512', 'win2048_nfauto', 'band1_toC1', 'filtered_sift', '*'))),
            own, os.path.exists(os.path.join(jd, 'TRUTH_RANKING.csv')),
-           os.path.exists(os.path.join(jd, 'TRUTH_RANKING_SUBCELLS_512.csv'))), (True, [], False, True))
+           os.path.exists(os.path.join(jd, 'TRUTH_RANKING_SUBCELLS.csv'))), (True, [], False, True))
     a = acc.set_index(['window_size', 'ransac'])
     check('accuracy (finished job): the sub-cell picks are right at least as often, at most 5 per cell',
           (bool(a.loc[(2048, 'magsac90-sc512'), 'precision_inliers'] >= a.loc[(2048, 'magsac90'),
@@ -3201,6 +3211,11 @@ def test_accuracy_finished_job(tmp):
     finally:
         T.compare = real
     check('accuracy (finished job): read back when made with the same settings', reused, True)
+    with contextlib.redirect_stdout(io.StringIO()):
+        acc2 = A.job_accuracy(jd, tcsv, subcell_px=[256], keep=5)
+    check('accuracy (finished job): asking for 256 after 512 keeps both in the one file (subcell_px column)',
+          (sorted(set(acc2['subcell_px'])), sorted(set(acc2[acc2['subcell_px'] == 256]['ransac']))),
+          ([0, 256, 512], ['magsac90-sc256']))
     s = A.summarize(acc.assign(job='output999', sensor='MV'))
     txt = A.format_summary(s)
     check('accuracy (finished job): summary per sensor x window size, plain and sub-cells',

@@ -584,14 +584,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument('--accuracy', action='store_true',
                     help='score every job match by match against its truth, per window size and keypoint count '
                          '(ACCURACY_ALL / ACCURACY_SUMMARY.csv); nothing is matched again')
-    ap.add_argument('--subcell-px', type=int, default=0,
-                    help='with --accuracy: also the sub-cell variant (e.g. 512), made from the saved matches')
+    ap.add_argument('--subcell-px', type=int, nargs='*', default=[],
+                    help='with --accuracy: also the sub-cell variants (e.g. 256 512), made from the saved matches; '
+                         'sizes made before stay in the results')
     ap.add_argument('--subcell-keep', type=int, default=10, help='matches kept per sub-cell')
     a = ap.parse_args(argv)
     X.SHARE = (a.share_local, a.share_server)
     cross = None if a.no_cross else {'top_n': a.top, 'min_agree': a.min_agree, 'keep': a.keep,
                                      'cell_km': a.cell_km, 'tol_m': a.tolerance_m}
-    accuracy = {'subcell_px': a.subcell_px, 'keep': a.subcell_keep} if (a.accuracy or a.subcell_px) else None
+    accuracy = ({'subcell_px': [s for s in a.subcell_px if s > 0], 'keep': a.subcell_keep}
+                if (a.accuracy or a.subcell_px) else None)
     return batch(a.folder, a.jobs, a.success_px, a.recompute, a.all_jobs, cross,
                  a.cloud_model_dir if a.cloud == 'omnicloudmask' else None, accuracy)
 

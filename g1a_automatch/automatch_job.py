@@ -152,7 +152,7 @@ DEFAULT_JOB: Dict = {
     # Sub-cells: match whole windows (context), then keep in each sub-cell the
     # matches that fit there best; written beside the plain result as RANSAC
     # variant <method>-sc<px>, so both are ranked in the same run
-    'subcell_px': 0,             # sub-cell side, e.g. 512 inside 2048 px windows; 0 = off
+    'subcell_px': [],            # sub-cell sides, e.g. [256, 512] inside 2048 px windows; [] = off
     'subcell_keep': 10,          # matches kept per sub-cell: the least distorted
 
     # chip consensus (tolerance in pixels unless *_m given)
@@ -236,6 +236,8 @@ def normalize(job: Dict) -> Dict:
         if not isinstance(out[k], list):
             out[k] = [out[k]]
     out['num_features'] = [None if v in (None, '', 'auto', 0) else int(v) for v in out['num_features']] or [None]
+    sc = out['subcell_px'] if isinstance(out['subcell_px'], (list, tuple)) else [out['subcell_px']]
+    out['subcell_px'] = sorted({int(v) for v in sc if v not in (None, '') and int(v) > 0})
     dp = out.get('detector_params') or {}
     if not isinstance(dp, dict) or not all(isinstance(v, dict) for v in dp.values()):
         raise ValueError('detector_params must map detector -> {parameter: [values]}')
@@ -649,8 +651,7 @@ def _config_for(job: Dict, win: int, nf: Optional[int], res: float, out_dir: str
         use_amp=job['use_amp'], debug_mode=job['debug'],
         smnn_thresholds=job['smnn_thresholds'], ransac_methods=job['ransac_methods'],
         ransac_thresholds=thr_m, ransac_confidences=job['ransac_confidences'],
-        subcell_m=(float(job['subcell_px']) * res if 0 < int(job['subcell_px'] or 0) < win else 0.0),
-        subcell_px=(int(job['subcell_px']) if 0 < int(job['subcell_px'] or 0) < win else 0),
+        subcell_sizes=[(int(px), float(px) * res) for px in job['subcell_px'] if 0 < int(px) < win],
         subcell_keep=int(job['subcell_keep'] or 10),
         reference_dir=job['reference_dir'], reference_label=job['reference_label'],
         reference_mode=None if job['reference_mode'] in ('', 'auto') else job['reference_mode'],

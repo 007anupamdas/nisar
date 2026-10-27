@@ -12,13 +12,15 @@ matches. Written into <job>/SUBCELLS_<px>/ (filtered_* and their chip
 consensus, final_*), never into the job's own folders, and scored beside the
 plain results as RANSAC variant <method>-sc<px>.
 
-Per job: TRUTH_MATCH_ACCURACY.csv (and with sub-cells
-TRUTH_RANKING_SUBCELLS_<px>.csv, the truth ranking with the sub-cell
-variants); the job's TRUTH_RANKING.csv is left as it is. Results made with
-the same settings are read back.
+Per job: TRUTH_MATCH_ACCURACY.csv -- one file for everything: window size,
+keypoint count and sub-cell size (subcell_px, 0 = plain) are columns -- and
+with sub-cells TRUTH_RANKING_SUBCELLS.csv, the truth ranking with the
+sub-cell variants; the job's TRUTH_RANKING.csv is left as it is. Sizes made
+before (SUBCELLS_<px>/) stay in the file when another size is asked for.
+Results made with the same settings are read back.
 
 Over many jobs this runs inside the benchmark (automatch_job.py bench
-<folder> --accuracy [--subcell-px 512]); it writes ACCURACY_ALL.csv and
+<folder> --accuracy [--subcell-px 256 512]); it writes ACCURACY_ALL.csv and
 ACCURACY_SUMMARY.csv there.
 """
 from __future__ import annotations
@@ -138,14 +140,34 @@ def _subcell_run(filtered_dir: str, raw_dir: str, out_dir: str, cell_m: float, p
     return n
 
 
-def job_accuracy(job_dir: str, truth_csv: str, subcell_px: int = 0, keep: int = 10, radius_m: float = 5000.0,
+def made_sizes(job_dir: str, keep: int) -> List[int]:
+    """Sub-cell sizes already made for a job with this keep (SUBCELLS_<px>/)."""
+    out = []
+    for m in glob.glob(os.path.join(job_dir, 'SUBCELLS_*', 'SUBCELLS.json')):
+        try:
+            with open(m, encoding='utf-8') as f:
+                d = json.load(f)
+            if int(d.get('keep', -1)) == int(keep) and d.get('v') == VERSION:
+                out.append(int(d['px']))
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    return sorted(out)
+
+
+def job_accuracy(job_dir: str, truth_csv: str, subcell_px=(), keep: int = 10, radius_m: float = 5000.0,
                  recompute: bool = False, quiet: bool = True) -> pd.DataFrame:
-    """TRUTH_MATCH_ACCURACY.csv of one finished job (with the sub-cell
-    variants when subcell_px), read back when made with the same settings."""
+    """TRUTH_MATCH_ACCURACY.csv of one finished job: the plain results and
+    every sub-cell size asked for (a number or a list), plus the sizes made
+    for it before, so asking for 256 after 512 keeps both in the file; the
+    variants are told apart by RANSAC label (magsac90-sc256) and the
+    subcell_px column. Read back when made with the same settings."""
     import automatch_cross as X
     import automatch_truth as T
+    sizes = subcell_px if isinstance(subcell_px, (list, tuple)) else [subcell_px]
+    asked = sorted({int(s) for s in sizes if s and int(s) > 0})
+    sizes = sorted(set(asked) | set(made_sizes(job_dir, keep)))
     path = os.path.join(job_dir, 'TRUTH_MATCH_ACCURACY.csv')
-    want = {'truth_csv': os.path.abspath(truth_csv), 'subcell_px': int(subcell_px or 0), 'keep': int(keep),
+    want = {'truth_csv': os.path.abspath(truth_csv), 'subcell_px': sizes, 'keep': int(keep),
             'radius_m': float(radius_m), 'v': VERSION}
     if not recompute and X._reusable(job_dir, 'accuracy', want, 'TRUTH_MATCH_ACCURACY.csv',
                                      ['TRUTH_RANKING.csv', 'RUN_MANIFEST.csv']):
@@ -154,37 +176,38 @@ def job_accuracy(job_dir: str, truth_csv: str, subcell_px: int = 0, keep: int = 
     if not crs:
         raise ValueError('working CRS unknown (no RUN_MANIFEST.csv / job_used.json)')
     runs = T.find_runs(job_dir)
-    if subcell_px:
+    if sizes:
         res = T.job_resolution(job_dir)
         if not res:
             raise ValueError('working resolution unknown: sub-cells need it')
-        runs = runs + subcell_runs(job_dir, int(subcell_px), int(keep), res, T.consensus_settings(job_dir),
-                                   recompute)
+        settings = T.consensus_settings(job_dir)
+        for px in sizes:
+            runs = runs + subcell_runs(job_dir, px, int(keep), res, settings, recompute and px in asked)
     r = T.compare(job_dir, truth_csv, radius_m, 'consensus', crs, write=False, quiet=quiet, runs=runs)
     acc = r.get('accuracy')
     acc = acc if isinstance(acc, pd.DataFrame) else pd.DataFrame()
     acc.to_csv(path, index=False)
-    if subcell_px and not r['ranking'].empty:
-        r['ranking'].to_csv(os.path.join(job_dir, f'TRUTH_RANKING_SUBCELLS_{int(subcell_px)}.csv'), index=False)
+    if sizes and not r['ranking'].empty:
+        r['ranking'].to_csv(os.path.join(job_dir, 'TRUTH_RANKING_SUBCELLS.csv'), index=False)
     X._remember(job_dir, 'accuracy', want)
     return acc
 
 
 def summarize(acc: pd.DataFrame) -> pd.DataFrame:
-    """Per sensor x window size (x keypoint count) x plain / sub-cells: the
-    medians over its configurations and jobs; then the same per detector +
-    matcher. Columns: level, sensor, window_size, num_features, subcells,
+    """Per sensor x window size (x keypoint count) x sub-cell size (0 =
+    plain): the medians over its configurations and jobs; then the same per
+    detector + matcher. Columns: level, sensor, window_size, num_features, subcell_px,
     configuration, jobs, configs, precision_inliers, good_inliers_per_window,
     windows_90pct_good, windows_mostly_wrong, truth_rmse_m."""
     if acc.empty:
         return pd.DataFrame()
     a = acc.copy()
-    a['subcells'] = a['ransac'].astype(str).str.contains('-sc')
+    a['subcell_px'] = a['ransac'].astype(str).str.extract(r'-sc(\d+)$')[0].fillna(0).astype(int)
     a['configuration'] = a['detector'].astype(str) + ' + ' + a['matcher'].astype(str)
     cols = ['precision_inliers', 'good_inliers_per_window', 'windows_90pct_good', 'windows_mostly_wrong',
             'truth_rmse_m']
     rows = []
-    keys = ['sensor', 'window_size', 'num_features', 'subcells']
+    keys = ['sensor', 'window_size', 'num_features', 'subcell_px']
     for level, by in (('sensor', keys), ('configuration', keys + ['configuration'])):
         for k, g in a.groupby(by, dropna=False):
             r = dict(zip(by, k if isinstance(k, tuple) else (k,)))
@@ -194,7 +217,7 @@ def summarize(acc: pd.DataFrame) -> pd.DataFrame:
                 r[c] = round(float(v.median()), 4) if v.notna().any() else None
             rows.append(r)
     out = pd.DataFrame(rows)
-    order = ['level', 'sensor', 'window_size', 'num_features', 'subcells', 'configuration', 'jobs', 'configs'] + cols
+    order = ['level', 'sensor', 'window_size', 'num_features', 'subcell_px', 'configuration', 'jobs', 'configs'] + cols
     return out[[c for c in order if c in out.columns]]
 
 
@@ -208,9 +231,10 @@ def format_summary(s: pd.DataFrame) -> str:
              'over every configuration of the jobs:']
     for sensor, g in t.groupby('sensor'):
         lines.append(f'  {sensor}:')
-        for r in g.sort_values(['window_size', 'num_features', 'subcells']).itertuples():
+        for r in g.sort_values(['window_size', 'num_features', 'subcell_px']).itertuples():
             p = '-' if pd.isna(r.precision_inliers) else f'{100 * r.precision_inliers:5.1f} %'
             lines.append(f"    {str(r.window_size) + ' px':>8}  keypoints {str(r.num_features):<6} "
-                         f"{'sub-cells' if r.subcells else 'plain':<10}{p} ({r.good_inliers_per_window})"
+                         f"{(f'sub-cells {r.subcell_px}' if r.subcell_px else 'plain'):<15}{p} "
+                         f"({r.good_inliers_per_window})"
                          f"   windows >= 90 % right: {r.windows_90pct_good}   jobs {r.jobs}")
     return '\n'.join(lines)

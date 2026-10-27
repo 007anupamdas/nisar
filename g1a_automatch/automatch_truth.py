@@ -777,6 +777,9 @@ def compare(output_dir: str, truth_csv: str, radius_m: float = 5000.0, chips: st
             chip_files[(base['channel'], base['sweep'], base['detector'], base['matcher'], base['ransac'])] = \
                 (run['filtered_dir'], cfg['files'])
     acc = pd.DataFrame(acc_rows)
+    if not acc.empty:            # 0: the plain result; else the sub-cell size of a <method>-sc<px> variant
+        acc.insert(acc.columns.get_loc('ransac') + 1, 'subcell_px',
+                   acc['ransac'].astype(str).str.extract(r'-sc(\d+)$')[0].fillna(0).astype(int))
     keys = ['channel', 'sweep', 'detector', 'matcher', 'ransac']
     acc_cols = ['precision_inliers', 'windows_90pct_good', 'windows_mostly_wrong', 'good_inliers_per_window',
                 'precision_all']

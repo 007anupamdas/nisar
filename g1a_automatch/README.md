@@ -628,13 +628,18 @@ column.
 Every job's saved matches are scored again against its own truth: the share
 of each window's matches that are right (see *Few but right*), by window
 size, keypoint count and RANSAC setting. Nothing is matched again.
-- **Sub-cells afterwards:** `--subcell-px 512` (`--subcell-keep 10`) also
-  makes the sub-cell variant of the jobs' large windows from the saved raw
-  matches and RANSAC inliers. It goes into `<job>/SUBCELLS_512/`, never into
-  the job's own folders, and is scored beside the plain results.
-- **Per job:** `TRUTH_MATCH_ACCURACY.csv`, and with sub-cells
-  `TRUTH_RANKING_SUBCELLS_512.csv`. The job's own `TRUTH_RANKING.csv` stays
-  as it was. Results made with the same settings are read back.
+- **Sub-cells afterwards:** `--subcell-px 256 512` (`--subcell-keep 10`)
+  also makes the sub-cell variants of the jobs' large windows from the saved
+  raw matches and RANSAC inliers. They go into `<job>/SUBCELLS_256/` and
+  `SUBCELLS_512/`, never into the job's own folders, and are scored beside
+  the plain results.
+- **Per job, one file:** `TRUTH_MATCH_ACCURACY.csv` holds every window
+  size, keypoint count and sub-cell size as columns (`window_size`,
+  `num_features`, `subcell_px`, 0 = plain). Sizes made before stay in it
+  when you ask for another, so 256 after 512 keeps both. With sub-cells,
+  `TRUTH_RANKING_SUBCELLS.csv` ranks them all. The job's own
+  `TRUTH_RANKING.csv` stays as it was. Results made with the same settings
+  are read back.
 - **Over the jobs:** `ACCURACY_ALL.csv` (every job × configuration × window
   size) and `ACCURACY_SUMMARY.csv` (medians per sensor × window size ×
   keypoints × plain or sub-cells, then per detector + matcher). The log
@@ -812,8 +817,9 @@ The log prints each detector's time and peak GPU memory when it finishes.
 A large window gives the matcher context: a whole city is easier to place
 than one of its streets. But one RANSAC model over 2048 px (92 km at 45 m)
 has to bend with the scene's distortion, and the matches crowd where the
-texture is. `"subcell_px": 512` keeps the large windows and then judges each
-of them in 512 px cells:
+texture is. `"subcell_px": 512` (or a list, `[256, 512]`: each size its own
+variant) keeps the large windows and then judges each of them in 512 px
+cells:
 - **The window plane:** the window's RANSAC inliers give its error plane.
 - **Each cell's own correction:** in each cell, the inliers there correct
   the plane. With 6 or more, a plane through their misfit; with 3 or more,

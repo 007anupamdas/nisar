@@ -452,8 +452,9 @@ class PipelineConfig:
     ransac_methods: List = None
     ransac_thresholds: List[float] = None
     ransac_confidences: List[float] = None
-    subcell_m: float = 0.0             # > 0: also the sub-cell variant of each RANSAC setting
-    subcell_px: int = 0                # the same in pixels (its name: RANSAC method <m>-sc<px>)
+    # [(px, metres)]: also the sub-cell variant of each RANSAC setting, one per
+    # size, named RANSAC method <m>-sc<px>
+    subcell_sizes: List = None
     subcell_keep: int = 10             # matches kept per sub-cell, the least distorted
 
     # Reference collection used for every polarisation (L8_ref, C1, ...).
@@ -4197,11 +4198,11 @@ class RANSACFilter:
                             continue
 
                         write(out_path, inliers, method, thr, conf)
-                        if self.config.subcell_m > 0:
-                            sc = subcell_select(mkpts1, mkpts2, inliers, self.config.subcell_m, float(thr),
+                        for px, cell_m in (self.config.subcell_sizes or []):
+                            sc = subcell_select(mkpts1, mkpts2, inliers, float(cell_m), float(thr),
                                                 self.config.subcell_keep)
                             if sc.any():
-                                label = f'{method}-sc{int(self.config.subcell_px)}'
+                                label = f'{method}-sc{int(px)}'
                                 write(os.path.join(output_dir, f'{basename}_aff_{label}_{thr}_{conf}_.csv'),
                                       sc, label, thr, conf)
                     except Exception:
