@@ -420,9 +420,18 @@ def test_e2e_truth(tmp):
            'output_dir': out, 'channels': ['band1'], 'detectors': ['sift'],
            'matchers': {'sift': ['smnn', 'mnn', 'ada']}, 'window_sizes': [1024],
            'max_expected_error_m': 10000, 'smnn_thresholds': [0.95], 'use_amp': False,
-           'truth_csv': truth_file('truth_ok.csv', 4013.0, -2487.0), 'truth_radius_m': 5000}
+           'truth_csv': truth_file('truth_ok.csv', 4013.0, -2487.0), 'truth_radius_m': 5000,
+           'subcell_px': 512, 'subcell_keep': 10}
     code, stdout = _run_job(job, tmp, want_output=True)
     check('truth e2e: job completes', code, 0)
+    ap = os.path.join(out, 'TRUTH_MATCH_ACCURACY.csv')
+    acc = pd.read_csv(ap) if os.path.exists(ap) else pd.DataFrame(columns=['ransac', 'precision_inliers'])
+    sub = acc[acc['ransac'].astype(str).str.contains('-sc512')]
+    plain = acc[~acc['ransac'].astype(str).str.contains('-sc')]
+    check('truth e2e: match accuracy of the plain and the 512 px sub-cell result, both nearly all right',
+          (len(plain) > 0, len(sub) > 0, bool((plain['precision_inliers'] > 0.9).all()),
+           bool((sub['precision_inliers'] > 0.9).all()), bool((acc['precision_all'] <= acc['precision_inliers']).all())),
+          (True, True, True, True, True))
     by_path = os.path.join(out, 'TRUTH_BY_DETECTOR_MATCHER.csv')
     by = pd.read_csv(by_path) if os.path.exists(by_path) else pd.DataFrame()
     check('truth e2e: every detector + matcher ranked', sorted(by.get('matcher_family', pd.Series()).tolist()),
