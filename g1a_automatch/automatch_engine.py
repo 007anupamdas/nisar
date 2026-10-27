@@ -2985,8 +2985,8 @@ class DiskBasedMatcher(BaseMatcher):
         if side is not None and side >= window:
             side = None
         self.gpu_window = side
-        n = budget if side is None else max(int(self.config.min_num_features),
-                                            int(round(budget * (side / window) ** 2)))
+        n = budget if side is None else max(min(int(self.config.min_num_features), budget),   # never above the
+                                            int(round(budget * (side / window) ** 2)))        # window's own count
         if self.uses_keypoint_budget and n != int(self.config.num_features):
             if not getattr(self, '_own_config', False):
                 self.config = copy.copy(self.config)   # the variants share one config

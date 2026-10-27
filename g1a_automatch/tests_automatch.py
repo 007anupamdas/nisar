@@ -2897,6 +2897,78 @@ def test_parallel_share(tmp):
     check('parallel: each window counted once whatever the RANSAC variants', got['ada']['matches'], 400)
 
 
+def test_match_accuracy(tmp):
+    """Match by match against the truth: the truth points give the error
+    field (a mis-marked point dropped); each window's matches are good or
+    not by it, before and after RANSAC, at every keypoint count of the sweep
+    -- also where nothing survives the consensus."""
+    import contextlib
+    import io
+    import numpy as np
+    import pandas as pd
+    from pyproj import Transformer
+    import automatch_truth as T
+    rng = np.random.default_rng(11)
+    E0, N0, crs = 500000.0, 1700000.0, 'EPSG:32643'
+
+    def field(e, n):
+        return 4000 + 0.01 * (e - E0), -2500 - 0.005 * (n - N0)
+    te = E0 + np.r_[0, 40000, 0, 40000, rng.uniform(0, 40000, 8)]        # the corners and inside
+    tn = N0 + np.r_[0, 0, 40000, 40000, rng.uniform(0, 40000, 8)]
+    de, dn = field(te, tn)
+    de[5] += 3000.0                                       # a mis-marked truth point
+    to_ll = Transformer.from_crs(crs, 'EPSG:4326', always_xy=True)
+    ilo, ila = to_ll.transform(te, tn)
+    rlo, rla = to_ll.transform(te - de, tn - dn)
+    tcsv = os.path.join(tmp, 'acc_truth.csv')
+    pd.DataFrame({'In_Lon': ilo, 'In_Lat': ila, 'Ref_Lon': rlo, 'Ref_Lat': rla}).to_csv(tcsv, index=False)
+    out = os.path.join(tmp, 'acc_out')
+
+    def write(d, name, n_good, n_bad, inl_good, inl_bad, outside=0):
+        os.makedirs(d, exist_ok=True)
+        n = n_good + n_bad + outside
+        x1, y1 = E0 + rng.uniform(2000, 38000, n), N0 + rng.uniform(2000, 38000, n)
+        x1[n_good + n_bad:] += 200000.0                   # beyond the truth points: not judged
+        fe, fn = field(x1, y1)
+        fe, fn = fe + rng.normal(0, 5, n), fn + rng.normal(0, 5, n)
+        bad = slice(n_good, n_good + n_bad)
+        fe[bad] += rng.choice([-1, 1], n_bad) * rng.uniform(500, 5000, n_bad)
+        inl = np.zeros(n, bool)
+        inl[:inl_good] = True
+        inl[n_good:n_good + inl_bad] = True
+        pd.DataFrame({'x1': 0, 'y1': 0, 'x2': 0, 'y2': 0, 'x1-map': x1, 'y1-map': y1, 'x2-map': x1 - fe,
+                      'y2-map': y1 - fn, 'Distance': 0, 'along': 0, 'across': 0, 'model-type': 'magsac',
+                      'threshold': 40.0, 'confidence': 0.99, 'inliers': inl}).to_csv(os.path.join(d, name), index=False)
+    runs = []
+    for nf, plan in (('10', {'sift': (9, 1, 9, 0), 'disk': (4, 6, 4, 6)}),
+                     ('1000', {'sift': (900, 100, 880, 20), 'disk': (700, 300, 650, 50)})):
+        d = os.path.join(out, f'win512_nf{nf}', 'band1_toC1', 'filtered_x')
+        os.makedirs(os.path.join(out, f'win512_nf{nf}', 'band1_toC1', 'final_x'), exist_ok=True)
+        for det, (g, b, ig, ib) in plan.items():
+            for pix in (0, 1024):
+                write(d, f'{det}_band1_toC1_pair001_scan0_pix{pix}_smnn_0.95_aff_magsac_40.0_0.99_.csv',
+                      g, b, ig, ib, outside=3)
+        runs.append({'filtered_dir': d, 'final_dir': d.replace('filtered_x', 'final_x'), 'sweep': f'win512_nf{nf}'})
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        res = T.compare(out, tcsv, 5000.0, 'consensus', crs, runs=runs)
+    f = res['field']
+    check('accuracy: the truth points give the error field; the mis-marked one is dropped',
+          (f['degree'], len(f['dropped']), f['loo_rmse_m'] < 5.0), (1, 1, True))
+    acc = res['accuracy'].set_index(['detector', 'num_features'])
+    check('accuracy: before RANSAC 9 of 10 good; after it all 9 inliers good (and every window >= 90 %)',
+          (acc.loc[('sift', '10'), 'precision_all'], acc.loc[('sift', '10'), 'precision_inliers'],
+           acc.loc[('sift', '10'), 'windows_90pct_good'], acc.loc[('sift', '10'), 'good_inliers_per_window']),
+          (0.9, 1.0, 1.0, 9.0))
+    check('accuracy: RANSAC fooled at 10 keypoints (4 of 10 inliers good): windows mostly wrong',
+          (acc.loc[('disk', '10'), 'precision_inliers'], acc.loc[('disk', '10'), 'windows_mostly_wrong']), (0.4, 1.0))
+    check('accuracy: at 1000 keypoints 880 of 900 inliers good; matches beyond the truth points not judged',
+          (round(acc.loc[('sift', '1000'), 'precision_inliers'], 3), acc.loc[('sift', '1000'), 'matches_per_window']),
+          (0.978, 1003.0))
+    check('accuracy: written even where no window survived a consensus, with the table by keypoint count',
+          (os.path.exists(os.path.join(out, 'TRUTH_MATCH_ACCURACY.csv')), 'by keypoints per window' in buf.getvalue(),
+           '100% (9)' in buf.getvalue(), ' 40% (4)' in buf.getvalue()), (True, True, True, True))
+
+
 def test_partial_cover():
     """Jobs 336 and 343: a warning when the first-ranked configuration is km
     off while one reaching fewer points is close (343, matches on part of the
@@ -3351,6 +3423,7 @@ def main():
         test_cloud_mask(tmp)
         test_stretch()
         test_parallel_share(tmp)
+        test_match_accuracy(tmp)
         test_auto_bands(tmp)
         test_kornia_versions(tmp)
         test_warmup_and_padding()

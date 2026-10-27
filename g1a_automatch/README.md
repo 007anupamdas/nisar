@@ -791,6 +791,46 @@ detectors' time still grow with the count. FGINN follows the method row by
 row (kornia's version compares every row with the first row's candidates).
 The log prints each detector's time and peak GPU memory when it finishes.
 
+### Few but right: accuracy by keypoint count
+
+`num_features` takes several values; each is its own sweep point
+(`win<W>_nf<N>`), with the same windows and references. With a truth CSV,
+`TRUTH_MATCH_ACCURACY.csv` then says, per configuration and keypoint count,
+how many of each window's matches are right. When the run swept several
+counts, the log prints a table of the inliers' precision (and good inliers
+per window) by count.
+
+- **The truth field:** the truth points give the scene's error field
+  (affine, or quadratic when it predicts left-out points better). A
+  mis-marked truth point is dropped (up to three).
+- **A good match:** its displacement lies within its RANSAC threshold of the
+  field at its position (or twice the field's leave-one-out error, if that
+  is larger). Matches beyond 5 km of the truth points' area are not judged.
+- **Columns:**
+  - `precision_all`: of all matches, before RANSAC;
+  - `precision_inliers`: of the RANSAC inliers, the matches that are used;
+  - `good_inliers_per_window` (median);
+  - `windows_90pct_good`: the share of windows whose inliers are at least
+    90 % right;
+  - `windows_mostly_wrong`: under 50 % right, where RANSAC was fooled;
+  - `windows_no_inliers`: fewer than 3 inliers.
+- **Every window counts,** not only those that survive the chip
+  consensus. A configuration that never reaches `min_inliers_per_chip` is
+  still measured.
+- **Finished jobs:** `compare` adds this without matching again.
+
+A sweep for this, e.g. `"num_features": [10, 25, 50, 100, 300, 1000]` with
+one window size:
+- **Inliers per window:** set `"min_inliers_per_chip": 4`. At 10 keypoints a
+  window rarely keeps 6 inliers, and with fewer the consensus drops it.
+- **Which detectors:** only keypoint detectors use the count (SIFT, DISK,
+  ALIKED, XFeat, DeDoDe, KeyNet, DoG, GFTT, Hessian, SuperPoint…). Dense
+  matchers (LoFTR, ELoFTR, RoMa, TopicFM, XoFTR…) match the same at every
+  value, so leave them out of such a sweep.
+- **GPU tiles:** when a window is matched in GPU tiles, each tile gets its
+  area's share of the count (at least `min_num_features`, but never more
+  than the window's own count).
+
 ## GPU memory (16 GB workstation, GPU windows)
 
 Defaults: 1024 px windows, one model resident at a time (unloaded after its

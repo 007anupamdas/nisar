@@ -25,6 +25,17 @@ Files (in the output folder):
     TRUTH_BY_DETECTOR_MATCHER.csv   the best setting of each detector + matcher, ranked
     TRUTH_RANKING.csv               every configuration, ranked
     TRUTH_POINTS.csv                every configuration x truth point
+    TRUTH_MATCH_ACCURACY.csv        match by match: per configuration and sweep point
+                                    (window size, keypoints), the share of each window's
+                                    matches that are right, before and after RANSAC
+
+Match by match: the truth points give the scene's error field (affine, or
+quadratic when it predicts left-out points better). A match is good when its
+displacement lies within its RANSAC threshold (or twice the field's own
+leave-one-out error, if larger) of the field at its position. Every window a
+configuration matched counts, not only the consensus survivors, so a sweep
+over num_features shows how the share of good matches changes with the
+keypoint count (printed as a table when the run swept several).
 
     python automatch_truth.py <output_dir> --truth manual.csv [--radius-km 5] [--chips all]
 
@@ -376,6 +387,197 @@ def score_config(cfg: Dict, truth: pd.DataFrame, radius_m: float, local: str = '
     return summary, rows
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# match by match: how many of a window's matches are right
+# ─────────────────────────────────────────────────────────────────────────────
+def truth_field(truth: pd.DataFrame, max_drop: int = 3) -> Optional[Dict]:
+    """The scene's true error (dE, dN) everywhere, from the truth points: an
+    affine field, or a quadratic one when it predicts left-out points clearly
+    better (by 0.8, from 9 points on). Up to max_drop points whose
+    leave-one-out residual is over 3 x the median are dropped (a mis-marked
+    point), keeping 6. loo_rmse_m says how well the field knows the error
+    between the points. None with fewer than 4 points."""
+    E, N = truth['E'].to_numpy(float), truth['N'].to_numpy(float)
+    dE, dN = truth['dE'].to_numpy(float), truth['dN'].to_numpy(float)
+    if len(E) < 4:
+        return None
+    x0, y0 = float(E.mean()), float(N.mean())
+    s = max(float(np.ptp(E)), float(np.ptp(N)), 1.0)
+    x, y = (E - x0) / s, (N - y0) / s
+
+    def loo(keep, degree):
+        idx = np.flatnonzero(keep)
+        need = 6 if degree == 2 else 3
+        if len(idx) < need + 2:
+            return None
+        r = np.full(len(E), np.nan)
+        for i in idx:
+            m = keep.copy()
+            m[i] = False
+            A = _design(x[m], y[m], degree)
+            ca, *_ = np.linalg.lstsq(A, dE[m], rcond=None)
+            cc, *_ = np.linalg.lstsq(A, dN[m], rcond=None)
+            a = _design(x[i:i + 1], y[i:i + 1], degree)
+            r[i] = float(np.hypot((a @ ca)[0] - dE[i], (a @ cc)[0] - dN[i]))
+        return r
+
+    keep = np.ones(len(E), bool)
+    dropped = []
+    while True:
+        r1 = loo(keep, 1)
+        if r1 is None:
+            return None
+        r2 = loo(keep, 2) if keep.sum() >= 9 else None
+        rm1 = float(np.sqrt(np.nanmean(r1[keep] ** 2)))
+        rm2 = float(np.sqrt(np.nanmean(r2[keep] ** 2))) if r2 is not None else np.inf
+        degree, r, rmse = (2, r2, rm2) if rm2 < 0.8 * rm1 and rm1 - rm2 > 1.0 else (1, r1, rm1)
+        worst = int(np.nanargmax(np.where(keep, r, -1)))
+        if (len(dropped) < max_drop and keep.sum() > 6
+                and r[worst] > 3.0 * float(np.nanmedian(r[keep])) and r[worst] > 1.0):
+            # a mis-marked point also inflates its neighbours' leave-one-out
+            # residuals (an edge point's most): drop the point whose removal
+            # leaves the best-fitting set
+            best, best_rm = None, np.inf
+            for i in np.flatnonzero(keep):
+                m = keep.copy()
+                m[i] = False
+                rr = loo(m, degree)
+                if rr is None:
+                    continue
+                rm = float(np.sqrt(np.nanmean(rr[m] ** 2)))
+                if rm < best_rm:
+                    best, best_rm = int(i), rm
+            if best is None:
+                break
+            keep[best] = False
+            dropped.append(int(truth['truth_id'].iloc[best]) if 'truth_id' in truth.columns else best)
+            continue
+        break
+    A = _design(x[keep], y[keep], degree)
+    ca, *_ = np.linalg.lstsq(A, dE[keep], rcond=None)
+    cc, *_ = np.linalg.lstsq(A, dN[keep], rcond=None)
+    zone = None
+    try:
+        from shapely.geometry import MultiPoint
+        zone = MultiPoint(list(zip(E[keep], N[keep]))).convex_hull
+    except Exception:
+        pass
+    return {'x0': x0, 'y0': y0, 's': s, 'degree': degree, 'ca': ca, 'cc': cc, 'loo_rmse_m': rmse,
+            'n_used': int(keep.sum()), 'dropped': dropped, 'hull': zone, 'E': E[keep], 'N': N[keep]}
+
+
+def field_at(field: Dict, E: np.ndarray, N: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    A = _design((np.asarray(E, float) - field['x0']) / field['s'], (np.asarray(N, float) - field['y0']) / field['s'],
+                field['degree'])
+    return A @ field['ca'], A @ field['cc']
+
+
+def field_covers(field: Dict, E: np.ndarray, N: np.ndarray, radius_m: float) -> np.ndarray:
+    """Points where the field is known: within radius_m of the truth points'
+    convex hull (further out it would be extrapolated)."""
+    E, N = np.asarray(E, float), np.asarray(N, float)
+    if field.get('hull') is not None:
+        try:
+            import shapely
+            return np.asarray(shapely.contains_xy(field['hull'].buffer(radius_m), E, N), bool)
+        except Exception:
+            pass
+    out = np.zeros(len(E), bool)
+    for te, tn in zip(field['E'], field['N']):
+        out |= np.hypot(E - te, N - tn) <= radius_m
+    return out
+
+
+def match_accuracy(filtered_dir: str, field: Dict, radius_m: float = 5000.0) -> List[Dict]:
+    """Per configuration (channel, detector, matcher, RANSAC) of one run, how
+    many of each window's matches are right: a match is good when its
+    displacement is within tolerance of the truth field at its position;
+    tolerance = the window's RANSAC threshold, or twice the field's own
+    leave-one-out error if that is larger. Over every window the matcher
+    produced (not only the consensus survivors), before RANSAC ('all') and
+    after it ('inliers'). Matches outside the truth points' area are not
+    judged."""
+    import automatch_engine as E
+    acc: Dict[Tuple, List] = {}
+    for path in sorted(glob.glob(os.path.join(filtered_dir, '*.csv'))):
+        name = os.path.basename(path)
+        p = E.MatchStatistics._parse_filename(name) or {}
+        if not p:
+            continue
+        try:
+            df = pd.read_csv(path)
+        except Exception:
+            continue
+        key = (p.get('nisar_pol'), _variant(name), _matcher_label(p),
+               f"{p.get('ransac_method')}{float(p.get('ransac_threshold', 0)):g}")
+        if df.empty or not {'x1-map', 'y1-map', 'x2-map', 'y2-map'} <= set(df.columns):
+            acc.setdefault(key, []).append((0, 0, 0, 0, 0, 0))
+            continue
+        e1, n1 = df['x1-map'].to_numpy(float), df['y1-map'].to_numpy(float)
+        tE, tN = field_at(field, e1, n1)
+        res = np.hypot(e1 - df['x2-map'].to_numpy(float) - tE, n1 - df['y2-map'].to_numpy(float) - tN)
+        thr = float(pd.to_numeric(df.get('threshold'), errors='coerce').max()) if 'threshold' in df.columns else np.nan
+        if not np.isfinite(thr) or thr <= 0:
+            thr = float(p.get('ransac_threshold') or 0)
+        tol = max(thr, 2.0 * field['loo_rmse_m'])
+        judged = field_covers(field, e1, n1, radius_m)
+        good = judged & (res <= tol)
+        inl = (df['inliers'].astype(str).str.lower().str.contains('true').to_numpy()
+               if 'inliers' in df.columns else np.ones(len(df), bool))
+        acc.setdefault(key, []).append((len(df), int(judged.sum()), int(good.sum()),
+                                        int(inl.sum()), int((inl & judged).sum()), int((inl & good).sum())))
+    rows = []
+    for (ch, det, mat, ran), v in acc.items():
+        a = np.asarray(v, float).reshape(-1, 6)
+        seen = a[:, 1] > 0                                   # windows with judged matches
+        seen_inl = a[:, 4] > 0
+        share = np.divide(a[:, 5], a[:, 4], out=np.zeros(len(a)), where=seen_inl)
+        rows.append({'channel': ch, 'detector': det, 'matcher': mat, 'ransac': ran,
+                     'windows': int(len(a)), 'windows_judged': int(seen.sum()),
+                     'matches_per_window': float(np.median(a[:, 0])) if len(a) else 0.0,
+                     'precision_all': round(float(a[:, 2].sum() / a[:, 1].sum()), 4) if a[:, 1].sum() else None,
+                     'inliers_per_window': float(np.median(a[:, 3])) if len(a) else 0.0,
+                     'precision_inliers': round(float(a[:, 5].sum() / a[:, 4].sum()), 4) if a[:, 4].sum() else None,
+                     'good_inliers_per_window': float(np.median(a[seen, 5])) if seen.any() else 0.0,
+                     'windows_90pct_good': round(float((share[seen_inl] >= 0.9).mean()), 4) if seen_inl.any() else None,
+                     'windows_mostly_wrong': round(float((share[seen_inl] < 0.5).mean()), 4) if seen_inl.any() else None,
+                     'windows_no_inliers': round(float((a[seen, 3] < 3).mean()), 4) if seen.any() else None})
+    return rows
+
+
+def sweep_parts(sweep: str) -> Tuple[Optional[int], str]:
+    """(window size, keypoints) of a sweep tag such as win512_nf10."""
+    import re
+    w = re.search(r'win(\d+)', str(sweep or ''))
+    nf = re.search(r'nf(\w+)', str(sweep or ''))
+    return (int(w.group(1)) if w else None), (nf.group(1) if nf else '')
+
+
+def format_by_num_features(acc: pd.DataFrame, top: int = 15) -> str:
+    """Precision of the RANSAC inliers (and good inliers per window) of each
+    configuration at each keypoint count, when the run swept several."""
+    if acc.empty or acc['num_features'].nunique() < 2:
+        return ''
+    nfs = sorted(acc['num_features'].unique(), key=lambda v: (not str(v).isdigit(), int(v) if str(v).isdigit() else 0))
+    a = acc.assign(cfg=acc['channel'].astype(str) + ' ' + acc['detector'].astype(str) + ' + '
+                   + acc['matcher'].astype(str) + ' ' + acc['ransac'].astype(str)
+                   + ' @' + acc['window_size'].astype(str))
+    order = a.groupby('cfg')['precision_inliers'].mean().sort_values(ascending=False).index[:top]
+    lines = ['[Truth] share of good matches among the RANSAC inliers (good inliers per window), by keypoints '
+             'per window:', f"  {'configuration':<58}" + ''.join(f'{str(n):>14}' for n in nfs)]
+    for cfg in order:
+        g = a[a['cfg'] == cfg].set_index('num_features')
+        cells = []
+        for n in nfs:
+            if n in g.index and pd.notna(g.loc[n, 'precision_inliers']):
+                r = g.loc[n]
+                cells.append(f"{100 * r['precision_inliers']:5.0f}% ({r['good_inliers_per_window']:g})")
+            else:
+                cells.append('-')
+        lines.append(f'  {cfg[:58]:<58}' + ''.join(f'{c:>14}' for c in cells))
+    return '\n'.join(lines)
+
+
 def rank(df: pd.DataFrame) -> pd.DataFrame:
     """Configurations that reach at least half of the truth points first; among
     them the lowest RMSE, then the most points reached. (The number reached
@@ -465,10 +667,18 @@ def compare(output_dir: str, truth_csv: str, radius_m: float = 5000.0, chips: st
     if not crs:
         raise ValueError('working CRS unknown: pass working_crs (e.g. EPSG:32640)')
     truth = truth_in_crs(load_truth(truth_csv), crs)
-    rows, point_rows = [], []
+    rows, point_rows, acc_rows = [], [], []
     chip_files: Dict[Tuple, Tuple[str, List[str]]] = {}
     settings = consensus_settings(output_dir)
+    field = truth_field(truth)
     for run in (runs if runs is not None else find_runs(output_dir)):
+        if field is not None:
+            win, nf = sweep_parts(run['sweep'])
+            try:
+                acc_rows += [{'sweep': run['sweep'], 'window_size': win, 'num_features': nf, **r}
+                             for r in match_accuracy(run['filtered_dir'], field, radius_m)]
+            except Exception as e:
+                print(f"[Truth] match accuracy of {run['filtered_dir']}: {type(e).__name__}: {e}")
         timing = {}
         tpath = os.path.join(run['final_dir'], 'PASS_TIMING.csv')
         if os.path.exists(tpath):
@@ -484,7 +694,18 @@ def compare(output_dir: str, truth_csv: str, radius_m: float = 5000.0, chips: st
             point_rows += [{**base, **r} for r in prow]
             chip_files[(base['channel'], base['sweep'], base['detector'], base['matcher'], base['ransac'])] = \
                 (run['filtered_dir'], cfg['files'])
-    ranking = rank(pd.DataFrame(rows))
+    acc = pd.DataFrame(acc_rows)
+    keys = ['channel', 'sweep', 'detector', 'matcher', 'ransac']
+    acc_cols = ['precision_inliers', 'windows_90pct_good', 'windows_mostly_wrong', 'good_inliers_per_window',
+                'precision_all']
+    table = pd.DataFrame(rows)
+    if not acc.empty and not table.empty:
+        k = table[keys].astype(str).agg('|'.join, axis=1)
+        a = acc.set_index(acc[keys].astype(str).agg('|'.join, axis=1))[acc_cols]
+        a = a[~a.index.duplicated()]
+        for c in acc_cols:
+            table[c] = k.map(a[c]).values
+    ranking = rank(table)
     if not ranking.empty:
         ranking = ranking[[c for c in RANK_COLS if c in ranking.columns]
                           + [c for c in ranking.columns if c not in RANK_COLS]]
@@ -498,18 +719,38 @@ def compare(output_dir: str, truth_csv: str, radius_m: float = 5000.0, chips: st
     else:
         by = ranking
     points = pd.DataFrame(point_rows)
+    if not acc.empty and not ranking.empty:
+        k = acc[keys].astype(str).agg('|'.join, axis=1)
+        r = ranking.set_index(ranking[keys].astype(str).agg('|'.join, axis=1))
+        r = r[~r.index.duplicated()]
+        acc['truth_rmse_m'] = k.map(r['truth_rmse_m']).values
+        acc['truth_reached'] = k.map(r['truth_reached']).values
+    if not acc.empty:
+        acc = acc.sort_values(['channel', 'detector', 'matcher', 'ransac', 'window_size', 'num_features'],
+                              key=lambda s: s.map(lambda v: (0, int(v)) if str(v).isdigit() else (1, str(v))))
     best: Dict[str, Dict] = {}
     if write:
         by.to_csv(os.path.join(output_dir, 'TRUTH_BY_DETECTOR_MATCHER.csv'), index=False)
         ranking.to_csv(os.path.join(output_dir, 'TRUTH_RANKING.csv'), index=False)
         points.to_csv(os.path.join(output_dir, 'TRUTH_POINTS.csv'), index=False)
+        if not acc.empty:
+            acc.to_csv(os.path.join(output_dir, 'TRUTH_MATCH_ACCURACY.csv'), index=False)
         best = write_truth_best(by, chip_files, crs, output_dir, max_points_per_chip)
     if not quiet:
         print(format_ranking(by, len(truth), radius_m, chips, local))
+        if field is not None:
+            print(f"[Truth] match by match: the truth points give "
+                  f"{'a quadratic' if field['degree'] == 2 else 'an affine'} error field ({field['n_used']} points, leave-one-out {field['loo_rmse_m']:.0f} m"
+                  + (f"; dropped point(s) {field['dropped']}" if field['dropped'] else '')
+                  + f"); a match is good within max(RANSAC threshold, {2 * field['loo_rmse_m']:.0f} m) of it "
+                    f"(TRUTH_MATCH_ACCURACY.csv)")
+            nf_table = format_by_num_features(acc) if not acc.empty else ''
+            if nf_table:
+                print(nf_table)
         for ch, b in best.items():
             print(f"[Truth] best for {ch}: {b['detector']} + {b['matcher']} {b['ransac']} -> {b['csv']}")
     return {'by_detector_matcher': by, 'ranking': ranking, 'points': points, 'truth': truth, 'crs': crs,
-            'best': best, 'truth_csv': truth_csv}
+            'best': best, 'truth_csv': truth_csv, 'accuracy': acc, 'field': field}
 
 
 def write_truth_best(by: pd.DataFrame, chip_files: Dict, crs: str, output_dir: str,
