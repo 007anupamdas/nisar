@@ -452,6 +452,9 @@ class PipelineConfig:
     ransac_methods: List = None
     ransac_thresholds: List[float] = None
     ransac_confidences: List[float] = None
+    subcell_m: float = 0.0             # > 0: also the sub-cell variant of each RANSAC setting
+    subcell_px: int = 0                # the same in pixels (its name: RANSAC method <m>-sc<px>)
+    subcell_keep: int = 10             # matches kept per sub-cell, the least distorted
 
     # Reference collection used for every polarisation (L8_ref, C1, ...).
     reference_dir: str = ''
@@ -4080,6 +4083,51 @@ class XFeatStarMatcher(DenseWindowMatcher):
 # =============================================================================
 # RANSAC
 # =============================================================================
+def subcell_select(p1: np.ndarray, p2: np.ndarray, inliers: np.ndarray, cell_m: float, thr: float,
+                   keep: int) -> np.ndarray:
+    """A large window matched whole (its context identifies the ground), then
+    judged cell by cell: the window's error plane comes from its RANSAC
+    inliers; in each cell of cell_m metres the inliers there correct it (a
+    plane through their misfit from 6 on, their median shift from 3), so a
+    cell follows its own distortion; the matches within thr of that, the
+    window's outliers included, are ranked by misfit and the keep least
+    distorted kept. A cell with fewer than 3 inliers keeps the window plane.
+    p1, p2: (n, 2) map coordinates of input and reference; returns the cells'
+    picks as a mask."""
+    p1, p2 = np.asarray(p1, float).reshape(-1, 2), np.asarray(p2, float).reshape(-1, 2)
+    inl = np.asarray(inliers, bool).ravel()
+    out = np.zeros(len(p1), bool)
+    if inl.sum() < 3 or cell_m <= 0:
+        return inl.copy()
+    d = p1 - p2
+    c0 = p1[inl].mean(0)
+    s = max(float(np.ptp(p1[inl], 0).max()), 1.0)
+    A = np.column_stack([np.ones(len(p1)), (p1 - c0) / s])
+    coef, *_ = np.linalg.lstsq(A[inl], d[inl], rcond=None)
+    r = d - A @ coef
+    cell = np.floor((p1 - p1.min(0)) / cell_m).astype(int)
+    ids = cell[:, 0] * 100003 + cell[:, 1]
+    for c in np.unique(ids):
+        idx = np.flatnonzero(ids == c)
+        anc = idx[inl[idx]]
+        fix = np.zeros((len(idx), 2))
+        if len(anc) >= 6:                                # the cell's own tilt
+            B = np.column_stack([np.ones(len(idx)), (p1[idx] - p1[anc].mean(0)) / cell_m])
+            k = np.isin(idx, anc)
+            cf, *_ = np.linalg.lstsq(B[k], r[anc], rcond=None)
+            m = np.hypot(*(r[anc] - B[k] @ cf).T)
+            k2 = np.flatnonzero(k)[m <= max(np.median(m) * 3.0, 1e-9)]   # one trimming pass
+            if len(k2) >= 6:
+                cf, *_ = np.linalg.lstsq(B[k2], r[idx[k2]], rcond=None)
+            fix = B @ cf
+        elif len(anc) >= 3:
+            fix[:] = np.median(r[anc], axis=0)
+        mis = np.hypot(*(r[idx] - fix).T)
+        ok = np.flatnonzero(mis <= thr)
+        out[idx[ok[np.argsort(mis[ok], kind='stable')][:max(1, int(keep))]]] = True
+    return out
+
+
 class RANSACFilter:
     def __init__(self, config: PipelineConfig):
         self.config = config
@@ -4105,6 +4153,28 @@ class RANSACFilter:
         generated = []
         basename = match_data['file_id']
 
+        def write(out_path, keep, method, thr, conf):
+            with open(out_path, mode='w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    'x1', 'y1', 'x2', 'y2',
+                    'x1-map', 'y1-map', 'x2-map', 'y2-map',
+                    'Distance', 'along', 'across',
+                    'model-type', 'threshold', 'confidence', 'inliers'
+                ])
+                for i in range(len(X1)):
+                    if keep[i]:
+                        writer.writerow([
+                            match_data['x1'][i], match_data['y1'][i],
+                            match_data['x2'][i], match_data['y2'][i],
+                            X1[i], Y1[i], X2[i], Y2[i],
+                            match_data['distance'][i],
+                            match_data['along'][i],
+                            match_data['across'][i],
+                            method, thr, conf, True
+                        ])
+            generated.append(out_path)
+
         for method in self.config.ransac_methods:
             for thr in self.config.ransac_thresholds:
                 for conf in self.config.ransac_confidences:
@@ -4126,27 +4196,14 @@ class RANSACFilter:
                         if inliers.sum() == 0:
                             continue
 
-                        with open(out_path, mode='w', newline='') as f:
-                            writer = csv.writer(f)
-                            writer.writerow([
-                                'x1', 'y1', 'x2', 'y2',
-                                'x1-map', 'y1-map', 'x2-map', 'y2-map',
-                                'Distance', 'along', 'across',
-                                'model-type', 'threshold', 'confidence', 'inliers'
-                            ])
-                            for i in range(len(X1)):
-                                if inliers[i]:
-                                    writer.writerow([
-                                        match_data['x1'][i], match_data['y1'][i],
-                                        match_data['x2'][i], match_data['y2'][i],
-                                        X1[i], Y1[i], X2[i], Y2[i],
-                                        match_data['distance'][i],
-                                        match_data['along'][i],
-                                        match_data['across'][i],
-                                        method, thr, conf, True
-                                    ])
-
-                        generated.append(out_path)
+                        write(out_path, inliers, method, thr, conf)
+                        if self.config.subcell_m > 0:
+                            sc = subcell_select(mkpts1, mkpts2, inliers, self.config.subcell_m, float(thr),
+                                                self.config.subcell_keep)
+                            if sc.any():
+                                label = f'{method}-sc{int(self.config.subcell_px)}'
+                                write(os.path.join(output_dir, f'{basename}_aff_{label}_{thr}_{conf}_.csv'),
+                                      sc, label, thr, conf)
                     except Exception:
                         continue
 

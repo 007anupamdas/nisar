@@ -34,8 +34,10 @@ quadratic when it predicts left-out points better). A match is good when its
 displacement lies within its RANSAC threshold (or twice the field's own
 leave-one-out error, if larger) of the field at its position. Every window a
 configuration matched counts, not only the consensus survivors, so a sweep
-over num_features shows how the share of good matches changes with the
-keypoint count (printed as a table when the run swept several).
+over window sizes or num_features shows how the share of good matches
+changes with them (printed as a table when the run swept several). Before
+RANSAC comes from the raw_matches_* files (the filtered ones hold only the
+inliers).
 
     python automatch_truth.py <output_dir> --truth manual.csv [--radius-km 5] [--chips all]
 
@@ -197,6 +199,13 @@ def _variant(filename: str) -> str:
     return parts[0]
 
 
+def ransac_label(method, threshold) -> str:
+    """magsac40; a sub-cell variant (method magsac-sc512) is magsac40-sc512."""
+    m = str(method)
+    base, _, sub = m.partition('-sc')
+    return f"{base}{float(threshold or 0):g}" + (f'-sc{sub}' if sub else '')
+
+
 def _matcher_label(p: Dict) -> str:
     m = str(p.get('match_method'))
     if m == 'smnn' and p.get('match_parameter') is not None:
@@ -238,7 +247,7 @@ def config_points(run_dir_filtered: str, final_dir: str, chips: str = 'consensus
         out[key] = {
             'files': files,
             'detector': _variant(files[0]), 'matcher': _matcher_label(p),
-            'ransac': f"{p.get('ransac_method')}{float(p.get('ransac_threshold', 0)):g}",
+            'ransac': ransac_label(p.get('ransac_method'), p.get('ransac_threshold', 0)),
             'channel': p.get('nisar_pol'),
             'points': pd.DataFrame({'E': pts['x1-map'].values, 'N': pts['y1-map'].values,
                                     'dE': (pts['x1-map'] - pts['x2-map']).values,
@@ -495,37 +504,73 @@ def match_accuracy(filtered_dir: str, field: Dict, radius_m: float = 5000.0) -> 
     tolerance = the window's RANSAC threshold, or twice the field's own
     leave-one-out error if that is larger. Over every window the matcher
     produced (not only the consensus survivors), before RANSAC ('all') and
-    after it ('inliers'). Matches outside the truth points' area are not
-    judged."""
+    after it ('inliers'). The filtered files hold only RANSAC's inliers; all
+    matches come from the run's raw_matches_* folder beside them, and a
+    window RANSAC kept nothing of counts with 0 inliers. Matches outside the
+    truth points' area are not judged."""
     import automatch_engine as E
-    acc: Dict[Tuple, List] = {}
+
+    misfits: Dict[str, Tuple[int, np.ndarray]] = {}
+
+    def score(path, cols, thr):
+        """(n, judged, good) of a match file, judged at tolerance thr (each
+        file read once, whatever the RANSAC settings asking)."""
+        if path not in misfits:
+            try:
+                df = pd.read_csv(path)
+            except Exception:
+                df = pd.DataFrame()
+            x1, y1, x2, y2 = cols
+            if df.empty or not set(cols) <= set(df.columns):
+                misfits[path] = (len(df), np.zeros(0))
+            else:
+                e1, n1 = df[x1].to_numpy(float), df[y1].to_numpy(float)
+                tE, tN = field_at(field, e1, n1)
+                res = np.hypot(e1 - df[x2].to_numpy(float) - tE, n1 - df[y2].to_numpy(float) - tN)
+                misfits[path] = (len(df), res[field_covers(field, e1, n1, radius_m)])
+        n, res = misfits[path]
+        return n, len(res), int((res <= max(thr, 2.0 * field['loo_rmse_m'])).sum())
+
+    def meta(name):
+        p = E.MatchStatistics._parse_filename(name) or {}
+        return (p.get('nisar_pol'), _variant(name), _matcher_label(p)), p
+
+    filt: Dict[str, Dict[str, Tuple[str, float]]] = {}   # window -> RANSAC label -> (file, threshold)
+    cfg_of: Dict[str, Tuple] = {}
+    ransacs: Dict[Tuple, Dict[str, float]] = {}
     for path in sorted(glob.glob(os.path.join(filtered_dir, '*.csv'))):
         name = os.path.basename(path)
-        p = E.MatchStatistics._parse_filename(name) or {}
-        if not p:
+        cfg, p = meta(name)
+        if not p or '_aff_' not in name:
             continue
-        try:
-            df = pd.read_csv(path)
-        except Exception:
-            continue
-        key = (p.get('nisar_pol'), _variant(name), _matcher_label(p),
-               f"{p.get('ransac_method')}{float(p.get('ransac_threshold', 0)):g}")
-        if df.empty or not {'x1-map', 'y1-map', 'x2-map', 'y2-map'} <= set(df.columns):
-            acc.setdefault(key, []).append((0, 0, 0, 0, 0, 0))
-            continue
-        e1, n1 = df['x1-map'].to_numpy(float), df['y1-map'].to_numpy(float)
-        tE, tN = field_at(field, e1, n1)
-        res = np.hypot(e1 - df['x2-map'].to_numpy(float) - tE, n1 - df['y2-map'].to_numpy(float) - tN)
-        thr = float(pd.to_numeric(df.get('threshold'), errors='coerce').max()) if 'threshold' in df.columns else np.nan
-        if not np.isfinite(thr) or thr <= 0:
-            thr = float(p.get('ransac_threshold') or 0)
-        tol = max(thr, 2.0 * field['loo_rmse_m'])
-        judged = field_covers(field, e1, n1, radius_m)
-        good = judged & (res <= tol)
-        inl = (df['inliers'].astype(str).str.lower().str.contains('true').to_numpy()
-               if 'inliers' in df.columns else np.ones(len(df), bool))
-        acc.setdefault(key, []).append((len(df), int(judged.sum()), int(good.sum()),
-                                        int(inl.sum()), int((inl & judged).sum()), int((inl & good).sum())))
+        win = name[:name.index('_aff_')]
+        ran = ransac_label(p.get('ransac_method'), p.get('ransac_threshold', 0))
+        thr = float(p.get('ransac_threshold') or 0)
+        filt.setdefault(win, {})[ran] = (path, thr)
+        cfg_of[win] = cfg
+        ransacs.setdefault(cfg, {})[ran] = thr
+    raw_dir = os.path.join(os.path.dirname(filtered_dir),
+                           'raw_matches_' + os.path.basename(filtered_dir)[len('filtered_'):])
+    raws = {os.path.basename(p)[:-len('_raw.csv')]: p
+            for p in glob.glob(os.path.join(raw_dir, '*_raw.csv'))} if os.path.isdir(raw_dir) else {}
+    every_thr = sorted({t for d in ransacs.values() for t in d.values()})
+    acc: Dict[Tuple, List] = {}
+    for win in sorted(set(filt) | set(raws)):
+        cfg = cfg_of.get(win)
+        if cfg is None:                                 # RANSAC kept nothing in this window
+            cfg, p = meta(f'{win}_aff_none_0_0_.csv')
+            if not p:
+                continue
+        labels = ransacs.get(cfg) or {f'-{t:g}': t for t in every_thr[:1]} or {'-': 0.0}
+        for ran, thr in labels.items():
+            n_all, j_all, g_all = (score(raws[win], ('x1_map', 'y1_map', 'x2_map', 'y2_map'), thr)
+                                   if win in raws else (0, 0, 0))
+            got = filt.get(win, {}).get(ran)
+            n_in, j_in, g_in = (score(got[0], ('x1-map', 'y1-map', 'x2-map', 'y2-map'), got[1])
+                                if got else (0, 0, 0))
+            if win not in raws:                         # no raw file: the inliers are all that is known
+                n_all, j_all, g_all = n_in, j_in, g_in
+            acc.setdefault((*cfg, ran), []).append((n_all, j_all, g_all, n_in, j_in, g_in))
     rows = []
     for (ch, det, mat, ran), v in acc.items():
         a = np.asarray(v, float).reshape(-1, 6)
@@ -553,28 +598,40 @@ def sweep_parts(sweep: str) -> Tuple[Optional[int], str]:
     return (int(w.group(1)) if w else None), (nf.group(1) if nf else '')
 
 
-def format_by_num_features(acc: pd.DataFrame, top: int = 15) -> str:
+def format_by_sweep(acc: pd.DataFrame, top: int = 15) -> str:
     """Precision of the RANSAC inliers (and good inliers per window) of each
-    configuration at each keypoint count, when the run swept several."""
-    if acc.empty or acc['num_features'].nunique() < 2:
+    configuration at each sweep point -- window size and / or keypoint count
+    -- when the run swept several."""
+    if acc.empty:
         return ''
-    nfs = sorted(acc['num_features'].unique(), key=lambda v: (not str(v).isdigit(), int(v) if str(v).isdigit() else 0))
+    num = (lambda v: (0, int(v)) if str(v).isdigit() else (1, str(v)))
+    points = sorted({(w, n) for w, n in zip(acc['window_size'], acc['num_features'])},
+                    key=lambda p: (num(p[0]), num(p[1])))
+    if len(points) < 2:
+        return ''
+    wins = {w for w, _ in points}
+    nfs = {n for _, n in points}
+    name = (lambda w, n: f'nf {n}') if len(wins) == 1 else (
+        (lambda w, n: f'{w} px') if len(nfs) == 1 else (lambda w, n: f'{w} px/{n}'))
+    what = ('keypoints per window' if len(wins) == 1 else
+            'window size' if len(nfs) == 1 else 'window size / keypoints per window')
     a = acc.assign(cfg=acc['channel'].astype(str) + ' ' + acc['detector'].astype(str) + ' + '
-                   + acc['matcher'].astype(str) + ' ' + acc['ransac'].astype(str)
-                   + ' @' + acc['window_size'].astype(str))
+                   + acc['matcher'].astype(str) + ' ' + acc['ransac'].astype(str),
+                   pt=list(zip(acc['window_size'], acc['num_features'])))
     order = a.groupby('cfg')['precision_inliers'].mean().sort_values(ascending=False).index[:top]
-    lines = ['[Truth] share of good matches among the RANSAC inliers (good inliers per window), by keypoints '
-             'per window:', f"  {'configuration':<58}" + ''.join(f'{str(n):>14}' for n in nfs)]
+    lines = [f'[Truth] share of good matches among the RANSAC inliers (good inliers per window), by {what}:',
+             f"  {'configuration':<52}" + ''.join(f'{name(*p):>16}' for p in points)]
     for cfg in order:
-        g = a[a['cfg'] == cfg].set_index('num_features')
+        g = a[a['cfg'] == cfg]
         cells = []
-        for n in nfs:
-            if n in g.index and pd.notna(g.loc[n, 'precision_inliers']):
-                r = g.loc[n]
+        for p in points:
+            r = g[g['pt'] == p]
+            if len(r) and pd.notna(r['precision_inliers'].iloc[0]):
+                r = r.iloc[0]
                 cells.append(f"{100 * r['precision_inliers']:5.0f}% ({r['good_inliers_per_window']:g})")
             else:
                 cells.append('-')
-        lines.append(f'  {cfg[:58]:<58}' + ''.join(f'{c:>14}' for c in cells))
+        lines.append(f'  {cfg[:52]:<52}' + ''.join(f'{c:>16}' for c in cells))
     return '\n'.join(lines)
 
 
@@ -744,7 +801,7 @@ def compare(output_dir: str, truth_csv: str, radius_m: float = 5000.0, chips: st
                   + (f"; dropped point(s) {field['dropped']}" if field['dropped'] else '')
                   + f"); a match is good within max(RANSAC threshold, {2 * field['loo_rmse_m']:.0f} m) of it "
                     f"(TRUTH_MATCH_ACCURACY.csv)")
-            nf_table = format_by_num_features(acc) if not acc.empty else ''
+            nf_table = format_by_sweep(acc) if not acc.empty else ''
             if nf_table:
                 print(nf_table)
         for ch, b in best.items():

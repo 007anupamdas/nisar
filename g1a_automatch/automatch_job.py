@@ -149,6 +149,11 @@ DEFAULT_JOB: Dict = {
     'ransac_thresholds_px': [1.0, 2.0],
     'ransac_thresholds_m': [],
     'ransac_confidences': [0.99],
+    # Sub-cells: match whole windows (context), then keep in each sub-cell the
+    # matches that fit there best; written beside the plain result as RANSAC
+    # variant <method>-sc<px>, so both are ranked in the same run
+    'subcell_px': 0,             # sub-cell side, e.g. 512 inside 2048 px windows; 0 = off
+    'subcell_keep': 10,          # matches kept per sub-cell: the least distorted
 
     # chip consensus (tolerance in pixels unless *_m given)
     'consensus_tolerance_px': 3.0,
@@ -644,6 +649,9 @@ def _config_for(job: Dict, win: int, nf: Optional[int], res: float, out_dir: str
         use_amp=job['use_amp'], debug_mode=job['debug'],
         smnn_thresholds=job['smnn_thresholds'], ransac_methods=job['ransac_methods'],
         ransac_thresholds=thr_m, ransac_confidences=job['ransac_confidences'],
+        subcell_m=(float(job['subcell_px']) * res if 0 < int(job['subcell_px'] or 0) < win else 0.0),
+        subcell_px=(int(job['subcell_px']) if 0 < int(job['subcell_px'] or 0) < win else 0),
+        subcell_keep=int(job['subcell_keep'] or 10),
         reference_dir=job['reference_dir'], reference_label=job['reference_label'],
         reference_mode=None if job['reference_mode'] in ('', 'auto') else job['reference_mode'],
         reference_band=int(job['reference_band']), reference_band_map=job['reference_band_map'] or None,
@@ -720,6 +728,7 @@ def _performance_table(out_root: str, manifest: List[Dict]) -> Optional[str]:
     there is one. Sorted by truth RMSE, else by chips kept."""
     import glob as _glob
     import pandas as pd
+    import automatch_truth as T
     def read(path):         # an empty or cut-off file is skipped, not fatal (job 313)
         try:
             return pd.read_csv(path)
@@ -769,7 +778,7 @@ def _performance_table(out_root: str, manifest: List[Dict]) -> Optional[str]:
                 'chips_kept': b.get('surviving_chips'), 'inliers': b.get('agg_inliers'),
                 'surface_rmse_m': b.get('surface_rmse_m'),
                 'parallel_share': pv.get('parallel_share'), 'windows_parallel': pv.get('windows_parallel'),
-                'best_ransac': (f"{b.get('ransac_method')}{float(b['ransac_threshold']):g}"
+                'best_ransac': (T.ransac_label(b.get('ransac_method'), b['ransac_threshold'])
                                 if b.get('ransac_threshold') is not None else None),
                 'truth_rank': None if tru is None else tru.get('rank'),
                 'truth_rmse_m': None if tru is None else tru.get('truth_rmse_m'),

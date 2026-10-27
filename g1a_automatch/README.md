@@ -791,6 +791,30 @@ detectors' time still grow with the count. FGINN follows the method row by
 row (kornia's version compares every row with the first row's candidates).
 The log prints each detector's time and peak GPU memory when it finishes.
 
+### Large windows, judged in sub-cells
+
+A large window gives the matcher context: a whole city is easier to place
+than one of its streets. But one RANSAC model over 2048 px (92 km at 45 m)
+has to bend with the scene's distortion, and the matches crowd where the
+texture is. `"subcell_px": 512` keeps the large windows and then judges each
+of them in 512 px cells:
+- **The window plane:** the window's RANSAC inliers give its error plane.
+- **Each cell's own correction:** in each cell, the inliers there correct
+  the plane. With 6 or more, a plane through their misfit; with 3 or more,
+  their median shift. A cell with fewer keeps the window's plane.
+- **The pick:** the matches within the RANSAC threshold of the corrected
+  plane are ranked by misfit, and the `subcell_keep` (10) least distorted
+  of each cell are kept. A match the window RANSAC rejected can come back
+  this way.
+- **Side by side:** the result is written beside the plain one as RANSAC
+  variant `<method>-sc512` (label e.g. `magsac90-sc512`). The truth ranking,
+  `TRUTH_MATCH_ACCURACY.csv`, the consensus and RIVAL export treat it as a
+  configuration of its own, so one run shows whether it helps.
+
+With windows of 512 px or less nothing changes. Compare window sizes with
+`"window_sizes": [512, 1024, 2048]`; the accuracy table then lists each
+configuration by window size.
+
 ### Few but right: accuracy by keypoint count
 
 `num_features` takes several values; each is its own sweep point

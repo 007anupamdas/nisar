@@ -1052,6 +1052,10 @@ def test_gui_dialog():
         w.stretch_mode.setCurrentIndex(1)
         check('gui: CLAHE choice reaches the job', w.get_job()['stretch_mode'], 'clahe')
         w.stretch_mode.setCurrentIndex(0)
+        w.subcell.setValue(512)
+        w.subcell_keep.setValue(7)
+        check('gui: sub-cells reach the job', (w.get_job()['subcell_px'], w.get_job()['subcell_keep']), (512, 7))
+        w.subcell.setValue(0)
         w.cloud_mask.setChecked(True)
         w.cloud_choice.setCurrentIndex(1)
         check('gui: cloud band choice reaches the job', w.get_job()['cloud_band_choice'], 'quality')
@@ -2924,8 +2928,9 @@ def test_match_accuracy(tmp):
     pd.DataFrame({'In_Lon': ilo, 'In_Lat': ila, 'Ref_Lon': rlo, 'Ref_Lat': rla}).to_csv(tcsv, index=False)
     out = os.path.join(tmp, 'acc_out')
 
-    def write(d, name, n_good, n_bad, inl_good, inl_bad, outside=0):
-        os.makedirs(d, exist_ok=True)
+    def write(base, fid, n_good, n_bad, inl_good, inl_bad, outside=0):
+        """A window as a run leaves it: every match in raw_matches_x, only
+        RANSAC's inliers in filtered_x (no file when it kept none)."""
         n = n_good + n_bad + outside
         x1, y1 = E0 + rng.uniform(2000, 38000, n), N0 + rng.uniform(2000, 38000, n)
         x1[n_good + n_bad:] += 200000.0                   # beyond the truth points: not judged
@@ -2936,19 +2941,28 @@ def test_match_accuracy(tmp):
         inl = np.zeros(n, bool)
         inl[:inl_good] = True
         inl[n_good:n_good + inl_bad] = True
-        pd.DataFrame({'x1': 0, 'y1': 0, 'x2': 0, 'y2': 0, 'x1-map': x1, 'y1-map': y1, 'x2-map': x1 - fe,
-                      'y2-map': y1 - fn, 'Distance': 0, 'along': 0, 'across': 0, 'model-type': 'magsac',
-                      'threshold': 40.0, 'confidence': 0.99, 'inliers': inl}).to_csv(os.path.join(d, name), index=False)
+        os.makedirs(os.path.join(base, 'raw_matches_x'), exist_ok=True)
+        os.makedirs(os.path.join(base, 'filtered_x'), exist_ok=True)
+        pd.DataFrame({'x1': 0, 'y1': 0, 'x2': 0, 'y2': 0, 'x1_map': x1, 'y1_map': y1, 'x2_map': x1 - fe,
+                      'y2_map': y1 - fn, 'distance': 0, 'along': 0, 'across': 0}).to_csv(
+            os.path.join(base, 'raw_matches_x', f'{fid}_raw.csv'), index=False)
+        if inl.any():
+            pd.DataFrame({'x1': 0, 'y1': 0, 'x2': 0, 'y2': 0, 'x1-map': x1[inl], 'y1-map': y1[inl],
+                          'x2-map': (x1 - fe)[inl], 'y2-map': (y1 - fn)[inl], 'Distance': 0, 'along': 0, 'across': 0,
+                          'model-type': 'magsac', 'threshold': 40.0, 'confidence': 0.99, 'inliers': True}).to_csv(
+                os.path.join(base, 'filtered_x', f'{fid}_aff_magsac_40.0_0.99_.csv'), index=False)
     runs = []
     for nf, plan in (('10', {'sift': (9, 1, 9, 0), 'disk': (4, 6, 4, 6)}),
                      ('1000', {'sift': (900, 100, 880, 20), 'disk': (700, 300, 650, 50)})):
-        d = os.path.join(out, f'win512_nf{nf}', 'band1_toC1', 'filtered_x')
-        os.makedirs(os.path.join(out, f'win512_nf{nf}', 'band1_toC1', 'final_x'), exist_ok=True)
+        base = os.path.join(out, f'win512_nf{nf}', 'band1_toC1')
+        os.makedirs(os.path.join(base, 'final_x'), exist_ok=True)
         for det, (g, b, ig, ib) in plan.items():
             for pix in (0, 1024):
-                write(d, f'{det}_band1_toC1_pair001_scan0_pix{pix}_smnn_0.95_aff_magsac_40.0_0.99_.csv',
-                      g, b, ig, ib, outside=3)
-        runs.append({'filtered_dir': d, 'final_dir': d.replace('filtered_x', 'final_x'), 'sweep': f'win512_nf{nf}'})
+                write(base, f'{det}_band1_toC1_pair001_scan0_pix{pix}_smnn_0.95', g, b, ig, ib, outside=3)
+        if nf == '10':                                    # a window where RANSAC kept nothing
+            write(base, 'disk_band1_toC1_pair001_scan0_pix2048_smnn_0.95', 4, 6, 0, 0)
+        runs.append({'filtered_dir': os.path.join(base, 'filtered_x'), 'final_dir': os.path.join(base, 'final_x'),
+                     'sweep': f'win512_nf{nf}'})
     with contextlib.redirect_stdout(io.StringIO()) as buf:
         res = T.compare(out, tcsv, 5000.0, 'consensus', crs, runs=runs)
     f = res['field']
@@ -2959,14 +2973,70 @@ def test_match_accuracy(tmp):
           (acc.loc[('sift', '10'), 'precision_all'], acc.loc[('sift', '10'), 'precision_inliers'],
            acc.loc[('sift', '10'), 'windows_90pct_good'], acc.loc[('sift', '10'), 'good_inliers_per_window']),
           (0.9, 1.0, 1.0, 9.0))
-    check('accuracy: RANSAC fooled at 10 keypoints (4 of 10 inliers good): windows mostly wrong',
-          (acc.loc[('disk', '10'), 'precision_inliers'], acc.loc[('disk', '10'), 'windows_mostly_wrong']), (0.4, 1.0))
+    check('accuracy: RANSAC fooled at 10 keypoints (4 of 10 inliers good): windows mostly wrong; '
+          'the window it kept nothing of counts (from the raw matches)',
+          (acc.loc[('disk', '10'), 'precision_inliers'], acc.loc[('disk', '10'), 'windows_mostly_wrong'],
+           acc.loc[('disk', '10'), 'windows'], round(acc.loc[('disk', '10'), 'windows_no_inliers'], 3),
+           acc.loc[('disk', '10'), 'precision_all']), (0.4, 1.0, 3, 0.333, 0.4))
     check('accuracy: at 1000 keypoints 880 of 900 inliers good; matches beyond the truth points not judged',
           (round(acc.loc[('sift', '1000'), 'precision_inliers'], 3), acc.loc[('sift', '1000'), 'matches_per_window']),
           (0.978, 1003.0))
     check('accuracy: written even where no window survived a consensus, with the table by keypoint count',
           (os.path.exists(os.path.join(out, 'TRUTH_MATCH_ACCURACY.csv')), 'by keypoints per window' in buf.getvalue(),
            '100% (9)' in buf.getvalue(), ' 40% (4)' in buf.getvalue()), (True, True, True, True))
+
+
+def test_subcells(tmp):
+    """A 2048 px window matched whole, judged in 512 px cells: each cell keeps
+    its least distorted matches (at most subcell_keep), following its own
+    distortion; the plain RANSAC result is kept beside it as <method>-sc512."""
+    import numpy as np
+    import pandas as pd
+    import cv2
+    import automatch_engine as E
+    import automatch_truth as T
+    rng = np.random.default_rng(13)
+    res, win = 45.0, 2048
+    L = win * res
+    n = 1200
+    p1 = rng.uniform(0, L, (n, 2)) + np.array([500000.0, 1700000.0])
+    x = (p1[:, 0] - 500000.0)
+
+    def true_d(e):                                      # error growing across the window, curving (job 347)
+        return np.column_stack([4000 + 0.03 * e + 6e-8 * e * e, -2500 - 0.01 * e])
+    d = true_d(x) + rng.normal(0, 4, (n, 2))
+    bad = rng.random(n) < 0.15
+    d[bad] += rng.uniform(-3000, 3000, (bad.sum(), 2))
+    p2 = p1 - d
+    thr = 2 * res
+    _, inl = cv2.estimateAffine2D(p1, p2, method=E.ransac_flag('magsac'), ransacReprojThreshold=thr, confidence=0.99)
+    inl = inl.ravel() > 0
+    sc = E.subcell_select(p1, p2, inl, 512 * res, thr, 5)
+    good = np.hypot(*(d - true_d(x)).T) <= thr
+    cells = np.floor((p1 - p1.min(0)) / (512 * res)).astype(int)
+    per = pd.Series(1, index=pd.MultiIndex.from_arrays([cells[sc, 0], cells[sc, 1]])).groupby(level=[0, 1]).sum()
+    check('subcells: at most 5 per 512 px cell, from (nearly) every cell of the 2048 px window',
+          (int(per.max()), len(per) >= 15), (5, True))
+    check('subcells: the picks are right at least as often as the window RANSAC inliers',
+          (float(good[sc].mean()) >= float(good[inl].mean()), float(good[sc].mean()) > 0.97), (True, True))
+    # in the RANSAC filter: both results written, the sub-cell one as magsac-sc512
+    cfg = E.PipelineConfig(ransac_methods=['magsac'], ransac_thresholds=[thr], ransac_confidences=[0.99],
+                           subcell_m=512 * res, subcell_px=512, subcell_keep=5)
+    md = {'X1': list(p1[:, 0]), 'Y1': list(p1[:, 1]), 'X2': list(p2[:, 0]), 'Y2': list(p2[:, 1]),
+          'x1': [0] * n, 'y1': [0] * n, 'x2': [0] * n, 'y2': [0] * n, 'distance': [0] * n, 'along': [0] * n,
+          'across': [0] * n, 'file_id': 'sift_band1_toC1_pair001_scan0_pix0_smnn_0.95'}
+    out = os.path.join(tmp, 'filtered_subcells')
+    files = sorted(os.path.basename(f) for f in E.RANSACFilter(cfg).filter_matches_in_memory([md], out))
+    sub = [f for f in files if '-sc' in f]
+    p = E.MatchStatistics._parse_filename(sub[0]) if sub else {}
+    check('subcells: the RANSAC filter writes the plain and the sub-cell result, ranked apart',
+          (len(files), p.get('ransac_method'), T.ransac_label(p.get('ransac_method'), p.get('ransac_threshold')),
+           len(pd.read_csv(os.path.join(out, sub[0]))) <= 16 * 5 if sub else None),
+          (2, 'magsac-sc512', 'magsac90-sc512', True))
+    check('subcells: off by default (no sub-cell file)',
+          len(E.RANSACFilter(E.PipelineConfig(ransac_methods=['magsac'], ransac_thresholds=[thr],
+                                              ransac_confidences=[0.99])).filter_matches_in_memory(
+              [md], os.path.join(tmp, 'filtered_plain'))), 1)
 
 
 def test_partial_cover():
@@ -3424,6 +3494,7 @@ def main():
         test_stretch()
         test_parallel_share(tmp)
         test_match_accuracy(tmp)
+        test_subcells(tmp)
         test_auto_bands(tmp)
         test_kornia_versions(tmp)
         test_warmup_and_padding()

@@ -1341,6 +1341,21 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
                                 'matched in tiles whose matches are pooled into the window. Automatic: start '
                                 'whole and cut into smaller tiles whenever the GPU runs out of memory.')
         f.addRow('GPU window (px)', self.gpu_win)
+        self.subcell = QtWidgets.QSpinBox()
+        self.subcell.setRange(0, 8192)
+        self.subcell.setSingleStep(128)
+        self.subcell.setSpecialValueText('off')
+        self.subcell.setToolTip('Match whole windows (context), then judge each in cells of this size: per cell '
+                                'the least distorted matches are kept. Written beside the plain result as RANSAC '
+                                'variant <method>-sc<px>, so both are ranked in the same run.')
+        self.subcell_keep = QtWidgets.QSpinBox()
+        self.subcell_keep.setRange(1, 1000)
+        self.subcell_keep.setToolTip('Matches kept per sub-cell: the least distorted')
+        hs = QtWidgets.QHBoxLayout()
+        hs.addWidget(self.subcell)
+        hs.addWidget(QtWidgets.QLabel('keep per cell'))
+        hs.addWidget(self.subcell_keep)
+        f.addRow('Sub-cells (px)', hs)
         self.lbl_kp = QtWidgets.QLabel('')
         self.lbl_kp.setWordWrap(True)
         f.addRow('', self.lbl_kp)
@@ -1539,6 +1554,8 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.kp_density.setValue(int(j['keypoint_density']))
         self.max_feat.setValue(int(j.get('max_num_features') or 32000))
         self.gpu_win.setValue(int(j.get('gpu_window_px') or 0))
+        self.subcell.setValue(int(j.get('subcell_px') or 0))
+        self.subcell_keep.setValue(int(j.get('subcell_keep') or 10))
         self.auto_bands.setValue(int(j.get('auto_bands') or 0))
         r = j.get('auto_bands_range') or []
         self.cloud_mask.setChecked(str(j.get('cloud_mask') or 'none').lower() == 'omnicloudmask')
@@ -1634,6 +1651,8 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             'keypoint_density': self.kp_density.value(),
             'max_num_features': self.max_feat.value(),
             'gpu_window_px': self.gpu_win.value(),
+            'subcell_px': self.subcell.value(),
+            'subcell_keep': self.subcell_keep.value(),
             'auto_bands': self.auto_bands.value(),
             'auto_bands_range': self._auto_range(),
             'cloud_mask': 'omnicloudmask' if self.cloud_mask.isChecked() else 'none',
