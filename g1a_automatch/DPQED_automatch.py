@@ -1083,8 +1083,12 @@ class CloudTestDialog(QtWidgets.QDialog):
         self.image = PathRow('file', 'Rasters (*.tif *.tiff *.vrt *.img);;All (*)')
         self.image.setText(job.get('input_path') or settings.value('cloud_test/image', ''))
         f.addRow('Image', self.image)
+        self.job_out = job.get('output_dir') or ''
         self.out = PathRow('dir')
-        self.out.edit.setPlaceholderText('<image folder>/cloud_test_<image>')
+        self.out.edit.setPlaceholderText('<job output folder>/cloud_test_<image>' if self.job_out
+                                         else '<image folder>/cloud_test_<image>')
+        self.out.edit.setToolTip('Each band choice gets its own folder inside (bands_3-2-6, ...), so tests do not '
+                                 'overwrite each other; CLOUD_TEST_ALL.csv lists them all')
         self.out.setText(settings.value('cloud_test/out', '') or '')
         f.addRow('Output folder', self.out)
         self.conf = QtWidgets.QLineEdit(settings.value('cloud_test/conf', '') or
@@ -1114,6 +1118,33 @@ class CloudTestDialog(QtWidgets.QDialog):
         self.device = QtWidgets.QComboBox()
         self.device.addItems(['GPU when there is one', 'cpu'])
         f.addRow('Device', self.device)
+        self.refine = QtWidgets.QCheckBox('bright blobs only: keep the model\'s clouds that are brighter than '
+                                          'most clear ground and form a blob')
+        self.refine.setChecked(bool(job.get('cloud_refine', True)))
+        self.refine.setToolTip('The model takes water and vegetation for cloud on G1A MV. A cloud must be above '
+                               'this percentile of the clear ground in both visible bands, in a blob of at least '
+                               'this area; shadows only near such a blob. The model\'s own result is shown beside.')
+        self.bright = QtWidgets.QDoubleSpinBox()
+        self.bright.setRange(50, 99.9)
+        self.bright.setSuffix(' percentile')
+        self.bright.setValue(float(job.get('cloud_bright_pct') or 90))
+        self.blob = QtWidgets.QDoubleSpinBox()
+        self.blob.setRange(0, 1000)
+        self.blob.setDecimals(2)
+        self.blob.setSuffix(' km²')
+        self.blob.setValue(float(job.get('cloud_min_blob_km2') if job.get('cloud_min_blob_km2') is not None else 1))
+        self.near = QtWidgets.QDoubleSpinBox()
+        self.near.setRange(0, 200)
+        self.near.setSuffix(' km')
+        self.near.setValue(float(job.get('cloud_shadow_near_km') if job.get('cloud_shadow_near_km') is not None
+                                 else 10))
+        hr = QtWidgets.QHBoxLayout()
+        for lab, w in (('brighter than', self.bright), ('blob ≥', self.blob), ('shadow within', self.near)):
+            hr.addWidget(QtWidgets.QLabel(lab))
+            hr.addWidget(w)
+        f.addRow(self.refine)
+        f.addRow('', hr)
+        self.refine.toggled.connect(lambda on: [w.setEnabled(on) for w in (self.bright, self.blob, self.near)])
         bb = QtWidgets.QDialogButtonBox()
         bb.addButton('Run cloud test', QtWidgets.QDialogButtonBox.ButtonRole.AcceptRole
                      if QT_API != 'PyQt5' else QtWidgets.QDialogButtonBox.AcceptRole)
@@ -1131,8 +1162,8 @@ class CloudTestDialog(QtWidgets.QDialog):
 
     def out_dir(self):
         img = self.image.text()
-        return self.out.text() or os.path.join(os.path.dirname(os.path.abspath(img)),
-                                               'cloud_test_' + os.path.splitext(os.path.basename(img))[0])
+        name = 'cloud_test_' + os.path.splitext(os.path.basename(img))[0]
+        return self.out.text() or os.path.join(self.job_out or os.path.dirname(os.path.abspath(img)), name)
 
     def _ok(self):
         if not os.path.isfile(self.image.text()):
@@ -1164,45 +1195,67 @@ class CloudTestDialog(QtWidgets.QDialog):
             a += ['--model-dir', self.model_dir.text()]
         if self.device.currentIndex() == 1:
             a += ['--device', 'cpu']
+        if self.refine.isChecked():
+            a += ['--bright-pct', f'{self.bright.value():g}', '--min-blob-km2', f'{self.blob.value():g}',
+                  '--shadow-near-km', f'{self.near.value():g}']
+        else:
+            a += ['--model-only']
         return a
 
 
 class CloudResultDialog(QtWidgets.QDialog):
-    """CLOUD_TEST.csv and each threshold's quicklook."""
+    """Every cloud test made in a folder (CLOUD_TEST_ALL.csv: each band choice
+    at each threshold), and each one's quicklook beside the model's own."""
 
-    COLS = [('confidence', 'confidence'), ('cloud_pct', 'cloud %'), ('thick_pct', 'thick %'),
-            ('thin_pct', 'thin %'), ('shadow_pct', 'shadow %'), ('dark_cloud_pct', 'dark cloud %'),
-            ('bands', 'bands'), ('band_choice', 'bands from'), ('model_seconds', 'model s')]
+    COLS = [('variant', 'bands'), ('confidence', 'confidence'), ('cloud_pct', 'cloud %'),
+            ('thick_pct', 'thick %'), ('thin_pct', 'thin %'), ('shadow_pct', 'shadow %'),
+            ('model_cloud_pct', 'model said cloud %'), ('removed_dark_cloud_pct', 'removed: not bright %'),
+            ('removed_small_blob_pct', 'removed: specks %'), ('removed_far_shadow_pct', 'removed: far shadow %'),
+            ('blobs', 'cloud blobs'), ('dark_cloud_pct', 'dark cloud %'), ('band_choice', 'bands from'),
+            ('model_seconds', 'model s')]
 
     def __init__(self, folder, parent=None):
         super().__init__(parent)
         import csv as _csv
         self.setWindowTitle('Cloud mask test')
-        self.resize(1100, 820)
+        self.resize(1250, 860)
         lay = QtWidgets.QVBoxLayout(self)
-        note = QtWidgets.QLabel('dark cloud %: the share of "cloud" darker than the median clear ground -- over 20 % '
-                                'means ground is taken for cloud; prefer a threshold where it is low.')
+        note = QtWidgets.QLabel('Left: the mask kept (thick cloud red, thin yellow, shadow blue); right: what the '
+                                'model alone said. dark cloud %: the share of "cloud" darker than the median clear '
+                                'ground -- over 20 % means ground is taken for cloud.')
         note.setWordWrap(True)
         lay.addWidget(note)
-        table = csv_table(os.path.join(folder, 'CLOUD_TEST.csv'), self.COLS)
-        table.setMaximumHeight(150)
+        path = os.path.join(folder, 'CLOUD_TEST_ALL.csv')
+        if not os.path.exists(path):
+            path = os.path.join(folder, 'CLOUD_TEST.csv')
+        table = csv_table(path, self.COLS)
+        table.setMaximumHeight(190)
         lay.addWidget(table)
         tabs = QtWidgets.QTabWidget()
-        rows = list(_csv.DictReader(open(os.path.join(folder, 'CLOUD_TEST.csv'), encoding='utf-8')))
-        for r in rows:
-            ql = r.get('quicklook') or ''
+        rows = list(_csv.DictReader(open(path, encoding='utf-8'))) if os.path.exists(path) else []
+
+        def image(p):
             lab = QtWidgets.QLabel()
             lab.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter if QT_API != 'PyQt5' else QtCore.Qt.AlignCenter)
-            pm = QtGui.QPixmap(ql) if os.path.exists(ql) else QtGui.QPixmap()
+            pm = QtGui.QPixmap(p) if p and os.path.exists(p) else QtGui.QPixmap()
             if pm.isNull():
-                lab.setText('no quicklook (HS: see the VNIR image\'s, in from_<image>/)')
+                lab.setText('no quicklook here (HS: see the VNIR image\'s)')
             else:
-                lab.setPixmap(pm.scaled(1040, 600, QtCore.Qt.AspectRatioMode.KeepAspectRatio
+                lab.setPixmap(pm.scaled(600, 640, QtCore.Qt.AspectRatioMode.KeepAspectRatio
                                         if QT_API != 'PyQt5' else QtCore.Qt.KeepAspectRatio))
+            return lab
+        for r in rows:
+            w = QtWidgets.QWidget()
+            hl = QtWidgets.QHBoxLayout(w)
+            hl.addWidget(image(r.get('quicklook') or ''), 1)
+            if r.get('quicklook_model'):
+                hl.addWidget(image(r['quicklook_model']), 1)
             sc = QtWidgets.QScrollArea()
-            sc.setWidget(lab)
+            sc.setWidget(w)
             sc.setWidgetResizable(True)
-            tabs.addTab(sc, f"confidence {float(r['confidence']):g}: {float(r['cloud_pct']):.1f} % cloud")
+            model = f" (model {float(r['model_cloud_pct']):.1f} %)" if r.get('model_cloud_pct') else ''
+            tabs.addTab(sc, f"{r.get('variant', '')} @ {float(r['confidence']):g}: "
+                            f"{float(r['cloud_pct']):.1f} % cloud{model}")
         lay.addWidget(tabs, 1)
         row = QtWidgets.QHBoxLayout()
         b = QtWidgets.QPushButton('Open folder')
@@ -1366,9 +1419,16 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.cloud_conf.setToolTip('A pixel is cloud / shadow only when the model is this sure. Raise it (0.85) '
                                    'when ground is taken for cloud (see CLOUD_QUICKLOOK.png and dark_cloud_pct).')
         hl2.addWidget(self.cloud_conf)
-        self.cloud_thin = QtWidgets.QCheckBox('mask thin cloud')
-        self.cloud_thin.setToolTip('Off: mask thick cloud and shadow only')
-        hl2.addWidget(self.cloud_thin)
+        self.cloud_what = QtWidgets.QComboBox()
+        self.cloud_what.addItems(['mask thick cloud', 'thick cloud + shadow', 'thick + thin cloud + shadow'])
+        self.cloud_what.setToolTip('What is left out of matching')
+        hl2.addWidget(self.cloud_what)
+        self.cloud_refine = QtWidgets.QCheckBox('bright blobs only')
+        self.cloud_refine.setToolTip('Keep only the model\'s clouds that are bright (above the 90th percentile of '
+                                     'the clear ground in both visible bands) and form a blob of 1 km² or more; '
+                                     'shadows only within 10 km of one. The model alone took water and vegetation '
+                                     'for cloud on G1A MV.')
+        hl2.addWidget(self.cloud_refine)
         f.addRow('Clouds', hl2)
         self.cloud_from = PathRow('file', 'Rasters (*.tif *.tiff *.vrt);;All (*)')
         self.cloud_from.edit.setPlaceholderText('HS (SWIR) only: the HV / MV product of the same pass, whose cloud '
@@ -1745,7 +1805,9 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.cloud_bands.setText(', '.join(j.get('cloud_bands') or []))
         self.cloud_choice.setCurrentIndex(1 if str(j.get('cloud_band_choice') or 'spec') == 'quality' else 0)
         self.cloud_conf.setValue(float(j.get('cloud_min_confidence') or 0.7))
-        self.cloud_thin.setChecked(2 in [int(c) for c in (j.get('cloud_mask_classes') or [1, 2, 3])])
+        cl = sorted(int(c) for c in (j.get('cloud_mask_classes') or [1]))
+        self.cloud_what.setCurrentIndex(2 if 2 in cl else (1 if 3 in cl else 0))
+        self.cloud_refine.setChecked(bool(j.get('cloud_refine', True)))
         self.cloud_from.setText(j.get('cloud_mask_from') or '')
         self.auto_range.setText(f'{r[0]}-{r[1]}' if len(r) == 2 else '')
         self._update_kp_label()
@@ -1843,7 +1905,8 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             'cloud_mask_from': self.cloud_from.text(),
             'cloud_band_choice': 'quality' if self.cloud_choice.currentIndex() == 1 else 'spec',
             'cloud_min_confidence': round(self.cloud_conf.value(), 2),
-            'cloud_mask_classes': [1, 2, 3] if self.cloud_thin.isChecked() else [1, 3],
+            'cloud_mask_classes': [[1], [1, 3], [1, 2, 3]][self.cloud_what.currentIndex()],
+            'cloud_refine': self.cloud_refine.isChecked(),
             'target_resolution': float(tr) if tr else None,
             'max_expected_error_m': self.max_err.value() * 1000.0,
             'coarse_method': self.coarse.currentText(),
@@ -2162,7 +2225,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
                 self.lbl_status.setText('Benchmark found no finished job — see Log.')
         elif kind == 'cloud':
             folder = getattr(self, '_cloud_dir', '')
-            if code == 0 and os.path.exists(os.path.join(folder, 'CLOUD_TEST.csv')):
+            if code == 0 and os.path.exists(os.path.join(folder, 'CLOUD_TEST_ALL.csv')):
                 dlg = CloudResultDialog(folder, self)
                 dlg.show()
                 self._last_cloud_dialog = dlg
@@ -2358,7 +2421,9 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         Its settings come straight from the controls, so an unfinished job
         elsewhere in the window does not matter."""
         job = dict(DEFAULT_JOB, input_path=self.in_path.text(), weights_cache_dir=self.weights_cache.text(),
+                   output_dir=self.out_path.text(),
                    cloud_min_confidence=self.cloud_conf.value(), cloud_mask_from=self.cloud_from.text(),
+                   cloud_refine=self.cloud_refine.isChecked(),
                    cloud_bands=[t for t in re.split(r'[,;\s]+', self.cloud_bands.text().strip()) if t],
                    cloud_band_choice='quality' if self.cloud_choice.currentIndex() == 1 else 'spec')
         dlg = CloudTestDialog(self.settings, job, self)

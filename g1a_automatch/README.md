@@ -522,8 +522,22 @@ to no data, and the job matches that copy.
 - **Resolution:** the model runs at the image's own resolution, as its
   documentation asks. It is trained at 10–50 m; 180 m and 315 m are outside
   that range but work (below).
-- **Masked classes:** `cloud_mask_classes` (default 1, 2, 3: thick cloud,
-  thin cloud, shadow). The mask is grown by `cloud_dilate_px` (2).
+- **Masked classes:** `cloud_mask_classes`, default `[1]`: thick cloud
+  only (2 thin cloud, 3 shadow; GUI: *mask thick cloud* / *+ shadow* /
+  *+ thin + shadow*). The mask is grown by `cloud_dilate_px` (2).
+- **Bright blobs only** (`cloud_refine`, on by default):
+  - **Why:** the model standardises each band per 1000 px tile. In a
+    cloud-free tile the brightest ground then looks like cloud, and on G1A
+    MV it took water and vegetation for cloud at every confidence from 0.2
+    to 0.9.
+  - **The check:** its clouds are kept only where they are bright, above
+    the `cloud_bright_pct` (90th) percentile of the clear ground in both
+    visible bands, and form a blob of at least `cloud_min_blob_km2` (1 km²).
+  - **Shadows:** kept only within `cloud_shadow_near_km` (10 km) of such a
+    blob.
+  - **What is reported:** the log says what the model said and what the
+    check removed. `CLOUD_QUICKLOOK_MODEL.png` beside the quicklook is the
+    model's own result.
 - **Confidence:** a pixel is cloud only when the model gives
   P(thick) + P(thin) ≥ `cloud_min_confidence` (0.7), and shadow only when
   P(shadow) reaches it; otherwise the pixel is clear. The plain most-likely
@@ -533,8 +547,8 @@ to no data, and the job matches that copy.
 - **Checks:** `CLOUD_INFO.json` gives `dark_cloud_pct`, the share of cloud
   pixels darker in red than the median clear pixel. Real clouds are
   brighter, so above 20 % the log warns that ground is probably being taken
-  for cloud. Then raise `cloud_min_confidence` to about 0.85, or mask thick
-  cloud only with `cloud_mask_classes: [1]`. `CLOUD_QUICKLOOK.png` in the
+  for cloud (with the bright-blob check on, little such cloud is left).
+  `CLOUD_QUICKLOOK.png` in the
   output folder shows false colour (NIR, red, green) with thick cloud red,
   thin yellow and shadow blue.
 - **Outputs and reuse:** the mask (`CLOUD_MASK.tif`) and its statistics are
@@ -553,10 +567,22 @@ to no data, and the job matches that copy.
       python automatch_job.py cloud <image> --out <folder> --conf 0.5 0.7 0.85
           [--bands 3 2 6 | --choice quality] [--from <HV image of the same pass>]
           [--model-dir <weights>/omnicloudmask] [--device cpu]
+          [--model-only | --bright-pct 90 --min-blob-km2 1 --shadow-near-km 10]
 
-  The model runs once. Each threshold gets its own `conf_<c>/CLOUD_MASK.tif`
-  and `CLOUD_QUICKLOOK.png`, and `CLOUD_TEST.csv` compares their cloud,
-  thick, thin and shadow % and `dark_cloud_pct`. On the GPU service, use
+  (GUI: *Cloud mask test…*; its output folder defaults to the job's output
+  folder, not the image's.)
+  - **One model pass:** the model runs once for all the thresholds.
+  - **One folder per band choice:** e.g. `bands_3-2-6/` and
+    `bands_12-30-45/`, so a test with other bands does not overwrite the
+    first.
+  - **In each folder:** every threshold has its `conf_<c>/CLOUD_MASK.tif`,
+    `CLOUD_QUICKLOOK.png` and `CLOUD_QUICKLOOK_MODEL.png`.
+  - **`CLOUD_TEST_ALL.csv`** in the output folder lists every test made
+    there: cloud, thick, thin and shadow %, what the model alone said, what
+    the bright-blob check removed, and `dark_cloud_pct`.
+  - **The GUI** shows each test's quicklook beside the model's own.
+
+  On the GPU service, use
   `<image>,<reference folder>,<mode_cloud.json>` with
   `{"mode": "cloud", "cloud_test_confidences": [0.5, 0.7, 0.85]}`. The
   job's other `cloud_*` settings apply (`cloud_mask_from` for HS), and the

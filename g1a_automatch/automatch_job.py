@@ -89,7 +89,11 @@ DEFAULT_JOB: Dict = {
     'cloud_mask': 'none',        # none | omnicloudmask
     'cloud_band_choice': 'spec', # spec: red / green / nir by the band specs; quality: the 3 crispest bands
     'cloud_bands': [],           # three bands named explicitly (wins over cloud_band_choice)
-    'cloud_mask_classes': [1, 2, 3],   # 1 thick cloud, 2 thin cloud, 3 shadow
+    'cloud_mask_classes': [1],   # masked: 1 thick cloud, 2 thin cloud, 3 shadow
+    'cloud_refine': True,        # keep only the model's clouds that are bright blobs (below)
+    'cloud_bright_pct': 90.0,    # bright: above this percentile of the clear ground, both visible bands
+    'cloud_min_blob_km2': 1.0,   # a cloud blob is at least this big
+    'cloud_shadow_near_km': 10.0,  # a shadow lies within this of a cloud blob
     'cloud_min_confidence': 0.7, # a pixel is cloud / shadow only when the model is this sure
     'cloud_dilate_px': 2,        # grow the mask by this much (cloud edges)
     'cloud_mask_from': '',       # HS (SWIR): the VNIR product of the same pass, whose mask is laid on

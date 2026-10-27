@@ -180,7 +180,7 @@ def test_e2e_cloud(tmp):
                            'channels': ['band1'], 'detectors': ['sift'], 'window_sizes': [1024],
                            'max_expected_error_m': 10000, 'smnn_thresholds': [0.95], 'use_amp': False,
                            'cloud_mask': 'omnicloudmask', 'cloud_bands': ['band1', 'band2', 'band3'],
-                           'cloud_dilate_px': 0, 'cross_top_n': 0})
+                           'cloud_dilate_px': 0, 'cross_top_n': 0, 'cloud_refine': False})
         os.makedirs(out, exist_ok=True)
         with contextlib.redirect_stdout(io.StringIO()) as buf:
             J.run_job(job)
@@ -895,11 +895,13 @@ def test_gui_cloud():
             return p
         with contextlib.redirect_stdout(io.StringIO()):
             C.standalone(img, os.path.join(tmp, 'ct'), '', None, 'spec', [0.5, 0.8], predictor=fake)
+            C.standalone(img, os.path.join(tmp, 'ct'), '', ['band1', 'band2', 'band4'], 'spec', [0.8], predictor=fake)
         res = G.CloudResultDialog(os.path.join(tmp, 'ct'), w)
         tabs = res.findChild(G.QtWidgets.QTabWidget)
         check('gui: the cloud result shows each threshold\'s quicklook and the table',
-              (tabs.count(), tabs.tabText(1).startswith('confidence 0.8'),
-               res.findChild(G.QtWidgets.QTableWidget).rowCount()), (2, True, 2))
+              (tabs.count(), tabs.tabText(1).startswith('bands_3-2-6 @ 0.8'),
+               tabs.tabText(2).startswith('bands_1-2-4 @ 0.8'),
+               res.findChild(G.QtWidgets.QTableWidget).rowCount()), (3, True, True, 3))
     finally:
         w.close()
 
@@ -1144,10 +1146,13 @@ def test_gui_dialog():
         w.cloud_choice.setCurrentIndex(1)
         check('gui: cloud band choice reaches the job', w.get_job()['cloud_band_choice'], 'quality')
         w.cloud_conf.setValue(0.85)
-        w.cloud_thin.setChecked(False)
-        check('gui: cloud confidence and thin-cloud choice reach the job',
-              (w.get_job()['cloud_min_confidence'], w.get_job()['cloud_mask_classes']), (0.85, [1, 3]))
-        w.cloud_thin.setChecked(True)
+        w.cloud_what.setCurrentIndex(1)
+        w.cloud_refine.setChecked(False)
+        check('gui: cloud confidence, what is masked and the bright-blob check reach the job',
+              (w.get_job()['cloud_min_confidence'], w.get_job()['cloud_mask_classes'], w.get_job()['cloud_refine']),
+              (0.85, [1, 3], False))
+        w.cloud_what.setCurrentIndex(0)
+        w.cloud_refine.setChecked(True)
         w.cloud_choice.setCurrentIndex(0)
         w.cloud_bands.setText('band3, band2, band6')
         w.cloud_from.setText('/x/G1A_HV.tif')
@@ -2779,9 +2784,10 @@ def test_cloud_mask(tmp):
 
     class Sc:
         raster_path = mv
+    MECH = {'cloud_dilate_px': 1, 'cloud_refine': False, 'cloud_mask_classes': [1, 2, 3]}  # the model alone
     cache, out = os.path.join(tmp, 'cache_cloud'), os.path.join(tmp, 'out_cloud')
     with contextlib.redirect_stdout(io.StringIO()):
-        rasters, info = C.prepare({'cloud_dilate_px': 1}, Sc(), ['band3', 'band5'], cache, out, 'MV', fake)
+        rasters, info = C.prepare(MECH, Sc(), ['band3', 'band5'], cache, out, 'MV', fake)
     with rasterio.open(rasters['band5'][0]) as m, rasterio.open(mv) as o:
         a, orig = m.read(1), o.read(5)
     H, W = a.shape
@@ -2791,7 +2797,7 @@ def test_cloud_mask(tmp):
     check('cloud: statistics and CLOUD_INFO.json in the job folder',
           (round(info['thick_pct']), os.path.exists(os.path.join(out, 'CLOUD_INFO.json'))), (6, True))
     with contextlib.redirect_stdout(io.StringIO()) as buf:
-        C.prepare({'cloud_dilate_px': 1}, Sc(), ['band3'], cache, out, 'MV', lambda *a: 1 / 0)
+        C.prepare(MECH, Sc(), ['band3'], cache, out, 'MV', lambda *a: 1 / 0)
     check('cloud: the mask is reused from the cache, not predicted again', 'reused' in buf.getvalue(), True)
     # confidence threshold: an unsure 'thin cloud' stays clear
     probs = np.zeros((4, 2, 2), np.float32)
@@ -2806,7 +2812,8 @@ def test_cloud_mask(tmp):
     def dark_fake(arr, nodata, model_dir, device):       # 'cloud' on the darkest pixels: ground taken for cloud
         return (arr[0] < np.percentile(arr[0], 30)).astype(np.uint8)
     with contextlib.redirect_stdout(io.StringIO()) as buf:
-        _, dinfo = C.prepare({}, Sc(), [], os.path.join(tmp, 'cache_dark'), os.path.join(tmp, 'out_dark'), 'MV', dark_fake)
+        _, dinfo = C.prepare({'cloud_refine': False}, Sc(), [], os.path.join(tmp, 'cache_dark'),
+                              os.path.join(tmp, 'out_dark'), 'MV', dark_fake)
     check('cloud: dark "clouds" are flagged (brightness check), with a quicklook to look at',
           (dinfo['dark_cloud_pct'] > 90, 'CHECK' in buf.getvalue(),
            os.path.exists(os.path.join(tmp, 'out_dark', 'CLOUD_QUICKLOOK.png'))), (True, True, True))
@@ -2817,7 +2824,8 @@ def test_cloud_mask(tmp):
     class Hs:
         raster_path = hs2
     with contextlib.redirect_stdout(io.StringIO()):
-        rasters, info = C.prepare({'cloud_mask_from': hv2, 'cloud_from_margin_px': 0, 'cloud_dilate_px': 0}, Hs(),
+        rasters, info = C.prepare({'cloud_mask_from': hv2, 'cloud_from_margin_px': 0, 'cloud_dilate_px': 0,
+                                   'cloud_refine': False}, Hs(),
                                   ['band40'], os.path.join(tmp, 'cache_hs'), '', 'HS', fake)
     with rasterio.open(info['mask']) as m:
         cls = m.read(1)
@@ -2851,6 +2859,29 @@ def test_cloud_mask(tmp):
         print('SKIP  cloud: OmniCloudMask or its weights not here (set AUTOMATCH_OCM_WEIGHTS)')
     check('cloud: preflight names missing weights',
           any('weights missing' in p or 'not installed' in p for p in C.check({'cloud_model_dir': tmp})), True)
+    # bright blobs only: what the model took for cloud on G1A MV (water, vegetation, specks) goes
+    H, W = 400, 600
+    land = 500 + rng.normal(0, 40, (3, H, W)).astype(np.float32)
+    model = np.zeros((H, W), np.uint8)
+    land[:, 50:90, 50:90] = 2000                         # a thick cloud: bright in every band, 1600 px (3.2 km2)
+    model[50:90, 50:90] = 1
+    land[0:2, 200:260, 50:110] = 300                     # vegetation: dark red / green, bright NIR
+    land[2, 200:260, 50:110] = 1500
+    model[200:260, 50:110] = 2                           # ... taken for thin cloud
+    land[:, 300:310, 300:310] = 2000                     # a bright speck taken for cloud (100 px, 0.2 km2)
+    model[300:310, 300:310] = 1
+    land[:, 100:140, 500:580] = 120                      # water far from any cloud, taken for shadow
+    model[100:140, 500:580] = 3
+    model[90:100, 50:90] = 3                             # the cloud's own shadow beside it
+    valid = np.ones((H, W), bool)
+    ref, gone = C.refine(model, land, valid, 45.0, [650.0, 555.0, 860.0], 90.0, 1.0, 10.0)
+    check('cloud refine: the bright cloud blob and its shadow stay; vegetation, a speck and far water go',
+          (int(ref[70, 70]), int(ref[95, 70]), int(ref[230, 80]), int(ref[305, 305]), int(ref[120, 540]),
+           gone['blobs'], gone['removed_dark_cloud_pct'] > 0, gone['removed_small_blob_pct'] > 0,
+           gone['removed_far_shadow_pct'] > 0), (1, 3, 0, 0, 0, 1, True, True, True))
+    check('cloud: by default only thick cloud is masked, after the bright-blob check',
+          (J_default_classes(), C.refine_options({}), C.refine_options({'cloud_refine': False})),
+          ([1], C.REFINE_DEFAULTS, None))
     # the mask alone, without a run: the model once, a mask and quicklook per threshold
     calls = []
 
@@ -2864,18 +2895,19 @@ def test_cloud_mask(tmp):
         return p
     tdir = os.path.join(tmp, 'cloud_test')
     with contextlib.redirect_stdout(io.StringIO()) as buf:
-        rows = C.standalone(mv, tdir, '', None, 'spec', [0.5, 0.7, 0.85], predictor=prob_fake)
+        rows = C.standalone(mv, tdir, '', None, 'spec', [0.5, 0.7, 0.85], predictor=prob_fake, refine_opts=None)
     pct = [r['cloud_pct'] for r in rows]
     check('cloud test: the model runs once; each threshold has its mask, quicklook and row in CLOUD_TEST.csv',
           (len(calls), [r['confidence'] for r in rows], all(os.path.exists(r['mask']) and os.path.exists(r['quicklook'])
                                                              for r in rows),
-           len(pd.read_csv(os.path.join(tdir, 'CLOUD_TEST.csv'))), rows[0]['sensor'], rows[0]['bands']),
+           len(pd.read_csv(os.path.join(tdir, 'bands_3-2-6_model_only', 'CLOUD_TEST.csv'))), rows[0]['sensor'],
+           rows[0]['bands']),
           (1, [0.5, 0.7, 0.85], True, 3, 'MV', '3 2 6'))
     check('cloud test: a stricter threshold drops the unsure ring', (pct[0] > pct[1], pct[1] == pct[2]), (True, True))
     calls.clear()
     with contextlib.redirect_stdout(io.StringIO()):
         hrows = C.standalone(hs2, os.path.join(tmp, 'cloud_test_hs'), '', None, 'spec', [0.7], mask_from=hv2,
-                             margin_px=0, predictor=prob_fake)
+                             margin_px=0, predictor=prob_fake, refine_opts=None)
     with rasterio.open(hrows[0]['mask']) as m:
         hcls = m.read(1)
     check('cloud test: HS takes the mask of its VNIR pass, on its own grid',
@@ -2888,7 +2920,7 @@ def test_cloud_mask(tmp):
     try:
         with contextlib.redirect_stdout(io.StringIO()) as buf:
             rc = J.main(['cloud', mv, '--out', os.path.join(tmp, 'cloud_cli'), '--conf', '0.7', '--model-dir', ''])
-        cli_ok = os.path.exists(os.path.join(tmp, 'cloud_cli', 'conf_0.7', 'CLOUD_MASK.tif'))
+        cli_ok = os.path.exists(os.path.join(tmp, 'cloud_cli', 'bands_3-2-6', 'conf_0.7', 'CLOUD_MASK.tif'))
         mf = os.path.join(tmp, 'mode_cloud.json')
         with open(mf, 'w') as f:
             json.dump({'mode': 'cloud', 'cloud_test_confidences': [0.6, 0.9]}, f)
@@ -2900,9 +2932,14 @@ def test_cloud_mask(tmp):
     if have_ocm:
         check('cloud test: command line (automatch_job.py cloud) and service mode "cloud"',
               (rc, cli_ok, rc2, sorted(os.listdir(os.path.join(tmp, 'svc_cloud', 'cloud_test')))),
-              (0, True, 0, ['CLOUD_TEST.csv', 'conf_0.6', 'conf_0.9']))
+              (0, True, 0, ['CLOUD_TEST_ALL.csv', 'bands_3-2-6']))
     else:
         check('cloud test: without omnicloudmask the command line and service mode say so (exit 2)', (rc, rc2), (2, 2))
+
+
+def J_default_classes():
+    import automatch_job as J
+    return J.normalize({})['cloud_mask_classes']
 
 
 def test_stretch():

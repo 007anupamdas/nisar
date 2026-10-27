@@ -28,20 +28,33 @@ and its statistics (CLOUD_INFO.json) are kept in the job's cache and reused
 while the image, bands and settings are the same. With cloud masking on, each
 band the job matches is copied with the masked pixels (cloud_mask_classes,
 grown by cloud_dilate_px) set to no data, and the job matches that copy, so no
-keypoint comes from a cloud.
+keypoint comes from a cloud. By default only thick cloud is masked
+(cloud_mask_classes [1]).
+
+Bright blobs only (cloud_refine, on by default): the model standardises each
+band per 1000 px tile, so in a cloud-free tile the brightest ground looks
+like cloud to it; on G1A MV it took water and vegetation for cloud at every
+confidence from 0.2 to 0.9. Its clouds are kept only where they are bright
+-- above the cloud_bright_pct (90) percentile of the clear ground in both
+visible bands -- and form a blob of at least cloud_min_blob_km2 (1 km2);
+shadows only within cloud_shadow_near_km (10 km) of such a blob (refine()).
 
 Testing the mask alone, without a matching run (the model runs once; each
 confidence threshold gets its own mask and quicklook):
 
     python automatch_cloud.py <image> --out <folder> [--conf 0.5 0.7 0.85]
         [--sensor MV] [--bands 3 2 6 | --choice quality] [--from <VNIR image>]
-        [--model-dir <weights>] [--device cpu]
+        [--model-dir <weights>] [--device cpu] [--model-only]
+        [--bright-pct 90 --min-blob-km2 1 --shadow-near-km 10]
     (also: automatch_job.py cloud ..., and the GPU service's mode "cloud")
 
-writes <folder>/conf_<c>/CLOUD_MASK.tif and CLOUD_QUICKLOOK.png per threshold,
-and CLOUD_TEST.csv: cloud / thick / thin / shadow %, and dark_cloud_pct (the
-share of "cloud" darker than the median clear ground: high means ground
-taken for cloud).
+Each band choice gets its own folder, so tests do not overwrite each other:
+<folder>/bands_3-2-6/conf_<c>/CLOUD_MASK.tif, CLOUD_QUICKLOOK.png (and
+CLOUD_QUICKLOOK_MODEL.png, the model's own result), CLOUD_TEST.csv there, and
+<folder>/CLOUD_TEST_ALL.csv listing every test made in the folder: cloud /
+thick / thin / shadow %, what the model alone said, what the bright-blob
+check removed, and dark_cloud_pct (the share of "cloud" darker than the
+median clear ground: high means ground taken for cloud).
 """
 from __future__ import annotations
 
@@ -68,7 +81,7 @@ SENSOR_BANDS_NM = {
 TARGET_NM = {'red': 650.0, 'green': 560.0, 'nir': 860.0}
 MAX_OFFSET_NM = 40.0                  # a band further than this from the target does not stand in for it
 CLASS_NAMES = {0: 'clear', 1: 'thick cloud', 2: 'thin cloud', 3: 'cloud shadow'}
-MASK_VERSION = 2                      # 2: confidence threshold, brightness check, quicklook
+MASK_VERSION = 3                      # 2: confidence threshold, brightness check, quicklook; 3: bright blobs
 
 
 def band_wavelengths(path: str, sensor: str) -> Optional[List[float]]:
@@ -205,6 +218,60 @@ def classify(out: np.ndarray, min_conf: float = 0.7) -> np.ndarray:
     return cls
 
 
+def pixel_m(transform, crs, height: int) -> float:
+    """Ground size of a raster pixel in metres (degrees converted at the
+    raster's middle latitude)."""
+    if crs is not None and crs.is_projected:
+        return float(abs(transform.a))
+    lat = transform.f + transform.e * height / 2.0
+    return float(abs(transform.a) * 111320.0 * np.cos(np.radians(lat)))
+
+
+def refine(cls: np.ndarray, arr: np.ndarray, valid: np.ndarray, px_m: float, wl: Optional[List] = None,
+           bright_pct: float = 90.0, min_blob_km2: float = 1.0, shadow_near_km: float = 10.0
+           ) -> Tuple[np.ndarray, Dict]:
+    """The model's clouds kept only where they are what a thick cloud looks
+    like: bright -- above the bright_pct percentile of the clear ground in
+    both visible bands (the two shortest wavelengths of the three) -- and in
+    a connected blob of at least min_blob_km2. The model standardises each
+    band per 1000 px tile, so in a cloud-free tile the brightest ground looks
+    like cloud to it: on G1A MV water and vegetation were taken for cloud at
+    every confidence. Shadows are kept only within shadow_near_km of a kept
+    cloud (water far from any cloud is not a shadow). Returns (classes,
+    what was removed, in % of the valid pixels)."""
+    import cv2
+    out = cls.copy()
+    nv = max(int(valid.sum()), 1)
+    model_cloud = np.isin(cls, (1, 2)) & valid
+    order = list(np.argsort([w if w is not None else i for i, w in enumerate(wl)])) if wl and len(wl) == len(arr) \
+        else list(range(len(arr)))
+    vis = order[:2]
+    clear = valid & (cls == 0)
+    ref = clear if clear.sum() >= 1000 else valid
+    bright = valid.copy()
+    for i in vis:
+        bright &= arr[i] > np.percentile(arr[i][ref], bright_pct)
+    cand = model_cloud & bright
+    min_px = max(1, int(round(min_blob_km2 * 1e6 / max(px_m, 1e-6) ** 2)))
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(cand.astype(np.uint8), connectivity=8)
+    keep = stats[:, cv2.CC_STAT_AREA] >= min_px
+    keep[0] = False
+    cloud = keep[lab] & cand
+    out[model_cloud & ~cloud] = 0
+    shadow = (cls == 3) & valid
+    near = np.zeros_like(shadow)
+    if cloud.any() and shadow_near_km > 0:
+        dist = cv2.distanceTransform((~cloud).astype(np.uint8), cv2.DIST_L2, 5) * px_m
+        near = dist <= shadow_near_km * 1000.0
+    elif shadow_near_km <= 0:
+        near[:] = True
+    out[shadow & ~near] = 0
+    return out, {'removed_dark_cloud_pct': round(100.0 * float((model_cloud & ~bright).sum()) / nv, 2),
+                 'removed_small_blob_pct': round(100.0 * float((cand & ~cloud).sum()) / nv, 2),
+                 'removed_far_shadow_pct': round(100.0 * float((shadow & ~near).sum()) / nv, 2),
+                 'blobs': int(keep.sum())}
+
+
 def quicklook(arr: np.ndarray, cls: np.ndarray, valid: np.ndarray, path: str, max_side: int = 1600) -> None:
     """False colour (NIR, red, green) with thick cloud in red, thin cloud in
     yellow and shadow in blue, for looking at locally."""
@@ -225,27 +292,45 @@ def quicklook(arr: np.ndarray, cls: np.ndarray, valid: np.ndarray, path: str, ma
 
 
 def compute(path: str, bands: List[int], out_dir: str, model_dir: str = '', device: Optional[str] = None,
-            predictor=None, min_conf: float = 0.7) -> Dict:
+            predictor=None, min_conf: float = 0.7, refine_opts: Optional[Dict] = None,
+            wl: Optional[List] = None) -> Dict:
     """CLOUD_MASK.tif and CLOUD_QUICKLOOK.png in out_dir for the image, and its
     statistics, with a check that the clouds are bright: dark_cloud_pct is the
     share of cloud pixels darker in red than the median clear pixel (real
-    clouds are brighter; a large share means ground taken for cloud)."""
+    clouds are brighter; a large share means ground taken for cloud). With
+    refine_opts (refine()'s settings) only bright cloud blobs are kept; the
+    model's own result is then also given (model_*_pct,
+    CLOUD_QUICKLOOK_MODEL.png)."""
     import rasterio as rio
     with rio.open(path) as src:
         prof = src.profile.copy()
         nd = src.nodata if src.nodata is not None else 0
         arr = np.stack([src.read(b).astype(np.float32) for b in bands])
+        px = pixel_m(src.transform, src.crs, src.height)
     valid = np.all(np.isfinite(arr) & (arr != nd), axis=0)
     cls = classify((predictor or predict)(np.where(valid, arr, nd), float(nd), model_dir, device), min_conf)
     cls = np.where(valid, cls, 255).astype(np.uint8)
     os.makedirs(out_dir, exist_ok=True)
+    nv = max(int(valid.sum()), 1)
+    extra = {}
+    if refine_opts is not None:
+        mp = {k: round(100.0 * int((cls == k).sum()) / nv, 2) for k in (1, 2, 3)}
+        extra = {'model_thick_pct': mp[1], 'model_thin_pct': mp[2], 'model_shadow_pct': mp[3],
+                 'model_cloud_pct': round(mp[1] + mp[2], 2)}
+        try:
+            quicklook(arr, cls, valid, os.path.join(out_dir, 'CLOUD_QUICKLOOK_MODEL.png'))
+        except Exception as e:
+            print(f'[Cloud] model quicklook not written: {type(e).__name__}: {e}')
+        cls, removed = refine(cls, arr, valid, px, wl, **refine_opts)
+        cls = np.where(valid, cls, 255).astype(np.uint8)
+        extra.update(removed)
+        extra['refine'] = dict(refine_opts)
     prof.update(count=1, dtype='uint8', nodata=255, compress='deflate')
     prof.pop('blockxsize', None)
     prof.pop('blockysize', None)
     mask_path = os.path.join(out_dir, 'CLOUD_MASK.tif')
     with rio.open(mask_path, 'w', **prof) as dst:
         dst.write(cls, 1)
-    nv = max(int(valid.sum()), 1)
     pct = {k: round(100.0 * int((cls == k).sum()) / nv, 2) for k in (1, 2, 3)}
     cloud = np.isin(cls, (1, 2))
     clear = cls == 0
@@ -257,7 +342,20 @@ def compute(path: str, bands: List[int], out_dir: str, model_dir: str = '', devi
     except Exception as e:
         print(f'[Cloud] quicklook not written: {type(e).__name__}: {e}')
     return {'mask': mask_path, 'thick_pct': pct[1], 'thin_pct': pct[2], 'shadow_pct': pct[3],
-            'cloud_pct': round(pct[1] + pct[2], 2), 'dark_cloud_pct': dark, 'min_confidence': min_conf}
+            'cloud_pct': round(pct[1] + pct[2], 2), 'dark_cloud_pct': dark, 'min_confidence': min_conf, **extra}
+
+
+REFINE_DEFAULTS = {'bright_pct': 90.0, 'min_blob_km2': 1.0, 'shadow_near_km': 10.0}
+
+
+def refine_options(job: Dict) -> Optional[Dict]:
+    """refine()'s settings from a job, None when cloud_refine is off."""
+    if not job.get('cloud_refine', True):
+        return None
+    get = (lambda k, d: float(job[k]) if job.get(k) is not None else d)
+    return {'bright_pct': get('cloud_bright_pct', REFINE_DEFAULTS['bright_pct']),
+            'min_blob_km2': get('cloud_min_blob_km2', REFINE_DEFAULTS['min_blob_km2']),
+            'shadow_near_km': get('cloud_shadow_near_km', REFINE_DEFAULTS['shadow_near_km'])}
 
 
 def masked_band(path: str, band: int, mask_path: str, out_path: str, classes: List[int], dilate_px: int) -> str:
@@ -347,8 +445,9 @@ def prepare(job: Dict, scene, channels: List[str], cache_dir: str, out_dir: str,
                                   job.get('cloud_band_choice') or 'spec')
     st = os.stat(path)
     conf = float(job.get('cloud_min_confidence') or 0.7)
+    ropts = refine_options(job)
     key = hashlib.sha1(json.dumps({'v': MASK_VERSION, 'path': os.path.abspath(path), 'size': st.st_size,
-                                   'mtime': int(st.st_mtime), 'bands': bands, 'conf': conf},
+                                   'mtime': int(st.st_mtime), 'bands': bands, 'conf': conf, 'refine': ropts},
                                   sort_keys=True).encode()).hexdigest()
     info_path = os.path.join(cache_dir, 'CLOUD_INFO.json')
     info = None
@@ -362,7 +461,8 @@ def prepare(job: Dict, scene, channels: List[str], cache_dir: str, out_dir: str,
     if info is None:
         print(f'[Cloud] OmniCloudMask on bands {bands} ({how}; {", ".join(f"{w:.0f} nm" for w in wl if w)}) ...',
               flush=True)
-        info = compute(path, bands, cache_dir, model_dir_for(job), job.get('cloud_device') or None, predictor, conf)
+        info = compute(path, bands, cache_dir, model_dir_for(job), job.get('cloud_device') or None, predictor, conf,
+                       ropts, wl)
         info.update({'key': key, 'bands': bands, 'band_choice': how, 'wavelengths_nm': wl, 'sensor': sensor,
                      'model': 'OmniCloudMask'})
         os.makedirs(cache_dir, exist_ok=True)
@@ -375,12 +475,18 @@ def prepare(job: Dict, scene, channels: List[str], cache_dir: str, out_dir: str,
 
 def _finish(job: Dict, path: str, info: Dict, channels: List[str], cache_dir: str, out_dir: str
             ) -> Tuple[Dict[str, List], Dict]:
-    classes = [int(c) for c in (job.get('cloud_mask_classes') or [1, 2, 3])]
+    classes = [int(c) for c in (job.get('cloud_mask_classes') or [1])]
     dilate = int(job.get('cloud_dilate_px') or 0)
     key = info['key']
     print(f"[Cloud] {info['cloud_pct']:.1f} % cloud (thick {info['thick_pct']:.1f}, thin {info['thin_pct']:.1f}), "
           f"{info['shadow_pct']:.1f} % shadow ({info.get('band_choice')}; confidence >= "
           f"{info.get('min_confidence', '?')}); masking classes {classes}, grown by {dilate} px", flush=True)
+    if info.get('model_cloud_pct') is not None:
+        print(f"[Cloud] the model said {info['model_cloud_pct']:.1f} % cloud, {info['model_shadow_pct']:.1f} % shadow; "
+              f"kept only bright blobs: {info.get('removed_dark_cloud_pct')} % not bright, "
+              f"{info.get('removed_small_blob_pct')} % in small specks, {info.get('removed_far_shadow_pct')} % shadow "
+              f"far from cloud dropped ({info.get('blobs')} cloud blob(s); CLOUD_QUICKLOOK_MODEL.png is the "
+              f"model's own)", flush=True)
     if info.get('dark_cloud_pct') is not None and info['dark_cloud_pct'] > 20:
         print(f"[Cloud] CHECK: {info['dark_cloud_pct']:.0f} % of the 'cloud' pixels are darker than the median "
               f"clear ground -- ground is probably taken for cloud. Raise cloud_min_confidence (e.g. 0.85) or "
@@ -408,10 +514,17 @@ def _finish(job: Dict, path: str, info: Dict, channels: List[str], cache_dir: st
 
 def standalone(path: str, out_dir: str, sensor: str = '', bands: Optional[List[str]] = None, choice: str = 'spec',
                confidences=(0.5, 0.7, 0.85), model_dir: str = '', device: Optional[str] = None,
-               mask_from: str = '', margin_px: int = 10, predictor=None) -> List[Dict]:
+               mask_from: str = '', margin_px: int = 10, predictor=None,
+               refine_opts: Optional[Dict] = 'default') -> List[Dict]:
     """The cloud mask of one image at each confidence threshold, without a
-    matching run (module docstring). Rows of CLOUD_TEST.csv."""
+    matching run (module docstring). refine_opts: refine()'s settings
+    ('default': REFINE_DEFAULTS; None: the model alone). Each band choice
+    goes into its own folder <out_dir>/bands_<b>-<b>-<b>/, and every test
+    made in out_dir is listed in CLOUD_TEST_ALL.csv. Rows of CLOUD_TEST.csv."""
+    if refine_opts == 'default':
+        refine_opts = dict(REFINE_DEFAULTS)
     import rasterio as rio
+    import pandas as pd
     import automatch_bench as B
     stem = os.path.splitext(os.path.basename(path))[0]
     if not sensor:
@@ -421,26 +534,30 @@ def standalone(path: str, out_dir: str, sensor: str = '', bands: Optional[List[s
     os.makedirs(out_dir, exist_ok=True)
     confs = sorted({round(float(c), 3) for c in confidences}) or [0.7]
     if mask_from:              # HS: the mask is made on the VNIR product of the same pass and laid on
-        src_rows = standalone(mask_from, os.path.join(out_dir, 'from_' + os.path.splitext(
-            os.path.basename(mask_from))[0]), '', bands, choice, confs, model_dir, device, '', 0, predictor)
+        src_rows = standalone(mask_from, out_dir, '', bands, choice, confs, model_dir, device, '', 0, predictor,
+                              refine_opts)
+        variant = f"from_{os.path.splitext(os.path.basename(mask_from))[0]}_{src_rows[0]['variant']}"
         rows = []
         for r in src_rows:
-            sub = os.path.join(out_dir, f"conf_{r['confidence']:g}")
+            sub = os.path.join(out_dir, variant, f"conf_{r['confidence']:g}")
             os.makedirs(sub, exist_ok=True)
             mask = transfer(r['mask'], path, os.path.join(sub, 'CLOUD_MASK.tif'), int(margin_px))
             with rio.open(mask) as m:
                 cls = m.read(1)
             nv = max(int((cls != 255).sum()), 1)
             pct = {k: round(100.0 * int((cls == k).sum()) / nv, 2) for k in (1, 2, 3)}
-            rows.append(dict(r, image=path, sensor=sensor, mask=mask, quicklook=r['quicklook'],
+            rows.append(dict(r, image=path, sensor=sensor, variant=variant, mask=mask, quicklook=r['quicklook'],
                              thick_pct=pct[1], thin_pct=pct[2], shadow_pct=pct[3],
                              cloud_pct=round(pct[1] + pct[2], 2), dark_cloud_pct=None,
                              band_choice=f"from {os.path.basename(mask_from)} ({r['band_choice']}), "
                                          f"grown {int(margin_px)} px"))
     else:
         bsel, how, wl = choose_bands(path, sensor, bands or None, choice)
+        # each band choice in its own folder: a second test (other bands) does not overwrite the first
+        variant = f"bands_{'-'.join(str(b) for b in bsel)}" + ('' if refine_opts is not None else '_model_only')
         print(f'[Cloud] {os.path.basename(path)} ({sensor}): OmniCloudMask on bands {bsel} ({how}; '
-              f'{", ".join(f"{w:.0f} nm" for w in wl if w)})', flush=True)
+              f'{", ".join(f"{w:.0f} nm" for w in wl if w)})'
+              + ('; bright blobs only' if refine_opts is not None else '; the model alone'), flush=True)
         memo: Dict = {}
 
         def once(arr, nd, md, dev):          # the model runs once; each threshold reads its output
@@ -451,23 +568,41 @@ def standalone(path: str, out_dir: str, sensor: str = '', bands: Optional[List[s
             return memo['p']
         rows = []
         for c in confs:
-            sub = os.path.join(out_dir, f'conf_{c:g}')
-            info = compute(path, bsel, sub, model_dir, device, once, c)
-            rows.append({'image': path, 'sensor': sensor, 'confidence': c, 'cloud_pct': info['cloud_pct'],
-                         'thick_pct': info['thick_pct'], 'thin_pct': info['thin_pct'],
-                         'shadow_pct': info['shadow_pct'], 'dark_cloud_pct': info['dark_cloud_pct'],
+            sub = os.path.join(out_dir, variant, f'conf_{c:g}')
+            info = compute(path, bsel, sub, model_dir, device, once, c, refine_opts, wl)
+            rows.append({'image': path, 'sensor': sensor, 'variant': variant, 'confidence': c,
+                         'cloud_pct': info['cloud_pct'], 'thick_pct': info['thick_pct'],
+                         'thin_pct': info['thin_pct'], 'shadow_pct': info['shadow_pct'],
+                         'model_cloud_pct': info.get('model_cloud_pct'),
+                         'model_shadow_pct': info.get('model_shadow_pct'),
+                         'removed_dark_cloud_pct': info.get('removed_dark_cloud_pct'),
+                         'removed_small_blob_pct': info.get('removed_small_blob_pct'),
+                         'removed_far_shadow_pct': info.get('removed_far_shadow_pct'), 'blobs': info.get('blobs'),
+                         'dark_cloud_pct': info['dark_cloud_pct'],
                          'bands': ' '.join(str(b) for b in bsel), 'band_choice': how,
                          'model_seconds': memo.get('s'), 'mask': info['mask'],
-                         'quicklook': os.path.join(sub, 'CLOUD_QUICKLOOK.png')})
-    import pandas as pd
-    pd.DataFrame(rows).to_csv(os.path.join(out_dir, 'CLOUD_TEST.csv'), index=False)
-    print(f"[Cloud] {'confidence':>10} {'cloud %':>8} {'thick':>6} {'thin':>6} {'shadow':>7} {'dark cloud %':>13}")
+                         'quicklook': os.path.join(sub, 'CLOUD_QUICKLOOK.png'),
+                         'quicklook_model': (os.path.join(sub, 'CLOUD_QUICKLOOK_MODEL.png')
+                                             if refine_opts is not None else '')})
+    pd.DataFrame(rows).to_csv(os.path.join(out_dir, variant, 'CLOUD_TEST.csv'), index=False)
+    allp = os.path.join(out_dir, 'CLOUD_TEST_ALL.csv')          # every test made in this folder
+    try:
+        old = pd.read_csv(allp)
+        old = old[~((old['image'] == path) & (old['variant'] == variant))]
+    except Exception:
+        old = pd.DataFrame()
+    pd.concat([old, pd.DataFrame(rows)], ignore_index=True).to_csv(allp, index=False)
+    print(f"[Cloud] {variant}:")
+    print(f"[Cloud] {'confidence':>10} {'cloud %':>8} {'thick':>6} {'thin':>6} {'shadow':>7} {'dark cloud %':>13}"
+          f"{'   model said cloud %':>21}")
     for r in rows:
-        dk = '-' if r['dark_cloud_pct'] is None else f"{r['dark_cloud_pct']:.0f}"
+        dk = '-' if r['dark_cloud_pct'] is None or pd.isna(r['dark_cloud_pct']) else f"{r['dark_cloud_pct']:.0f}"
+        ms = '' if r.get('model_cloud_pct') is None else f"{r['model_cloud_pct']:>21.1f}"
         print(f"[Cloud] {r['confidence']:>10g} {r['cloud_pct']:>8.1f} {r['thick_pct']:>6.1f} {r['thin_pct']:>6.1f} "
-              f"{r['shadow_pct']:>7.1f} {dk:>13}" + ('   <- ground taken for cloud?' if r['dark_cloud_pct']
-                                                     and r['dark_cloud_pct'] > 20 else ''))
-    print(f"[Cloud] masks and quicklooks: {out_dir}/conf_<c>/ ; table: CLOUD_TEST.csv", flush=True)
+              f"{r['shadow_pct']:>7.1f} {dk:>13}{ms}" + ('   <- ground taken for cloud?' if r['dark_cloud_pct']
+                                                         and r['dark_cloud_pct'] > 20 else ''))
+    print(f"[Cloud] masks and quicklooks: {os.path.join(out_dir, variant)}/conf_<c>/ ; every test in this folder: "
+          f"CLOUD_TEST_ALL.csv", flush=True)
     return rows
 
 
@@ -484,6 +619,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument('--margin', type=int, default=10, help='growth (px) of a mask laid on from --from')
     ap.add_argument('--model-dir', default='', help='OmniCloudMask weights folder')
     ap.add_argument('--device', default=None, help='cpu / cuda; default: GPU when there is one')
+    ap.add_argument('--model-only', action='store_true', help="the model's clouds as they are (no bright-blob check)")
+    ap.add_argument('--bright-pct', type=float, default=REFINE_DEFAULTS['bright_pct'],
+                    help='a cloud is brighter than this percentile of the clear ground, in both visible bands')
+    ap.add_argument('--min-blob-km2', type=float, default=REFINE_DEFAULTS['min_blob_km2'],
+                    help='smallest cloud blob kept')
+    ap.add_argument('--shadow-near-km', type=float, default=REFINE_DEFAULTS['shadow_near_km'],
+                    help='shadows kept within this of a cloud blob')
     a = ap.parse_args(argv)
     out = a.out or os.path.join(os.path.dirname(os.path.abspath(a.image)),
                                 'cloud_test_' + os.path.splitext(os.path.basename(a.image))[0])
@@ -491,7 +633,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     if problems:
         print('\n'.join(problems))
         return 2
-    standalone(a.image, out, a.sensor, a.bands, a.choice, a.conf, a.model_dir, a.device, a.mask_from, a.margin)
+    ropts = None if a.model_only else {'bright_pct': a.bright_pct, 'min_blob_km2': a.min_blob_km2,
+                                       'shadow_near_km': a.shadow_near_km}
+    standalone(a.image, out, a.sensor, a.bands, a.choice, a.conf, a.model_dir, a.device, a.mask_from, a.margin,
+               refine_opts=ropts)
     return 0
 
 

@@ -286,7 +286,8 @@ def main(argv: List[str] = None) -> int:
         C.standalone(job['input_path'], os.path.join(job['output_dir'], 'cloud_test'), '',
                      job.get('cloud_bands') or None, job.get('cloud_band_choice') or 'spec', confs,
                      C.model_dir_for(job), job.get('cloud_device') or None, job.get('cloud_mask_from') or '',
-                     int(job.get('cloud_from_margin_px') or 0) + int(job.get('cloud_dilate_px') or 0))
+                     int(job.get('cloud_from_margin_px') or 0) + int(job.get('cloud_dilate_px') or 0),
+                     refine_opts=C.refine_options(job))
         return 0
     if mode == 'preflight':
         res = J.preflight(job)
