@@ -24,9 +24,10 @@ filename parser with minimal disruption:
                               token count stays predictable.
 
 Usage:
-    python dqe_imw.py <unused> <output_dir> <scene_dir,vh_ref_dir,vv_ref_dir[,gcp_csv]>
+    python dqe_imw.py <unused> <output_dir> <scene_dir,vh_ref_dir,vv_ref_dir>
 
-Same CLI shape as your existing dqe_integrated.py.
+Same CLI shape as dqe_integrated.py (the import-safe copy of
+DPQED_agdqe_all.py that lives next to this file).
 """
 
 import os
@@ -40,8 +41,8 @@ import cv2
 import numpy as np
 import torch as th
 
-# Import the existing pipeline. Adjust the module name here if your file is
-# named differently (e.g. `dqe_integrated_polwise`).
+# Import the existing pipeline (dqe_integrated.py = import-safe copy of
+# DPQED_agdqe_all.py, shipped in this repo).
 from dqe_integrated import (
     PipelineConfig,
     DiskBasedMatcher,
@@ -53,6 +54,7 @@ from dqe_integrated import (
     DiskBasedPreprocessor,
     RANSACFilter,
     safe_cuda_empty_cache,
+    setup_logging,
     device,
 )
 
@@ -72,9 +74,10 @@ def _load_imw():
 # =============================================================================
 # IMW CONFIG CATALOG
 # =============================================================================
-# The catalog and its conf-builder helpers live in imw_configs.py, which has
-# no heavy imports so it can be reused by prefetch_imw_weights.py on an
-# internet-connected (download-only) machine. Edit the catalog THERE.
+# The catalog lives in imw_configs.py and is resolved against the conf
+# registry of the INSTALLED imcui (imcui.hloc.configs), so model names,
+# weights and preprocessing always line up with your install. Edit the
+# catalog THERE; select a subset at runtime with NISAR_IMW_ONLY=tag1,tag2.
 from imw_configs import IMW_CONFIGS  # noqa: E402
 
 
@@ -148,6 +151,16 @@ class IMWMatcher(DiskBasedMatcher):
     def _detector_needs_inpaint(self) -> bool:
         # Most learned models behave like DISK/DeDoDe at hard nodata edges.
         return True
+
+    @staticmethod
+    def _has_gpu_headroom(min_free_gb: float = 5.0) -> bool:
+        if not th.cuda.is_available():
+            return True
+        try:
+            free, _total = th.cuda.mem_get_info()
+            return free / 1024**3 >= min_free_gb
+        except Exception:
+            return True
 
     # ---- LoFTR-style override ------------------------------------------------
     def _process_single_window(self, nisar_data, s1_data,
@@ -306,6 +319,13 @@ class IMWMatcher(DiskBasedMatcher):
         gc.collect()
         print(f'[{self.get_detector_name()}] Model unloaded.')
 
+    def save_matches_to_csv(self, all_matches, output_dir):
+        # The parent pipeline calls this exactly once per matcher, right after
+        # the last pair has been matched. Unloading here keeps only ONE imcui
+        # model resident at a time across the catalog sweep.
+        super().save_matches_to_csv(all_matches, output_dir)
+        self.unload_model()
+
 
 # =============================================================================
 # FILENAME PARSER EXTENSION
@@ -395,6 +415,18 @@ if __name__ == '__main__':
     scene_dir   = input_[0]
     base_output = sys.argv[2]
 
+    os.makedirs(base_output, exist_ok=True)
+    setup_logging(base_output)
+
+    if not IMW_CONFIGS:
+        print('[IMW] No imcui configs resolved (is image-matching-webui '
+              'installed in this environment?). Nothing to do.')
+        sys.exit(1)
+
+    if len(input_) > 3:
+        print(f'[IMW] NOTE: ignoring extra CLI tokens: {input_[3:]} '
+              f'(this pipeline takes scene_dir,vh_ref_dir,vv_ref_dir)')
+
     # Where to store / read intermediate pair{NNN}_*.tif chips.
     #   NISAR_TEMP_DIR=/abs/path  → reuse an existing kornia-pipeline cache.
     #   unset                     → write fresh chips inside <base_output>/temp_cache.
@@ -461,8 +493,6 @@ if __name__ == '__main__':
             consensus_mode_bin_m  = 0.5,
             min_inliers_per_chip  = 3,
             min_surviving_chips   = 1 if win >= 2000 else 2,
-
-            manual_gcp_csv = input_[3] if len(input_) > 3 else '',
         )
         config.num_features = config.compute_num_features(win)
         print(f'win={win} -> num_features={config.num_features}')

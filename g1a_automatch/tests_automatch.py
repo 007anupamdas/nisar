@@ -1,0 +1,3907 @@
+#!/usr/bin/env python3
+"""
+Tests for automatch. Plain script, like tests_rival_*.py:
+
+    python tests_automatch.py                     # fast checks (no matching)
+    python tests_automatch.py --e2e               # + synthetic end-to-end runs
+    python tests_automatch.py --rival /path/DPQED_rival.py   # + parity with RIVAL
+
+The end-to-end runs build a G1A-like 3-band raster whose georeferencing is off
+by a known (dE, dN) of kilometres, plus C1 (degree tiles, lon/lat) and L8_ref
+(UTM + Meta/index.shp) references, run automatch_job with kornia SIFT, and
+require the RIVAL CSV to report that offset to within half a pixel.
+"""
+
+import argparse
+import ast
+import csv
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import textwrap
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+
+FAILS = []
+
+
+def check(name, got, want=True):
+    ok = got == want
+    print(f"{'PASS' if ok else 'FAIL'}  {name}" + ('' if ok else f'  (got {got!r}, want {want!r})'))
+    if not ok:
+        FAILS.append(name)
+
+
+# ── reference discovery ──────────────────────────────────────────────────────
+def test_refs(tmp):
+    import automatch_refs as R
+    check('degree tile N16E78', R.parse_degree_tile('N16E78.tif')['ring'][0], (78.0, 17.0))
+    check('degree tile unpadded N8E76', R.parse_degree_tile('N8E76_ortho.tif')['ring'][3], (76.0, 8.0))
+    check('NISAR name is not a tile', R.parse_degree_tile('NISAR_L2_PR_GSLC.tif'), None)
+    check('mode index-shp', R.detect_reference_mode(['a.tif', 'index.shp']), R.REF_MODE_INDEX)
+    check('mode sidecar', R.detect_reference_mode(['a.tif', 'a_meta.txt']), R.REF_MODE_SIDECAR)
+    check('mode degree-tile', R.detect_reference_mode(['N16E78.tif']), R.REF_MODE_TILE)
+    check('meta stem .h5.iso.xml', R.meta_base_stem('X.h5.iso.xml'), 'X')
+    check('meta stem _META.txt', R.meta_base_stem('scene_META.txt'), 'scene')
+    check('label L8_ref', R.reference_label('/d/L8_ref'), 'L8ref')
+
+    # sidecar folder: gdalinfo-style _meta.txt beside the tif
+    d = os.path.join(tmp, 'side')
+    os.makedirs(d)
+    open(os.path.join(d, 'S1A_X.tif'), 'wb').close()
+    with open(os.path.join(d, 'S1A_X_meta.txt'), 'w') as f:
+        f.write('Upper Left  ( 78.0, 17.0)\nLower Left  ( 78.0, 16.0)\n'
+                'Upper Right ( 79.0, 17.0)\nLower Right ( 79.0, 16.0)\n')
+    cat = R.scan_reference_folder(d)
+    check('sidecar footprint paired', list(os.path.basename(p) for p in cat['footprints']), ['S1A_X.tif'])
+
+    # index shapefile via the built-in reader (projected .prj, reprojected)
+    from synthetic_data import _write_index_shp
+    d = os.path.join(tmp, 'idx')
+    os.makedirs(os.path.join(d, 'Meta'))
+    open(os.path.join(d, 'LC08_A.tif'), 'wb').close()
+    _write_index_shp(os.path.join(d, 'Meta', 'index.shp'),
+                     [('LC08_A.tif', [(78.0, 17.0), (79.0, 17.0), (79.0, 16.0), (78.0, 16.0)]),
+                      ('NOT_HERE.tif', [(70.0, 10.0), (71.0, 10.0), (71.0, 9.0), (70.0, 9.0)])])
+    names, feats, reader = R.read_index_features(os.path.join(d, 'Meta', 'index.shp'))
+    check('index reader is built-in', reader, 'builtin')
+    check('index attributes', names, ['FILENAME'])
+    check('index ring', [tuple(round(v, 6) for v in p) for p in feats[0][1][:2]], [(78.0, 17.0), (79.0, 17.0)])
+    cat = R.scan_reference_folder(d)
+    check('index footprint matched (unmatched entry ignored)', len(cat['footprints']), 1)
+
+
+# ── RIVAL parity ─────────────────────────────────────────────────────────────
+PORTED = ['band_from_name', 'band_from_frequency', 'close_ring', 'is_data_value', 'parse_pos_list',
+          'parse_meta_json', 'parse_meta_text', '_iso_text', 'parse_meta_iso_xml', 'meta_base_stem',
+          'match_raster', 'parse_degree_tile', 'rank_name_fields', 'build_name_lookup',
+          'resolve_index_name', 'pick_index_shapefile', 'detect_reference_mode', 'is_meta_file',
+          'accuracy_stats', 'csv_record']
+
+
+def _functions(path):
+    src = open(path, encoding='utf-8').read()
+    out = {}
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.FunctionDef):
+            out.setdefault(node.name, ast.dump(node))
+    return out, src
+
+
+def test_rival_parity(rival_path):
+    if not rival_path or not os.path.exists(rival_path):
+        print('SKIP  RIVAL parity (pass --rival /path/DPQED_rival.py)')
+        return
+    theirs, src = _functions(rival_path)
+    ours, _ = _functions(os.path.join(HERE, 'automatch_refs.py'))
+    for fn in PORTED:
+        check(f'ported {fn} identical to DPQED_rival.py', ours.get(fn) == theirs.get(fn))
+    import automatch_rival as AR
+    i = src.index('def save_csv(self)')
+    header = ast.literal_eval(src[src.index('w.writerow([', i) + len('w.writerow('):
+                                  src.index('])', src.index('w.writerow([', i)) + 1])
+    check('RIVAL CSV header identical', AR.RIVAL_HEADER, header)
+
+
+# ── engine pure helpers ──────────────────────────────────────────────────────
+def test_engine_helpers():
+    import automatch_engine as E
+    P = E.MatchStatistics._parse_filename
+    r = P('sift_band1_toC1_pair001_scan0_pix2048_smnn_0.95_aff_magsac_20.0_0.99_.csv')
+    check('parse sift', (r['detector'], r['nisar_pol'], r['s1_ref_tag'], r['pix'], r['match_parameter'],
+                         r['ransac_threshold']), ('sift', 'band1', 'C1', 2048, 0.95, 20.0))
+    r = P('disk_depth_band2_toL8ref_pair003_scan5_pix6_lgm_aff_4_2_0.99_.csv')
+    check('parse disk_depth lgm', (r['disk_mode'], r['match_method'], r['match_parameter']), ('depth', 'lgm', None))
+    r = P('dedode_L-C4_G-C4_HH_toS1VV_pair001_scan1_pix2_smnn_0.9_aff_4_1_0.91_.csv')
+    check('parse dedode weights', (r['det_wt'], r['desc_wt'], r['s1_ref_tag']), ('L-C4', 'G-C4', 'S1VV'))
+    r = P('loftr_HH_toC1_pair004_scan7_pix8_loftr_internal_aff_4_2_0.95_.csv')
+    check('parse loftr', r['match_method'], 'loftr_internal')
+    r = P('imw-sp-lg_band1_toC1_pair002_scan1_pix2_internal_aff_ransac_2_0.99_.csv')
+    check('parse imcui', (r['detector'], r['desc_wt'], r['ransac_method']), ('imw-sp-lg', 'sp-lg', 'ransac'))
+    check('raw csv not parsed', P('sift_band1_toC1_pair001_scan0_pix0_smnn_0.95_raw.csv'), None)
+    check('ransac token 4 = MAGSAC', E.ransac_flag(4), E.ransac_flag('magsac'))
+    try:
+        E.PipelineConfig(ransac_methods=['bogus'])
+        check('bad RANSAC method rejected', False)
+    except ValueError:
+        check('bad RANSAC method rejected', True)
+    check('kornia refuses imcui disk', E.register_detector('imw-disk-lg', lambda c: None, ['disk'], 'imcui'), False)
+    check('imcui superpoint allowed', E.register_detector('imw-test-sp', lambda c: None, ['superpoint'], 'imcui'), True)
+    E.EXTERNAL_DETECTORS.pop('imw-test-sp', None)
+    check('utm zone 78.5E 16N', E.utm_epsg_for(78.5, 16.4), 32644)
+
+
+# ── end to end ───────────────────────────────────────────────────────────────
+def _run_job(job, tmp, want_output=False):
+    path = os.path.join(tmp, 'job.json')
+    with open(path, 'w') as f:
+        json.dump(job, f)
+    out = subprocess.run([sys.executable, os.path.join(HERE, 'automatch_job.py'), 'run', path],
+                         capture_output=True, text=True)
+    if out.returncode != 0:
+        print(out.stdout[-3000:], out.stderr[-3000:])
+    return (out.returncode, out.stdout) if want_output else out.returncode
+
+
+def test_e2e_cloud(tmp):
+    """A job with cloud masking: the mask is made (a stand-in model here,
+    clouding the west third), the matched band is the masked copy, and no
+    matched point lies under the cloud."""
+    import contextlib
+    import io
+    import numpy as np
+    import rasterio
+    import automatch_cloud as C
+    import automatch_job as J
+    import synthetic_data as S
+    data = os.path.join(tmp, 'synth')
+    if not os.path.exists(os.path.join(data, 'G1A_SYNTH_L1.tif')):
+        S.make_all(data, 4013.0, -2487.0)
+    inp = os.path.join(data, 'G1A_SYNTH_L1.tif')
+    with rasterio.open(inp) as s:
+        west = s.transform.c + s.width * s.transform.a / 3.0
+
+    def fake(arr, nodata, model_dir, device):
+        cls = np.zeros(arr.shape[1:], np.uint8)
+        cls[:, :arr.shape[2] // 3] = 1
+        return cls
+    real = C.predict
+    C.predict = fake
+    real_check = C.check
+    C.check = lambda job: []
+    out = os.path.join(tmp, 'out_cloud')
+    try:
+        job = J.normalize({'input_path': inp, 'reference_dir': os.path.join(data, 'C1'), 'output_dir': out,
+                           'channels': ['band1'], 'detectors': ['sift'], 'window_sizes': [1024],
+                           'max_expected_error_m': 10000, 'smnn_thresholds': [0.95], 'use_amp': False,
+                           'cloud_mask': 'omnicloudmask', 'cloud_bands': ['band1', 'band2', 'band3'],
+                           'cloud_dilate_px': 0, 'cross_top_n': 0, 'cloud_refine': False})
+        os.makedirs(out, exist_ok=True)
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            J.run_job(job)
+    finally:
+        C.predict, C.check = real, real_check
+    info = json.load(open(os.path.join(out, 'CLOUD_INFO.json')))
+    check('cloud e2e: the job made the mask and reports its cloud %', round(info['cloud_pct']), 33)
+    logp = os.path.join(out, 'automatch.log')       # the job mirrors its output there, past redirect_stdout
+    check('cloud e2e: the log names the masking',
+          '[Cloud]' in buf.getvalue() or (os.path.exists(logp) and '[Cloud]' in open(logp, encoding='utf-8').read()),
+          True)
+    best = [p for p in os.listdir(out) if p.startswith('RIVAL_BEST_') and not p.endswith('_detail.csv')]
+    import automatch_rival as R
+    pts = R.read_rival_csv(os.path.join(out, best[0])) if best else None
+    check('cloud e2e: points found, none under the cloud (west third)',
+          (pts is not None and len(pts) > 0, bool(pts is not None and (pts['ix'] < west).any())),
+          (True, False))
+
+
+def test_e2e_rerun(tmp):
+    """Rerun in the same output folder: identical settings reuse the results;
+    changed settings run again on the cached preprocessing, and the previous
+    run's files do not leak into the new consensus."""
+    import glob
+    import synthetic_data as S
+    data = os.path.join(tmp, 'synth')
+    if not os.path.exists(os.path.join(data, 'G1A_SYNTH_L1.tif')):
+        S.make_all(data, 4013.0, -2487.0)
+    out = os.path.join(tmp, 'out_rerun')
+    job = {'input_path': os.path.join(data, 'G1A_SYNTH_L1.tif'), 'reference_dir': os.path.join(data, 'C1'),
+           'output_dir': out, 'channels': ['band1'], 'detectors': ['sift'], 'window_sizes': [1024],
+           'max_expected_error_m': 10000, 'smnn_thresholds': [0.95], 'use_amp': False}
+    rc, log1 = _run_job(job, tmp, True)
+    check('rerun: first run', rc, 0)
+    rc, log2 = _run_job(job, tmp, True)
+    check('rerun: same settings -> results reused', rc == 0 and 'reusing finished results' in log2)
+    rc, log3 = _run_job({**job, 'smnn_thresholds': [0.9]}, tmp, True)
+    check('rerun: changed settings -> run again', rc == 0 and 'running again' in log3)
+    check('rerun: preprocessing reused from the cache', '[Cache] All 1 pairs loaded' in log3)
+    files = [os.path.basename(f) for f in glob.glob(
+        os.path.join(out, 'win1024_nfauto', 'band1_toC1', 'filtered_same-res_sift', '*.csv'))]
+    check('rerun: new run\'s files written', any('_smnn_0.9_' in f for f in files))
+    check('rerun: no file left from the previous run', not any('_smnn_0.95_' in f for f in files))
+
+
+def _pass_of(path):
+    """The matching pass in a filtered CSV's name (..._pix<col>_<pass>_aff_...);
+    windows can start at any column since they go down to 128 px."""
+    m = re.search(r'_pix\d+_(.+?)_aff', os.path.basename(path))
+    return m.group(1) if m else ''
+
+
+def test_e2e_variants(tmp):
+    """SIFT rootsift on/off + DISK LightGlue filter sweep: every variant and
+    matcher pass is run and named, and RIVAL_BEST picks one of them."""
+    import csv as _csv
+    import glob
+    import synthetic_data as S
+    data = os.path.join(tmp, 'synth')
+    if not os.path.exists(os.path.join(data, 'G1A_SYNTH_L1.tif')):
+        S.make_all(data, 4013.0, -2487.0)
+    out = os.path.join(tmp, 'out_variants')
+    rc = _run_job({'input_path': os.path.join(data, 'G1A_SYNTH_L1.tif'),
+                   'reference_dir': os.path.join(data, 'C1'), 'output_dir': out,
+                   'channels': ['band1'], 'detectors': ['sift', 'disk', 'dedode'],
+                   'matchers': {'disk': ['lgm'], 'dedode': ['ada', 'lgm']},
+                   'detector_params': {'sift': {'rootsift': [True, False]},
+                                       'disk': {'lgm.filter_threshold': [0.1, 0.2]},
+                                       'dedode': {'detector_weights': ['L-C4-v2'],
+                                                  'descriptor_weights': ['B-upright']}},
+                   'window_sizes': [1024], 'max_expected_error_m': 10000,
+                   'smnn_thresholds': [0.95], 'use_amp': False}, tmp)
+    check('variants: job exit code', rc, 0)
+    man = os.path.join(out, 'RUN_MANIFEST.csv')
+    rows = list(_csv.DictReader(open(man, encoding='utf-8'))) if os.path.exists(man) else []
+    check('variants: one manifest row per variant', sorted(r['detector'] for r in rows),
+          ['dedode_L-C4-v2_B-upright', 'disk_depth', 'sift', 'sift-rs0'])
+    ded = {_pass_of(p)
+           for p in glob.glob(os.path.join(out, '*', 'band1_toC1', 'filtered_*dedode*', '*.csv'))}
+    check('variants: DeDoDe matched with AdaLAM and LightGlue', ded >= {'ada', 'lgm'})
+    sift = {_pass_of(p)
+            for p in glob.glob(os.path.join(out, '*', 'band1_toC1', 'filtered_*_sift', '*.csv'))}
+    check('variants: SIFT matched with SMNN and AdaLAM', {'ada', 'smnn_0.95'} <= sift)
+    check('variants: all ran', {r['status'] for r in rows}, {'ok'})
+    lgm = {_pass_of(p)
+           for p in glob.glob(os.path.join(out, '*', 'band1_toC1', 'filtered_*disk_depth', '*.csv'))}
+    check('variants: both LightGlue passes filtered', lgm >= {'lgm', 'lgm_lf0p2'})
+    best = os.path.join(out, 'RIVAL_BEST_G1A_SYNTH_L1_band1.csv')
+    check('variants: RIVAL_BEST chosen among them', os.path.exists(best))
+    for r in rows:
+        if r.get('mean_dx_m'):
+            ok = abs(float(r['mean_dx_m']) - 4013.0) < 10 and abs(float(r['mean_dy_m']) + 2487.0) < 10
+            print(f"      {r['detector']:<10} dE {float(r['mean_dx_m']):.1f}  dN {float(r['mean_dy_m']):.1f}  "
+                  f"CE90 {float(r['ce90_m']):.1f}")
+            check(f"variants: {r['detector']} recovers the offset", ok)
+
+
+def test_e2e_distortion(tmp):
+    """Error that varies across the scene by kilometres (6 % east-west scale,
+    curvature): every exported point must carry the error of ITS location,
+    chips must survive across the whole scene, and the constant rule shows
+    why it is not used."""
+    import csv as _csv
+    import glob
+    import numpy as np
+    import pandas as pd
+    import synthetic_data as S
+    data = os.path.join(tmp, 'synth')
+    if not os.path.exists(os.path.join(data, 'C1')):
+        S.make_all(data, 4013.0, -2487.0)
+    world, wtf = S._world()
+    inp, (Ec, Nc) = S.make_input_distorted(data, world, wtf)
+    base = {'input_path': inp, 'reference_dir': os.path.join(data, 'C1'), 'channels': ['band1'],
+            'detectors': ['sift'], 'window_sizes': [512], 'max_expected_error_m': 10000,
+            'smnn_thresholds': [0.95], 'use_amp': False}
+    runs = {}
+    for model in ('surface', 'constant'):
+        out = os.path.join(tmp, f'out_dist_{model}')
+        rc = _run_job({**base, 'output_dir': out, 'consensus_model': model}, tmp)
+        check(f'distortion ({model}): job exit code', rc, 0)
+        man = os.path.join(out, 'RUN_MANIFEST.csv')
+        runs[model] = (out, list(_csv.DictReader(open(man, encoding='utf-8')))[0] if os.path.exists(man) else {})
+    out, row = runs['surface']
+    field_csv = glob.glob(os.path.join(out, '*', 'band1_toC1', 'raw_matches_*', 'COARSE_FIELD_pair001.csv'))
+    if field_csv:
+        f = pd.read_csv(field_csv[0])
+        print(f"      coarse field: {len(f)} cells, dE {f.dE_m.min():.0f}..{f.dE_m.max():.0f} m")
+        check('distortion: coarse field follows the varying error', f.dE_m.max() - f.dE_m.min() > 2500)
+    else:
+        check('distortion: coarse field written', False)
+    det = row.get('detail_csv') or ''
+    if os.path.exists(det):
+        d = pd.read_csv(det, encoding='utf-8-sig')
+        tE, tN = S.distortion_field(d.In_X.values, d.In_Y.values, Ec, Nc)
+        eE, eN = np.abs(d.DX_Err.values - tE), np.abs(d.DY_Err.values - tN)
+        print(f"      {len(d)} points from {d.source_file.nunique()} chips; |error - truth| median "
+              f"{np.median(eE):.1f} / {np.median(eN):.1f} m, 95% {np.percentile(eE, 95):.1f} / "
+              f"{np.percentile(eN, 95):.1f} m; true dE spans {tE.min():.0f}..{tE.max():.0f} m")
+        check('distortion: each point carries its own location\'s error (median < 10 m)',
+              np.median(eE) < 10 and np.median(eN) < 10)
+        check('distortion: 95% of points within 30 m of the truth',
+              np.percentile(eE, 95) < 30 and np.percentile(eN, 95) < 30)
+        check('distortion: chips kept across the scene (>= 20 of 25)', d.source_file.nunique() >= 20)
+        # The summary regresses the error on reference position, so compare it
+        # with the same summary of the TRUE errors at the same points.
+        import automatch_rival as AR
+        truth = AR.distortion_summary(d.In_X, d.In_Y, d.In_X - tE, d.In_Y - tN)
+        sc, sc_t = float(row.get('affine_scale_E_ppm') or 0), truth['affine_scale_E_ppm']
+        rr, rr_t = float(row.get('affine_resid_rmse_m') or 0), truth['affine_resid_rmse_m']
+        print(f"      affine scale E {sc:.0f} ppm (truth {sc_t:.0f}), rotation "
+              f"{float(row.get('affine_rot_deg') or 0):.3f} deg (truth {truth['affine_rot_deg']:.3f}), "
+              f"residual beyond affine {rr:.0f} m (truth {rr_t:.0f})")
+        check('distortion: scale and residual match the truth',
+              abs(sc - sc_t) < 1000 and abs(rr - rr_t) < 20)
+    else:
+        check('distortion: RIVAL detail written', False)
+    n_const = int(float(runs['constant'][1].get('n_chips') or 0))
+    n_surf = int(float(row.get('n_chips') or 0))
+    print(f"      chips kept: surface {n_surf}, constant {n_const}")
+    check('distortion: constant rule keeps far fewer chips', n_const < n_surf / 2)
+
+
+def test_e2e_missing_weights(tmp):
+    """A detector whose weights are missing is skipped at once with a clear
+    message; the other detectors still run."""
+    import csv as _csv
+    import synthetic_data as S
+    data = os.path.join(tmp, 'synth')
+    if not os.path.exists(os.path.join(data, 'G1A_SYNTH_L1.tif')):
+        S.make_all(data, 4013.0, -2487.0)
+    out = os.path.join(tmp, 'out_missing')
+    # imcui-free, offline-simulated: point loftr at weights this machine never had
+    import automatch_engine as E
+    import time as _t
+    job = os.path.join(tmp, 'job_missing.py')
+    with open(job, 'w') as f:
+        f.write(textwrap.dedent(f"""
+            import sys, json
+            sys.path.insert(0, {HERE!r})
+            import automatch_engine as E
+            def offline(url, *a, **k):
+                raise OSError('offline: ' + url)
+            E._ORIG_LOAD_STATE_DICT = offline
+            E._default_hub_dir = lambda: {os.path.join(tmp, 'no_weights_here')!r}
+            import torch
+            torch.hub.set_dir({os.path.join(tmp, 'no_weights_here')!r})
+            import automatch_job as J
+            sys.exit(J.main(['run', {os.path.join(tmp, 'job_missing.json')!r}]))
+        """))
+    with open(os.path.join(tmp, 'job_missing.json'), 'w') as f:
+        json.dump({'input_path': os.path.join(data, 'G1A_SYNTH_L1.tif'),
+                   'reference_dir': os.path.join(data, 'C1'), 'output_dir': out,
+                   'channels': ['band1'], 'detectors': ['loftr', 'sift'], 'matchers': {'sift': ['smnn']},
+                   'detector_params': {'loftr': {'pretrained': ['indoor_new']}},
+                   'window_sizes': [1024], 'max_expected_error_m': 10000,
+                   'smnn_thresholds': [0.95], 'use_amp': False}, f)
+    t0 = _t.time()
+    res = subprocess.run([sys.executable, job], capture_output=True, text=True)
+    rows = list(_csv.DictReader(open(os.path.join(out, 'RUN_MANIFEST.csv'), encoding='utf-8'))) \
+        if os.path.exists(os.path.join(out, 'RUN_MANIFEST.csv')) else []
+    by = {r['detector']: r for r in rows}
+    check('missing weights: job completes', res.returncode, 0)
+    check('missing weights: detector reported as failed with the reason',
+          by.get('loftr-windoornew', {}).get('status') == 'failed'
+          and 'model not available' in by.get('loftr-windoornew', {}).get('error', ''))
+    check('missing weights: other detectors still run', by.get('sift', {}).get('status'), 'ok')
+    check('missing weights: skipped before any window was matched',
+          'loftr-windoornew SKIPPED' in res.stdout and 'loftr-windoornew: Processing pair' not in res.stdout)
+    print(f'      job took {_t.time() - t0:.0f} s')
+
+
+def test_e2e_truth(tmp):
+    """A run with truth_csv ranks every detector + matcher against the manual
+    points: right truth -> metres, truth off by 400 m -> ~400 m."""
+    import csv as _csv
+    import numpy as np
+    import pandas as pd
+    import rasterio
+    from pyproj import Transformer
+    import synthetic_data as S
+    data = os.path.join(tmp, 'synth')
+    if not os.path.exists(os.path.join(data, 'G1A_SYNTH_L1.tif')):
+        S.make_all(data, 4013.0, -2487.0)
+    src = rasterio.open(os.path.join(data, 'G1A_SYNTH_L1.tif'))
+    b = src.bounds
+    to_ll = Transformer.from_crs(src.crs, 'EPSG:4326', always_xy=True)
+    xs = np.array([0.25, 0.5, 0.75, 0.3, 0.7]) * (b.right - b.left) + b.left
+    ys = np.array([0.3, 0.5, 0.7, 0.75, 0.25]) * (b.top - b.bottom) + b.bottom
+
+    def truth_file(name, dE, dN):
+        ilo, ila = to_ll.transform(xs, ys)
+        rlo, rla = to_ll.transform(xs - dE, ys - dN)
+        p = os.path.join(tmp, name)
+        pd.DataFrame({'In_X': xs, 'In_Y': ys, 'Ref_X': xs - dE, 'Ref_Y': ys - dN, 'DX_Err': dE, 'DY_Err': dN,
+                      'Row': range(1, 6), 'In_Lon': ilo, 'In_Lat': ila, 'Ref_Lon': rlo,
+                      'Ref_Lat': rla}).to_csv(p, index=False, encoding='utf-8-sig')
+        return p
+    out = os.path.join(tmp, 'out_truth')
+    job = {'input_path': os.path.join(data, 'G1A_SYNTH_L1.tif'), 'reference_dir': os.path.join(data, 'C1'),
+           'output_dir': out, 'channels': ['band1'], 'detectors': ['sift'],
+           'matchers': {'sift': ['smnn', 'mnn', 'ada']}, 'window_sizes': [1024],
+           'max_expected_error_m': 10000, 'smnn_thresholds': [0.95], 'use_amp': False,
+           'truth_csv': truth_file('truth_ok.csv', 4013.0, -2487.0), 'truth_radius_m': 5000,
+           'subcell_px': 512, 'subcell_keep': 10}
+    code, stdout = _run_job(job, tmp, want_output=True)
+    check('truth e2e: job completes', code, 0)
+    ap = os.path.join(out, 'TRUTH_MATCH_ACCURACY.csv')
+    acc = pd.read_csv(ap) if os.path.exists(ap) else pd.DataFrame(columns=['ransac', 'precision_inliers'])
+    sub = acc[acc['ransac'].astype(str).str.contains('-sc512')]
+    plain = acc[~acc['ransac'].astype(str).str.contains('-sc')]
+    check('truth e2e: match accuracy of the plain and the 512 px sub-cell result, both nearly all right',
+          (len(plain) > 0, len(sub) > 0, bool((plain['precision_inliers'] > 0.9).all()),
+           bool((sub['precision_inliers'] > 0.9).all()), bool((acc['precision_all'] <= acc['precision_inliers']).all())),
+          (True, True, True, True, True))
+    by_path = os.path.join(out, 'TRUTH_BY_DETECTOR_MATCHER.csv')
+    by = pd.read_csv(by_path) if os.path.exists(by_path) else pd.DataFrame()
+    check('truth e2e: every detector + matcher ranked', sorted(by.get('matcher_family', pd.Series()).tolist()),
+          ['ada', 'mnn', 'smnn'])
+    if not by.empty:
+        top = by.iloc[0]
+        check('truth e2e: best agrees with the truth to a few metres',
+              (int(top['truth_reached']) >= 4, float(top['truth_rmse_m']) < 15.0), (True, True))
+        print(f"      best: {top['detector']} + {top['best_matcher_setting']} RMSE {top['truth_rmse_m']:.1f} m")
+    man = list(_csv.DictReader(open(os.path.join(out, 'RUN_MANIFEST.csv'), encoding='utf-8')))
+    check('truth e2e: manifest carries the run\'s truth RMSE',
+          bool(man) and man[0].get('truth_rmse_m') not in (None, '') and float(man[0]['truth_rmse_m']) < 15.0)
+    check('truth e2e: ranking printed', '[Truth]' in stdout and 'Best detector + matcher' in stdout)
+    tb = os.path.join(out, 'RIVAL_TRUTH_BEST_band1.csv')
+    rb = os.path.join(out, 'RIVAL_BEST_G1A_SYNTH_L1_band1.csv')
+    check('truth e2e: RIVAL_BEST is the configuration that agrees best with the truth; consensus pick kept aside',
+          (os.path.exists(tb), os.path.exists(rb) and open(rb, 'rb').read() == open(tb, 'rb').read(),
+           os.path.exists(os.path.join(out, 'RIVAL_CONSENSUS_BEST_G1A_SYNTH_L1_band1.csv'))), (True, True, True))
+    # the same results against a truth that is 400 m off: re-scored without matching again
+    res = subprocess.run([sys.executable, os.path.join(HERE, 'automatch_job.py'), 'compare', out, '--truth',
+                          truth_file('truth_off.csv', 4413.0, -2487.0)], capture_output=True, text=True)
+    by2 = pd.read_csv(by_path)
+    check('truth e2e: compare on existing results measures a 400 m disagreement',
+          (res.returncode, round(float(by2.iloc[0]['truth_rmse_m']) / 50) * 50), (0, 400))
+    # the GPU service's compare mode re-scores a finished run, nothing matched again
+    st = os.path.join(tmp, 'cmp_settings.json')
+    md = os.path.join(tmp, 'mode_compare.json')
+    with open(st, 'w') as f:
+        json.dump({'truth_csv': job['truth_csv']}, f)
+    with open(md, 'w') as f:
+        json.dump({'mode': 'compare', 'compare_dir': out}, f)
+    o2 = os.path.join(tmp, 'o_compare')
+    res = subprocess.run([sys.executable, os.path.join(HERE, 'automatch_gpuaas.py'), 'id', o2, f'{st},{md}'],
+                         capture_output=True, text=True)
+    check('truth e2e: GPU-service compare mode re-scores a finished run into its output folder',
+          (res.returncode, os.path.exists(os.path.join(o2, 'TRUTH_BY_DETECTOR_MATCHER.csv')),
+           os.path.exists(os.path.join(o2, 'RIVAL_TRUTH_BEST_band1.csv')), 'Processing pair' in res.stdout),
+          (0, True, True, False))
+    check('truth e2e: compare mode also rewrites PERFORMANCE.csv and RIVAL_BEST in the new order',
+          (os.path.exists(os.path.join(o2, 'PERFORMANCE.csv')),
+           len(_glob_rival_best(o2)) == 1), (True, True))
+    # a run whose consensus never ran (e.g. stopped by an unusable GCP file):
+    # compare rebuilds it from the saved matches instead of matching again
+    import glob as _glob
+    for p in _glob.glob(os.path.join(out, '**', 'final_*', '*.csv'), recursive=True):
+        os.remove(p)
+    res = subprocess.run([sys.executable, os.path.join(HERE, 'automatch_job.py'), 'compare', out, '--truth',
+                          job['truth_csv']], capture_output=True, text=True)
+    by3 = pd.read_csv(by_path)
+    check('truth e2e: missing consensus rebuilt from the saved matches, same ranking',
+          (res.returncode, 'rebuilding' in res.stdout, float(by3.iloc[0]['truth_rmse_m']) < 15.0),
+          (0, True, True))
+    bad = dict(job, output_dir=os.path.join(tmp, 'out_bad_gcp'), manual_gcp_csv=job['truth_csv'])
+    code, stdout = _run_job(bad, tmp, want_output=True)
+    check('truth e2e: RIVAL file as manual GCP stops the job in preflight, before matching',
+          (code, 'manual_gcp_csv is a RIVAL CSV' in stdout, 'Processing pair' in stdout), (2, True, False))
+
+
+def test_pack(tmp):
+    """pack: only the references the scene can need, with their index; paths
+    rewritten for the server; the bundle runs through the GPU-service entry."""
+    import synthetic_data as S
+    import automatch_pack as P
+    import automatch_job as J
+    data = os.path.join(tmp, 'synth')
+    if not os.path.exists(os.path.join(data, 'G1A_SYNTH_L1.tif')):
+        S.make_all(data, 4013.0, -2487.0)
+    for ref, want_files in (('L8_ref', {'Meta/index.shp', 'Meta/index.dbf', 'Meta/index.shx'}), ('C1', set())):
+        job = J.normalize({'input_path': os.path.join(data, 'G1A_SYNTH_L1.tif'),
+                           'reference_dir': os.path.join(data, ref), 'output_dir': os.path.join(tmp, 'x'),
+                           'channels': ['band1'], 'detectors': ['sift'], 'max_expected_error_m': 10000})
+        dest = os.path.join(tmp, f'bundle_{ref}')
+        res = P.pack(job, dest, dest, server_weights='/srv/weights')
+        got = {os.path.relpath(os.path.join(dp, f), os.path.join(dest, 'reference', ref)).replace(os.sep, '/')
+               for dp, _, fs in os.walk(os.path.join(dest, 'reference', ref)) for f in fs}
+        n_all = len([f for f in os.listdir(os.path.join(data, ref)) if f.endswith('.tif')])
+        check(f'pack {ref}: selected references copied with their footprint source, check OK',
+              (want_files <= got, len(res['references']) >= 1, res['check'].get('lost'),
+               len([g for g in got if g.endswith('.tif')]) == len(res['references']) <= n_all),
+              (True, True, [], True))
+        st = json.load(open(os.path.join(dest, 'automatch_settings.json')))
+        check(f'pack {ref}: settings point at the server folder',
+              (st['input_path'], st['reference_dir'], st['weights_cache_dir']),
+              (f'{dest}/input/G1A_SYNTH_L1.tif', f'{dest}/reference/{ref}', '/srv/weights'))
+        report = open(os.path.join(dest, 'PACK_REPORT.txt')).read()
+        check(f'pack {ref}: only non-default settings written; the report names the code version',
+              ('max_num_features' in st, st['detectors'], J.AUTOMATCH_VERSION in report,
+               'channels, detectors, max_expected_error_m' in report),
+              (False, ['sift'], True, True))
+        again = P.pack(job, dest, dest)
+        check(f'pack {ref}: a second pack copies nothing again', (again['copied'], again['skipped'] > 0), (0, True))
+    sh = open(os.path.join(dest, 'submit_gpuaas.sh')).read()
+    check('pack: curl script for env / weights / preflight / run', 'submit_job' in sh and 'mode_$1.json' in sh)
+    # the Pack dialog's window field (remembered) overriding the job's list must be visible
+    jf = os.path.join(tmp, 'pack_windows_job.json')
+    with open(jf, 'w') as f:
+        json.dump({**{k: v for k, v in job.items() if not str(k).startswith('_')},
+                   'window_sizes': [256, 384, 512]}, f)
+    import contextlib
+    import io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        P.main([jf, '--to', os.path.join(tmp, 'bundle_win'), '--server-dir', os.path.join(tmp, 'bundle_win'),
+                '--dry-run', '--set', 'window_sizes=[2048]'])
+    out = buf.getvalue()
+    check('pack: the report names the window sizes the server will run, and a dialog / --set override of the '
+          "job's list", ('window sizes the server will run: 2048 px' in out,
+                         'window_sizes for the server: [2048] (the job file has [256, 384, 512]' in out),
+          (True, True))
+    inputs = again['inputs']
+    check('pack: input_path holds only existing files (the service checks each item)',
+          all(os.path.exists(p) for m in ('env', 'weights', 'preflight', 'run') for p in inputs[m].split(',')))
+    for m in ('preflight', 'env'):
+        res = subprocess.run([sys.executable, os.path.join(HERE, 'automatch_gpuaas.py'), 'id',
+                              os.path.join(tmp, f'o_{m}'), inputs[m]], capture_output=True, text=True)
+        check(f'pack: mode file selects {m}', (res.returncode, os.path.exists(os.path.join(
+            tmp, f'o_{m}', {'preflight': 'PREFLIGHT.json', 'env': 'ENVIRONMENT.txt'}[m]))), (0, True))
+    pf = json.load(open(os.path.join(tmp, 'o_preflight', 'PREFLIGHT.json')))
+    check('pack: the bundle passes preflight through the GPU-service entry', pf['errors'], [])
+    # V:\X\Y <-> /maintenance/X/Y : server paths checked through the share
+    lf = P.local_for('/maintenance/ICIGDev/GPUPOC/exe/a.py', '/mnt/v/ICIGDev/GPUPOC/input/g1a/set1',
+                     '/maintenance/ICIGDev/GPUPOC/input/g1a/set1')
+    check('pack: server path mapped to the local share', lf, '/mnt/v/ICIGDev/GPUPOC/exe/a.py')
+    d = os.path.join(tmp, 'comp')
+    os.makedirs(d, exist_ok=True)
+    for n in ('X.tif', 'X.tif.aux.xml', 'X.tfw', 'X_meta.txt', 'X_B5.tif', 'Y.tif', 'X.TIF.ovr', 'XX.tfw'):
+        open(os.path.join(d, n), 'w').close()
+    check('pack: companions of a raster (aux, world file, sidecar; not other rasters)',
+          sorted(os.path.basename(c) for c in P.companions(os.path.join(d, 'X.tif'))),
+          ['X.TIF.ovr', 'X.tfw', 'X.tif.aux.xml', 'X_meta.txt'])
+
+
+def test_e2e(tmp):
+    import synthetic_data as S
+    import automatch_rival as AR
+    dE, dN = 4013.0, -2487.0
+    data = S.make_all(os.path.join(tmp, 'synth'), dE, dN)
+    for ref in ('C1', 'L8_ref'):
+        out = os.path.join(tmp, f'out_{ref}')
+        rc = _run_job({'input_path': data['input'], 'reference_dir': data[ref], 'output_dir': out,
+                       'channels': ['band1'], 'detectors': ['sift'], 'window_sizes': [1024],
+                       'max_expected_error_m': 10000, 'smnn_thresholds': [0.95], 'use_amp': False}, tmp)
+        check(f'{ref}: job exit code', rc, 0)
+        best = os.path.join(out, 'RIVAL_BEST_G1A_SYNTH_L1_band1.csv')
+        check(f'{ref}: RIVAL_BEST written', os.path.exists(best))
+        if not os.path.exists(best):
+            continue
+        with open(best, encoding='utf-8-sig') as f:
+            check(f'{ref}: header', next(csv.reader(f)), AR.RIVAL_HEADER)
+        pts = AR.read_rival_csv(best)
+        mdx, mdy = float((pts.ix - pts.rx).mean()), float((pts.iy - pts.ry).mean())
+        print(f'      {ref}: {len(pts)} points, mean dE {mdx:.1f} m (true {dE}), dN {mdy:.1f} m (true {dN})')
+        check(f'{ref}: dE within half a pixel', abs(mdx - dE) < 10.0)
+        check(f'{ref}: dN within half a pixel', abs(mdy - dN) < 10.0)
+    # as on a GPU that cannot hold 1024 px: every window matched in 512 px tiles
+    out = os.path.join(tmp, 'out_C1_tiles')
+    rc = _run_job({'input_path': data['input'], 'reference_dir': data['C1'], 'output_dir': out,
+                   'channels': ['band1'], 'detectors': ['sift'], 'window_sizes': [1024], 'gpu_window_px': 512,
+                   'max_expected_error_m': 10000, 'smnn_thresholds': [0.95], 'use_amp': False}, tmp)
+    best = os.path.join(out, 'RIVAL_BEST_G1A_SYNTH_L1_band1.csv')
+    got = None
+    if rc == 0 and os.path.exists(best):
+        import pandas as pd
+        pts = AR.read_rival_csv(best)
+        man = pd.read_csv(os.path.join(out, 'RUN_MANIFEST.csv'))
+        got = (abs(float((pts.ix - pts.rx).mean()) - dE) < 10.0, abs(float((pts.iy - pts.ry).mean()) - dN) < 10.0,
+               int(man['gpu_window_px'].iloc[0]))
+    check('C1 in 512 px tiles: dE, dN within half a pixel; manifest records the GPU window', got, (True, True, 512))
+
+
+def test_nisar_h5(tmp):
+    """NISAR L-band GSLC: compound complex, NaN fill, boundingPolygon, no .met."""
+    import numpy as np
+    import rasterio
+    import synthetic_data as S
+    import automatch_engine as E
+    world, wtf = S._world()
+    h5 = S.make_nisar_h5(tmp, world, wtf)
+    sc = E.InputScene(os.path.dirname(h5), E.PipelineConfig())
+    check('NISAR: detected', sc.kind, 'nisar')
+    check('NISAR: L-band grid found', (sc.info['band'], sc.info['product']), ('LSAR', 'GSLC'))
+    check('NISAR: channels', sc.channels, ['HH'])
+    check('NISAR: working CRS from projection', sc.working_crs, 'EPSG:32644')
+    path, band = sc.channel_raster('HH', os.path.join(tmp, 'cache'))
+    with rasterio.open(path) as src:
+        a = src.read(1)
+        check('NISAR: amplitude finite, fill -> 0', bool(np.isfinite(a).all() and (a == 0).any() and a.max() > 0))
+        import h5py
+        with h5py.File(h5, 'r') as f:
+            x0 = float(f['science/LSAR/GSLC/grids/frequencyA/xCoordinates'][0])
+            y0 = float(f['science/LSAR/GSLC/grids/frequencyA/yCoordinates'][0])
+        check('NISAR: pixel-centre coords -> corner origin',
+              (round(src.transform.c - (x0 - 10.0), 6), round(src.transform.f - (y0 + 10.0), 6)), (0.0, 0.0))
+    foot, src = sc.footprint_lonlat(path, band)
+    check('NISAR: footprint from boundingPolygon (no .met)', src, 'h5-boundingPolygon')
+
+
+def test_detector_params():
+    import automatch_engine as E
+    cfg = E.PipelineConfig(smnn_thresholds=[0.9, 0.95])
+    names = lambda d, p=None: [m.get_filename_prefix() for m in E.build_variants(d, cfg, p)]
+    check('params: sift rootsift on/off -> 2 named variants', names('sift', {'rootsift': [True, False]}),
+          ['sift', 'sift-rs0'])
+    check('params: dedode weights in the prefix',
+          names('dedode', {'detector_weights': ['L-C4-v2', 'L-C4'], 'descriptor_weights': ['B-upright']}),
+          ['dedode_L-C4-v2_B-upright', 'dedode_L-C4_B-upright'])
+    check('params: non-default single value is named', names('aliked', {'detection_threshold': 0.3}),
+          ['aliked_aliked-n16-dt0p3'])
+    check('params: legacy disk_epipolar name', names('disk_epipolar'), ['disk_epipolar'])
+    check('params: AdaLAM offered for every sparse kornia detector',
+          {d: 'ada' in E.KORNIA_MATCHERS[d] for d in ('sift', 'disk', 'dedode', 'aliked', 'xfeat', 'keynet')},
+          {d: True for d in ('sift', 'disk', 'dedode', 'aliked', 'xfeat', 'keynet')})
+    check('params: AdaLAM defaults are kornia\'s', (cfg.adalam_search_expansion, cfg.adalam_ransac_iters,
+                                                   cfg.adalam_min_confidence), (4, 128, 200))
+    check('params: DeDoDe LightGlue weights follow the descriptor',
+          [E.build_detector('dedode', cfg, {'descriptor_weights': [w]})._lightglue_feature_name()
+           for w in ('B-upright', 'G-C4')], ['dedodeb', 'dedodeg'])
+    m = E.build_detector('disk', cfg, {'lgm.filter_threshold': [0.1, 0.2], 'ada.search_expansion': [4, 2]})
+    runs = [(n, m._matcher_param_str(n, p)) for n, p in m.matcher_runs()]
+    check('params: matcher values add passes, not variants', runs,
+          [('smnn', '0.9'), ('smnn', '0.95'), ('lgm', ''), ('lgm', 'lf0p2'), ('ada', ''), ('ada', 'as2')])
+    check('params: run count (variants, passes in total)',
+          E.count_runs('disk', {'checkpoint': ['depth', 'epipolar'], 'lgm.filter_threshold': [0.1, 0.2]},
+                       ['smnn', 'lgm'], 2), (2, 8))
+    check('params: a matcher a variant cannot run is not counted (lgm: DoG-HardNet only)',
+          E.count_runs('dog', {'descriptor': ['hardnet', 'sosnet']}, ['smnn', 'lgm'], 1), (2, 3))
+    check('params: new kornia detectors and names',
+          (names('dog', {'descriptor': ['hardnet', 'sosnet'], 'affnet': [True]}),
+           names('keynet', {'affnet': [False]}), names('gftt'), names('hessian')),
+          (['dog_hardnet-aff1', 'dog_sosnet-aff1'], ['keynet-aff0'], ['gftt'], ['hessian']))
+    check('params: LightGlue for SIFT, KeyNet and DoG-HardNet (not DoG-SOSNet)',
+          [('lgm' in E.build_detector(d, cfg, p).get_available_matchers(),
+            E.build_detector(d, cfg, p)._lightglue_feature_name())
+           for d, p in (('sift', {}), ('keynet', {}), ('dog', {}), ('dog', {'affnet': [True]}))]
+          + ['lgm' in E.build_detector('dog', cfg, {'descriptor': ['sosnet']}).get_available_matchers()],
+          [(True, 'sift'), (True, 'keynet_affnet_hardnet'), (True, 'doghardnet'),
+           (True, 'dog_affnet_hardnet'), False])
+    check('params: default matchers unchanged by the optional ones',
+          (E.build_detector('sift', cfg).selected_matchers(), E.OPTIONAL_MATCHERS['sift']),
+          (['smnn', 'lgm', 'ada'], ['mnn', 'snn', 'nn', 'fginn']))
+    opt = E.build_detector('sift', E.PipelineConfig(smnn_thresholds=[0.9], detector_matchers={
+        'sift': ['smnn', 'snn', 'fginn', 'mnn']}), {'snn.th': [0.7, 0.8]})
+    runs = [(n, opt._matcher_param_str(n, p)) for n, p in opt.matcher_runs()]
+    check('params: optional matchers run when selected, with their parameter passes', runs,
+          [('smnn', '0.9'), ('mnn', ''), ('snn', 'sn0p7'), ('snn', ''), ('fginn', '')])
+    r = P0 = E.MatchStatistics._parse_filename('dog_sosnet-aff1_band1_toC1_pair001_scan0_pix0_snn_sn0p7'
+                                               '_aff_magsac_20_0.99_.csv')
+    check('params: new names parse', (r['detector'], r['disk_mode'], r['match_method']),
+          ('dog', 'sosnet-aff1', 'snn_sn0p7'))
+    cat = {d['name']: d for d in E.available_detectors()}
+    check('params: catalogue lists defaults and optional matchers',
+          (cat['sift']['default_matchers'], cat['sift']['matchers'][-4:], cat['loftr']['matchers']),
+          (['smnn', 'lgm', 'ada'], ['mnn', 'snn', 'nn', 'fginn'], ['loftr_internal']))
+    for bad, why in ((('sift', {'rootsift': ['maybe']}), 'bad bool'),
+                     (('dedode', {'detector_weights': ['L-X']}), 'bad choice'),
+                     (('sift', {'nope': [1]}), 'unknown name'),
+                     (('aliked', {'nms_radius': [2.5]}), 'non-integer')):
+        try:
+            E.expand_variants(*bad)
+            check(f'params: {why} rejected', False)
+        except ValueError:
+            check(f'params: {why} rejected', True)
+    P = E.MatchStatistics._parse_filename
+    check('params: variant name parses', P('sift-rs0_band1_toC1_pair001_scan0_pix0_smnn_0.95_aff_magsac_20_0.99_.csv')
+          ['detector'], 'sift-rs0')
+    r = P('disk_depth_band1_toC1_pair001_scan0_pix0_lgm_lf0p2_aff_magsac_20_0.99_.csv')
+    check('params: matcher variant parses', (r['detector'], r['disk_mode'], r['match_method']),
+          ('disk', 'depth', 'lgm_lf0p2'))
+
+
+def test_distortion_helpers():
+    """Chip consistency on an error field shaped like the manual RIVAL points
+    (6.8 % east-west scale + curvature over ~280 x 540 km) and the coarse
+    field interpolation."""
+    import numpy as np
+    import automatch_engine as E
+    C = E.ChipConsensusSelector
+    X, Y = np.meshgrid(np.linspace(-150e3, 130e3, 5), np.linspace(-270e3, 268e3, 5))
+    X, Y = X.ravel(), Y.ravel()
+    u, v = X / 140e3, Y / 270e3
+    dE = 27000 + 0.068 * X + 12000 * v ** 2 * (u + 1) / 2
+    dN = 6400 + 0.0024 * Y + 1200 * v ** 2
+    rng = np.random.default_rng(1)
+    a, c = dN + rng.normal(0, 30, 25), dE + rng.normal(0, 30, 25)
+    a[7] += 6000
+    c[18] -= 9000
+    keep, _, _, deg, _ = C._surface_keep(X, Y, a, c, tol=150.0)
+    check('surface: every good chip kept, both wrong chips rejected',
+          (int(keep.sum()), bool(keep[7]), bool(keep[18])), (23, False, False))
+    for forced in ('affine', 'bilinear', 'quadratic'):
+        keep, *_ = C._surface_keep(X, Y, a, c, tol=150.0, degree=forced)
+        check(f'surface ({forced}, cannot fit the curvature): wrong chips still rejected',
+              (bool(keep[7]), bool(keep[18])), (False, False))
+    am, cm = C._mode_center(a, 50), C._mode_center(c, 50)
+    check('constant rule on a varying field keeps almost nothing',
+          int(((abs(a - am) <= 150) & (abs(c - cm) <= 150)).sum()) <= 2)
+    f = {'x0': 0.0, 'y1': 100.0, 'cw': 50.0, 'ch': 50.0, 'nx': 2, 'ny': 2,
+         'dx': [[0.0, 100.0], [0.0, 100.0]], 'dy': [[10.0, 10.0], [30.0, 30.0]]}
+    check('field: bilinear between cell centres', E.field_offset(f, 50.0, 50.0), (50.0, 20.0))
+    check('field: constant beyond the outer centres', E.field_offset(f, -500.0, 500.0), (0.0, 10.0))
+
+
+def test_weights_and_failfast(tmp):
+    """The user's log: a torch-hub folder pointed elsewhere made kornia miss
+    weights it already had and retry a download in every window. Weights must
+    be found in kornia's default folder; a model that cannot be loaded must
+    fail once, fast, and not be retried."""
+    import torch as th
+    import automatch_engine as E
+    cfg = E.PipelineConfig(num_features=500, use_amp=False)
+    default_ckpt = os.path.join(E._default_hub_dir(), 'checkpoints', 'depth-save.pth')
+    old = th.hub.get_dir()
+    empty = os.path.join(tmp, 'empty_hub')
+    os.makedirs(os.path.join(empty, 'checkpoints'), exist_ok=True)
+    calls = []
+    orig = E._ORIG_LOAD_STATE_DICT
+    default_hub = E._default_hub_dir
+
+    def offline(url, *a, **k):  # no network: every download fails
+        calls.append(url)
+        raise OSError(f'offline: {url}')
+    try:
+        th.hub.set_dir(empty)
+        E._ORIG_LOAD_STATE_DICT = offline
+        if os.path.exists(default_ckpt):
+            m = E.build_detector('disk', cfg)
+            try:
+                m.warmup()
+                check('weights: kornia default folder used when the hub folder points elsewhere',
+                      not calls and m.disk is not None)
+            finally:
+                m.unload_model()
+        else:
+            print('SKIP  weights: DISK depth weights not in the default folder here')
+        E.FAILED_MODELS.clear()
+        # from here on the default folder is not searched either, so the
+        # weights count as missing whatever this machine has cached
+        E._default_hub_dir = lambda: empty
+        m = E.build_detector('loftr', cfg, {'pretrained': ['indoor_new']})
+        n_before = len(calls)
+        try:
+            m.warmup()
+            check('fail-fast: missing weights raise ModelLoadError', False)
+        except E.ModelLoadError as e:
+            check('fail-fast: missing weights raise ModelLoadError', True)
+            check('fail-fast: message names the folders searched', 'Looked for its weights in' in str(e))
+        m2 = E.build_detector('loftr', cfg, {'pretrained': ['indoor_new']})
+        try:
+            m2.warmup()
+        except E.ModelLoadError:
+            pass
+        check('fail-fast: download tried once for the whole job, not per window', len(calls) - n_before, 1)
+    finally:
+        E._ORIG_LOAD_STATE_DICT = orig
+        E._default_hub_dir = default_hub
+        th.hub.set_dir(old)
+        E.FAILED_MODELS.clear()
+
+    ests = {1: {'method': 'failed', 'dx': 0.0, 'dy': 0.0},
+            2: {'method': 'matcher@60m', 'dx': 1000.0, 'dy': 2000.0, 'field': None},
+            3: {'method': 'matcher@60m', 'dx': 9000.0, 'dy': 9000.0, 'field': None}}
+    pairs = [{'pair_id': 1, 'bounds': [0, 0, 10, 10]}, {'pair_id': 2, 'bounds': [10, 0, 20, 10]},
+             {'pair_id': 3, 'bounds': [500, 500, 510, 510]}]
+    E.AutoMatchPipeline._borrow_failed_offsets(pairs, ests)
+    check('coarse: failed pair borrows the nearest pair\'s offset',
+          (ests[1]['method'], ests[1]['dx'], ests[1]['dy'], ests[1]['margin_scale']),
+          ('from-pair-2', 1000.0, 2000.0, 2.0))
+
+
+def test_gui_cross():
+    """Benchmark & cross-check is one tool: the dialog builds one command with
+    the cross-check settings; the results show a Cross-check tab."""
+    try:
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+        import DPQED_automatch as G
+    except Exception as e:
+        print(f'SKIP  GUI cross ({type(e).__name__}: {e})')
+        return
+    app = G.QtWidgets.QApplication.instance() or G.QtWidgets.QApplication([])
+    w = G.AutoMatchWindow()
+    fmt = G.QtCore.QSettings.IniFormat if G.QT_API == 'PyQt5' else G.QtCore.QSettings.Format.IniFormat
+    w.settings = G.QtCore.QSettings(os.path.join(tempfile.mkdtemp(), 'cross.ini'), fmt)
+    try:
+        check('gui: one button for benchmark and cross-check, no separate cross-check button',
+              (w.btn_benchmark.text().replace('&&', '&'), hasattr(w, 'btn_cross_check')), ('Benchmark & cross-check…', False))
+        dlg = w.bench_dialog(run=False)
+        dlg.folder.setText(tempfile.mkdtemp())
+        dlg.top.setValue(4)
+        dlg.keep.setValue(2)
+        a = dlg.args()
+        check('gui: the cross-check settings go into the benchmark command',
+              (a[0], a[a.index('--top') + 1], a[a.index('--keep') + 1], '--no-cross' in a), ('bench', '4', '2', False))
+        dlg.cross_on.setChecked(False)
+        check('gui: cross-check can be switched off', ('--no-cross' in dlg.args(), dlg.top.isEnabled()), (True, False))
+        check('gui: match accuracy off by default', ('--accuracy' in dlg.args(), dlg.subcell.isEnabled()), (False, False))
+        dlg.accuracy.setChecked(True)
+        dlg.subcell.setText('256, 512')
+        a = dlg.args()
+        check('gui: match accuracy with 256 and 512 px sub-cells goes into the benchmark command',
+              ('--accuracy' in a, a[a.index('--subcell-px') + 1:a.index('--subcell-px') + 3],
+               a[a.index('--subcell-keep') + 1]), (True, ['256', '512'], '10'))
+    finally:
+        w.close()
+
+
+def test_gui_cloud():
+    """Cloud mask test from the GUI: the dialog builds the stand-alone
+    command from the job's cloud settings; the result shows the table and a
+    quicklook per threshold."""
+    try:
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+        import DPQED_automatch as G
+    except Exception as e:
+        print(f'SKIP  GUI cloud ({type(e).__name__}: {e})')
+        return
+    import contextlib
+    import io
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_origin
+    import automatch_cloud as C
+    app = G.QtWidgets.QApplication.instance() or G.QtWidgets.QApplication([])
+    tmp = tempfile.mkdtemp()
+    img = os.path.join(tmp, 'G1A_MV_G_GUI.tif')
+    with rasterio.open(img, 'w', driver='GTiff', height=80, width=100, count=6, dtype='uint16', crs='EPSG:32643',
+                       transform=from_origin(500000, 1700000, 45, 45), nodata=0) as d:
+        for b in range(1, 7):
+            d.write((500 + 100 * np.random.default_rng(b).random((80, 100))).astype('uint16'), b)
+    w = G.AutoMatchWindow()
+    fmt = G.QtCore.QSettings.IniFormat if G.QT_API == 'PyQt5' else G.QtCore.QSettings.Format.IniFormat
+    w.settings = G.QtCore.QSettings(os.path.join(tmp, 'cloud.ini'), fmt)
+    try:
+        check('gui: a Cloud mask test button', w.btn_cloud.text(), 'Cloud mask test…')
+        tools = [a.text().replace('&&', '&') for a in w.menuBar().actions()[0].menu().actions()]
+        check('gui: the analysis tools in their own row and in the Tools menu; the version in the title',
+              (w.btn_cloud_sweep.parentWidget() is not None, tools, G.AUTOMATCH_VERSION in w.windowTitle()),
+              (True, ['Benchmark & cross-check…', 'Cloud mask test…', 'Cloud sweep…'], True))
+        w.in_path.setText(img)
+        w.cloud_conf.setValue(0.8)
+        w.cloud_bands.setText('band3, band2, band6')
+        dlg = w.cloud_dialog(run=False)
+        dlg.out.setText(os.path.join(tmp, 'ct'))
+        dlg.device.setCurrentIndex(1)
+        a = dlg.args()
+        check('gui: the cloud test command takes the image, the thresholds (with the job\'s) and the job\'s bands',
+              (a[:4], a[a.index('--conf') + 1:a.index('--conf') + 4], a[a.index('--bands') + 1:a.index('--bands') + 4],
+               a[a.index('--device') + 1]),
+              (['cloud', img, '--out', os.path.join(tmp, 'ct')], ['0.5', '0.8', '0.85'], ['band3', 'band2', 'band6'],
+               'cpu'))
+        dlg.conf.setText('0.5, 1.5')
+        try:
+            dlg.thresholds()
+            bad = False
+        except ValueError:
+            bad = True
+        check('gui: a threshold outside 0-1 is refused', bad, True)
+
+        def fake(arr, nodata, model_dir, device):
+            p = np.zeros((4,) + arr.shape[1:], np.float32)
+            p[0] = 1.0
+            p[:, 10:40, 10:50] = np.array([0.1, 0.85, 0.05, 0.0])[:, None, None]
+            return p
+        with contextlib.redirect_stdout(io.StringIO()):
+            C.standalone(img, os.path.join(tmp, 'ct'), '', None, 'spec', [0.5, 0.8], predictor=fake)
+            C.standalone(img, os.path.join(tmp, 'ct'), '', ['band1', 'band2', 'band4'], 'spec', [0.8], predictor=fake)
+        res = G.CloudResultDialog(os.path.join(tmp, 'ct'), w)
+        tabs = res.findChild(G.QtWidgets.QTabWidget)
+        sd = w.cloud_sweep_dialog(run=False)
+        sd.images.setPlainText(img)
+        sd.conf.setText('0.6-0.9:0.1')
+        sd.bright.setText('60-90:15')
+        sd.crisp.setValue(6)
+        sa = sd.args()
+        check('gui: the cloud sweep dialog counts the combinations and builds the command',
+              (w.btn_cloud.text(), w.btn_cloud_sweep.text(), sa[:2], sa[sa.index('--conf') + 1],
+               sa[sa.index('--bright') + 1], sa[sa.index('--blob-km2') + 1:sa.index('--blob-km2') + 4],
+               '21 band set' in sd.lbl_n.text(), sa[sa.index('--images') + 1], '--sheets' in sa),
+              ('Cloud mask test…', 'Cloud sweep…', ['cloudsweep', img], '0.6-0.9:0.1', '60-90:15', ['0.25', '1', '4'],
+               True, 'grid', False))
+        import automatch_cloudsweep as CS
+        with contextlib.redirect_stdout(io.StringIO()):
+            sres = CS.run([img], os.path.join(tmp, 'sw'), [], '', '0.7, 0.9', '90', [1], [10], 0, True, [1], '',
+                          None, 2048, 0, predictor=fake)
+        swd = G.CloudSweepResultDialog(sres['folder'], w)
+        stabs = swd.findChild(G.QtWidgets.QTabWidget)
+        check('gui: the sweep result shows the summary and an image browser (one quicklook per combination)',
+              (stabs.count(), stabs.tabText(0), stabs.tabText(1), swd.png_list.count(),
+               swd.png_view.pixmap() is not None and not swd.png_view.pixmap().isNull()),
+              (2, 'Summary', 'Images (4)', 4, True))
+        check('gui: the cloud result shows each threshold\'s quicklook and the table',
+              (tabs.count(), 'bands_1-2-4 @ 0.8' in tabs.tabText(0),
+               'bands_3-2-6 @ 0.8' in tabs.tabText(2),
+               res.findChild(G.QtWidgets.QTableWidget).rowCount()), (3, True, True, 3))
+    finally:
+        w.close()
+
+
+def test_gui_queue():
+    """Queued runs on one workstation GPU: a run queued while another runs
+    waits, starts when that one finishes, keeps its own copy of the settings,
+    honours a start time, never shares an output folder, pauses on Stop and
+    comes back paused after a restart."""
+    try:
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+        import DPQED_automatch as G
+    except Exception as e:
+        print(f'SKIP  GUI queue ({type(e).__name__}: {e})')
+        return
+    import automatch_engine as E
+    app = G.QtWidgets.QApplication.instance() or G.QtWidgets.QApplication([])
+    ini = os.path.join(tempfile.mkdtemp(), 'queue_test.ini')
+    fmt = G.QtCore.QSettings.IniFormat if G.QT_API == 'PyQt5' else G.QtCore.QSettings.Format.IniFormat
+    w = G.AutoMatchWindow()
+    started, warned = [], []
+
+    class FakeProc:
+        def state(self):
+            return 'running'
+
+        def terminate(self):
+            pass
+
+        def kill(self):
+            pass
+
+    def fake_start(args, kind):
+        if kind != 'run':              # the detector list refreshed at start-up
+            return True
+        started.append((kind, args[-1]))
+        w.proc, w.proc_kind, w._events, w.proc_buffer = FakeProc(), kind, [], ''
+        return True
+    warn = G.QtWidgets.QMessageBox.warning
+    G.QtWidgets.QMessageBox.warning = staticmethod(lambda *a, **k: warned.append(a[-1]))
+    try:
+        w.settings = G.QtCore.QSettings(ini, fmt)
+        w._run_queue = []
+        w._start = fake_start
+        w._fill_detector_table(E.available_detectors())
+        base = tempfile.mkdtemp()
+        out = {k: os.path.join(base, k) for k in 'abc'}
+        w.out_path.setText(out['a'])
+        w.run_job()
+        check('gui queue: Run starts at once', started, [('run', os.path.join(out['a'], 'job_gui.json'))])
+        w.out_path.setText(out['b'])
+        w.windows.setText('512')
+        e = w.queue_run()
+        check('gui queue: a run queued while one runs waits', (len(started), len(w._run_queue)), (1, 1))
+        w.windows.setText('1024')
+        with open(e['path'], encoding='utf-8') as f:
+            check('gui queue: the queued run keeps its own copy of the settings', json.load(f)['window_sizes'], [512])
+        w.queue_run()
+        check('gui queue: a second run into the same folder is refused', (len(w._run_queue), len(warned)), (1, 1))
+        w.out_path.setText(out['a'])
+        w.queue_run()
+        check('gui queue: nor into the running run\'s folder', (len(w._run_queue), len(warned)), (1, 2))
+        w.out_path.setText(out['c'])
+        w.use_not_before.setChecked(True)
+        w.not_before.setDateTime(G.QtCore.QDateTime.currentDateTime().addSecs(3 * 3600))
+        w.queue_run()
+        w.use_not_before.setChecked(False)
+        check('gui queue: listed in order, with the start time', (w.queue_list.count(),
+              'not before' in w.queue_list.item(1).text()), (2, True))
+        w._finished(0)
+        app.processEvents()
+        check('gui queue: the next run starts when the running one finishes',
+              (started[-1], len(w._run_queue)), (('run', e['path']), 1))
+        w._finished(0)
+        app.processEvents()
+        check('gui queue: a run with a later start time waits, even with the GPU free',
+              (len(started), len(w._run_queue), w.proc is None), (2, 1, True))
+        w._run_queue[0]['not_before'] = '2000-01-01 00:00'
+        w._maybe_start_queued()
+        check('gui queue: it starts once due', (len(started), w._run_queue), (3, []))
+        w.out_path.setText(out['b'])
+        w.queue_run()
+        w.stop()
+        check('gui queue: Stop pauses the queue', w.queue_on.isChecked(), False)
+        w._finished(0)
+        app.processEvents()
+        check('gui queue: nothing starts while paused', (len(started), len(w._run_queue)), (3, 1))
+        w2 = G.AutoMatchWindow.__new__(G.AutoMatchWindow)
+        G.QtWidgets.QMainWindow.__init__(w2)
+        w2.settings = G.QtCore.QSettings(ini, fmt)
+        w2.queue_list = G.QtWidgets.QListWidget()
+        w2.queue_on = G.QtWidgets.QCheckBox()
+        w2.queue_on.setChecked(True)
+        w2.lbl_status = G.QtWidgets.QLabel()
+        w2._restore_queue()
+        check('gui queue: queued runs come back after a restart, paused',
+              (len(w2._run_queue), w2.queue_on.isChecked()), (1, False))
+        w.queue_list.setCurrentRow(0)
+        w._queue_remove()
+        check('gui queue: Remove empties the queue (and what is saved)',
+              (w._run_queue, json.loads(G.QtCore.QSettings(ini, fmt).value('run_queue'))), ([], []))
+    finally:
+        G.QtWidgets.QMessageBox.warning = warn
+        w.proc = None
+        w.close()
+
+
+def test_gui_dialog():
+    """Configure… dialog, headless: values stored, summary, job round trip."""
+    try:
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+        import DPQED_automatch as G
+    except Exception as e:
+        print(f'SKIP  GUI dialog ({type(e).__name__}: {e})')
+        return
+    import automatch_engine as E
+    app = G.QtWidgets.QApplication.instance() or G.QtWidgets.QApplication([])
+    w = G.AutoMatchWindow()
+    try:
+        w._fill_detector_table(E.available_detectors())
+        dlg = w.open_param_dialog('sift', run=False)
+        box = dlg.widgets['rootsift']
+        for cb, opt in box._items:
+            cb.setChecked(True)                       # rootsift: on AND off
+        dlg._accept()
+        check('gui: dialog stores the ticked values', w.detector_params.get('sift'), {'rootsift': [True, False]})
+        r = w._row_of('sift')
+        text = w.det_table.cellWidget(r, 3).findChild(G.QtWidgets.QLabel, 'summary').text()
+        check('gui: summary shows the variants', '2 variants' in text)
+        w.det_table.item(r, 0).setCheckState(G.CHECKED)
+        job = w.get_job()
+        check('gui: job carries detector_params', job['detector_params'].get('sift'), {'rootsift': [True, False]})
+        dlg = w.open_param_dialog('aliked', run=False)
+        dlg.widgets['nms_radius'].setText('2, x')
+        try:
+            dlg.values()
+            check('gui: bad number rejected', False)
+        except ValueError:
+            check('gui: bad number rejected', True)
+        dlg = w.open_param_dialog('disk', run=False)
+        dlg.reset_defaults()
+        dlg._accept()
+        check('gui: all defaults -> nothing stored', 'disk' in w.detector_params, False)
+        w.set_job({**G.DEFAULT_JOB, 'detectors': ['disk_depth', 'disk_epipolar']})
+        check('gui: legacy disk names -> disk with both checkpoints',
+              (w.detector_params.get('disk'), w.det_table.item(w._row_of('disk'), 0).checkState() == G.CHECKED),
+              ({'checkpoint': ['depth', 'epipolar']}, True))
+        # the whole catalogue: rows not offered are shown greyed and never selected
+        w._fill_detector_table(E.available_detectors(), [
+            {'tag': 'disk-lg', 'kind': 'kornia', 'use': "'disk' with lgm",
+             'reason': "disk is provided by kornia: use 'disk' with lgm"}])
+        r = w._row_of('imw-disk-lg')
+        check('gui: not-offered row shown, greyed, with the kornia replacement',
+              (r is not None, w._selectable(r), w.det_table.cellWidget(r, 2).text()),
+              (True, False, "use kornia 'disk' with lgm"))
+        w.set_job({**G.DEFAULT_JOB, 'detectors': ['sift', 'imw-disk-lg']})
+        job = w.get_job()
+        check('gui: default matchers ticked, optional ones not; nothing stored when unchanged',
+              (job['detectors'], job['matchers']), (['sift'], {}))
+        r = w._row_of('sift')
+        for cb in w.det_table.cellWidget(r, 2).findChildren(G.QtWidgets.QCheckBox):
+            if cb.text() == 'mnn':
+                cb.setChecked(True)
+        check('gui: ticking an optional matcher stores the selection',
+              w.get_job()['matchers'].get('sift'), ['smnn', 'lgm', 'ada', 'mnn'])
+        ev = {'event': 'weights', 'mode': 'check', 'torch_folders': ['/a/checkpoints'], 'hf_caches': [],
+              'put_in': '/a/checkpoints', 'summary': {'files': 2, 'found': 1, 'missing': 1, 'detectors': 1},
+              'missing': [{'file': 'x.pth', 'source': 'http://h/x.pth', 'kind': 'torch-hub', 'detectors': ['sift']}],
+              'detectors': [{'detector': 'sift', 'status': 'missing', 'error': '', 'variants': [
+                  {'variant': 'sift', 'status': 'missing', 'error': ''}], 'files': [
+                  {'file': 'x.pth', 'status': 'MISSING', 'model': 'LightGlue (sift)', 'source': 'http://h/x.pth',
+                   'folder': '', 'needed_by': ['sift'], 'all_variants': True},
+                  {'file': 'y.pth', 'status': 'ok', 'model': 'SIFT', 'source': 'http://h/y.pth',
+                   'folder': '/a/checkpoints', 'needed_by': ['sift'], 'all_variants': True}]}]}
+        w._show_weights(ev)
+        dlg = w._last_weights_dialog
+        check('gui: weights dialog lists the files and the detector column says what is missing',
+              (dlg.table.rowCount(), w.det_table.item(w._row_of('sift'), 4).text(),
+               'x.pth\thttp://h/x.pth' in dlg.missing_text()), (2, '1 missing', True))
+        dlg.close()
+        w.windows.setText('1024, 3072')
+        w.max_feat.setValue(32000)
+        check('gui: keypoints per window shown, capped sizes flagged',
+              ('1024 px: 9,437' in w.lbl_kp.text(), '3072 px: 32,000 (capped; 84,934' in w.lbl_kp.text()), (True, True))
+        w.max_feat.setValue(90000)
+        check('gui: max keypoints reaches the job', w.get_job()['max_num_features'], 90000)
+        w.gpu_win.setValue(1024)
+        check('gui: GPU window reaches the job (0 = automatic)',
+              (w.get_job()['gpu_window_px'], w.gpu_win.minimum()), (1024, 0))
+        w.gpu_win.setValue(0)
+        w.auto_bands.setValue(2)
+        check('gui: auto bands reaches the job (0 = off)', (w.get_job()['auto_bands'], w.auto_bands.minimum()), (2, 0))
+        cp = w.channels
+        cp.set_names([f'band{i}' for i in range(1, 181)])
+        cp.edit.setText('47, 50 - 52; band60 HH')
+        try:
+            cp.checked()
+            bad = False
+        except ValueError:
+            bad = True
+        check('gui channels: a channel the input lacks is refused', bad, True)
+        cp.edit.setText('47, 50 - 52; band60 47')
+        check('gui channels: numbers, ranges and names, no repeats', cp.checked(),
+              ['band47', 'band50', 'band51', 'band52', 'band60'])
+        check('gui channels: shown with runs as ranges', (cp.set_checked(cp.checked()), cp.edit.text())[1],
+              'band47, band50-52, band60')
+        check('gui channels: typed channels tick their boxes', cp.combo.checked_items(),
+              ['band47', 'band50', 'band51', 'band52', 'band60'])
+        cp.edit.clear()
+        check('gui channels: clearing the field unticks every box', cp.combo.checked_items(), [])
+        cp.combo._pressed(cp.combo.model().index(47, 0))
+        check('gui channels: ticking band47 in the drop-down fills the field and keeps the list open',
+              (cp.checked(), cp.combo._keep_open, cp.combo.itemText(0)), (['band47'], True, '1 of 180 ticked'))
+        cp.combo._pressed(cp.combo.model().index(47, 0))
+        check('gui channels: unticking it empties the field', (cp.checked(), cp.combo.itemText(0)), ([], 'all channels'))
+        cp.combo._pressed(cp.combo.model().index(0, 0))
+        check('gui channels: the summary row is not a channel', cp.checked(), [])
+        cp.combo._keep_open = False
+        cp.combo._pressed(cp.combo.model().index(47, 0))
+        check('gui channels: reach the job; empty = all', (w.get_job()['channels'], (cp.edit.clear(), w.get_job()['channels'])[1]),
+              (['band47'], []))
+        cp.set_names([])
+        cp.edit.setText('HH, hv')
+        check('gui channels: before Inspect, typed names are kept as typed', cp.checked(), ['HH', 'hv'])
+        cp.set_names(['HH', 'HV'])
+        check('gui channels: after Inspect, names match the input and are ticked', (cp.checked(), cp.combo.checked_items()),
+              (['HH', 'HV'], ['HH', 'HV']))
+        cp.edit.clear()
+        cp.set_names([])
+        w.stretch_hi.setValue(90)
+        check('gui: the contrast stretch reaches the job', w.get_job()['stretch_percentiles'], [1.0, 90.0])
+        w.stretch_hi.setValue(99)
+        w.stretch_mode.setCurrentIndex(1)
+        check('gui: CLAHE choice reaches the job', w.get_job()['stretch_mode'], 'clahe')
+        w.stretch_mode.setCurrentIndex(0)
+        w.subcell.setText('256, 512')
+        w.subcell_keep.setValue(7)
+        check('gui: sub-cell sizes reach the job', (w.get_job()['subcell_px'], w.get_job()['subcell_keep']),
+              ([256, 512], 7))
+        w.subcell.setText('')
+        w.cloud_mask.setChecked(True)
+        w.cloud_choice.setCurrentIndex(1)
+        check('gui: cloud band choice reaches the job', w.get_job()['cloud_band_choice'], 'quality')
+        w.cloud_conf.setValue(0.85)
+        w.cloud_what.setCurrentIndex(1)
+        w.cloud_refine.setChecked(False)
+        check('gui: cloud confidence, what is masked and the bright-blob check reach the job',
+              (w.get_job()['cloud_min_confidence'], w.get_job()['cloud_mask_classes'], w.get_job()['cloud_refine']),
+              (0.85, [1, 3], False))
+        w.cloud_what.setCurrentIndex(0)
+        w.cloud_refine.setChecked(True)
+        w.cloud_choice.setCurrentIndex(0)
+        w.cloud_bands.setText('band3, band2, band6')
+        w.cloud_from.setText('/x/G1A_HV.tif')
+        jj = w.get_job()
+        check('gui: cloud masking options reach the job',
+              (jj['cloud_mask'], jj['cloud_bands'], jj['cloud_mask_from']),
+              ('omnicloudmask', ['band3', 'band2', 'band6'], '/x/G1A_HV.tif'))
+        w.cloud_mask.setChecked(False)
+        w.cloud_bands.setText('')
+        w.cloud_from.setText('')
+        w.coarse_shared.setChecked(False)
+        w.coarse_dets.setText('imw-topicfm, loftr')
+        check('gui: shared coarse fields reach the job', (w.get_job()['coarse_shared'], w.get_job()['coarse_detectors']),
+              (False, ['imw-topicfm', 'loftr']))
+        w.coarse_shared.setChecked(True)
+        w.coarse_dets.setText('')
+        w.auto_range.setText('1-70')
+        check('gui: auto bands range reaches the job', w.get_job()['auto_bands_range'], [1, 70])
+        w.auto_range.setText('70-1')
+        try:
+            w.get_job()
+            bad = False
+        except ValueError:
+            bad = True
+        check('gui: a reversed auto bands range is refused', bad, True)
+        w.auto_range.setText('')
+        w.auto_bands.setValue(0)
+        w.settings = G.QtCore.QSettings(os.path.join(tempfile.mkdtemp(), 'gui_test.ini'), G.QtCore.QSettings.IniFormat
+                                        if G.QT_API == 'PyQt5' else G.QtCore.QSettings.Format.IniFormat)
+        # the real button: its clicked signal passes checked=False, which once
+        # silently stopped the dialog from opening
+        opened = []
+        cls = G.PackDialog
+        name = 'exec' if hasattr(cls, 'exec') else 'exec_'
+        orig = getattr(cls, name)
+        setattr(cls, name, lambda self_: opened.append(self_) or 0)
+        try:
+            w.btn_pack.click()
+        finally:
+            setattr(cls, name, orig)
+        check('gui pack: the button opens the dialog', len(opened), 1)
+        for d_ in opened:
+            d_.close()
+        pd_ = w.pack_dialog(run=False)
+        pd_.local.setText('V:\\ICIGDev\\GPUPOC\\input\\dqe\\g1a\\set9')
+        pd_.all_det.setChecked(True)
+        a, job = pd_.args()
+        check('gui pack: server folder from the share mapping, remembered defaults; window sizes only from the '
+              'main window', (pd_.server.text(), a[a.index('--server-weights') + 1], a[a.index('--gpu-mb') + 1],
+                              any(x.startswith('window_sizes=') for x in a), 'detectors=all' in a,
+                              '1024, 3072 px' in pd_.windows_info.text()),
+              ('/maintenance/ICIGDev/GPUPOC/input/dqe/g1a/set9',
+               '/maintenance/ICIGDev/GPUPOC/input/dqe/imw_runtime/imw_cache', '40000', False, True, True))
+        pd_.close()
+        w._show_truth({'event': 'truth', 'n_truth': 3, 'files': {}, 'top': [
+            {'rank': 1, 'channel': 'band1', 'detector': 'sift', 'matcher_family': 'lgm',
+             'best_matcher_setting': 'lgm', 'ransac': 'magsac2', 'truth_rmse_m': 12.5,
+             'truth_reached': 3, 'truth_total': 3}]})
+        check('gui: truth ranking shown and summarised',
+              (w._last_truth_dialog.table.rowCount(), 'sift + lgm' in w.lbl_status.text()), (1, True))
+        w._last_truth_dialog.close()
+    finally:
+        if w.proc is not None:
+            w.proc.kill()
+            w.proc.waitForFinished(5000)
+        w.close()
+
+
+def test_imcui_mock():
+    """imcui bridge against a mock imcui (real registry shapes) and the full
+    catalogue: kornia-covered rows refused with the kornia replacement named,
+    rows the installed imcui lacks reported, the rest registered and runnable."""
+    import types
+    import numpy as np
+    sp = {'output': 'f-sp', 'model': {'name': 'superpoint', 'max_keypoints': 4096, 'nms_radius': 4},
+          'preprocessing': {'grayscale': True}}
+    feat = {'superpoint_max': sp, 'aliked-n16': {'output': 'f-a', 'model': {'name': 'aliked'}, 'preprocessing': {}},
+            'disk': {'output': 'f-d', 'model': {'name': 'disk'}, 'preprocessing': {}},
+            'sift': {'output': 'f-s', 'model': {'name': 'sift', 'rootsift': True}, 'preprocessing': {}},
+            'dedode': {'output': 'f-dd', 'model': {'name': 'dedode'}, 'preprocessing': {}},
+            'rootsift': {'output': 'f-r', 'model': {'name': 'dog', 'descriptor': 'rootsift'}, 'preprocessing': {}},
+            'hardnet': {'output': 'f-h', 'model': {'name': 'dog', 'descriptor': 'hardnet'}, 'preprocessing': {}},
+            'r2d2': {'output': 'f-r2', 'model': {'name': 'r2d2'}, 'preprocessing': {}}}
+
+    def lg(f):
+        return {'output': 'm', 'model': {'name': 'lightglue', 'features': f}, 'preprocessing': {}}
+    match = {'superpoint-lightglue': lg('superpoint'), 'aliked-lightglue': lg('aliked'),
+             'disk-lightglue': lg('disk'), 'sift-lightglue': lg('sift'),
+             'superglue': {'output': 'm', 'model': {'name': 'superglue'}, 'preprocessing': {}},
+             'NN-mutual': {'output': 'm', 'model': {'name': 'nearest_neighbor', 'do_mutual_check': True},
+                           'preprocessing': {}},
+             'adalam': {'output': 'm', 'model': {'name': 'adalam'}, 'preprocessing': {}}}
+    dense = {n: {'output': 'm', 'model': {'name': n}, 'preprocessing': {}}
+             for n in ('loftr', 'eloftr', 'aspanformer', 'roma', 'dkm', 'xfeat_dense', 'xfeat_lightglue')}
+    dense['minima_loftr'] = {'output': 'm', 'model': {'name': 'loftr', 'model_name': 'minima_loftr.ckpt'},
+                             'preprocessing': {}}
+
+    class API:
+        def __init__(self, conf, device, detect_threshold, max_keypoints, match_threshold):
+            self.max_keypoints = max_keypoints
+
+        def __call__(self, a, b):
+            ys, xs = np.mgrid[20:a.shape[0] - 20:25, 20:a.shape[1] - 20:25]
+            k0 = np.stack([xs.ravel(), ys.ravel()], 1).astype(float)
+            return {'mkeypoints0_orig': k0, 'mkeypoints1_orig': k0 + [7.0, -4.0]}
+
+    mods = {'imcui': types.ModuleType('imcui'), 'imcui.api': types.ModuleType('imcui.api'),
+            'imcui.hloc': types.ModuleType('imcui.hloc')}
+    mods['imcui.api'].ImageMatchingAPI = API
+    for sub, confs in (('extract_features', feat), ('match_features', match), ('match_dense', dense)):
+        m = types.ModuleType('imcui.hloc.' + sub)
+        m.confs = confs
+        mods['imcui.hloc.' + sub] = m
+        setattr(mods['imcui.hloc'], sub, m)
+    saved = {k: sys.modules.get(k) for k in mods}
+    sys.modules.update(mods)
+    try:
+        import automatch_engine as E
+        import automatch_imcui as IM
+        IM._API = None
+        res = IM.register_imcui_detectors()
+        check('imcui: registered only what kornia lacks (MINIMA-LoFTR exempt: other weights)',
+              sorted(res['registered']),
+              ['imw-aspanformer', 'imw-dkm', 'imw-eloftr', 'imw-minima-loftr', 'imw-r2d2-nn', 'imw-roma',
+               'imw-sp-lg', 'imw-sp-nn', 'imw-sp-sg', 'imw-xfeat-lg'])
+        by_kind = {}
+        for row in res['not_offered']:
+            by_kind.setdefault(row['kind'], {})[row['tag']] = row
+        check('imcui: kornia-covered rows refused', sorted(by_kind.get('kornia', {})),
+              ['aliked-lg', 'dedode-nn', 'disk-adalam', 'disk-lg', 'hardnet-nn', 'loftr',
+               'rootsift-nn', 'sift-lg', 'xfeat-dense'])
+        use = {t: r['use'] for t, r in by_kind.get('kornia', {}).items()}
+        check('imcui: refusals name the kornia replacement',
+              (use['hardnet-nn'], use['rootsift-nn'], use['disk-lg'], use['sift-lg'], use['disk-adalam'],
+               use['xfeat-dense']),
+              ("'dog' (descriptor hardnet) with mnn", "'sift' (RootSIFT on) with mnn", "'disk' with lgm",
+               "'sift' with lgm", "'disk' with ada", "'xfeatstar'"))
+        unavailable = by_kind.get('unavailable', {})
+        check('imcui: rows the installed imcui lacks are reported',
+              ('rord-nn' in unavailable and 'omniglue' in unavailable
+               and 'not in the installed imcui' in unavailable['rord-nn']['reason']), True)
+        check('imcui: every catalogue row is either offered or explained',
+              len(res['registered']) + len(res['not_offered']), len(__import__('imw_configs').catalog_rows()))
+        m = E.build_detector('imw-sp-lg', E.PipelineConfig(num_features=100))
+        rng = np.random.default_rng(0)
+        img = rng.random((300, 300)).astype('float32') * 100 + 1
+        meta = {'x01': 1000.0, 'y01': 5000.0, 'xres1': 10.0, 'yres1': -10.0, 'x02': 0.0, 'y02': 5000.0,
+                'xres2': 10.0, 'yres2': -10.0, 'nisar_crop_row_offset': 0, 'nisar_crop_col_offset': 0,
+                'pair_id': 1, 'nisar_pol': 'band1', 's1_ref_tag': 'C1'}
+        rec = m._process_single_window(img, img, 0, 0, 0, 0, meta, 'internal', None, 0.0, 0.0)
+        check('imcui: window record built', rec is not None and len(rec['X1']) > 10)
+        if rec:
+            dx = float(np.median(np.array(rec['X1']) - np.array(rec['X2'])))
+            dy = float(np.median(np.array(rec['Y1']) - np.array(rec['Y2'])))
+            check('imcui: map offset from pixel shift', (round(dx, 3), round(dy, 3)), (930.0, -40.0))
+            check('imcui: file id parses', E.MatchStatistics._parse_filename(
+                rec['file_id'] + '_aff_magsac_2_0.99_.csv')['detector'], 'imw-sp-lg')
+
+        class OOMOnLarge:     # a model that runs out of GPU memory above 400 px
+            def __init__(self, inner):
+                self.inner, self.sizes = inner, []
+
+            def __call__(self, a, b):
+                self.sizes.append(a.shape[0])
+                if a.shape[0] > 400:
+                    raise E.th.cuda.OutOfMemoryError('CUDA out of memory. Tried to allocate 12.88 GiB')
+                return self.inner(a, b)
+        import rasterio
+        tmpd = tempfile.mkdtemp(prefix='imcui_tiles_')
+        try:
+            timg, _ = _texture(600, seed=7)
+            pin, pref = os.path.join(tmpd, 'in.tif'), os.path.join(tmpd, 'ref.tif')
+            _write_tif(pin, timg, 500000.0, 1600000.0)
+            _write_tif(pref, timg, 500000.0, 1600000.0)
+            m2 = E.build_detector('imw-sp-lg', E.PipelineConfig(window_size=600, num_features=2000))
+            m2._ensure_api()
+            m2.api = first = OOMOnLarge(m2.api)
+            with rasterio.open(pin) as a, rasterio.open(pref) as b:
+                recs = m2._process_windows_from_disk(a, b, _pair_meta(a, b), {'windows': [(0, 0, 600, 600)]},
+                                                     'internal', None)
+            pooled = recs[0] if len(recs) == 1 else None
+            check('imcui: out of memory at 600 px -> 300 px tiles, the model rebuilt with a quarter of '
+                  'the keypoints, matches pooled into the window',
+                  (first.sizes[:1], m2.gpu_window, getattr(m2.api, 'max_keypoints', None),
+                   pooled is not None and min(pooled['x1']) < 300 < max(pooled['x1'])
+                   and min(pooled['y1']) < 300 < max(pooled['y1'])),
+                  ([608], 300, 1000, True))
+        finally:
+            shutil.rmtree(tmpd, ignore_errors=True)
+            E.GPU_WINDOWS.clear()
+        # per-model parameters come from the registry conf; overridden keys hidden
+        names = [p.name for p in E.detector_param_specs('imw-sp-lg')]
+        check('imcui params: thresholds + registry keys, API-owned keys hidden',
+              (names[:2], 'feature.nms_radius' in names, 'feature.max_keypoints' in names),
+              (['api.detect_threshold', 'api.match_threshold'], True, False))
+        vs = E.build_variants('imw-sp-lg', E.PipelineConfig(num_features=100),
+                              {'feature.nms_radius': [3, 4], 'api.match_threshold': [0.3]})
+        check('imcui variants: one per combination, distinct names',
+              len({v.get_filename_prefix() for v in vs}), 2)
+        v0 = vs[0]
+        check('imcui override reaches the conf',
+              (v0.imw_conf['feature']['model']['nms_radius'], v0.match_threshold,
+               v0.imw_conf['matcher']['model']['match_threshold']), (3, 0.3, 0.3))
+        check("imcui conf carries both 'dense' and 'standalone'",
+              (v0.imw_conf['dense'], v0.imw_conf['standalone']), (False, False))
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+        try:
+            import automatch_engine as E
+            for k in [k for k in E.EXTERNAL_DETECTORS if k.startswith('imw-')]:
+                E.EXTERNAL_DETECTORS.pop(k)
+        except Exception:
+            pass
+
+
+def _texture(size=320, seed=3):
+    import numpy as np
+    import cv2
+    rng = np.random.default_rng(seed)
+    img = np.zeros((size, size), np.float32)
+    for scale, amp in ((64, 1.0), (16, 0.6), (4, 0.35)):
+        small = rng.random((size // scale + 2, size // scale + 2)).astype(np.float32)
+        img += amp * cv2.resize(small, (size, size), interpolation=cv2.INTER_CUBIC)
+    for _ in range(size * size // 600):
+        cv2.circle(img, (int(rng.random() * size * 16), int(rng.random() * size * 16)),
+                   int(rng.integers(2, 9)) * 16, float(rng.random() * 2), -1, lineType=cv2.LINE_AA, shift=4)
+    img = cv2.GaussianBlur(img, (0, 0), 0.8)
+    img = 50 + 1000 * (img - img.min()) / (img.max() - img.min())
+    shifted = cv2.warpAffine(img, np.float32([[1, 0, 7], [0, 1, -4]]), (size, size), borderValue=0)
+    return img, shifted
+
+
+_META = {'x01': 0.0, 'y01': 0.0, 'xres1': 1.0, 'yres1': -1.0, 'x02': 0.0, 'y02': 0.0, 'xres2': 1.0,
+         'yres2': -1.0, 'nisar_crop_row_offset': 0, 'nisar_crop_col_offset': 0, 'pair_id': 1,
+         'nisar_pol': 'band1', 's1_ref_tag': 'C1'}
+
+
+def _shift_of(rec):
+    import numpy as np
+    if rec is None:
+        return None
+    d = np.array(rec['X1']) - np.array(rec['X2'])
+    e = np.array(rec['Y1']) - np.array(rec['Y2'])
+    return len(d), round(float(np.median(d))), round(float(np.median(e)))
+
+
+def test_truth_helpers(tmp):
+    """Ground-truth scoring of one configuration: local median near a truth
+    point, error surface elsewhere, extrapolation flagged and not scored."""
+    import numpy as np
+    import pandas as pd
+    import math
+    import automatch_truth as T
+    rng = np.random.default_rng(1)
+    E0, N0 = 500000.0, 3000000.0
+    field = lambda e, n: (4000.0 + 0.002 * (e - E0), -2500.0 + 0.001 * (n - N0))  # 2 / 1 m per km
+    rows = []
+    for ci, (ce, cn) in enumerate([(E0 + x, N0 + y) for x in range(0, 60001, 15000) for y in range(0, 60001, 15000)]):
+        e = ce + rng.uniform(-3000, 3000, 40)
+        n = cn + rng.uniform(-3000, 3000, 40)
+        de, dn = field(e, n)
+        rows.append(pd.DataFrame({'E': e, 'N': n, 'dE': de + rng.normal(0, 3, 40),
+                                  'dN': dn + rng.normal(0, 3, 40), 'chip': ci}))
+    pts = pd.concat(rows, ignore_index=True)
+    te = np.array([E0 + 15000, E0 + 37500, E0 + 250000])
+    tn = np.array([N0 + 30000, N0 + 22500, N0 + 30000])
+    de, dn = field(te, tn)
+    truth = pd.DataFrame({'truth_id': [1, 2, 3], 'E': te, 'N': tn, 'dE': de, 'dN': dn})
+    summ, per = T.score_config({'points': pts}, truth, 5000.0)
+    check('truth: local, surface, extrapolated', [r['method'] for r in per], ['local', 'surface', 'extrapolated'])
+    check('truth: agreeing configuration scores a few metres',
+          (summ['truth_reached'], summ['truth_rmse_m'] < 5.0), (2, True))
+    truth2 = truth.assign(dE=truth['dE'] + 300.0)
+    summ2, _ = T.score_config({'points': pts}, truth2, 5000.0)
+    check('truth: a 300 m disagreement is measured', round(summ2['truth_rmse_m'] / 10) * 10, 300)
+    # a steep east-west gradient (60 m/km, as on G1A scenes) and a truth point at
+    # the edge of the matches: the median of the neighbours is pulled by the
+    # gradient, a plane through them is not
+    ge, gn = rng.uniform(0, 5000, 400), rng.uniform(-2500, 2500, 400)
+    steep = pd.DataFrame({'E': ge, 'N': gn, 'dE': 4000 + 0.06 * ge + rng.normal(0, 3, 400),
+                          'dN': -2500 + 0.01 * gn + rng.normal(0, 3, 400), 'chip': 0})
+    med = T.estimate(steep, None, 0.0, 0.0, 5000.0, local='median')
+    pla = T.estimate(steep, None, 0.0, 0.0, 5000.0, local='plane')
+    check('truth: with a steep gradient the plane removes the median\'s bias',
+          (abs(med[0] - 4000) > 100, abs(pla[0] - 4000) < 5, abs(pla[1] + 2500) < 5), (True, True, True))
+    line = steep.assign(N=0.0)
+    check('truth: neighbours on a line -> slope along it only', abs(T.estimate(line, None, 0.0, 0.0, 5000.0)[0] - 4000) < 5)
+    ranked = T.rank(pd.DataFrame([{**summ, 'detector': 'a'}, {**summ2, 'detector': 'b'},
+                                  {**summ, 'truth_reached': 0, 'truth_rmse_m': None, 'detector': 'c'}]))
+    check('truth: ranking by coverage then RMSE', ranked['detector'].tolist(), ['a', 'b', 'c'])
+    job315 = pd.DataFrame([
+        {'detector': 'gftt+nn', 'truth_total': 8, 'truth_reached': 8, 'truth_rmse_m': 63522.7},
+        {'detector': 'dkm', 'truth_total': 8, 'truth_reached': 6, 'truth_rmse_m': 237.6},
+        {'detector': 'few', 'truth_total': 8, 'truth_reached': 3, 'truth_rmse_m': 50.0},
+        {'detector': 'dkm-all', 'truth_total': 8, 'truth_reached': 8, 'truth_rmse_m': 237.6}])
+    check('truth: within the configurations reaching half the points, RMSE ranks before points reached '
+          '(job 315 picked a 63 km configuration that reached 8 of 8)',
+          T.rank(job315)['detector'].tolist(), ['dkm-all', 'dkm', 'gftt+nn', 'few'])
+    # a RIVAL truth file: errors recomputed in the working CRS from lon/lat
+    from pyproj import Transformer
+    to_ll = Transformer.from_crs('EPSG:32640', 'EPSG:4326', always_xy=True)
+    ilo, ila = to_ll.transform(te, tn)
+    rlo, rla = to_ll.transform(te - de, tn - dn)
+    path = os.path.join(tmp, 'truth.csv')
+    pd.DataFrame({'In_X': te, 'In_Y': tn, 'Ref_X': te - de, 'Ref_Y': tn - dn, 'DX_Err': de, 'DY_Err': dn,
+                  'Row': [1, 2, 3], 'In_Lon': ilo, 'In_Lat': ila, 'Ref_Lon': rlo, 'Ref_Lat': rla}).to_csv(
+        path, index=False, encoding='utf-8-sig')
+    back = T.truth_in_crs(T.load_truth(path), 'EPSG:32640')
+    check('truth: RIVAL file read back in the working CRS',
+          (np.allclose(back['dE'], de, atol=0.01), np.allclose(back['N'], tn, atol=0.01)), (True, True))
+    import automatch_job as J
+    errs = J._check_gcp_file(path)
+    check('truth: a RIVAL file given as manual GCP CSV is refused with the fix named',
+          len(errs) == 1 and 'Ground truth CSV' in errs[0])
+    # RIVAL rows with a point unset: Ref_Lon/Ref_Lat blank, 0 or text, In_Lon/In_Lat 0
+    import contextlib
+    import io
+    rng = np.random.default_rng(3)
+    ex, ny = 500000 + rng.uniform(-80e3, 80e3, 8), 1600000 + rng.uniform(-80e3, 80e3, 8)
+    ddx, ddy = rng.uniform(-6e3, 6e3, 8), rng.uniform(5e3, 9e3, 8)
+    to43 = Transformer.from_crs('EPSG:32643', 'EPSG:4326', always_xy=True)
+    a_lo, a_la = to43.transform(ex, ny)
+    b_lo, b_la = to43.transform(ex - ddx, ny - ddy)
+    full = pd.DataFrame({'In_X': ex, 'In_Y': ny, 'Ref_X': ex - ddx, 'Ref_Y': ny - ddy, 'Row': range(1, 9),
+                         'In_Lon': a_lo, 'In_Lat': a_la, 'Ref_Lon': b_lo, 'Ref_Lat': b_la}).astype(object)
+    broken = full.copy()
+    broken.loc[1, ['Ref_Lon', 'Ref_Lat']] = ''            # blank
+    broken.loc[2, ['Ref_Lon', 'Ref_Lat']] = 0             # zero
+    broken.loc[3, ['Ref_Lon']] = '-'                      # text, and no X/Y to recover it
+    broken.loc[3, ['Ref_X']] = ''
+    broken.loc[4, ['In_Lon', 'In_Lat']] = 0               # the case reported: In 0, Ref blank, no X/Y
+    broken.loc[4, ['Ref_Lon', 'Ref_Lat', 'In_X', 'In_Y', 'Ref_X', 'Ref_Y']] = ''
+    bp = os.path.join(tmp, 'truth_broken.csv')
+    broken.to_csv(bp, index=False)
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        got = T.load_truth(bp)
+    check('truth: rows without a usable point are left out, never scored (In 0 / Ref blank)',
+          sorted(got['truth_id']), [1, 2, 3, 6, 7, 8])
+    ref = full.set_index('Row')
+    gi = got.set_index('truth_id')
+    err = max(math.hypot((gi.ref_lon[i] - ref.Ref_Lon[i]) * 111320 * math.cos(math.radians(ref.Ref_Lat[i])),
+                         (gi.ref_lat[i] - ref.Ref_Lat[i]) * 110570) for i in (2, 3))
+    check('truth: a blank or 0 Ref_Lon/Ref_Lat is recovered from Ref_X/Ref_Y within 5 m', err < 5, True)
+    check('truth: each recovered or dropped point is named',
+          ('point 2 had no Ref_Lon' in buf.getvalue(), 'point 4 left out' in buf.getvalue(),
+           'point 5 left out' in buf.getvalue()), (True, True, True))
+    far = full.copy()
+    far.loc[0, ['Ref_Lon', 'Ref_Lat']] = [10.0, 10.0]
+    fp = os.path.join(tmp, 'truth_far.csv')
+    far.to_csv(fp, index=False)
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        got = T.load_truth(fp)
+    check('truth: a point thousands of km off is a broken row, left out',
+          (1 in got['truth_id'].tolist(), 'km apart' in buf.getvalue()), (False, True))
+    try:
+        pd.DataFrame({'a': [1]}).to_csv(os.path.join(tmp, 'bad.csv'), index=False)
+        T.load_truth(os.path.join(tmp, 'bad.csv'))
+        check('truth: file without lon/lat refused', False)
+    except ValueError as e:
+        check('truth: file without lon/lat refused', 'In_Lon' in str(e))
+
+
+def test_server(tmp):
+    """HTTP front end: health, token, job state, file download confined to the
+    output folder (no subprocess: a finished job is faked)."""
+    import threading
+    import urllib.request
+    import urllib.error
+    from http.server import ThreadingHTTPServer
+    import automatch_server as SV
+    srv = SV.Server(os.path.join(tmp, 'srv_jobs'))
+    out = os.path.join(tmp, 'srv_out')
+    os.makedirs(out, exist_ok=True)
+    open(os.path.join(out, 'TRUTH_BY_DETECTOR_MATCHER.csv'), 'w').write('rank,detector\n1,sift\n')
+    open(os.path.join(tmp, 'secret.txt'), 'w').write('x')
+    j = SV.Job('j1', {'output_dir': out, 'detectors': ['sift']}, os.path.join(tmp, 'srv_jobs'))
+    j.state = 'done'
+    srv.jobs['j1'] = j
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), SV.make_handler(srv, 'tok'))
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = f'http://127.0.0.1:{httpd.server_address[1]}'
+
+    def get(path, token='tok'):
+        req = urllib.request.Request(base + path, headers={'Authorization': f'Bearer {token}'} if token else {})
+        try:
+            with urllib.request.urlopen(req) as r:
+                return r.status, r.read().decode()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode()
+    try:
+        check('server: health without token', get('/health', None)[0], 200)
+        check('server: token required', get('/jobs', 'bad')[0], 401)
+        code, body = get('/jobs/j1')
+        check('server: job state', (code, json.loads(body)['state']), (200, 'done'))
+        check('server: output file download', get('/jobs/j1/files/TRUTH_BY_DETECTOR_MATCHER.csv'),
+              (200, 'rank,detector\n1,sift\n'))
+        check('server: no file outside the output folder', get('/jobs/j1/files/..%2Fsecret.txt')[0], 404)
+        check('server: unknown job', get('/jobs/nope')[0], 404)
+        try:
+            srv.submit({'detectors': ['sift']})
+            check('server: job without output_dir refused', False)
+        except ValueError:
+            check('server: job without output_dir refused', True)
+    finally:
+        httpd.shutdown()
+
+
+def test_gpuaas_args(tmp):
+    """GPU-service entry: sys.argv[2] = output folder, sys.argv[3] = the
+    comma-separated input_path (as the NISAR scripts take it)."""
+    import automatch_gpuaas as G
+    settings = os.path.join(tmp, 'settings.json')
+    with open(settings, 'w') as f:
+        json.dump({'detectors': ['sift', 'dog'], 'window_sizes': [3072], 'mode': 'run'}, f)
+    ref = os.path.join(tmp, 'refdir')
+    os.makedirs(ref, exist_ok=True)
+    mode, job = G.build_job(['s.py', 'id', '/out/x', f'/in/scene.tif,{ref},/in/truth.csv,{settings}'])
+    check('gpuaas: positional paths, settings file, output folder from the service',
+          (mode, job['input_path'], job['reference_dir'], job['truth_csv'], job['detectors'],
+           job['window_sizes'], job['output_dir'], job['temp_dir']),
+          ('run', '/in/scene.tif', ref, '/in/truth.csv', ['sift', 'dog'], [3072], '/out/x',
+           os.path.join('/out/x', '_cache')))
+    mode, job = G.build_job(['s.py', 'id', '/out/y', 'weights,/in/scene.tif,window_sizes=2048|3072,coarse_local=false'])
+    check('gpuaas: mode token and key=value overrides (| for lists)',
+          (mode, job['window_sizes'], job['coarse_local'], job['input_path']),
+          ('weights', [2048, 3072], False, '/in/scene.tif'))
+    try:
+        G.build_job(['s.py', 'id', '/o', '/a,/b,/c'])
+        check('gpuaas: three folders refused', False)
+    except ValueError:
+        check('gpuaas: three folders refused', True)
+    envfile = os.path.join(tmp, 'envmode.json')
+    with open(envfile, 'w') as f:
+        json.dump({'mode': 'env', 'env': {'AUTOMATCH_TEST_VAR': '42'}}, f)
+    old = os.environ.pop('AUTOMATCH_TEST_VAR', None)
+    try:
+        mode, job = G.build_job(['s.py', 'id', '/o', envfile])
+        check('gpuaas: env mode, and "env" settings applied before imports',
+              (mode, os.environ.get('AUTOMATCH_TEST_VAR'), 'env' in job), ('env', '42', False))
+    finally:
+        os.environ.pop('AUTOMATCH_TEST_VAR', None)
+        if old is not None:
+            os.environ['AUTOMATCH_TEST_VAR'] = old
+    text = G.environment_report({'weights_cache_dir': ''})
+    check('gpuaas: environment report has packages, GPU, catalogue and weight folders',
+          all(k in text for k in ('== Packages', 'kornia', '== GPU', '== Detector catalogue', 'dog ',
+                                  '== Weight folders searched')))
+    import automatch_job as J
+    ex = J.expand_selection(J.normalize({'detectors': ['all-kornia'], 'matchers': 'all'}))
+    import automatch_engine as E
+    check('selection: "all-kornia" and matchers "all" expand to this machine\'s catalogue',
+          (ex['detectors'] == list(E.KORNIA_DETECTORS), ex['matchers'].get('dog'),
+           ex['matchers'].get('loftr')),
+          (True, ['smnn', 'lgm', 'ada', 'mnn', 'snn', 'nn', 'fginn'], ['loftr_internal']))
+    ex = J.expand_selection(J.normalize({'detectors': ['sift', 'dog'], 'matchers': {'sift': 'all', 'dog': ['lgm']}}))
+    check('selection: per-detector "all" next to an explicit list',
+          (ex['detectors'], ex['matchers']['sift'][-1], ex['matchers']['dog']), (['sift', 'dog'], 'fginn', ['lgm']))
+    plain = J.normalize({'detectors': ['sift']})
+    check('selection: a job without "all" is left as it is', J.expand_selection(plain) is plain)
+
+
+def test_version_skew_and_coarse(tmp):
+    """From the uploaded runs: settings files that work across code versions
+    (jobs 304-307), the coarse stage on a 315 m image (run 300), preflight
+    warnings for scale, and the once-only GeoTIFF-keys CRS notice."""
+    import contextlib
+    import io
+    import logging
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_origin
+    import automatch_engine as E
+    import automatch_gpuaas as G
+    import automatch_job as J
+    import automatch_native as N
+    import automatch_pack as P
+
+    # settings from another version
+    J._WARNED_KEYS.discard('future_setting')
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        j1 = J.normalize({'detectors': ['sift'], 'future_setting': 3, '_note': 'x'})
+        J.normalize({'future_setting': 4})
+    check('settings: an unknown setting is ignored with one warning; "_" keys are dropped',
+          ('future_setting' in j1, '_note' in j1, j1['detectors'], buf.getvalue().count("'future_setting'")),
+          (False, False, ['sift'], 1))
+    check('settings: a near miss names the setting it resembles',
+          "did you mean 'window_sizes'" in J.unknown_key_note('window_size'))
+    jp = os.path.join(tmp, 'skew_job.json')
+    with open(jp, 'w') as f:
+        json.dump({'detectors': ['sift'], 'future_setting': 1}, f)
+    with contextlib.redirect_stdout(io.StringIO()):
+        loaded = J.load_job(jp)
+    try:
+        J.load_job(jp, ['window_size=[1024]'])
+        strict = False
+    except ValueError:
+        strict = True
+    check('settings: a job file with a newer setting loads; a mistyped --set is refused',
+          (loaded['detectors'], strict), (['sift'], True))
+    vl = J.version_line()
+    check('settings: version line names the version and an 8-hex code fingerprint',
+          (J.AUTOMATCH_VERSION in vl, len(J.code_fingerprint()), J.code_fingerprint() == J.code_fingerprint()),
+          (True, 8, True))
+    job = J.normalize({'input_path': '/a.tif', 'reference_dir': '/r', 'output_dir': '/o', 'window_sizes': [2048]})
+    st = P.server_settings(job)
+    old_keys = set(J.DEFAULT_JOB) - {'max_num_features'}       # the server's code behind jobs 304-307
+    check('pack: settings file holds the paths and only the settings that differ from the defaults',
+          (sorted(st), set(st) <= old_keys),
+          (['input_path', 'output_dir', 'reference_dir', 'temp_dir', 'window_sizes'], True))
+    sj = os.path.join(tmp, 'skew_settings.json')
+    with open(sj, 'w') as f:
+        json.dump({'detectors': ['sift'], 'future_setting': 1}, f)
+    with contextlib.redirect_stdout(io.StringIO()):
+        mode, gj = G.build_job(['s.py', 'id', '/out/z', f'/in/scene.tif,{sj}'])
+    check('gpuaas: a settings file with a newer setting runs, the setting noted for preflight',
+          (mode, gj['detectors'], gj.get('_ignored_keys')), ('run', ['sift'], ['future_setting']))
+
+    # coarse stage
+    al = E.CoarseAligner(E.PipelineConfig())
+    check('coarse: resolution no coarser than the pixels (315 m image: 315 m, not 630 m; 10 m: 60 m)',
+          (al._resolution({'xres1': 315.0, 'xres2': 315.0, 'bounds': [0, 0, 160000, 120000]}),
+           al._resolution({'xres1': 10.0, 'xres2': 10.0, 'bounds': [0, 0, 20000, 20000]})), (315.0, 60.0))
+    cfg = E.PipelineConfig()
+    km = 1000.0
+    pairs = [{'pair_id': i, 'bounds': [i * 20 * km, 0, i * 20 * km + 10 * km, 10 * km]} for i in range(1, 8)]
+    ests = {1: {'method': 'matcher@315m', 'dx': -1500.0, 'dy': 7100.0, 'field': None},
+            2: {'method': 'matcher@315m', 'dx': -1200.0, 'dy': 6900.0, 'field': None},
+            3: {'method': 'phasecorr@315m', 'dx': -1000.0, 'dy': 7500.0, 'field': None, 'peak': 0.2},
+            4: {'method': 'phasecorr@315m', 'dx': -27300.0, 'dy': -6600.0, 'field': None, 'peak': 0.1},
+            5: {'method': 'phasecorr@315m', 'dx': 3000.0, 'dy': -2500.0, 'field': None, 'peak': 0.1},
+            6: {'method': 'phasecorr@315m', 'dx': -76800.0, 'dy': -11600.0, 'field': None, 'peak': 0.1},
+            7: {'method': 'failed', 'dx': 0.0, 'dy': 0.0}}
+    before = E.AutoMatchPipeline._coarse_spread(ests)
+    with contextlib.redirect_stdout(io.StringIO()):
+        rep = E.AutoMatchPipeline._check_phasecorr_offsets(pairs, ests, cfg)
+    E.AutoMatchPipeline._borrow_failed_offsets(pairs, ests)
+    check('coarse: phase-correlation offsets far from every matcher offset are replaced (run 300)',
+          (rep, ests[3]['method'], ests[4]['method'], (ests[4]['dx'], ests[4]['dy']),
+           ests[7]['method'], before > 25 * km, E.AutoMatchPipeline._coarse_spread(ests) < km),
+          ([4, 5, 6], 'phasecorr@315m', 'from-pair-2 (phasecorr disagreed)', (-1200.0, 6900.0),
+           'from-pair-6', True, True))
+    grad = {i + 1: {'method': 'matcher@60m', 'dx': v * km, 'dy': 5 * km, 'field': None}
+            for i, v in enumerate((3.9, 1.1, -4.5, -6.0, -10.2))}
+    grad[6] = {'method': 'phasecorr@60m', 'dx': -7.2 * km, 'dy': 5.2 * km, 'field': None}
+    grad[7] = {'method': 'phasecorr@60m', 'dx': -12.5 * km, 'dy': 5.5 * km, 'field': None}
+    with contextlib.redirect_stdout(io.StringIO()):
+        rep = E.AutoMatchPipeline._check_phasecorr_offsets(pairs, grad, cfg)
+    check('coarse: offsets that vary across a distorted scene (run 297) are kept', rep, [])
+
+    # preflight: scale
+    p315 = os.path.join(tmp, 'coarse315.tif')
+    p45 = os.path.join(tmp, 'fine45.tif')
+    for path, res in ((p315, 315.0), (p45, 45.0)):
+        with rasterio.open(path, 'w', driver='GTiff', width=500, height=400, count=1, dtype='uint8',
+                           crs='EPSG:32643', transform=from_origin(500000, 1600000, res, res)) as dst:
+            dst.write(np.ones((1, 400, 500), dtype='uint8'))
+    w315 = J._scale_warnings(J.normalize({'window_sizes': [256, 2048]}), E.InputScene(p315, cfg), 315.0, E)
+    w45 = J._scale_warnings(J.normalize({'window_sizes': [256]}), E.InputScene(p45, cfg), 45.0, E)
+    check('preflight: windows larger than the image are flagged (run 300)',
+          (len(w315), w315[0].startswith('2048 px windows are 645 km'), 'here 256 px' in w315[0], w45),
+          (1, True, True, []))
+    p180 = os.path.join(tmp, 'hs180.tif')               # a G1A HS scene: 180 m pixels, natively
+    with rasterio.open(p180, 'w', driver='GTiff', width=3000, height=3000, count=1, dtype='uint8',
+                       crs='EPSG:32643', transform=from_origin(500000, 1600000, 180.0, 180.0)) as dst:
+        dst.write(np.ones((1, 3000, 3000), dtype='uint8'))
+    w180 = J._scale_warnings(J.normalize({'window_sizes': [512, 2048]}), E.InputScene(p180, cfg), 180.0, E)
+    check('preflight: 2048 px windows at 180 m (369 km) -> about 92 km, 512 px, suggested; 512 px passes',
+          (len(w180), w180[0].startswith('2048 px windows are 369 km'), 'here 512 px' in w180[0]), (1, True, True))
+    refd = os.path.join(tmp, 'skew_refs')
+    os.makedirs(refd, exist_ok=True)
+    with contextlib.redirect_stdout(io.StringIO()):
+        pf = J.preflight({'input_path': p315, 'reference_dir': refd, 'output_dir': os.path.join(tmp, 'skew_out'),
+                          'window_sizes': [2048], 'future_setting': 1}, check_weights=False)
+    check('preflight: lists ignored settings and the scale warnings',
+          (any("'future_setting'" in w for w in pf['warnings']), any('645 km' in w for w in pf['warnings'])),
+          (True, True))
+
+    # log: the GeoTIFF-keys CRS notice
+    N._OnceGeoKeysNotice.seen = False
+    flt = N._OnceGeoKeysNotice()
+
+    def rec(msg):
+        return logging.LogRecord('rasterio._env', logging.WARNING, '', 0, msg, None, None)
+    notice = ('CPLE_AppDefined in The definition of geographic CRS EPSG:4326 got from GeoTIFF keys is not '
+              'the same as the one from the EPSG registry')
+    check('log: the GeoTIFF-keys CRS notice is shown once, other warnings always',
+          (flt.filter(rec(notice)), flt.filter(rec(notice)), flt.filter(rec('something else')),
+           any(isinstance(f, N._OnceGeoKeysNotice) for f in logging.getLogger('rasterio._env').filters)),
+          (True, False, True, True))
+
+
+
+def _write_tif(path, arr, x0, y0, res=10.0):
+    import rasterio
+    from rasterio.transform import from_origin
+    with rasterio.open(path, 'w', driver='GTiff', width=arr.shape[1], height=arr.shape[0], count=1,
+                       dtype='float32', crs='EPSG:32643', transform=from_origin(x0, y0, res, res)) as d:
+        d.write(arr.astype('float32'), 1)
+
+
+def _pair_meta(a, b):
+    return {'x01': a.transform.c, 'y01': a.transform.f, 'xres1': a.transform.a, 'yres1': a.transform.e,
+            'x02': b.transform.c, 'y02': b.transform.f, 'xres2': b.transform.a, 'yres2': b.transform.e,
+            'nisar_crop_row_offset': 0, 'nisar_crop_col_offset': 0, 'pair_id': 1, 'nisar_pol': 'band1',
+            's1_ref_tag': 'T', 'coarse_dx': 0.0, 'coarse_dy': 0.0, 'search_margin_m': 200.0}
+
+
+def test_gpu_windows(tmp):
+    """GPU windows (runs 297 / 299 lost 217 / 190 windows to out-of-memory): a
+    window too big for the GPU is matched in tiles, each detector stepping
+    down until its tiles fit; the tiles share the window's keypoints and
+    their matches are pooled into the window."""
+    import numpy as np
+    import rasterio
+    import automatch_engine as E
+    check('gpu windows: tile sides tried for 2048 / 3072 / 600 px windows',
+          (E.gpu_window_steps(2048), E.gpu_window_steps(3072), E.gpu_window_steps(600)),
+          ([2048, 1024, 683, 512, 342, 256], [3072, 1536, 1024, 768, 512, 384], [600, 300]))
+    cfg = E.PipelineConfig(window_size=2048, num_features=32000)
+    m = E.build_detector('sift', cfg)
+    other = E.build_detector('disk', cfg)
+    m.gpu_window = 683
+    check('gpu windows: an edge window cut into an even grid',
+          m._tiles(0, 0, 600, 2048), [(0, 0, 600, 683), (0, 683, 600, 682), (0, 1365, 600, 683)])
+    m.gpu_window = None
+    check('gpu windows: a window that fits stays whole', m._tiles(10, 20, 2048, 2048), [(10, 20, 2048, 2048)])
+    m._use_gpu_window(1024)
+    n1024 = m.config.num_features
+    m._use_gpu_window(256)
+    check("gpu windows: tiles share the window's keypoints by area (at least min_num_features); "
+          "the other detectors keep theirs",
+          (n1024, m.config.num_features, other.config.num_features, cfg.num_features), (8000, 1000, 32000, 32000))
+
+    img, _ = _texture(1024, seed=5)
+    pin, pref = os.path.join(tmp, 'gw_in.tif'), os.path.join(tmp, 'gw_ref.tif')
+    _write_tif(pin, img, 500000.0, 1600000.0)
+    _write_tif(pref, img, 500000.0 - 70.0, 1600000.0 + 40.0)     # same pixels: dE 70 m, dN -40 m
+    s = E.build_detector('sift', E.PipelineConfig(window_size=1024, num_features=4000, min_num_features=500,
+                                                  use_amp=False))
+    real, sizes = s.detect_and_describe, []
+
+    def limited(t1, t2):           # a GPU that holds 600 px but not 1024 px
+        sizes.append(int(t1.shape[-1]))
+        if t1.shape[-1] > 600:
+            raise E.th.cuda.OutOfMemoryError('CUDA out of memory. Tried to allocate 12.88 GiB')
+        return real(t1, t2)
+    s.detect_and_describe = limited
+    with rasterio.open(pin) as a, rasterio.open(pref) as b:
+        recs = s._process_windows_from_disk(a, b, _pair_meta(a, b), {'windows': [(0, 0, 1024, 1024)]},
+                                            'smnn', 0.95)
+    rec = recs[0] if len(recs) == 1 else None
+    got = None
+    if rec:
+        got = (round(float(np.median(np.array(rec['X1']) - np.array(rec['X2'])))),
+               round(float(np.median(np.array(rec['Y1']) - np.array(rec['Y2'])))),
+               min(rec['x1']) < 512 < max(rec['x1']), min(rec['y1']) < 512 < max(rec['y1']),
+               '_scan0_pix0_' in rec['file_id'])
+    check('gpu windows: out of memory at 1024 px -> four 512 px tiles with a quarter of the keypoints '
+          'each, pooled into one record for the window, offset unchanged',
+          (sizes, s.gpu_window, s.config.num_features, got),
+          ([1024, 512, 512, 512, 512], 512, 1000, (70, -40, True, True, True)))
+
+    def never(t1, t2):
+        raise E.th.cuda.OutOfMemoryError('CUDA out of memory.')
+    s2 = E.build_detector('sift', E.PipelineConfig(window_size=600))
+    s2.detect_and_describe = never
+    with rasterio.open(pin) as a, rasterio.open(pref) as b:
+        recs2 = s2._process_windows_from_disk(a, b, _pair_meta(a, b), {'windows': [(0, 0, 600, 600)]},
+                                              'smnn', 0.95)
+    check('gpu windows: out of memory even in the smallest tiles drops the window, not the run',
+          (recs2, s2.gpu_window), ([], 300))
+    s3 = E.build_detector('sift', E.PipelineConfig(window_size=1024, num_features=4000, min_num_features=500))
+    with rasterio.open(pin) as a, rasterio.open(pref) as b:
+        s3._process_windows_from_disk(a, b, _pair_meta(a, b), {'windows': [(0, 0, 1024, 1024)]}, 'smnn', 0.95)
+    check('gpu windows: the next channel / sweep point of the job starts at the size found',
+          (E.GPU_WINDOWS.get(('sift', 1024)), s3.gpu_window), (512, 512))
+    E.GPU_WINDOWS.clear()
+
+    import contextlib
+    import io
+
+    class Props:
+        name, total_memory = 'Quadro RTX 5000', 16 * 1024 ** 3
+    cuda = E.th.cuda
+    saved = (cuda.is_available, cuda.get_device_properties, cuda.current_device, cuda.memory_reserved)
+    reserved = [10 * 1024 ** 3]
+    cuda.is_available, cuda.get_device_properties = (lambda: True), (lambda i=0: Props)
+    cuda.current_device, cuda.memory_reserved = (lambda: 0), (lambda *a: reserved[0])
+    try:
+        sp = E.build_detector('sift', E.PipelineConfig(window_size=2048, num_features=32000))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            sp._check_spill()                       # 10 GB on a 16 GB card: nothing to do
+            fits = sp.gpu_window
+            reserved[0] = int(27.1 * 1024 ** 3)     # as DeDoDe on the RTX 5000 (Windows)
+            sp._check_spill()
+    finally:
+        cuda.is_available, cuda.get_device_properties, cuda.current_device, cuda.memory_reserved = saved
+        E.GPU_WINDOWS.clear()
+    check('gpu windows: memory spilled into system RAM (Windows sysmem fallback) counts as running out, '
+          'with the NVIDIA setting named',
+          (fits, sp.gpu_window, 'Sysmem Fallback' in buf.getvalue(), 'spilled into system RAM' in buf.getvalue()),
+          (None, 1024, True, True))
+
+
+
+def _glob_rival_best(folder):
+    import glob as _glob
+    return _glob.glob(os.path.join(folder, 'RIVAL_BEST_*_band1.csv'))
+
+
+def test_jobs_312_317(tmp):
+    """From jobs 312-317: an empty CSV no longer loses PERFORMANCE.csv, a
+    narrow image still gets windows, DeDoDe's keypoints fit small windows, and
+    the warm-up uses a small keypoint budget."""
+    import numpy as np
+    import pandas as pd
+    import rasterio
+    import torch as th
+    import automatch_engine as E
+    import automatch_job as J
+    out = os.path.join(tmp, 'perf312')
+    fd = os.path.join(out, 'final_x')
+    os.makedirs(fd, exist_ok=True)
+    open(os.path.join(fd, 'PASS_TIMING.csv'), 'w').close()                 # empty, as in job 313
+    open(os.path.join(fd, 'CONSENSUS_SCORES_x.csv'), 'w').close()
+    open(os.path.join(out, 'TRUTH_RANKING.csv'), 'w').close()
+    try:
+        J._performance_table(out, [{'final_dir': fd, 'channel': 'band1', 'sweep': 's', 'detector': 'sift'}])
+        survived = True
+    except Exception as e:
+        survived = f'{type(e).__name__}: {e}'
+    check('performance table: empty CSV files are skipped (job 313 lost the whole table)', survived, True)
+
+    narrow = os.path.join(tmp, 'narrow.tif')
+    img, _ = _texture(1000, seed=11)
+    _write_tif(narrow, img[:300, :1000], 500000.0, 1600000.0, res=180.0)   # 54 x 180 km at 180 m
+    m = E.build_detector('sift', E.PipelineConfig(window_size=3072))
+    with rasterio.open(narrow) as src:
+        wins = m._determine_window_strategy(src, src)['windows']
+    check('window grid: a 300 px wide image (54 km at 180 m) gets a window (job 313 got none)',
+          wins, [(0, 0, 300, 1000)])
+
+    d = E.build_detector('dedode', E.PipelineConfig(num_features=32000))
+    check("dedode: keypoints capped at one per 16 pixels of the window (job 315: 'selected index k out "
+          "of range')", (d._keypoints_for(th.zeros(1, 1, 150, 150)), d._keypoints_for(th.zeros(1, 1, 2048, 2048))),
+          (1406, 32000))
+
+    class Probe(E.SIFTMatcher):
+        seen = []
+
+        def matcher_runs(self):
+            return [('smnn', 0.95)]
+
+        def _process_single_window(self, *a, **k):
+            Probe.seen.append(self.config.num_features)
+    cfg = E.PipelineConfig(num_features=32000)
+    p = Probe(cfg)
+    p._warmup_pass()
+    check('warm-up: a small keypoint budget for the 256 px pair, the window budget restored after '
+          '(job 316: DeDoDe + LightGlue asked for 3.6 GB)', (Probe.seen, cfg.num_features), ([2048], 32000))
+
+    # a run made by an older version, ranked again: PERFORMANCE.csv and RIVAL_BEST follow
+    old = os.path.join(tmp, 'old_run')
+    fd2 = os.path.join(old, 'final_same-res_sift')
+    os.makedirs(fd2, exist_ok=True)
+    pd.DataFrame([{'matcher': 'smnn0.95', 'seconds': 10.0, 'windows': 5, 'sec_per_window': 2.0}]).to_csv(
+        os.path.join(fd2, 'PASS_TIMING.csv'), index=False)
+    pd.DataFrame([{'final_dir': fd2, 'channel': 'band1', 'sweep': 'win512_nfauto', 'detector': 'sift',
+                   'detector_seconds': 10.0, 'gpu_peak_gb': 1.0}]).to_csv(os.path.join(old, 'RUN_MANIFEST.csv'),
+                                                                         index=False)
+    pd.DataFrame([{'rank': 1, 'channel': 'band1', 'sweep': 'win512_nfauto', 'detector': 'sift',
+                   'matcher': 'smnn0.95', 'ransac': 'lmeds360', 'truth_rmse_m': 120.0, 'truth_reached': 6,
+                   'truth_total': 8}]).to_csv(os.path.join(old, 'TRUTH_RANKING.csv'), index=False)
+    with open(os.path.join(old, 'RIVAL_BEST_scene_band1.csv'), 'w') as f:
+        f.write('old pick')
+    new_best = os.path.join(old, 'RIVAL_TRUTH_BEST_band1.csv')
+    with open(new_best, 'w') as f:
+        f.write('new pick')
+    import contextlib
+    import io
+    with contextlib.redirect_stdout(io.StringIO()):
+        written = J.refresh_after_compare(old, {'best': {'band1': {
+            'csv': new_best, 'detector': 'sift', 'matcher': 'smnn0.95', 'ransac': 'lmeds360',
+            'truth_rmse_m': 120.0}}})
+    perf = pd.read_csv(os.path.join(old, 'PERFORMANCE.csv'))
+    check('compare: a re-ranked older run gets PERFORMANCE.csv and RIVAL_BEST in the new order',
+          (sorted(os.path.basename(w) for w in written), perf.iloc[0]['truth_rank'], perf.iloc[0]['truth_reached'],
+           open(os.path.join(old, 'RIVAL_BEST_scene_band1.csv')).read()),
+          (['PERFORMANCE.csv', 'RIVAL_BEST_scene_band1.csv'], 1, 6, 'new pick'))
+
+
+
+def test_jobs_318_323(tmp):
+    """From jobs 318-323: kornia LightGlue survives imcui's XFeat + LighterGlue
+    replacing its defaults; a 39 km wide HS strip (216 px at 180 m) gets
+    windows; preflight measures 'larger than the image' on the long side."""
+    import contextlib
+    import io
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_origin
+    from kornia.feature.lightglue import LightGlue
+    import automatch_engine as E
+    import automatch_job as J
+    xfeat = {'name': 'lighterglue', 'input_dim': 64, 'descriptor_dim': 96, 'add_scale_ori': False,
+             'add_laf': False, 'scale_coef': 1.0, 'n_layers': 6, 'num_heads': 1, 'flash': True, 'mp': False,
+             'depth_confidence': 0.95, 'width_confidence': 0.95, 'filter_threshold': 0.1, 'weights': None}
+    kept = LightGlue.default_conf
+    LightGlue.default_conf = dict(xfeat)        # what XFeat's LighterGlue does
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            back = E.restore_lightglue_defaults()
+        check("lightglue: kornia's defaults put back after XFeat + LighterGlue replaced them",
+              (back, LightGlue.default_conf['descriptor_dim'], LightGlue.default_conf['num_heads']), (True, 256, 4))
+        LightGlue.default_conf = dict(xfeat)
+        m = E.build_detector('sift', E.PipelineConfig())
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                m._lightglue('sift', None)
+            built = True
+        except E.ModelLoadError as e:
+            built = 'no weights here' if 'offline' in str(e) or 'URLError' in str(e) else str(e)[:200]
+        if built == 'no weights here':
+            print('SKIP  lightglue: SIFT LightGlue weights not on this machine')
+        else:
+            check('lightglue: SIFT LightGlue builds after XFeat + LighterGlue (job 318 second sweep: size '
+                  'mismatch for SIFT, DISK, KeyNet, DoG, DeDoDe)', built, True)
+    finally:
+        LightGlue.default_conf = kept
+
+    strip = os.path.join(tmp, 'hs_strip.tif')            # 39 x 225 km at 180 m
+    img, _ = _texture(1250, seed=13)
+    _write_tif(strip, img[:, :216], 500000.0, 1600000.0, res=180.0)
+    m = E.build_detector('sift', E.PipelineConfig(window_size=512))
+    with rasterio.open(strip) as src:
+        wins = m._determine_window_strategy(src, src)['windows']
+    check('window grid: a 216 px wide HS strip (39 km at 180 m) gets windows along it (job 320 got none)',
+          (len(wins), all(w[3] == 216 for w in wins)), (3, True))
+    cfg = E.PipelineConfig()
+    w = J._scale_warnings(J.normalize({'window_sizes': [512, 2048]}), E.InputScene(strip, cfg), 180.0, E)
+    check('preflight: on a strip, windows longer than the strip are flagged with a third of its length; '
+          '512 px windows are not', (len(w), w[0].startswith('2048 px windows are 369 km'), 'here 384 px' in w[0]),
+          (1, True, True))
+
+
+
+def test_auto_bands(tmp):
+    """Hyperspectral cubes (G1A HV, 180 bands): the band whose good bands
+    change from image to image is picked by signal-to-noise. A 40-band cube
+    whose scene contrast peaks at band 20, with a striped band, a dead band,
+    noise-only bands and a fill strip."""
+    import contextlib
+    import io
+    import cv2
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_origin
+    import automatch_engine as E
+    import automatch_job as J
+    rng = np.random.default_rng(0)
+    H, W, N = 500, 640, 40
+
+    def tex(s):
+        a = cv2.GaussianBlur(rng.normal(size=(H, W)).astype(np.float32), (0, 0), s)
+        return (a - a.mean()) / a.std()
+    base = tex(3) * 60 + tex(15) * 120
+    cube = np.zeros((N, H, W), np.float32)
+    for b in range(N):
+        cube[b] = 500 + np.exp(-0.5 * ((b - 19) / 6.0) ** 2) * base + rng.normal(scale=8, size=(H, W))
+    cube[29] += rng.normal(scale=60, size=W)[None, :]
+    cube[34] = 0
+    cube[0] = 0            # a corrupt band 1: no valid pixel (the HV cube pack crashed on it)
+    # band 3: the G1A HV case -- soft and hazy (broad shading, no fine
+    # detail) but almost noise-free, so signal-to-noise alone ranked it first
+    soft = cv2.GaussianBlur(base.astype(np.float32), (0, 0), 5)
+    cube[2] = 300 + soft / soft.std() * 150 + rng.normal(scale=0.3, size=(H, W))
+    cube[:, :, :100] = 0
+    path = os.path.join(tmp, 'hs_cube.tif')
+    with rasterio.open(path, 'w', driver='GTiff', height=H, width=W, count=N, dtype='uint16', crs='EPSG:32644',
+                       transform=from_origin(500000, 2000000, 180, 180)) as d:
+        d.write(np.clip(cube, 0, 65535).astype('uint16'))
+    rows = E.band_quality(path)
+    sc = {r['band']: r['score'] for r in rows}
+    db = {r['band']: r['snr_db'] for r in rows}
+    best = max(sc, key=sc.get)
+    check('bands: the best band is at the crisp peak (19-21)', 19 <= best <= 21, True)
+    check('bands: signal-to-noise alone would pick the soft band 3', max(db, key=db.get), 3)
+    check('bands: the soft band 3 scores below the crisp bands 17-23 by 3x',
+          sc[3] * 3 < min(sc[b] for b in range(17, 24)), True)
+    check('bands: noise-only bands score 0 or are never picked',
+          all(sc[b] == 0 or next(r for r in rows if r['band'] == b)['detail_db'] <= 0 for b in (1, 2, 40)), True)
+    r30 = next(r for r in rows if r['band'] == 30)
+    check('bands: the striped band scores below its neighbours, its detail under its noise',
+          (sc[30] < min(sc[29], sc[31]), r30['detail_db'] <= 0), (True, True))
+    check('bands: the striped band is never picked', 'band30' in E.pick_bands(rows, 40, spacing=1), False)
+    check('bands: the dead band is unusable', (db[35], sc[35]), (E.UNUSABLE_DB, 0.0))
+    check('bands: picks are the top 3 near the peak', all(17 <= int(c[4:]) <= 23 for c in E.pick_bands(rows, 3)), True)
+    sp = E.pick_bands(rows, 3, spacing=5)
+    check('bands: spacing keeps picks apart', min(abs(int(a[4:]) - int(b[4:])) for a in sp for b in sp if a != b) >= 5,
+          True)
+    check('bands: no pick from noise only', E.pick_bands([dict(r, detail_db=-3.0) for r in rows], 2), [])
+
+    out = os.path.join(tmp, 'bands_out')
+    os.makedirs(out, exist_ok=True)
+    scene = E.InputScene(path, E.PipelineConfig())
+    job = J.normalize({'input_path': path, 'auto_bands': 1})
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        picked, note = J.resolve_auto_bands(job, scene, E, out)
+    check('bands: job picks one band and writes BAND_QUALITY.csv',
+          (len(picked), note, os.path.exists(os.path.join(out, 'BAND_QUALITY.csv'))), (1, '', True))
+    check('bands: the log shows the table', 'picked: ' + picked[0] in buf.getvalue(), True)
+    with contextlib.redirect_stdout(io.StringIO()):
+        picked, note = J.resolve_auto_bands(dict(job, auto_bands=1, auto_bands_range=[25, 40]), scene, E)
+    check('bands: auto_bands_range limits the search (best within 25-40 is 25-27)',
+          (len(picked) == 1 and 25 <= int(picked[0][4:]) <= 27, note), (True, ''))
+    picked, note = J.resolve_auto_bands(dict(job, auto_bands_range=[50, 60]), scene, E)
+    check('bands: a range beyond the bands is reported', (picked, 'beyond' in note), ([], True))
+    picked, note = J.resolve_auto_bands(dict(job, auto_bands_range=[9]), scene, E)
+    check('bands: a malformed range is reported', (picked, 'not [first, last]' in note), ([], True))
+    picked, note = J.resolve_auto_bands(dict(job, channels=['band5']), scene, E)
+    check('bands: explicit channels win over auto_bands', (picked, 'ignored' in note), ([], True))
+    picked, note = J.resolve_auto_bands(dict(job, auto_bands=0), scene, E)
+    check('bands: 40 bands, no channels, auto_bands 0 -> a note', (picked, 'auto_bands' in note), ([], True))
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        rc = J.main(['bands', path, '--top', '2'])
+    check('bands: CLI prints the ranking', (rc, 'picked:' in buf.getvalue()), (0, True))
+
+    # pack: the picked band is baked into the server settings, and the
+    # footprint passes over the corrupt band 1
+    import automatch_pack as P
+    with contextlib.redirect_stdout(io.StringIO()):
+        foot, src, ch = J.scene_footprint(job, scene, E)
+    check('bands: the footprint passes over a band with no valid pixel', (ch != 'band1', foot.area > 0), (True, True))
+    with contextlib.redirect_stdout(io.StringIO()):
+        foot, src, ch = J.scene_footprint(job, scene, E, ['band20'])
+    check('bands: the footprint comes from the picked band', ch, 'band20')
+    pdest = os.path.join(tmp, 'bands_pack')
+    with contextlib.redirect_stdout(io.StringIO()):
+        baked, note = P.bake_auto_bands(job, pdest, dry_run=False)
+    ss = P.server_settings(baked)
+    check('bands pack: the server gets the picked band as channels, auto_bands off',
+          (len(ss.get('channels') or []) == 1 and 19 <= int(ss['channels'][0][4:]) <= 21, 'auto_bands' in ss),
+          (True, False))
+    check('bands pack: the note names the band; BAND_QUALITY.csv is in the pack',
+          (ss['channels'][0] in (note or ''), os.path.exists(os.path.join(pdest, 'BAND_QUALITY.csv'))), (True, True))
+    same, note = P.bake_auto_bands(dict(job, channels=['band7']), pdest, dry_run=True)
+    check('bands pack: ticked channels are packed as they are', (same['channels'], note), (['band7'], None))
+
+
+def test_shared_coarse(tmp):
+    """Job 342 (G1A HS): 18 detectors whose coarse matcher found nothing put
+    34 of 55 pairs on a phase-correlation guess 60-110 km off. One coarse
+    offset per channel, measured by a panel and given to every detector."""
+    import contextlib
+    import io
+    import math
+    import automatch_engine as E
+    km = 1000.0
+    P = E.AutoMatchPipeline
+    pairs = [{'pair_id': i, 'bounds': [i * 20 * km, 0, i * 20 * km + 30 * km, 30 * km],
+              'reference_path': f'ref{i}.tif', 'nisar_path': f'in{i}.tif'} for i in range(1, 25)]
+    truth = (81500.0, 3800.0)
+
+    def mat(dx, dy, sup):
+        return {'dx': dx, 'dy': dy, 'support': sup, 'n': sup * 2, 'peak': None, 'field': None,
+                'method': 'matcher@180m'}
+
+    def pc(dx, dy, peak):
+        return {'dx': dx, 'dy': dy, 'support': None, 'n': None, 'peak': peak, 'field': None,
+                'method': 'phasecorr@180m'}
+    fail = {'dx': 0.0, 'dy': 0.0, 'support': None, 'n': None, 'peak': None, 'method': 'failed'}
+
+    def phase_only():
+        return {i: (pc(-21500, 59600, 0.07) if i <= 9 else pc(82000, 4000, 0.08) if i >= 20 else dict(fail))
+                for i in range(1, 25)}
+    strong = phase_only()
+    strong.update({i: mat(truth[0] + 50 * (i % 3), truth[1] - 40 * (i % 2), 30) for i in range(10, 20)})
+    weak = phase_only()
+    weak.update({i: mat(truth[0], truth[1], 12) for i in (10, 12, 14, 16)})
+    cfg = E.PipelineConfig()
+
+    def off(ests):
+        return sum(1 for e in ests.values() if math.hypot(e['dx'] - truth[0], e['dy'] - truth[1]) > 5 * km)
+    alone = phase_only()
+    with contextlib.redirect_stdout(io.StringIO()):
+        P._settle_coarse(pairs, alone, cfg, 'sift')
+    check('coarse shared: a detector without matcher offsets puts pairs on the wrong guess (job 342)',
+          off(alone) > 5, True)
+    pooled = P._pool_coarse({'topicfm': strong, 'sift': phase_only(), 'xoftr': weak}, [p['pair_id'] for p in pairs])
+    check('coarse shared: each pair keeps the best-supported estimate',
+          (pooled[11]['panel_detector'], pooled[10]['support']), ('topicfm', 30))
+    with contextlib.redirect_stdout(io.StringIO()):
+        P._settle_coarse(pairs, pooled, cfg, 'shared')
+    check('coarse shared: pooled and checked, every pair within 5 km of the scene offset', off(pooled), 0)
+
+    # coarse_panel
+    dets = ['sift', 'disk_depth', 'imw-topicfm', 'loftr', 'imw-xoftr']
+    check('coarse panel: the best coarse detectors of the job, in order', E.coarse_panel(dets, cfg),
+          ['imw-topicfm', 'loftr', 'disk_depth'])
+    check('coarse panel: topped up from the job', E.coarse_panel(['gftt', 'keynet'], cfg), ['gftt', 'keynet'])
+    check('coarse panel: coarse_detectors wins', E.coarse_panel(dets, E.PipelineConfig(coarse_detectors=['imw-xoftr'])),
+          ['imw-xoftr'])
+
+    # _shared_coarse: panel built, cache reused, a missing model skipped
+    calls = []
+
+    class FakeMatcher:
+        def __init__(self, name):
+            self.name = name
+
+        def get_filename_prefix(self):
+            return self.name
+
+        def selected_matchers(self):
+            return ['smnn']
+
+        def warmup(self):
+            if self.name == 'loftr':
+                raise E.ModelLoadError('no weights here')
+
+        def unload_model(self):
+            pass
+
+    table = {'imw-topicfm': strong, 'disk_depth': weak}
+
+    class FakeAligner:
+        def estimate(self, pair, m):
+            calls.append(m.name)
+            return dict(table.get(m.name, phase_only())[pair['pair_id']])
+    iv = E.iter_variants
+    E.iter_variants = lambda d, c, params=None: iter([FakeMatcher(d)])
+    try:
+        pipe = P.__new__(P)
+        pipe.config = E.PipelineConfig(window_size=256)
+        cache = os.path.join(tmp, 'coarse', 'COARSE_SHARED.json')
+        csvp = os.path.join(tmp, 'coarse_out', 'COARSE_SHARED.csv')
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            got = pipe._shared_coarse('band3', pairs, dets, FakeAligner(), cache, csvp)
+        check('coarse shared: the panel measures each pair once; a detector without weights is skipped',
+              (sorted(set(calls)), len(calls)), (['disk_depth', 'imw-topicfm'], 2 * len(pairs)))
+        check('coarse shared: the result is right on every pair, and written out',
+              (off(got), os.path.exists(cache), os.path.exists(csvp)), (0, True, True))
+        check('coarse shared: the log names the panel', 'measured by' in buf.getvalue() and 'not available' in buf.getvalue(),
+              True)
+        calls.clear()
+        with contextlib.redirect_stdout(io.StringIO()):
+            again = pipe._shared_coarse('band3', pairs, dets, FakeAligner(), cache)
+        check('coarse shared: read back from the cache, nothing measured again',
+              (calls, {k: (v['dx'], v['dy']) for k, v in again.items()} == {k: (v['dx'], v['dy']) for k, v in got.items()}),
+              ([], True))
+        pipe.config = E.PipelineConfig(window_size=256, max_expected_error_m=100000.0)
+        with contextlib.redirect_stdout(io.StringIO()):
+            pipe._shared_coarse('band3', pairs, dets, FakeAligner(), cache)
+        check('coarse shared: other coarse settings measure again', len(calls), 2 * len(pairs))
+        E.iter_variants = lambda d, c, params=None: iter([FakeMatcher('loftr')])
+        with contextlib.redirect_stdout(io.StringIO()):
+            none = pipe._shared_coarse('band3', pairs, ['loftr'], FakeAligner(), os.path.join(tmp, 'c2.json'))
+        check('coarse shared: no panel detector -> None (each detector measures its own)', none, None)
+    finally:
+        E.iter_variants = iv
+
+    # an offset longer than the search buffer is a match outside the search (job 356)
+    al2 = E.CoarseAligner(E.PipelineConfig(coarse_local=False, max_expected_error_m=150000.0))
+    al2._resolution = lambda pair: 180.0
+    al2._by_matcher = lambda pair, m, res: {'dx': -139058.0, 'dy': -92086.0, 'support': 130, 'n': 200, 'peak': None}
+    al2._by_phase_correlation = lambda pair, res: {'dx': -62305.0, 'dy': -93304.0, 'support': None, 'n': None,
+                                                   'peak': 0.08}
+    with contextlib.redirect_stdout(io.StringIO()):
+        est = al2.estimate({'pair_id': 1}, FakeMatcher('minima'))
+    check('coarse: a 167 km matcher offset with a 150 km buffer is refused; phase correlation is used',
+          (est['method'], round(est['dx'])), ('phasecorr@180m', -62305))
+    al2._by_phase_correlation = lambda pair, res: {'dx': 151000.0, 'dy': 0.0, 'support': None, 'n': None, 'peak': 0.2}
+    with contextlib.redirect_stdout(io.StringIO()):
+        est = al2.estimate({'pair_id': 1}, FakeMatcher('minima'))
+    check('coarse: nothing within the buffer -> failed (the pair borrows)', est['method'], 'failed')
+    # thin evidence is reported
+    thin = {i: dict(fail) for i in range(1, 25)}
+    thin[1] = mat(-20000, -90000, 130)
+    E.iter_variants = lambda d, c, params=None: iter([FakeMatcher(d)])
+    table.clear()
+    table['imw-topicfm'] = thin
+    try:
+        pipe.config = E.PipelineConfig(window_size=256)
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            pipe._shared_coarse('band11', pairs, ['imw-topicfm'], FakeAligner(), os.path.join(tmp, 'c3.json'))
+        check('coarse shared: an offset resting on one measured pair is flagged', 'rests on 1 measured pair' in buf.getvalue(),
+              True)
+    finally:
+        E.iter_variants = iv
+
+    # out of GPU memory in the coarse matcher: retried at twice the pixel
+    al = E.CoarseAligner(E.PipelineConfig(coarse_local=False))
+    tries = []
+
+    def by_matcher(pair, m, res):
+        tries.append(res)
+        if len(tries) == 1:
+            raise E.GpuOutOfMemory('CUDA out of memory')
+        return {'dx': 100.0, 'dy': -50.0, 'support': 40, 'n': 60, 'peak': None}
+    al._by_matcher = by_matcher
+    al._resolution = lambda pair: 180.0
+    with contextlib.redirect_stdout(io.StringIO()):
+        est = al.estimate({'pair_id': 1}, FakeMatcher('rdd'))
+    check('coarse: out of GPU memory, retried at twice the pixel (job 346)', (tries, est['method']),
+          ([180.0, 360.0], 'matcher@360m'))
+
+
+def test_coarse_trend():
+    """Job 347/359 (G1A HV, ~800 km): the error grows from +49 km in the west to
+    +77 km in the east, and the coarse panel measured only western pairs.
+    Eastern pairs that copied their nearest measured neighbour were up to 27 km
+    wrong; they now follow the plane through the measured offsets."""
+    import contextlib
+    import io
+    import math
+    import automatch_engine as E
+    P = E.AutoMatchPipeline
+    km = 1000.0
+    cfg = E.PipelineConfig()
+    xs = [(-400 + 10 * i) * km for i in range(81)]                       # pair centres, west -> east
+    pairs = [{'pair_id': i + 1, 'bounds': [x - 15 * km, -15 * km, x + 15 * km, 15 * km]} for i, x in enumerate(xs)]
+
+    def truth(x):
+        return 63000.0 + 0.037 * x, -6000.0 - 0.006 * x
+
+    def fresh():
+        ests = {}
+        for p, x in zip(pairs, xs):
+            dx, dy = truth(x)
+            if x <= -250 * km:                                          # the measured west
+                ests[p['pair_id']] = {'dx': dx, 'dy': dy, 'support': 500, 'n': 600, 'peak': None,
+                                      'field': None, 'method': 'matcher@315m'}
+            elif p['pair_id'] % 7 == 0:                                  # some phase correlation, right or garbage
+                good = p['pair_id'] % 14 == 0
+                ests[p['pair_id']] = {'dx': dx + (500 if good else 90000), 'dy': dy, 'support': None, 'n': None,
+                                      'peak': 0.06, 'field': None, 'method': 'phasecorr@315m'}
+            else:
+                ests[p['pair_id']] = {'dx': 0.0, 'dy': 0.0, 'support': None, 'n': None, 'peak': None,
+                                      'method': 'failed'}
+        return ests
+
+    def worst(ests):
+        return max(math.hypot(ests[p['pair_id']]['dx'] - truth(x)[0], ests[p['pair_id']]['dy'] - truth(x)[1])
+                   for p, x in zip(pairs, xs))
+    ests = fresh()
+    with contextlib.redirect_stdout(io.StringIO()):
+        P._settle_coarse(pairs, ests, cfg, 'shared')
+    check('coarse trend: every pair within 5 km of an error growing 28 km across the scene', worst(ests) < 5 * km, True)
+    east = ests[pairs[-1]['pair_id']]
+    check('coarse trend: the far east follows the plane, with a wider search',
+          (east['method'].startswith('trend'), east['margin_scale'] > 4.0), (True, True))
+    good_pc = ests[14 * 4]
+    check('coarse trend: a phase-correlation offset that agrees with the trend is kept',
+          good_pc['method'], 'phasecorr@315m')
+    # without enough measured pairs, the nearest pair is copied as before
+    few = {pid: e for pid, e in fresh().items()}
+    for pid in list(few)[3:16]:
+        if str(few[pid]['method']).startswith('matcher'):
+            few[pid] = {'dx': 0.0, 'dy': 0.0, 'support': None, 'n': None, 'peak': None, 'method': 'failed'}
+    check('coarse trend: fewer than 6 measured pairs -> no trend',
+          P._coarse_trend(pairs, few, cfg), None)
+    flat = {p['pair_id']: {'dx': 1000.0 * (p['pair_id'] % 2) * 20, 'dy': 0.0, 'support': 50, 'n': 60, 'peak': None,
+                           'field': None, 'method': 'matcher@60m'} for p in pairs[:10]}
+    check('coarse trend: measured offsets that no plane fits -> no trend', P._coarse_trend(pairs[:10], flat, cfg), None)
+
+
+def test_cross_check(tmp):
+    """Matches kept only where most of the top configurations agree. Four
+    detectors measure the true offset; one is consistently 20 km off with the
+    most matches (it would win a single-configuration pick); one is wrong in
+    half the scene."""
+    import contextlib
+    import io
+    import numpy as np
+    import pandas as pd
+    from pyproj import Transformer
+    import automatch_cross as X
+    rng = np.random.default_rng(5)
+    true = (1000.0, -500.0)
+
+    def cfg(det, offsets, n=40, sweep='win512_nfauto', matcher='smnn0.9'):
+        rows = []
+        for ci in range(6):                       # six 25 km cells along E
+            off = offsets(ci)
+            if off is None:
+                continue
+            e = 500000 + ci * 25000 + rng.uniform(1000, 24000, n)
+            nn = 1600000 + rng.uniform(1000, 24000, n)
+            de, dn = off[0] + rng.normal(0, 60, n), off[1] + rng.normal(0, 60, n)
+            rows.append(pd.DataFrame({'x1-map': e, 'y1-map': nn, 'x2-map': e - de, 'y2-map': nn - dn,
+                                      'source_file': [f'{det}_c{ci}.csv'] * n}))
+        pts = pd.concat(rows, ignore_index=True)
+        pts = pts.assign(E=pts['x1-map'], N=pts['y1-map'], dE=pts['x1-map'] - pts['x2-map'],
+                         dN=pts['y1-map'] - pts['y2-map'])
+        return {'channel': 'band49', 'sweep': sweep, 'detector': det, 'matcher': matcher, 'ransac': 'magsac630',
+                'points': pts}
+    good = [cfg(d, lambda c: true) for d in ('imw-xoftr', 'imw-minima-roma', 'disk_epipolar', 'hessian')]
+    wrong = cfg('gftt', lambda c: (21000.0, -500.0), n=300)
+    half = cfg('sift', lambda c: true if c < 3 else (9000.0, 4000.0))
+    twin = cfg('imw-xoftr', lambda c: true, sweep='win1024_nfauto')      # same detector, other sweep
+    cfgs = good + [wrong, half, twin]
+    top, how = X.pick_top(cfgs, 5, 25000.0, 1000.0)
+    names = [c['detector'] for c in top]
+    check('cross: without truth, the consistently wrong detector is not among the top by agreement',
+          ('gftt' in names, how.startswith('agreement')), (False, True))
+    check('cross: one configuration per detector', len(names) == len(set(names)), True)
+    ranking = pd.DataFrame([{'rank': i + 1, 'channel': 'band49', 'sweep': c['sweep'], 'detector': c['detector'],
+                             'matcher': c['matcher'], 'ransac': c['ransac']}
+                            for i, c in enumerate([wrong] + good + [half])])
+    top, how = X.pick_top(cfgs, 5, 25000.0, 1000.0, ranking)
+    check('cross: with ground truth, the top follows its ranking', ([c['detector'] for c in top][0], how),
+          ('gftt', 'ground-truth ranking'))
+    pts, cells = X.cross_check(top, 25000.0, 1000.0, 3)
+    err = np.hypot(pts['dE'] - true[0], pts['dN'] - true[1])
+    check('cross: every kept point agrees with the true offset (the wrong one is outvoted in each cell)',
+          (len(pts) > 0, float(err.max()) < 1000.0, 'gftt' in set(pts['cross_detector'])), (True, True, False))
+    check('cross: all six cells kept, by the agreeing detectors', int(cells['kept'].sum()), 6)
+    # of the agreeing configurations in a cell, the three least distorted give the points
+    def noisy(det, sigma):
+        c = cfg(det, lambda ci: true)
+        p = c['points']
+        n = len(p)
+        de, dn = true[0] + rng.normal(0, sigma, n), true[1] + rng.normal(0, sigma, n)
+        p['x2-map'], p['y2-map'] = p['x1-map'] - de, p['y1-map'] - dn
+        p['dE'], p['dN'] = de, dn
+        return c
+    mixed = [noisy('imw-xoftr', 40), noisy('hessian', 50), noisy('disk_epipolar', 60),
+             noisy('sift', 350), noisy('gftt', 380)]
+    pts, cells = X.cross_check(mixed, 25000.0, 1000.0, 3, keep=3)
+    kept_dets = set(pts['cross_detector'])
+    check('cross: per cell the 3 least distorted agreeing configurations give the points',
+          kept_dets, {'imw-xoftr', 'hessian', 'disk_epipolar'})
+    check('cross: the cells report the kept spreads and how far apart the kept medians are',
+          (cells['kept_detectors'].str.count(',').max(), float(cells['kept_max_gap_m'].max()) < 200), (2, True))
+    # stray points are dropped by each cell's own scatter, not by one fixed rule
+    stray = [noisy('imw-xoftr', 40), noisy('hessian', 50), noisy('disk_epipolar', 60)]
+    for c in stray:
+        p = c['points']
+        idx = p.index[::10]                       # 10 % of points 600 m off: inside the 1 km tolerance
+        p.loc[idx, 'dE'] += 600.0
+        p.loc[idx, 'x2-map'] -= 600.0
+    pts, cells = X.cross_check(stray, 25000.0, 1000.0, 3, keep=3)
+    check('cross: points straying from the cell centre by more than 3x the cell scatter are dropped',
+          (float(np.abs(pts['dE'] - true[0]).max()) < 400, int(cells['outliers_dropped'].sum()) > 0), (True, True))
+    lonely = [cfg('a', lambda c: true if c == 0 else None), cfg('b', lambda c: true if c == 5 else None)]
+    _, cells = X.cross_check(lonely, 25000.0, 1000.0, 2)
+    check('cross: a cell only one configuration reaches is not kept', int(cells['kept'].sum()), 0)
+    # run(): files and the truth score
+    to_ll = Transformer.from_crs('EPSG:32643', 'EPSG:4326', always_xy=True)
+    te = np.array([512000.0, 562000.0, 612000.0])
+    tn = np.full(3, 1612000.0)
+    ilo, ila = to_ll.transform(te, tn)
+    rlo, rla = to_ll.transform(te - true[0], tn - true[1])
+    tp = os.path.join(tmp, 'cross_truth.csv')
+    pd.DataFrame({'Row': [1, 2, 3], 'In_Lon': ilo, 'In_Lat': ila, 'Ref_Lon': rlo, 'Ref_Lat': rla}).to_csv(tp, index=False)
+    out = os.path.join(tmp, 'cross_out')
+    os.makedirs(out, exist_ok=True)
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        res = X.run(out, 5, 0, 25.0, 1000.0, truth_csv=tp, working_crs='EPSG:32643', cfgs=cfgs)
+    r = res.get('band49', {})
+    check('cross: RIVAL_CROSS, its detail file, the cells and the summary are written',
+          all(os.path.exists(os.path.join(out, n)) for n in ('RIVAL_CROSS_band49.csv', 'RIVAL_CROSS_band49_detail.csv',
+                                                             'CROSS_CELLS_band49.csv', 'CROSS_SUMMARY.csv')), True)
+    check('cross: the cross-checked points meet the truth within 100 m at all 3 points',
+          (r.get('truth_reached'), (r.get('truth_rmse_m') or 1e9) < 100), (3, True))
+    check('cross: the log names the configurations used', 'imw-xoftr' in buf.getvalue(), True)
+    check('cross: a job where the top detectors agree is flagged reliable', (r.get('reliable'), r.get('kept_share') >= 0.15),
+          (True, True))
+    scattered = [cfg(d, (lambda o: (lambda c: (o + 5000.0 * c, 0.0)))(3000.0 * i)) for i, d in enumerate('abcde')]
+    with contextlib.redirect_stdout(io.StringIO()) as buf2:
+        bad = X.run(out, 5, 0, 25.0, 1000.0, working_crs='EPSG:32643', cfgs=scattered).get('band49', {})
+    check('cross: a job where they disagree everywhere is flagged NOT reliable',
+          (bad.get('reliable'), 'NOT reliable' in buf2.getvalue()), (False, True))
+    check('cross: off below 2 configurations', X.run(out, 1, cfgs=cfgs, working_crs='EPSG:32643'), {})
+    # replay on a finished job's TRUTH_POINTS.csv + TRUTH_RANKING.csv (the uploaded jobs)
+    rows, rk = [], []
+    for i, det in enumerate(['imw-xoftr', 'disk_epipolar', 'hessian', 'imw-ripe', 'gftt']):
+        rk.append({'rank': i + 1, 'channel': 'band49', 'sweep': 'win512_nfauto', 'detector': det, 'matcher': 'nn',
+                   'ransac': 'magsac360', 'truth_rmse_m': 150.0 + 10 * i, 'truth_reached': 3})
+        for tid in (1, 2, 3):
+            off = 5000.0 if (det == 'gftt' and tid == 2) else 0.0
+            rows.append({'channel': 'band49', 'sweep': 'win512_nfauto', 'detector': det, 'matcher': 'nn',
+                         'ransac': 'magsac360', 'truth_id': tid, 'truth_dE_m': 70000.0, 'truth_dN_m': -9000.0,
+                         'tool_dE_m': 70000.0 + off + rng.normal(0, 80), 'tool_dN_m': -9000.0 + rng.normal(0, 80),
+                         'method': 'local'})
+    pd.DataFrame(rows).to_csv(os.path.join(out, 'TRUTH_POINTS.csv'), index=False)
+    pd.DataFrame(rk).to_csv(os.path.join(out, 'TRUTH_RANKING.csv'), index=False)
+    t = X.from_truth_points(os.path.join(out, 'TRUTH_POINTS.csv'), os.path.join(out, 'TRUTH_RANKING.csv'), 5)
+    r = t.iloc[0]
+    check('cross replay: TRUTH_POINTS.csv alone gives the cross-checked RMSE, the off detector outvoted',
+          (int(r['cross_reached']), r['cross_rmse_m'] < 120, r['tolerance_m']), (3, True, 540.0))
+    parent = os.path.join(tmp, 'cross_jobs')
+    os.makedirs(os.path.join(parent, 'output359'), exist_ok=True)
+    for n in ('TRUTH_POINTS.csv', 'TRUTH_RANKING.csv'):
+        shutil.copyfile(os.path.join(out, n), os.path.join(parent, 'output359', n))
+    with contextlib.redirect_stdout(io.StringIO()):
+        rc = X.main([parent, '--batch'])
+    allc = pd.read_csv(os.path.join(parent, 'CROSS_ALL.csv'))
+    check('cross batch: every job folder found, one row per job and channel in CROSS_ALL.csv',
+          (rc, allc['job'].tolist(), allc['mode'].tolist()), (0, ['output359'], ['truth points']))
+    calls = []
+    orig = X.from_truth_points
+    X.from_truth_points = lambda *a, **k: (calls.append(1), orig(*a, **k))[1]
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            X.main([parent, '--batch'])
+        again = pd.read_csv(os.path.join(parent, 'CROSS_ALL.csv'))
+        check('cross batch: a folder already cross-checked with the same settings is read back, not recomputed',
+              (len(calls), bool(again['reused'].iloc[0])), (0, True))
+        with contextlib.redirect_stdout(io.StringIO()):
+            X.main([parent, '--batch', '--top', '4'])
+        check('cross batch: other settings compute again', len(calls), 1)
+        with contextlib.redirect_stdout(io.StringIO()):
+            X.main([parent, '--batch', '--top', '4', '--recompute'])
+        check('cross batch: --recompute computes again', len(calls), 2)
+        import time as _t
+        _t.sleep(0.05)
+        os.utime(os.path.join(parent, 'output359', 'TRUTH_RANKING.csv'))     # a later compare
+        with contextlib.redirect_stdout(io.StringIO()):
+            X.main([parent, '--batch', '--top', '4'])
+        check('cross batch: a newer TRUTH_RANKING.csv (a later compare) computes again', len(calls), 3)
+    finally:
+        X.from_truth_points = orig
+    # a shared output folder: finished, running, other users' and filtered jobs
+    def mk(name, files):
+        d = os.path.join(parent, name)
+        os.makedirs(d, exist_ok=True)
+        for n, text in files.items():
+            with open(os.path.join(d, n), 'w') as f:
+                f.write(text)
+    mk('output360', {'job_used.json': '{}', 'RUN_MANIFEST.csv': 'a\n', 'automatch.log': 'x\n[Job] done in 3 min\n'})
+    mk('output361', {'job_used.json': '{}', 'automatch.log': '[Job] >>> win512_nfauto\n'})        # still running
+    mk('output362', {'job_used.json': '{}', 'RUN_MANIFEST.csv': 'a\n', 'automatch.log': 'still going\n'})
+    mk('output900', {'result.tif': 'x', 'logs.csv': 'timestamp,message\n'})                        # another user's
+    found, skipped = X.find_jobs(parent)
+    names = sorted(os.path.basename(d) for d in found)
+    check('cross batch: finished automatch jobs only; running ones skipped, other folders ignored',
+          (names, sorted(skipped)), (['output359', 'output360'], ['output361', 'output362']))
+    found, _ = X.find_jobs(parent, X.parse_jobs('300-359, 999'))
+    check('cross batch: the job filter keeps only those numbers', [os.path.basename(d) for d in found], ['output359'])
+    try:
+        X.parse_jobs('35a')
+        bad = False
+    except ValueError:
+        bad = True
+    check('cross batch: a malformed job filter is refused', bad, True)
+    # each job's own ground truth, from its job_used.json, through the share's mount here
+    share = os.path.join(tmp, 'share')
+    jd = os.path.join(share, 'ICIGDev', 'GPUPOC', 'output', 'output359')
+    gt = os.path.join(share, 'ICIGDev', 'GPUPOC', 'input', 'dqe', 'g1a', '267577321', 'gt_347.csv')
+    os.makedirs(jd, exist_ok=True)
+    os.makedirs(os.path.dirname(gt), exist_ok=True)
+    with open(gt, 'w') as f:
+        f.write('In_Lon,In_Lat,Ref_Lon,Ref_Lat\n')
+    with open(os.path.join(jd, 'job_used.json'), 'w') as f:
+        json.dump({'output_dir': '/maintenance/ICIGDev/GPUPOC/output/output359',
+                   'truth_csv': '/maintenance/ICIGDev/GPUPOC/input/dqe/g1a/267577321/gt_347.csv'}, f)
+    check('cross: the job\'s own truth CSV is found through the share mount', X.job_truth_csv(jd), gt)
+    with open(os.path.join(jd, 'job_used.json'), 'w') as f:
+        json.dump({'output_dir': '/maintenance/ICIGDev/GPUPOC/output/output359', 'truth_csv': ''}, f)
+    check('cross: a job without truth gives none', X.job_truth_csv(jd), '')
+    # a job folder copied elsewhere: the share mapping (as Pack uses) finds the truth
+    moved = os.path.join(tmp, 'copied', 'output359')
+    os.makedirs(moved, exist_ok=True)
+    with open(os.path.join(moved, 'job_used.json'), 'w') as f:
+        json.dump({'output_dir': '/maintenance/ICIGDev/GPUPOC/output/output359',
+                   'truth_csv': '/maintenance/ICIGDev/GPUPOC/input/dqe/g1a/267577321/gt_347.csv'}, f)
+    with contextlib.redirect_stdout(io.StringIO()):
+        unreach = X.job_truth_csv(moved)
+    check('cross: unreachable without a mapping', unreach, '')
+    X.SHARE = (share, '/maintenance/')
+    try:
+        check('cross: found through the share mapping', X.job_truth_csv(moved), gt)
+    finally:
+        X.SHARE = ('', '')
+
+
+def test_bench(tmp):
+    """Benchmark over finished jobs: scene measures (cloud estimate checked on
+    synthetic clouds over textured land), the job's error from its truth,
+    detectors per job and the summary per detector and class."""
+    import contextlib
+    import io
+    import cv2
+    import numpy as np
+    import pandas as pd
+    import rasterio
+    from rasterio.transform import from_origin
+    from pyproj import Transformer
+    import automatch_bench as B
+    rng = np.random.default_rng(11)
+    H, W = 600, 800
+
+    def land():
+        a = cv2.GaussianBlur(rng.normal(size=(H, W)).astype(np.float32), (0, 0), 2)
+        return 800 + 120 * a / a.std() + rng.normal(0, 10, (H, W))
+
+    def write(path, a):
+        with rasterio.open(path, 'w', driver='GTiff', height=H, width=W, count=1, dtype='uint16', crs='EPSG:32643',
+                           transform=from_origin(500000, 1700000, 315, 315)) as d:
+            d.write(np.clip(a, 1, 65535).astype('uint16'), 1)
+    clear = land()
+    cloudy = land()
+    yy, xx = np.mgrid[0:H, 0:W]
+    blob = np.zeros((H, W), bool)
+    for cy, cx, r in ((150, 200, 110), (420, 560, 140), (480, 150, 70)):
+        blob |= (yy - cy) ** 2 + (xx - cx) ** 2 < r * r
+    cloudy[blob] = 2600 + rng.normal(0, 15, blob.sum())
+    pc, pk = os.path.join(tmp, 'clear.tif'), os.path.join(tmp, 'G1A_HV_G_TEST_cloudy.tif')
+    write(pc, clear)
+    write(pk, cloudy)
+    ic = B.scene_info(pc, 1)
+    ik = B.scene_info(pk, 1, png=os.path.join(tmp, 'q.png'))
+    truth_pct = 100.0 * blob.mean()
+    check('bench: no cloud on a clear textured scene', ic['cloud_pct'] < 3, True)
+    check(f'bench: synthetic clouds ({truth_pct:.0f} %) estimated within 8 points',
+          abs(ik['cloud_pct'] - truth_pct) < 8, True)
+    check('bench: the quicklook is written', os.path.exists(os.path.join(tmp, 'q.png')), True)
+    # one finished job folder, as on the share
+    parent = os.path.join(tmp, 'bench_out')
+    jd = os.path.join(parent, 'output366')
+    os.makedirs(jd, exist_ok=True)
+    to_ll = Transformer.from_crs('EPSG:32643', 'EPSG:4326', always_xy=True)
+    e, n = np.array([520000.0, 560000.0, 600000.0]), np.array([1650000.0, 1620000.0, 1600000.0])
+    ilo, ila = to_ll.transform(e, n)
+    rlo, rla = to_ll.transform(e - 64000.0, n + 6000.0)
+    tp = os.path.join(tmp, 'gt.csv')
+    pd.DataFrame({'Row': [1, 2, 3], 'In_Lon': ilo, 'In_Lat': ila, 'Ref_Lon': rlo, 'Ref_Lat': rla}).to_csv(tp, index=False)
+    with open(os.path.join(jd, 'job_used.json'), 'w') as f:
+        json.dump({'input_path': pk, 'truth_csv': tp, 'output_dir': jd, 'max_expected_error_m': 150000}, f)
+    pd.DataFrame({'channel': ['band1'], 'detector': ['sift']}).to_csv(os.path.join(jd, 'RUN_MANIFEST.csv'), index=False)
+    with open(os.path.join(jd, 'automatch.log'), 'w') as f:
+        f.write('[Job] done in 9 min\n')
+    pd.DataFrame([{'rank': i + 1, 'channel': 'band1', 'sweep': 'win512_nfauto', 'detector': d, 'matcher': m,
+                   'ransac': 'magsac630', 'truth_rmse_m': r, 'truth_reached': rc, 'truth_total': 3}
+                  for i, (d, m, r, rc) in enumerate([('dog_hynet', 'mnn', 170.0, 3), ('dog_hynet', 'snn', 199.0, 3),
+                                                      ('hessian', 'snn', 195.0, 2), ('gftt', 'nn', 33000.0, 3)])]
+                 ).to_csv(os.path.join(jd, 'TRUTH_RANKING.csv'), index=False)
+    pd.DataFrame([{'channel': 'band1', 'sweep': 'win512_nfauto', 'detector': d, 'matcher': m, 'ransac': 'magsac630',
+                   'truth_id': t, 'truth_dE_m': 64000.0, 'truth_dN_m': -6000.0, 'tool_dE_m': 64000.0 + off,
+                   'tool_dN_m': -6000.0, 'method': 'local'}
+                  for d, m, off in (('dog_hynet', 'mnn', 100.0), ('hessian', 'snn', 150.0), ('gftt', 'nn', 33000.0))
+                  for t in (1, 2, 3)]).to_csv(os.path.join(jd, 'TRUTH_POINTS.csv'), index=False)
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        rc = B.main([parent, '--top', '3'])
+    check('bench: the cross-check runs with the benchmark (CROSS_ALL.csv, its RMSE in the job row)',
+          (os.path.exists(os.path.join(parent, 'CROSS_ALL.csv')),
+           abs(float(pd.read_csv(os.path.join(parent, 'BENCH_JOBS.csv'))['cross_points_rmse_m'].iloc[0]) - 125) < 30),
+          (True, True))
+    jobs = pd.read_csv(os.path.join(parent, 'BENCH_JOBS.csv'))
+    dets = pd.read_csv(os.path.join(parent, 'BENCH_DETECTORS.csv'))
+    summ = pd.read_csv(os.path.join(parent, 'BENCH_SUMMARY.csv'))
+    j = jobs.iloc[0]
+    check('bench: the job row: sensor, band, error from its truth, clouds, best detector',
+          (rc, j['sensor'], j['band'], abs(j['error_km'] - 64.3) < 1.5, j['cloud_pct'] > 15, j['best_detector']),
+          (0, 'HV', 'band1', True, True, 'dog_hynet + mnn'))
+    check('bench: one row per detector (its best configuration), errors in pixels too',
+          (sorted(dets['detector']), round(float(dets.loc[dets.detector == 'dog_hynet', 'rmse_px'].iloc[0]), 2)),
+          (['dog_hynet', 'gftt', 'hessian'], round(170 / 315, 2)))
+    allg = summ[(summ['group_by'] == 'sensor') & (summ['group'] == 'HV')].set_index('detector')
+    check('bench: success needs half the truth points within 3 px (gftt 33 km fails)',
+          (allg.loc['dog_hynet', 'success_rate'], allg.loc['hessian', 'success_rate'], allg.loc['gftt', 'success_rate']),
+          (1.0, 1.0, 0.0))
+    check('bench: ranked per sensor only, cloud and error classes within each sensor, never across sensors',
+          (sorted(summ['group_by'].unique()), 'all' in set(summ['group']),
+           all(str(g).startswith('HV') for g in summ['group'])),
+          (['sensor', 'sensor + cloud', 'sensor + error'], False, True))
+    # an older job on the same scene is superseded by the newer one
+    old = os.path.join(parent, 'output343')
+    os.makedirs(old, exist_ok=True)
+    for n in ('job_used.json', 'RUN_MANIFEST.csv', 'TRUTH_RANKING.csv'):
+        shutil.copyfile(os.path.join(jd, n), os.path.join(old, n))
+    with open(os.path.join(old, 'automatch.log'), 'w') as f:
+        f.write('[Job] automatch 2026.10.05, code b17d90f9 (x)\n[Job] done in 3 min\n')
+    with open(os.path.join(jd, 'automatch.log'), 'w') as f:
+        f.write('[Job] automatch 2026.10.15, code da860f29 (x)\n[Job] done in 9 min\n')
+    with contextlib.redirect_stdout(io.StringIO()):
+        B.main([parent])
+    jobs = pd.read_csv(os.path.join(parent, 'BENCH_JOBS.csv')).set_index('job')
+    dets = pd.read_csv(os.path.join(parent, 'BENCH_DETECTORS.csv'))
+    check('bench: of two jobs on one scene the newer version counts, the older is listed as superseded',
+          (bool(jobs.loc['output366', 'used']), bool(jobs.loc['output343', 'used']), jobs.loc['output343', 'superseded_by'],
+           sorted(dets['job'].unique())), (True, False, 'output366', ['output366']))
+    check('bench: newest by version first, then finish time, then number',
+          B.newest_per_scene([{'job': 'a', 'scene': 's', 'version': '2026.10.15', 'finished': 1.0, 'number': 1},
+                              {'job': 'b', 'scene': 's', 'version': '2026.10.05', 'finished': 9.0, 'number': 9}]),
+          {'a': None, 'b': 'a'})
+    with contextlib.redirect_stdout(io.StringIO()):
+        B.main([parent, '--all-jobs'])
+    check('bench: --all-jobs counts both', sorted(pd.read_csv(os.path.join(parent, 'BENCH_DETECTORS.csv'))['job'].unique()),
+          ['output343', 'output366'])
+    # jobs 297-334 all read 'cog.tif': the packed set folder tells the scenes apart
+    check('bench: scenes named by the G1A product, else by the packed set folder',
+          (B.scene_id('/maintenance/x/g1a/267403461/input/cog.tif'), B.scene_id('/m/g1a/267419411/input/cog.tif'),
+           B.scene_id('/m/g1a/267522911/input/G1A_HS_G_06OCT2026_261006064217_26100603_SPLC00GTD_3_1.tif')),
+          ('267403461/cog', '267419411/cog', 'G1A_HS_G_06OCT2026_261006064217_26100603_SPLC00GTD_3_1'))
+    check('bench: the sensor from the name, else from the pixel size',
+          (B.sensor_of('267403461/cog', 315.0), B.sensor_of('x/cog', 180.0), B.sensor_of('x/cog', 45.0),
+           B.sensor_of('G1A_MV_G_X', 315.0)), ('HV', 'HS', 'MV', 'MV'))
+    # your own cloud estimates replace the automatic ones
+    check('bench: a form for your own cloud estimates is written', os.path.exists(os.path.join(parent, 'SCENE_NOTES_TEMPLATE.csv')),
+          True)
+    pd.DataFrame([{'job': 'output366', 'cloud_pct': 55, 'notes': 'thick cumulus in the north'}]).to_csv(
+        os.path.join(parent, 'SCENE_NOTES.csv'), index=False)
+    with contextlib.redirect_stdout(io.StringIO()):
+        B.main([parent, '--no-cross'])
+    jrow = pd.read_csv(os.path.join(parent, 'BENCH_JOBS.csv')).set_index('job').loc['output366']
+    drow = pd.read_csv(os.path.join(parent, 'BENCH_DETECTORS.csv'))
+    check('bench: SCENE_NOTES.csv replaces the cloud estimate (job row and detector classes)',
+          (jrow['cloud_pct'], jrow['cloud_source'], drow['cloud_class'].iloc[0]), (55.0, 'manual', 'cloudy (>30 %)'))
+    os.remove(os.path.join(parent, 'SCENE_NOTES.csv'))
+    # a job that ran with cloud masking reports the model's cloud %
+    with open(os.path.join(jd, 'CLOUD_INFO.json'), 'w') as f:
+        json.dump({'cloud_pct': 37.5, 'shadow_pct': 4.0, 'band_choice': 'red, green, nir by wavelength'}, f)
+    with contextlib.redirect_stdout(io.StringIO()):
+        B.main([parent, '--no-cross'])
+    jrow = pd.read_csv(os.path.join(parent, 'BENCH_JOBS.csv')).set_index('job').loc['output366']
+    check('bench: a run with cloud masking gives the model\'s cloud % (OmniCloudMask)',
+          (jrow['cloud_pct'], jrow['cloud_source'], bool(jrow['cloud_masked_in_run'])), (37.5, 'omnicloudmask', True))
+    os.remove(os.path.join(jd, 'CLOUD_INFO.json'))
+    calls = []
+    orig = B.scene_info
+    B.scene_info = lambda *a, **k: (calls.append(1), orig(*a, **k))[1]
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            B.main([parent])
+        check('bench: scene measures read back from SCENE_INFO.json, not measured again', len(calls), 0)
+    finally:
+        B.scene_info = orig
+    try:
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+        import DPQED_automatch as G
+    except Exception as e:
+        print(f'SKIP  bench GUI ({type(e).__name__}: {e})')
+        return
+    app = G.QtWidgets.QApplication.instance() or G.QtWidgets.QApplication([])
+    w = G.AutoMatchWindow()
+    fmt = G.QtCore.QSettings.IniFormat if G.QT_API == 'PyQt5' else G.QtCore.QSettings.Format.IniFormat
+    w.settings = G.QtCore.QSettings(os.path.join(tmp, 'bench.ini'), fmt)
+    try:
+        dlg = w.bench_dialog(run=False)
+        dlg.folder.setText(parent)
+        dlg.jobs.setText('360-370')
+        a = dlg.args()
+        check('bench gui: the dialog builds the command', (a[:2], a[a.index('--jobs') + 1]), (['bench', parent], '360-370'))
+        res = G.BenchResultDialog(parent, w)
+        res.group.setCurrentText('sensor: HV')
+        check('bench gui: jobs (superseded ones listed too) and the per-group detector table are shown',
+              (res.jobs_table.rowCount(), res.sum_table.rowCount() >= 3), (2, True))
+        w._bench_dir = parent
+        w.proc_kind, w._events, w.proc_buffer, w.proc = 'bench', [], '', None
+        w._finished(0)
+        check('bench gui: the results open when the benchmark ends', hasattr(w, '_last_bench_dialog'), True)
+    finally:
+        w.close()
+
+
+def test_cloud_mask(tmp):
+    """OmniCloudMask cloud masking: bands per G1A sensor by wavelength, HS
+    refused (SWIR-only) unless the VNIR product of the same pass lends its
+    mask, masked copies of the matched bands, the cache, the engine reading
+    the masked copy, and the benchmark taking the model's cloud %."""
+    import contextlib
+    import glob
+    import io
+    import numpy as np
+    import pandas as pd
+    import rasterio
+    from rasterio.transform import from_origin
+    import automatch_cloud as C
+    import automatch_engine as E
+    rng = np.random.default_rng(2)
+
+    def raster(path, n, H=300, W=400, px=45.0, x0=500000.0, desc=None):
+        with rasterio.open(path, 'w', driver='GTiff', height=H, width=W, count=n, dtype='uint16', crs='EPSG:32643',
+                           transform=from_origin(x0, 1700000, px, px), nodata=0) as d:
+            for b in range(1, n + 1):
+                d.write((500 + 100 * rng.random((H, W))).astype('uint16'), b)
+                if desc:
+                    d.set_band_description(b, desc[b - 1])
+        return path
+    mv = raster(os.path.join(tmp, 'G1A_MV_G_TEST.tif'), 6)
+    hv = raster(os.path.join(tmp, 'G1A_HV_G_TEST.tif'), 158, px=315.0, H=60, W=80)
+    hs = raster(os.path.join(tmp, 'G1A_HS_G_TEST.tif'), 256, px=180.0, H=100, W=140)
+    check('cloud: MV red / green / nir are B3, B2, B6 (650, 555, 860 nm)', C.choose_bands(mv, 'MV')[0], [3, 2, 6])
+    b, how, wl = C.choose_bands(hv, 'HV')
+    check('cloud: HV bands nearest 650 / 560 / 860 nm over 375-1000 nm',
+          (all(abs(w - t) < 5 for w, t in zip(wl, (650, 560, 860))), how.startswith('red')), (True, True))
+    try:
+        C.choose_bands(hs, 'HS')
+        refused = ''
+    except ValueError as e:
+        refused = str(e)
+    check('cloud: HS (SWIR only) is refused, pointing to cloud_mask_from', 'cloud_mask_from' in refused, True)
+    import cv2
+
+    def textured(path, n, px):
+        H, W = 160, 200
+        base = cv2.GaussianBlur(rng.normal(size=(H, W)).astype(np.float32), (0, 0), 2)
+        base /= base.std()
+        with rasterio.open(path, 'w', driver='GTiff', height=H, width=W, count=n, dtype='uint16', crs='EPSG:32643',
+                           transform=from_origin(500000, 1700000, px, px), nodata=0) as d:
+            for b in range(1, n + 1):
+                gain = 200.0 * np.exp(-0.5 * ((b - n * 0.6) / (n * 0.15)) ** 2)
+                d.write(np.clip(800 + gain * base + rng.normal(0, 8, (H, W)), 1, 65535).astype('uint16'), b)
+        return path
+    hvq = textured(os.path.join(tmp, 'G1A_HV_G_Q.tif'), 40, 315.0)
+    hsq = textured(os.path.join(tmp, 'G1A_HS_G_Q.tif'), 40, 180.0)
+    q, how, _ = C.choose_bands(hvq, 'HV', choice='quality')
+    check('cloud: quality choice takes the 3 crispest bands, short to long wavelength',
+          (len(q), q == sorted(q), how.startswith('the three crispest')), (3, True, True))
+    q, how, _ = C.choose_bands(hsq, 'HS', choice='quality')
+    check('cloud: on HS the quality choice runs but says the model was not trained on such bands',
+          (len(q), 'not trained' in how), (3, True))
+    named = raster(os.path.join(tmp, 'named.tif'), 3, desc=['560 nm', '660 nm', '870 nm'])
+    check('cloud: band centres from the band descriptions', C.choose_bands(named, 'other')[0], [2, 1, 3])
+
+    def fake(arr, nodata, model_dir, device):           # thick cloud in a square, shadow beside it
+        cls = np.zeros(arr.shape[1:], np.uint8)
+        h, w = cls.shape
+        cls[h // 4:h // 2, w // 4:w // 2] = 1
+        cls[h // 2:h // 2 + 10, w // 4:w // 2] = 3
+        return cls
+
+    class Sc:
+        raster_path = mv
+    MECH = {'cloud_dilate_px': 1, 'cloud_refine': False, 'cloud_mask_classes': [1, 2, 3]}  # the model alone
+    cache, out = os.path.join(tmp, 'cache_cloud'), os.path.join(tmp, 'out_cloud')
+    with contextlib.redirect_stdout(io.StringIO()):
+        rasters, info = C.prepare(MECH, Sc(), ['band3', 'band5'], cache, out, 'MV', fake)
+    with rasterio.open(rasters['band5'][0]) as m, rasterio.open(mv) as o:
+        a, orig = m.read(1), o.read(5)
+    H, W = a.shape
+    check('cloud: the matched bands are copied with cloud and shadow (grown 1 px) set to no data',
+          (int(a[H // 3, W // 3]), int(a[H // 2 + 5, W // 3]), int(a[H // 4 - 1, W // 3]), int(a[5, 5]) == int(orig[5, 5])),
+          (0, 0, 0, True))
+    jp = glob.glob(os.path.join(out, 'CLOUD_PARAMS_*.txt'))
+    jtxt = open(jp[0], encoding='utf-8').read() if len(jp) == 1 else ''
+    check('cloud: CLOUD_PARAMS.txt in the job folder names what was masked and how',
+          ('masked_classes: thick cloud, thin cloud, shadow' in jtxt, 'grown_px: 1' in jtxt,
+           "check: none: the model's result as it is" in jtxt), (True, True, True))
+    check('cloud: statistics and CLOUD_INFO.json in the job folder',
+          (round(info['thick_pct']), os.path.exists(os.path.join(out, 'CLOUD_INFO.json'))), (6, True))
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        C.prepare(MECH, Sc(), ['band3'], cache, out, 'MV', lambda *a: 1 / 0)
+    check('cloud: the mask is reused from the cache, not predicted again', 'reused' in buf.getvalue(), True)
+    # confidence threshold: an unsure 'thin cloud' stays clear
+    probs = np.zeros((4, 2, 2), np.float32)
+    probs[:, 0, 0] = (0.1, 0.8, 0.1, 0.0)     # sure thick cloud
+    probs[:, 0, 1] = (0.45, 0.05, 0.5, 0.0)   # most likely thin cloud, but only 55 % cloud
+    probs[:, 1, 0] = (0.1, 0.0, 0.0, 0.9)     # sure shadow
+    probs[:, 1, 1] = (0.9, 0.05, 0.05, 0.0)   # clear
+    check('cloud: cloud only when the model is sure (P(thick)+P(thin) >= 0.7), else clear',
+          C.classify(probs, 0.7).tolist(), [[1, 0], [3, 0]])
+    check('cloud: at 0.5 the unsure pixel is thin cloud', C.classify(probs, 0.5).tolist(), [[1, 2], [3, 0]])
+
+    def dark_fake(arr, nodata, model_dir, device):       # 'cloud' on the darkest pixels: ground taken for cloud
+        return (arr[0] < np.percentile(arr[0], 30)).astype(np.uint8)
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        _, dinfo = C.prepare({'cloud_refine': False}, Sc(), [], os.path.join(tmp, 'cache_dark'),
+                              os.path.join(tmp, 'out_dark'), 'MV', dark_fake)
+    check('cloud: dark "clouds" are flagged (brightness check), with a quicklook to look at',
+          (dinfo['dark_cloud_pct'] > 90, 'CHECK' in buf.getvalue(),
+           os.path.exists(os.path.join(tmp, 'out_dark', 'CLOUD_QUICKLOOK.png'))), (True, True, True))
+    # HS takes the mask of the HV product of the same pass, laid on by map coordinates
+    hv2 = raster(os.path.join(tmp, 'G1A_HV_G_PASS.tif'), 158, px=315.0, H=60, W=80, x0=500000.0)
+    hs2 = raster(os.path.join(tmp, 'G1A_HS_G_PASS.tif'), 256, px=180.0, H=100, W=140, x0=500000.0)
+
+    class Hs:
+        raster_path = hs2
+    with contextlib.redirect_stdout(io.StringIO()):
+        rasters, info = C.prepare({'cloud_mask_from': hv2, 'cloud_from_margin_px': 0, 'cloud_dilate_px': 0,
+                                   'cloud_refine': False}, Hs(),
+                                  ['band40'], os.path.join(tmp, 'cache_hs'), '', 'HS', fake)
+    with rasterio.open(info['mask']) as m:
+        cls = m.read(1)
+    # HV square: rows 15-30, cols 20-40 at 315 m -> HS rows ~26-52, cols ~35-70 at 180 m
+    check('cloud: HS gets the HV mask at the same ground (map coordinates)',
+          (int(cls[40, 50]), int(cls[5, 5]), 'from G1A_HV_G_PASS' in info['band_choice']), (1, 0, True))
+    # the engine reads the masked copy, and the pair cache follows it
+    sc = E.InputScene(mv, E.PipelineConfig())
+    sc.channel_override = {'band3': ['/x/band3_cloudmasked.tif', 1]}
+    check('cloud: the engine reads the masked copy of a channel', sc.channel_raster('band3', ''),
+          ('/x/band3_cloudmasked.tif', 1))
+    k1 = E.pair_cache_key(sc, 'band3', tmp, E.PipelineConfig())
+    k2 = E.pair_cache_key(sc, 'band3', tmp, E.PipelineConfig(channel_rasters={'band3': ['/x/m.tif', 1]}))
+    check('cloud: masked and unmasked runs keep separate pair caches', k1 != k2, True)
+    # the real model, when installed with its weights (AUTOMATCH_OCM_WEIGHTS)
+    wdir = os.environ.get('AUTOMATCH_OCM_WEIGHTS', '')
+    try:
+        import omnicloudmask  # noqa: F401
+        have = bool(wdir) and all(os.path.exists(os.path.join(wdir, n)) for n in C.weight_files())
+    except Exception:
+        have = False
+    if have:
+        with contextlib.redirect_stdout(io.StringIO()):
+            probs = C.predict(np.stack([rng.random((256, 256)) * 1000 + 100 for _ in range(3)]), 0.0, wdir, 'cpu')
+        cls = C.classify(probs, 0.7)
+        check('cloud: OmniCloudMask gives class probabilities, turned into classes 0-3',
+              (probs.shape, bool(np.allclose(probs.sum(0), 1, atol=0.01)), cls.shape, set(np.unique(cls)) <= {0, 1, 2, 3}),
+              ((4, 256, 256), True, (256, 256), True))
+        check('cloud: preflight finds the weights', C.check({'cloud_model_dir': wdir}), [])
+    else:
+        print('SKIP  cloud: OmniCloudMask or its weights not here (set AUTOMATCH_OCM_WEIGHTS)')
+    check('cloud: preflight names missing weights',
+          any('weights missing' in p or 'not installed' in p for p in C.check({'cloud_model_dir': tmp})), True)
+    # bright blobs only: what the model took for cloud on G1A MV (water, vegetation, specks) goes
+    H, W = 400, 600
+    land = 500 + rng.normal(0, 40, (3, H, W)).astype(np.float32)
+    model = np.zeros((H, W), np.uint8)
+    land[:, 50:90, 50:90] = 2000                         # a thick cloud: bright in every band, 1600 px (3.2 km2)
+    model[50:90, 50:90] = 1
+    land[0:2, 200:260, 50:110] = 300                     # vegetation: dark red / green, bright NIR
+    land[2, 200:260, 50:110] = 1500
+    model[200:260, 50:110] = 2                           # ... taken for thin cloud
+    land[:, 300:310, 300:310] = 2000                     # a bright speck taken for cloud (100 px, 0.2 km2)
+    model[300:310, 300:310] = 1
+    land[:, 100:140, 500:580] = 120                      # water far from any cloud, taken for shadow
+    model[100:140, 500:580] = 3
+    model[90:100, 50:90] = 3                             # the cloud's own shadow beside it
+    valid = np.ones((H, W), bool)
+    ref, gone = C.refine(model, land, valid, 45.0, [650.0, 555.0, 860.0], 90.0, 1.0, 10.0)
+    check('cloud refine: the bright cloud blob and its shadow stay; vegetation, a speck and far water go',
+          (int(ref[70, 70]), int(ref[95, 70]), int(ref[230, 80]), int(ref[305, 305]), int(ref[120, 540]),
+           gone['blobs'], gone['removed_dark_cloud_pct'] > 0, gone['removed_small_blob_pct'] > 0,
+           gone['removed_far_shadow_pct'] > 0), (1, 3, 0, 0, 0, 1, True, True, True))
+    check('cloud: by default only thick cloud is masked, after the bright-blob check',
+          (J_default_classes(), C.refine_options({}), C.refine_options({'cloud_refine': False})),
+          ([1], C.REFINE_DEFAULTS, None))
+    # the mask alone, without a run: the model once, a mask and quicklook per threshold
+    calls = []
+
+    def prob_fake(arr, nodata, model_dir, device):     # a sure cloud square, an unsure ring around it
+        calls.append(1)
+        h, w = arr.shape[1:]
+        p = np.zeros((4, h, w), np.float32)
+        p[0] = 1.0
+        p[:, h // 4 - 10:h // 2 + 10, w // 4 - 10:w // 2 + 10] = np.array([0.4, 0.0, 0.6, 0.0])[:, None, None]
+        p[:, h // 4:h // 2, w // 4:w // 2] = np.array([0.05, 0.9, 0.05, 0.0])[:, None, None]
+        return p
+    tdir = os.path.join(tmp, 'cloud_test')
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        rows = C.standalone(mv, tdir, '', None, 'spec', [0.5, 0.7, 0.85], predictor=prob_fake, refine_opts=None)
+    pct = [r['cloud_pct'] for r in rows]
+    check('cloud test: the model runs once; each threshold has its mask, quicklook and row in CLOUD_TEST.csv',
+          (len(calls), [r['confidence'] for r in rows], all(os.path.exists(r['mask']) and os.path.exists(r['quicklook'])
+                                                             for r in rows),
+           len(pd.read_csv(os.path.join(tdir, rows[0]['folder'], 'CLOUD_TEST.csv'))), rows[0]['sensor'],
+           rows[0]['bands']),
+          (1, [0.5, 0.7, 0.85], True, 3, 'MV', '3 2 6'))
+    check('cloud test: a stricter threshold drops the unsure ring', (pct[0] > pct[1], pct[1] == pct[2]), (True, True))
+    pp = os.path.join(tdir, rows[0]['folder'], 'conf_0.7', f"CLOUD_PARAMS_{rows[0]['run']}.txt")
+    params = dict(l.rstrip('\n').split(': ', 1) for l in open(pp, encoding='utf-8')) if os.path.exists(pp) else {}
+    check('cloud test: CLOUD_PARAMS.txt beside each mask says how it was made and what it found',
+          (params.get('bands'), params.get('confidence'), params.get('check', '').startswith('none'),
+           params.get('variant'), 'automatch' in params, params.get('cloud_pct') == str(rows[1]['cloud_pct'])),
+          ('band3, band2, band6', '0.7', True, 'bands_3-2-6_model_only', True, True))
+    with contextlib.redirect_stdout(io.StringIO()):
+        rows2 = C.standalone(mv, tdir, '', None, 'spec', [0.7], predictor=prob_fake, refine_opts=None)
+    check('cloud test: a second run with the same bands gets its own folder; CLOUD_TEST_ALL.csv keeps both',
+          (rows2[0]['folder'] != rows[0]['folder'], rows2[0]['folder'].endswith('bands_3-2-6_model_only')
+           or rows2[0]['folder'].endswith('bands_3-2-6_model_only_2'),
+           len(pd.read_csv(os.path.join(tdir, 'CLOUD_TEST_ALL.csv')))), (True, True, 4))
+    calls.clear()
+    with contextlib.redirect_stdout(io.StringIO()):
+        hrows = C.standalone(hs2, os.path.join(tmp, 'cloud_test_hs'), '', None, 'spec', [0.7], mask_from=hv2,
+                             margin_px=0, predictor=prob_fake, refine_opts=None)
+    with rasterio.open(hrows[0]['mask']) as m:
+        hcls = m.read(1)
+    check('cloud test: HS takes the mask of its VNIR pass, on its own grid',
+          (len(calls), hcls.shape, hrows[0]['cloud_pct'] > 0, 'from G1A_HV_G_PASS' in hrows[0]['band_choice']),
+          (1, (100, 140), True, True))
+    import automatch_job as J
+    import automatch_gpuaas as G
+    real = C.predict
+    C.predict = prob_fake
+    try:
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            rc = J.main(['cloud', mv, '--out', os.path.join(tmp, 'cloud_cli'), '--conf', '0.7', '--model-dir', ''])
+        cli_ok = bool(glob.glob(os.path.join(tmp, 'cloud_cli', '*_bands_3-2-6', 'conf_0.7', 'CLOUD_MASK.tif')))
+        mf = os.path.join(tmp, 'mode_cloud.json')
+        with open(mf, 'w') as f:
+            json.dump({'mode': 'cloud', 'cloud_test_confidences': [0.6, 0.9]}, f)
+        with contextlib.redirect_stdout(io.StringIO()) as buf2:
+            rc2 = G.main(['gpuaas', '.', os.path.join(tmp, 'svc_cloud'), f'{mv},{tmp},{mf}'])
+    finally:
+        C.predict = real
+    have_ocm = not C.check({})
+    if have_ocm:
+        check('cloud test: command line (automatch_job.py cloud) and service mode "cloud"',
+              (rc, cli_ok, rc2, sorted(re.sub(r'^\d{8}_\d{6}_', '<time>_', n)
+                                       for n in os.listdir(os.path.join(tmp, 'svc_cloud', 'cloud_test')))),
+              (0, True, 0, ['<time>_bands_3-2-6', 'CLOUD_TEST_ALL.csv']))
+    else:
+        check('cloud test: without omnicloudmask the command line and service mode say so (exit 2)', (rc, rc2), (2, 2))
+
+
+def test_cloud_sweep(tmp):
+    """Cloud benchmark: every combination of thresholds, band sets (spec + every
+    3 of the crispest) and bright-blob settings from one model run per band
+    set; against a reference mask (raster or polygons) the bright-blob check
+    beats the model alone where the model took vegetation for thick cloud."""
+    import contextlib
+    import glob
+    import io
+    import cv2
+    import numpy as np
+    import pandas as pd
+    import rasterio
+    from rasterio.transform import from_origin
+    from pyproj import Transformer
+    import automatch_cloudsweep as S
+    check('sweep: ranges lo-hi:step keep the end; lists as given',
+          (S.parse_range('0.6-0.99:0.1'), S.parse_range('60-90:5'), S.parse_range('0.25, 1, 4'), S.parse_range([10, 5])),
+          ([0.6, 0.7, 0.8, 0.9, 0.99], [60, 65, 70, 75, 80, 85, 90], [0.25, 1.0, 4.0], [5.0, 10.0]))
+    rng = np.random.default_rng(31)
+    H, W, crs = 400, 500, 'EPSG:32643'
+    tr = from_origin(500000, 1700000, 45, 45)
+    img = os.path.join(tmp, 'G1A_MV_G_SWEEP.tif')
+    with rasterio.open(img, 'w', driver='GTiff', height=H, width=W, count=6, dtype='uint16', crs=crs, transform=tr,
+                       nodata=0) as d:
+        for b in range(1, 7):
+            t = cv2.GaussianBlur(rng.normal(size=(H, W)).astype(np.float32), (0, 0), 2)
+            a = 600 + 120 * t / t.std() + rng.normal(0, 6, (H, W))
+            a[50:110, 60:140] = 2400                           # a thick cloud, bright in every band
+            a[250:320, 300:400] = 250 if b <= 3 else 1800      # vegetation: dark visible, bright NIR
+            d.write(np.clip(a, 1, 65000).astype('uint16'), b)
+    ref = os.path.join(tmp, 'sweep_ref.tif')
+    with rasterio.open(ref, 'w', driver='GTiff', height=H, width=W, count=1, dtype='uint8', crs=crs, transform=tr) as d:
+        m = np.zeros((H, W), np.uint8)
+        m[50:110, 60:140] = 1
+        d.write(m, 1)
+    calls = []
+
+    def fake(arr, nodata, model_dir, device):                   # the model takes the vegetation for thick cloud too
+        calls.append(1)
+        p = np.zeros((4,) + arr.shape[1:], np.float32)
+        p[0] = 1.0
+        p[:, 50:110, 60:140] = np.array([0.02, 0.95, 0.03, 0.0])[:, None, None]
+        p[:, 250:320, 300:400] = np.array([0.04, 0.93, 0.03, 0.0])[:, None, None]
+        return p
+    out = os.path.join(tmp, 'sweep_out')
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        res = S.run([img], out, [ref], '', '0.6-0.9:0.1', '60-90:15', [0.25, 1], [10], 6, True, [1], '', None,
+                    2048, 1, predictor=fake)
+    df = res['rows']
+    sets = df['band_set'].unique().tolist()
+    check('sweep: one model run per band set (spec + every 3 of the 6 crispest; + 1 for the best at full size), '
+          'every combination from it',
+          (len(calls), len(sets), 'spec' in sets, len(df), len(df) == len(sets) * 4 * (1 + 3 * 2 * 1)),
+          (len(sets) + 1, 21, True, len(sets) * 28, True))
+    best = df.sort_values('ref_f1', ascending=False).iloc[0]
+    model = df[(df['band_set'] == 'spec') & (df['check'] == 'none') & (df['confidence'] == 0.7)].iloc[0]
+    check('sweep: against the reference the bright-blob check is right (F1 ~1), the model alone is not',
+          (best['check'], best['ref_f1'] > 0.95, model['ref_f1'] < 0.8, model['ref_precision'] < 0.6),
+          ('bright blobs', True, True, True))
+    f = res['folder']
+    pngs = glob.glob(os.path.join(f, 'G1A_MV_G_SWEEP', '*', '*.png'))
+    check('sweep: summary, one PNG per threshold x (model alone, each brightness) and band set, named in the CSV; '
+          'no stacked sheets unless asked; the best combination at full size; its settings',
+          (os.path.exists(os.path.join(f, 'CLOUD_SWEEP_SUMMARY.csv')), len(pngs), int(df['png'].notna().sum()),
+           os.path.exists(os.path.join(f, 'G1A_MV_G_SWEEP', 'spec', 'conf0.7_bright75_blob1_shadow10.png')),
+           len(glob.glob(os.path.join(f, 'SHEET_*.png'))), bool(glob.glob(os.path.join(f, 'top_1_*', 'CLOUD_MASK.tif'))),
+           len(glob.glob(os.path.join(f, 'CLOUD_SWEEP_PARAMS_*.txt'))), 'against the reference' in buf.getvalue()),
+          (True, 21 * 4 * 4, 21 * 4 * 4, True, 0, True, 1, True))
+    to_ll = Transformer.from_crs(crs, 'EPSG:4326', always_xy=True)
+    xs, ys = [500000 + 60 * 45, 500000 + 140 * 45], [1700000 - 50 * 45, 1700000 - 110 * 45]
+    ring = [to_ll.transform(x, y) for x, y in ((xs[0], ys[0]), (xs[1], ys[0]), (xs[1], ys[1]), (xs[0], ys[1]),
+                                                (xs[0], ys[0]))]
+    gj = os.path.join(tmp, 'sweep_ref.geojson')
+    with open(gj, 'w') as fh:
+        json.dump({'type': 'FeatureCollection', 'features': [{'type': 'Feature', 'properties': {},
+                                                              'geometry': {'type': 'Polygon', 'coordinates': [ring]}}]},
+                  fh)
+    import automatch_cloud as Cm
+    import automatch_gpuaas as G
+    mf = os.path.join(tmp, 'mode_cloudsweep.json')
+    with open(mf, 'w') as fh:
+        json.dump({'mode': 'cloudsweep', 'cloud_sweep_conf': '0.7', 'cloud_sweep_bright': '90',
+                   'cloud_sweep_blob_km2': [1], 'cloud_sweep_shadow_km': [10], 'cloud_sweep_crisp': 0,
+                   'cloud_sweep_reference': [ref]}, fh)
+    real, real_check = Cm.predict, Cm.check
+    Cm.predict, Cm.check = fake, (lambda job: [])
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = G.main(['gpuaas', '.', os.path.join(tmp, 'svc_sweep'), f'{img},{tmp},{mf}'])
+    finally:
+        Cm.predict, Cm.check = real, real_check
+    made = glob.glob(os.path.join(tmp, 'svc_sweep', 'cloud_sweep', '*_sweep', 'CLOUD_SWEEP.csv'))
+    check('sweep: the GPU service mode "cloudsweep" runs it from the job file (with its reference)',
+          (rc, len(made), 'ref_f1' in pd.read_csv(made[0]).columns if made else None), (0, 1, True))
+    a_r, _ = S.load_reference(ref, img)
+    a_g, kg = S.load_reference(gj, img)
+    iou = (a_r & a_g).sum() / max((a_r | a_g).sum(), 1)
+    check('sweep: cloud outlines drawn as polygons (GeoJSON) give the same reference as the raster',
+          (iou > 0.95, bool(kg.all())), (True, True))
+
+
+def J_default_classes():
+    import automatch_job as J
+    return J.normalize({})['cloud_mask_classes']
+
+
+def test_stretch():
+    """The contrast stretch before matching follows stretch_percentiles: at 90
+    the brightest tenth saturates and the rest spreads over more grey levels."""
+    import numpy as np
+    import automatch_engine as E
+    import automatch_job as J
+    rng = np.random.default_rng(4)
+    img = (rng.gamma(2.0, 200.0, (200, 200)) + 50).astype(np.float32)
+    a99 = E.BaseMatcher._norm_img(img, nodata=0, plo=1, phi=99)
+    a90 = E.BaseMatcher._norm_img(img, nodata=0, plo=1, phi=90)
+    check('stretch: at 90 about a tenth saturates, at 99 about a hundredth',
+          (abs(float((a90 >= 0.999).mean()) - 0.10) < 0.02, abs(float((a99 >= 0.999).mean()) - 0.01) < 0.01), (True, True))
+    check('stretch: the darker ground gets more grey levels at 90', float(np.median(a90)) > float(np.median(a99)), True)
+    cfg = J._config_for(J.normalize({'stretch_percentiles': [1, 85]}), 512, None, 45.0, '/tmp/x')
+
+    class M(E.BaseMatcher):
+        def __init__(self, config):
+            self.config = config
+        def detect_and_describe(self, *a):
+            pass
+        def match(self, *a):
+            pass
+    try:
+        kw = M(cfg)._stretch_kw()
+    except TypeError:                     # other abstract methods: read it the way the matchers do
+        kw = E.BaseMatcher._stretch_kw(type('X', (), {'config': cfg})())
+    check('stretch: the job setting reaches the matchers', kw, {'plo': 1.0, 'phi': 85.0})
+    # job 369: bright cloud took the grey levels; the ground went black
+    import cv2
+    tex = cv2.GaussianBlur(rng.normal(size=(256, 256)).astype(np.float32), (0, 0), 2)
+    win = 300 + 40 * tex / tex.std()
+    win[:, :128] = 4000 + rng.normal(0, 30, (256, 128))          # cloud on the west half
+    land = (slice(None), slice(140, 256))
+    flat = E.BaseMatcher._norm_img(win, nodata=0, plo=1, phi=99)
+    local = E.BaseMatcher._norm_img(win, nodata=0, plo=1, phi=99, clahe=True)
+    masked = win.copy()
+    masked[:, :128] = 0                                          # what cloud masking hands the stretch
+    clear = E.BaseMatcher._norm_img(masked, nodata=0, plo=1, phi=99)
+    check('stretch: beside cloud the ground is nearly black with one stretch per window',
+          float(flat[land].std()) < 0.05, True)
+    check('stretch: CLAHE brings the ground\'s texture up (x3 or more)',
+          float(local[land].std()) > 3 * float(flat[land].std()), True)
+    check('stretch: with the cloud masked the ground gets the whole grey range',
+          float(clear[land].std()) > 0.15, True)
+    cfg2 = J._config_for(J.normalize({'stretch_mode': 'clahe'}), 512, None, 45.0, '/tmp/x')
+    check('stretch: stretch_mode clahe reaches the matchers',
+          E.BaseMatcher._stretch_kw(type('X', (), {'config': cfg2})()).get('clahe'), True)
+
+
+def test_parallel_share(tmp):
+    """Parallel match lines (a common displacement) mean good matches: the
+    share of a window's matches within the RANSAC threshold of its median
+    displacement, per matcher pass."""
+    import numpy as np
+    import pandas as pd
+    import automatch_rival as R
+    rng = np.random.default_rng(9)
+    d = os.path.join(tmp, 'filtered_par')
+    os.makedirs(d, exist_ok=True)
+
+    def write(name, de, dn):
+        n = len(de)
+        x1, y1 = rng.uniform(0, 20000, n), rng.uniform(0, 20000, n)
+        pd.DataFrame({'x1': 0, 'y1': 0, 'x2': 0, 'y2': 0, 'x1-map': x1, 'y1-map': y1, 'x2-map': x1 - de,
+                      'y2-map': y1 - dn, 'Distance': 0, 'along': 0, 'across': 0, 'model-type': 'magsac',
+                      'threshold': 40.0, 'confidence': 0.99, 'inliers': True}).to_csv(os.path.join(d, name), index=False)
+    for pix in (0, 1024):
+        write(f'sift_band1_toC1_pair001_scan0_pix{pix}_ada_aff_magsac_40.0_0.99_.csv',
+              4013 + rng.normal(0, 8, 200), -2487 + rng.normal(0, 8, 200))          # good: parallel
+        write(f'sift_band1_toC1_pair001_scan0_pix{pix}_ada_aff_magsac_20.0_0.99_.csv',
+              4013 + rng.normal(0, 8, 200), -2487 + rng.normal(0, 8, 200))          # same window, other RANSAC
+        write(f'sift_band1_toC1_pair001_scan0_pix{pix}_smnn_0.95_aff_magsac_40.0_0.99_.csv',
+              rng.uniform(-20000, 20000, 200), rng.uniform(-20000, 20000, 200))     # bad: any direction
+    got = R.parallel_share(d)
+    check('parallel: good matches are parallel, bad ones are not',
+          (got['ada']['parallel_share'] > 0.95, got['smnn0.95']['parallel_share'] < 0.05,
+           got['ada']['windows_parallel'], got['smnn0.95']['windows_parallel']), (True, True, 1.0, 0.0))
+    check('parallel: each window counted once whatever the RANSAC variants', got['ada']['matches'], 400)
+
+
+def test_match_accuracy(tmp):
+    """Match by match against the truth: the truth points give the error
+    field (a mis-marked point dropped); each window's matches are good or
+    not by it, before and after RANSAC, at every keypoint count of the sweep
+    -- also where nothing survives the consensus."""
+    import contextlib
+    import io
+    import numpy as np
+    import pandas as pd
+    from pyproj import Transformer
+    import automatch_truth as T
+    rng = np.random.default_rng(11)
+    E0, N0, crs = 500000.0, 1700000.0, 'EPSG:32643'
+
+    def field(e, n):
+        return 4000 + 0.01 * (e - E0), -2500 - 0.005 * (n - N0)
+    te = E0 + np.r_[0, 40000, 0, 40000, rng.uniform(0, 40000, 8)]        # the corners and inside
+    tn = N0 + np.r_[0, 0, 40000, 40000, rng.uniform(0, 40000, 8)]
+    de, dn = field(te, tn)
+    de[5] += 3000.0                                       # a mis-marked truth point
+    to_ll = Transformer.from_crs(crs, 'EPSG:4326', always_xy=True)
+    ilo, ila = to_ll.transform(te, tn)
+    rlo, rla = to_ll.transform(te - de, tn - dn)
+    tcsv = os.path.join(tmp, 'acc_truth.csv')
+    pd.DataFrame({'In_Lon': ilo, 'In_Lat': ila, 'Ref_Lon': rlo, 'Ref_Lat': rla}).to_csv(tcsv, index=False)
+    out = os.path.join(tmp, 'acc_out')
+
+    def write(base, fid, n_good, n_bad, inl_good, inl_bad, outside=0):
+        """A window as a run leaves it: every match in raw_matches_x, only
+        RANSAC's inliers in filtered_x (no file when it kept none)."""
+        n = n_good + n_bad + outside
+        x1, y1 = E0 + rng.uniform(2000, 38000, n), N0 + rng.uniform(2000, 38000, n)
+        x1[n_good + n_bad:] += 200000.0                   # beyond the truth points: not judged
+        fe, fn = field(x1, y1)
+        fe, fn = fe + rng.normal(0, 5, n), fn + rng.normal(0, 5, n)
+        bad = slice(n_good, n_good + n_bad)
+        fe[bad] += rng.choice([-1, 1], n_bad) * rng.uniform(500, 5000, n_bad)
+        inl = np.zeros(n, bool)
+        inl[:inl_good] = True
+        inl[n_good:n_good + inl_bad] = True
+        os.makedirs(os.path.join(base, 'raw_matches_x'), exist_ok=True)
+        os.makedirs(os.path.join(base, 'filtered_x'), exist_ok=True)
+        pd.DataFrame({'x1': 0, 'y1': 0, 'x2': 0, 'y2': 0, 'x1_map': x1, 'y1_map': y1, 'x2_map': x1 - fe,
+                      'y2_map': y1 - fn, 'distance': 0, 'along': 0, 'across': 0}).to_csv(
+            os.path.join(base, 'raw_matches_x', f'{fid}_raw.csv'), index=False)
+        if inl.any():
+            pd.DataFrame({'x1': 0, 'y1': 0, 'x2': 0, 'y2': 0, 'x1-map': x1[inl], 'y1-map': y1[inl],
+                          'x2-map': (x1 - fe)[inl], 'y2-map': (y1 - fn)[inl], 'Distance': 0, 'along': 0, 'across': 0,
+                          'model-type': 'magsac', 'threshold': 40.0, 'confidence': 0.99, 'inliers': True}).to_csv(
+                os.path.join(base, 'filtered_x', f'{fid}_aff_magsac_40.0_0.99_.csv'), index=False)
+    runs = []
+    for nf, plan in (('10', {'sift': (9, 1, 9, 0), 'disk': (4, 6, 4, 6)}),
+                     ('1000', {'sift': (900, 100, 880, 20), 'disk': (700, 300, 650, 50)})):
+        base = os.path.join(out, f'win512_nf{nf}', 'band1_toC1')
+        os.makedirs(os.path.join(base, 'final_x'), exist_ok=True)
+        for det, (g, b, ig, ib) in plan.items():
+            for pix in (0, 1024):
+                write(base, f'{det}_band1_toC1_pair001_scan0_pix{pix}_smnn_0.95', g, b, ig, ib, outside=3)
+        if nf == '10':                                    # a window where RANSAC kept nothing
+            write(base, 'disk_band1_toC1_pair001_scan0_pix2048_smnn_0.95', 4, 6, 0, 0)
+        runs.append({'filtered_dir': os.path.join(base, 'filtered_x'), 'final_dir': os.path.join(base, 'final_x'),
+                     'sweep': f'win512_nf{nf}'})
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        res = T.compare(out, tcsv, 5000.0, 'consensus', crs, runs=runs)
+    f = res['field']
+    check('accuracy: the truth points give the error field; the mis-marked one is dropped',
+          (f['degree'], len(f['dropped']), f['loo_rmse_m'] < 5.0), (1, 1, True))
+    acc = res['accuracy'].set_index(['detector', 'num_features'])
+    check('accuracy: before RANSAC 9 of 10 good; after it all 9 inliers good (and every window >= 90 %)',
+          (acc.loc[('sift', '10'), 'precision_all'], acc.loc[('sift', '10'), 'precision_inliers'],
+           acc.loc[('sift', '10'), 'windows_90pct_good'], acc.loc[('sift', '10'), 'good_inliers_per_window']),
+          (0.9, 1.0, 1.0, 9.0))
+    check('accuracy: RANSAC fooled at 10 keypoints (4 of 10 inliers good): windows mostly wrong; '
+          'the window it kept nothing of counts (from the raw matches)',
+          (acc.loc[('disk', '10'), 'precision_inliers'], acc.loc[('disk', '10'), 'windows_mostly_wrong'],
+           acc.loc[('disk', '10'), 'windows'], round(acc.loc[('disk', '10'), 'windows_no_inliers'], 3),
+           acc.loc[('disk', '10'), 'precision_all']), (0.4, 1.0, 3, 0.333, 0.4))
+    check('accuracy: at 1000 keypoints 880 of 900 inliers good; matches beyond the truth points not judged',
+          (round(acc.loc[('sift', '1000'), 'precision_inliers'], 3), acc.loc[('sift', '1000'), 'matches_per_window']),
+          (0.978, 1003.0))
+    check('accuracy: written even where no window survived a consensus, with the table by keypoint count',
+          (os.path.exists(os.path.join(out, 'TRUTH_MATCH_ACCURACY.csv')), 'by keypoints per window' in buf.getvalue(),
+           '100% (9)' in buf.getvalue(), ' 40% (4)' in buf.getvalue()), (True, True, True, True))
+
+
+def test_subcells(tmp):
+    """A 2048 px window matched whole, judged in 512 px cells: each cell keeps
+    its least distorted matches (at most subcell_keep), following its own
+    distortion; the plain RANSAC result is kept beside it as <method>-sc512."""
+    import numpy as np
+    import pandas as pd
+    import cv2
+    import automatch_engine as E
+    import automatch_truth as T
+    rng = np.random.default_rng(13)
+    res, win = 45.0, 2048
+    L = win * res
+    n = 1200
+    p1 = rng.uniform(0, L, (n, 2)) + np.array([500000.0, 1700000.0])
+    x = (p1[:, 0] - 500000.0)
+
+    def true_d(e):                                      # error growing across the window, curving (job 347)
+        return np.column_stack([4000 + 0.03 * e + 6e-8 * e * e, -2500 - 0.01 * e])
+    d = true_d(x) + rng.normal(0, 4, (n, 2))
+    bad = rng.random(n) < 0.15
+    d[bad] += rng.uniform(-3000, 3000, (bad.sum(), 2))
+    p2 = p1 - d
+    thr = 2 * res
+    _, inl = cv2.estimateAffine2D(p1, p2, method=E.ransac_flag('magsac'), ransacReprojThreshold=thr, confidence=0.99)
+    inl = inl.ravel() > 0
+    sc = E.subcell_select(p1, p2, inl, 512 * res, thr, 5)
+    good = np.hypot(*(d - true_d(x)).T) <= thr
+    cells = np.floor((p1 - p1.min(0)) / (512 * res)).astype(int)
+    per = pd.Series(1, index=pd.MultiIndex.from_arrays([cells[sc, 0], cells[sc, 1]])).groupby(level=[0, 1]).sum()
+    check('subcells: at most 5 per 512 px cell, from (nearly) every cell of the 2048 px window',
+          (int(per.max()), len(per) >= 15), (5, True))
+    check('subcells: the picks are right at least as often as the window RANSAC inliers',
+          (float(good[sc].mean()) >= float(good[inl].mean()), float(good[sc].mean()) > 0.97), (True, True))
+    # in the RANSAC filter: both results written, the sub-cell one as magsac-sc512
+    cfg = E.PipelineConfig(ransac_methods=['magsac'], ransac_thresholds=[thr], ransac_confidences=[0.99],
+                           subcell_sizes=[(256, 256 * res), (512, 512 * res)], subcell_keep=5)
+    md = {'X1': list(p1[:, 0]), 'Y1': list(p1[:, 1]), 'X2': list(p2[:, 0]), 'Y2': list(p2[:, 1]),
+          'x1': [0] * n, 'y1': [0] * n, 'x2': [0] * n, 'y2': [0] * n, 'distance': [0] * n, 'along': [0] * n,
+          'across': [0] * n, 'file_id': 'sift_band1_toC1_pair001_scan0_pix0_smnn_0.95'}
+    out = os.path.join(tmp, 'filtered_subcells')
+    files = sorted(os.path.basename(f) for f in E.RANSACFilter(cfg).filter_matches_in_memory([md], out))
+    sub = [f for f in files if '-sc512' in f]
+    p = E.MatchStatistics._parse_filename(sub[0]) if sub else {}
+    check('subcells: the RANSAC filter writes the plain result and one per sub-cell size, ranked apart',
+          (len(files), sum('-sc256_' in f for f in files), p.get('ransac_method'),
+           T.ransac_label(p.get('ransac_method'), p.get('ransac_threshold')),
+           len(pd.read_csv(os.path.join(out, sub[0]))) <= 16 * 5 if sub else None),
+          (3, 1, 'magsac-sc512', 'magsac90-sc512', True))
+    import automatch_job as J
+    check('subcells: a job takes one size or a list',
+          (J.normalize({'subcell_px': 512})['subcell_px'], J.normalize({'subcell_px': [512, 256, 0]})['subcell_px'],
+           J.normalize({})['subcell_px'],
+           [p_ for p_, _ in J._config_for(J.normalize({'subcell_px': [256, 512, 2048]}), 2048, None, 45.0,
+                                          tmp).subcell_sizes]),
+          ([512], [256, 512], [], [256, 512]))
+    check('subcells: off by default (no sub-cell file)',
+          len(E.RANSACFilter(E.PipelineConfig(ransac_methods=['magsac'], ransac_thresholds=[thr],
+                                              ransac_confidences=[0.99])).filter_matches_in_memory(
+              [md], os.path.join(tmp, 'filtered_plain'))), 1)
+
+
+def test_accuracy_finished_job(tmp):
+    """Finished jobs scored again, nothing matched: per window size, and the
+    512 px sub-cell variant made afterwards from the saved matches into
+    SUBCELLS_512/ (the job's own folders and ranking untouched)."""
+    import contextlib
+    import glob
+    import io
+    import numpy as np
+    import pandas as pd
+    import cv2
+    from pyproj import Transformer
+    import automatch_accuracy as A
+    import automatch_engine as E
+    import automatch_truth as T
+    rng = np.random.default_rng(21)
+    crs, res, E0, N0 = 'EPSG:32643', 45.0, 500000.0, 1700000.0
+    jd = os.path.join(tmp, 'output999')
+    os.makedirs(jd, exist_ok=True)
+    with open(os.path.join(jd, 'job_used.json'), 'w') as f:
+        json.dump({'input_path': '/srv/in/G1A_MV_G_TEST.tif', 'output_dir': '/srv/out/output999',
+                   'target_resolution': res, 'min_inliers_per_chip': 4}, f)
+    pd.DataFrame([{'working_crs': crs}]).to_csv(os.path.join(jd, 'RUN_MANIFEST.csv'), index=False)
+
+    def true_d(e):
+        return np.column_stack([4000 + 0.03 * e + 6e-8 * e * e, -2500 - 0.01 * e])
+    for win in (1024, 2048):
+        base = os.path.join(jd, f'win{win}_nfauto', 'band1_toC1')
+        for k in ('raw_matches_sift', 'filtered_sift', 'final_sift'):
+            os.makedirs(os.path.join(base, k), exist_ok=True)
+        for pix in (0, 1):
+            n = 900
+            p1 = rng.uniform(0, 2048 * res, (n, 2)) + np.array([E0, N0])
+            d = true_d(p1[:, 0] - E0) + rng.normal(0, 4, (n, 2))
+            bad = rng.random(n) < 0.15
+            d[bad] += rng.uniform(-3000, 3000, (bad.sum(), 2))
+            p2 = p1 - d
+            fid = f'sift_band1_toC1_pair001_scan0_pix{pix}_smnn_0.95'
+            raw = pd.DataFrame({'x1': 0, 'y1': 0, 'x2': 0, 'y2': 0, 'x1_map': p1[:, 0], 'y1_map': p1[:, 1],
+                                'x2_map': p2[:, 0], 'y2_map': p2[:, 1], 'distance': 0.1, 'along': d[:, 0],
+                                'across': d[:, 1]})
+            raw.to_csv(os.path.join(base, 'raw_matches_sift', f'{fid}_raw.csv'), index=False)
+            _, inl = cv2.estimateAffine2D(p1, p2, method=E.ransac_flag('magsac'), ransacReprojThreshold=90.0,
+                                          confidence=0.99)
+            inl = inl.ravel() > 0
+            r = raw[inl]
+            pd.DataFrame({'x1': r.x1, 'y1': r.y1, 'x2': r.x2, 'y2': r.y2, 'x1-map': r.x1_map, 'y1-map': r.y1_map,
+                          'x2-map': r.x2_map, 'y2-map': r.y2_map, 'Distance': r.distance, 'along': r.along,
+                          'across': r.across, 'model-type': 'magsac', 'threshold': 90.0, 'confidence': 0.99,
+                          'inliers': True}).to_csv(os.path.join(base, 'filtered_sift',
+                                                                f'{fid}_aff_magsac_90.0_0.99_.csv'), index=False)
+    te = E0 + np.r_[0, 92160, 0, 92160, rng.uniform(0, 92160, 8)]
+    tn = N0 + np.r_[0, 0, 92160, 92160, rng.uniform(0, 92160, 8)]
+    td = true_d(te - E0)
+    to_ll = Transformer.from_crs(crs, 'EPSG:4326', always_xy=True)
+    ilo, ila = to_ll.transform(te, tn)
+    rlo, rla = to_ll.transform(te - td[:, 0], tn - td[:, 1])
+    tcsv = os.path.join(tmp, 'acc_job_truth.csv')
+    pd.DataFrame({'In_Lon': ilo, 'In_Lat': ila, 'Ref_Lon': rlo, 'Ref_Lat': rla}).to_csv(tcsv, index=False)
+    with contextlib.redirect_stdout(io.StringIO()):
+        acc = A.job_accuracy(jd, tcsv, subcell_px=512, keep=5)
+    kinds = sorted(set(zip(acc['window_size'], acc['ransac'])))
+    check('accuracy (finished job): every window size, plain and 512 px sub-cells made from the saved matches',
+          kinds, [(1024, 'magsac90'), (1024, 'magsac90-sc512'), (2048, 'magsac90'), (2048, 'magsac90-sc512')])
+    own = glob.glob(os.path.join(jd, 'win*', '*', 'filtered_sift', '*-sc*')) + \
+        glob.glob(os.path.join(jd, 'win*', '*', 'final_sift', '*'))     # nothing rebuilt in the job's folders
+    check('accuracy (finished job): sub-cells in SUBCELLS_512/, the job\'s folders and TRUTH_RANKING untouched',
+          (bool(glob.glob(os.path.join(jd, 'SUBCELLS_512', 'win2048_nfauto', 'band1_toC1', 'filtered_sift', '*'))),
+           own, os.path.exists(os.path.join(jd, 'TRUTH_RANKING.csv')),
+           os.path.exists(os.path.join(jd, 'TRUTH_RANKING_SUBCELLS.csv'))), (True, [], False, True))
+    a = acc.set_index(['window_size', 'ransac'])
+    check('accuracy (finished job): the sub-cell picks are right at least as often, at most 5 per cell',
+          (bool(a.loc[(2048, 'magsac90-sc512'), 'precision_inliers'] >= a.loc[(2048, 'magsac90'),
+                                                                               'precision_inliers'] - 0.01),
+           float(a.loc[(2048, 'magsac90-sc512'), 'inliers_per_window']) <= 16 * 5), (True, True))
+    real = T.compare
+    T.compare = lambda *a_, **k: 1 / 0
+    try:
+        again = A.job_accuracy(jd, tcsv, subcell_px=512, keep=5)
+        reused = len(again) == len(acc)
+    except ZeroDivisionError:
+        reused = False
+    finally:
+        T.compare = real
+    check('accuracy (finished job): read back when made with the same settings', reused, True)
+    with contextlib.redirect_stdout(io.StringIO()):
+        acc2 = A.job_accuracy(jd, tcsv, subcell_px=[256], keep=5)
+    check('accuracy (finished job): asking for 256 after 512 keeps both in the one file (subcell_px column)',
+          (sorted(set(acc2['subcell_px'])), sorted(set(acc2[acc2['subcell_px'] == 256]['ransac']))),
+          ([0, 256, 512], ['magsac90-sc256']))
+    import automatch_bench as B
+    empty = os.path.join(tmp, 'output313')
+    os.makedirs(empty, exist_ok=True)
+    open(os.path.join(empty, 'TRUTH_RANKING.csv'), 'w').close()           # job 313: an empty file
+    with contextlib.redirect_stdout(io.StringIO()):
+        det313 = B.detectors_of(empty)
+        T.compare(empty, tcsv, 5000.0, 'consensus', crs, runs=[], quiet=True)
+    check('accuracy (finished job): an empty TRUTH_RANKING.csv is skipped, and an empty ranking is written with '
+          'its header', (det313.empty, list(pd.read_csv(os.path.join(empty, 'TRUTH_RANKING.csv')).columns[:3])),
+          (True, ['rank', 'channel', 'sweep']))
+    s = A.summarize(acc.assign(job='output999', sensor='MV'))
+    txt = A.format_summary(s)
+    check('accuracy (finished job): summary per sensor x window size, plain and sub-cells',
+          (len(s[s['level'] == 'sensor']), 'sub-cells' in txt, '2048 px' in txt), (4, True, True))
+
+
+def test_partial_cover():
+    """Jobs 336 and 343: a warning when the first-ranked configuration is km
+    off while one reaching fewer points is close (343, matches on part of the
+    scene only); none when rank 1 is close (336)."""
+    import pandas as pd
+    import automatch_truth as T
+
+    def table(rows):
+        cols = ['channel', 'detector', 'matcher_family', 'truth_rmse_m', 'truth_reached', 'truth_total']
+        return T.rank(pd.DataFrame([dict(zip(cols, r)) for r in rows]))
+    t343 = table([('band3', 'imw-minima-loftr', 'internal', 1112.0, 5, 9),
+                  ('band3', 'disk_epipolar', 'nn', 4864.0, 9, 9),
+                  ('band3', 'imw-topicfm', 'internal', 179.0, 2, 9),
+                  ('band3', 'dog_sosnet', 'mnn', 174.0, 1, 9)])
+    w = T.coverage_warnings(t343)
+    check('truth: job 343 shape warns once', len(w), 1)
+    check('truth: the warning names the close configuration reaching 2+ points',
+          'imw-topicfm' in w[0] and '179 m at 2/9' in w[0])
+    check('truth: the warning is in the printed ranking',
+          'WARNING band3' in T.format_ranking(t343.assign(best_matcher_setting='x', ransac='r',
+                                                          truth_mean_dE_m=0.0, truth_mean_dN_m=0.0,
+                                                          truth_max_m=0.0), 9, 5000.0, 'consensus'))
+    t336 = table([('band1', 'imw-xoftr', 'internal', 385.0, 6, 6),
+                  ('band1', 'imw-d2net', 'internal', 166.0, 2, 6)])
+    check('truth: job 336 shape (rank 1 within 1 km) does not warn', T.coverage_warnings(t336), [])
+    check('truth: one close point alone does not warn',
+          T.coverage_warnings(table([('b', 'a', 'x', 3000.0, 5, 9), ('b', 'c', 'y', 100.0, 1, 9)])), [])
+
+
+def test_coarse_outliers():
+    """Wrong coarse offsets from a matcher on a handful of matches (job 325,
+    XoFTR) are replaced; offsets that vary across a distorted scene (run
+    297) and two groups of similar weight are left alone."""
+    import contextlib
+    import io
+    import automatch_engine as E
+    cfg = E.PipelineConfig()
+    km = 1000.0
+
+    def pair(pid, e_km, n_km):
+        return {'pair_id': pid, 'bounds': [e_km * km - 5 * km, n_km * km - 5 * km, e_km * km + 5 * km, n_km * km + 5 * km]}
+
+    def m(dx, dy, sup):
+        return {'method': 'matcher@180m', 'dx': dx * km, 'dy': dy * km, 'support': sup, 'field': None}
+
+    def pc(dx, dy):
+        return {'method': 'phasecorr@180m', 'dx': dx * km, 'dy': dy * km, 'support': None, 'field': None}
+    # job 325, XoFTR: WRS-2 tiles along a 55 x 225 km HS strip (rows 44/45/46 north to south, paths 149/150)
+    where = {1: (0, 80), 2: (0, 80), 3: (0, 80), 4: (0, 0), 5: (0, 0), 6: (0, 0), 7: (0, -90), 8: (0, -90),
+             9: (-5, 80), 10: (-5, 80), 11: (-5, 80), 12: (-5, 0), 13: (-5, 0), 14: (-5, 0), 15: (-5, -90)}
+    ests = {1: m(-34.8, -27.0, 13), 2: m(-35.0, -28.9, 10), 3: {'method': 'failed', 'dx': 0.0, 'dy': 0.0},
+            4: m(-9.3, 4.9, 57), 5: m(-22.6, 18.6, 9), 6: m(-33.7, 18.6, 8), 7: m(-10.0, 4.8, 33),
+            8: pc(-9.95, 4.78), 9: m(-9.1, 4.87, 115), 10: m(-9.1, 4.87, 78), 11: m(-9.1, 4.88, 59),
+            12: m(30.6, 29.5, 9), 13: pc(-9.23, 4.83), 14: pc(-9.31, 4.82), 15: m(-10.0, 4.85, 20)}
+    pairs = [pair(i, *where[i]) for i in range(1, 16)]
+    with contextlib.redirect_stdout(io.StringIO()):
+        out = E.AutoMatchPipeline._drop_matcher_outliers(pairs, ests, cfg)
+    check('coarse: matcher offsets 19-51 km off on 8-13 matches are replaced (job 325, XoFTR)',
+          (out, round(ests[1]['dx'] / km, 1), ests[1]['method'], ests[8]['method']),
+          ([1, 2, 5, 6, 12], -9.1, 'from-pair-9 (matcher outlier)', 'phasecorr@180m'))
+    # run 297: dE grows 46 m per km eastwards; pairs on both sides of a 100 km gap
+    grad = {}
+    xs = [-135, -120, -100, -80, -60, 60, 80, 100, 120, 135]
+    for i, x in enumerate(xs):
+        for j, y in enumerate((-100, 100)):
+            grad[2 * i + j + 1] = (x, y)
+    ests = {pid: m(-2.0 + 0.046 * x, 5.0 + 0.3 * (pid % 3), 30 + 5 * pid) for pid, (x, y) in grad.items()}
+    pairs = [pair(pid, *grad[pid]) for pid in grad]
+    with contextlib.redirect_stdout(io.StringIO()):
+        out = E.AutoMatchPipeline._drop_matcher_outliers(pairs, ests, cfg)
+    check('coarse: offsets that grow across a distorted scene, with a 120 km gap between pairs, are kept '
+          '(run 297)', out, [])
+    # two groups of similar weight: nothing to decide on
+    ests = {1: m(0, 0, 50), 2: m(0.2, 0.1, 50), 3: m(30, 30, 45), 4: m(30.1, 29.9, 45)}
+    pairs = [pair(1, 0, 0), pair(2, 0, 10), pair(3, 0, 20), pair(4, 0, 30)]
+    with contextlib.redirect_stdout(io.StringIO()):
+        out = E.AutoMatchPipeline._drop_matcher_outliers(pairs, ests, cfg)
+    check('coarse: two groups of similar weight are left alone', out, [])
+    # consistent phase-correlation offsets alone never overrule a matcher
+    ests = {1: m(-1.5, 7.1, 12), 2: pc(24.5, -25.4), 3: pc(25.0, -25.7), 4: pc(24.8, -25.5), 5: pc(25.2, -25.6)}
+    pairs = [pair(i, 0, 10 * i) for i in range(1, 6)]
+    with contextlib.redirect_stdout(io.StringIO()):
+        out = E.AutoMatchPipeline._drop_matcher_outliers(pairs, ests, cfg)
+    check('coarse: a group of phase-correlation offsets does not overrule the matcher', out, [])
+
+
+
+def test_kornia_versions(tmp):
+    """A kornia without ALIKED / XFeat (the GPU node has 0.8.1): those detectors
+    are not offered, imcui's ALIKED / XFeat are; native libraries load in the
+    order that keeps conda GDAL working next to pip wheels."""
+    import automatch_engine as E
+    import kornia.feature as KF
+    saved = {n: getattr(KF, n) for n in ('ALIKED', 'XFeat')}
+    try:
+        for n in saved:
+            delattr(KF, n)
+        names = [d['name'] for d in E.available_detectors()]
+        check('kornia 0.8.1: aliked / xfeat / xfeatstar not offered, the rest are',
+              (sorted(E.kornia_unavailable()), 'aliked' in names, 'xfeat' in names, 'dog' in names),
+              (['aliked', 'xfeat', 'xfeatstar'], False, False, True))
+        check('kornia 0.8.1: imcui may provide ALIKED / XFeat, not DISK',
+              ('aliked' in E.kornia_families(), 'xfeat_dense' in E.kornia_families(), 'disk' in E.kornia_families()),
+              (False, False, True))
+        try:
+            E.build_detector('aliked', E.PipelineConfig())
+            check('kornia 0.8.1: selecting aliked explains why it cannot run', False)
+        except ValueError as e:
+            check('kornia 0.8.1: selecting aliked explains why it cannot run', 'has no ALIKED' in str(e))
+    finally:
+        for n, v in saved.items():
+            setattr(KF, n, v)
+    check('kornia: restored', sorted(E.kornia_unavailable()), [])
+    # a model that reads its checkpoint itself (imcui's r2d2): files found -> partial, not error
+    import torch as th
+    import automatch_weights as W
+    hub = os.path.join(tmp, 'kv_hub')
+    os.makedirs(os.path.join(hub, 'checkpoints'), exist_ok=True)
+    th.save({'net': 'Net()'}, os.path.join(hub, 'checkpoints', 'reads_ckpt.pth'))
+
+    class Reads(E.DiskBasedMatcher):
+        def __init__(self, c):
+            super().__init__(c)
+            self.m = None
+
+        def _build_models(self):
+            self.m = self._load_model('Reads', lambda: 'net = ' + th.hub.load_state_dict_from_url(
+                'http://example.invalid/reads_ckpt.pth')['net'])
+
+        def detect_and_describe(self, a, b):
+            return None
+
+        def get_detector_name(self):
+            return 'ext-reads'
+
+        def get_available_matchers(self):
+            return ['internal']
+    old_dir, default_hub = th.hub.get_dir(), E._default_hub_dir
+    try:
+        th.hub.set_dir(hub)
+        E._default_hub_dir = lambda: hub
+        E.register_detector('ext-reads', lambda c, kw: Reads(c), families=('reads',), source='test')
+        rep = W.check(detectors=['ext-reads'], imcui=False, quiet=True)
+        v = rep['detectors'][0]['variants'][0]
+        check('weights: files found but the model reads them itself -> partial, not error',
+              (v['status'], 'files are found' in v['error'], rep['detectors'][0]['files'][0]['status']),
+              ('partial', True, 'ok'))
+    finally:
+        th.hub.set_dir(old_dir)
+        E._default_hub_dir = default_hub
+        E.EXTERNAL_DETECTORS.pop('ext-reads', None)
+    order = {}
+    for mod in ('automatch_truth', 'automatch_engine', 'automatch_gpuaas', 'automatch_imcui'):
+        out = subprocess.run([sys.executable, '-c', textwrap.dedent(f"""
+            import sys; sys.path.insert(0, {HERE!r})
+            import importlib, ctypes
+            loaded = []
+            import builtins
+            real = builtins.__import__
+            def spy(name, *a, **k):
+                top = name.split('.')[0]
+                if top in ('rasterio', 'pandas', 'torch', 'cv2', 'h5py') and top not in loaded:
+                    loaded.append(top)
+                return real(name, *a, **k)
+            builtins.__import__ = spy
+            import {mod}
+            print(','.join(loaded))
+        """)], capture_output=True, text=True)
+        order[mod] = (out.stdout.strip().splitlines() or [''])[-1].split(',')[0]
+    check('native: rasterio is the first compiled package each entry module imports',
+          order, {m: 'rasterio' for m in order})
+
+
+def test_warmup_and_padding():
+    """A model failing on the synthetic warm-up pair no longer stops its
+    detector (imcui SuperPoint found no keypoints in noise and was lost);
+    missing weights still do. imcui windows are padded to multiples of 32."""
+    import numpy as np
+    import automatch_engine as E
+    import automatch_imcui as IM
+    import imw_configs
+
+    class NoiseHater(E.DenseWindowMatcher):
+        def match_images(self, a, b):
+            raise IndexError('max(): Expected reduction dim 1 to have non-zero size.')
+
+        def get_detector_name(self):
+            return 'noisehater'
+
+    class NoWeights(NoiseHater):
+        def _build_models(self):
+            self._load_model('nowhere', lambda: (_ for _ in ()).throw(OSError('offline')))
+    cfg = E.PipelineConfig(num_features=100, use_amp=False)
+    try:
+        NoiseHater(cfg).warmup()
+        check('warmup: a failure on the synthetic pair is reported, not fatal', True)
+    except Exception as e:
+        check('warmup: a failure on the synthetic pair is reported, not fatal', f'{type(e).__name__}: {e}')
+    E.FAILED_MODELS.pop('nowhere', None)
+    try:
+        NoWeights(cfg).warmup()
+        check('warmup: missing weights still stop the detector', False)
+    except E.ModelLoadError:
+        check('warmup: missing weights still stop the detector', True)
+    finally:
+        E.FAILED_MODELS.pop('nowhere', None)
+    a = np.zeros((100, 70), np.uint8)
+    old = imw_configs.RESIZE_MAX
+    try:
+        shp = IM._pad_for_model(a).shape
+        imw_configs.RESIZE_MAX = 64
+        shp_big = IM._pad_for_model(a).shape
+    finally:
+        imw_configs.RESIZE_MAX = old
+    check('imcui padding: multiples of 32; a square when imcui will shrink it', (shp, shp_big), ((128, 96), (128, 128)))
+
+
+def test_sliced_matching():
+    """Matching in slices (for keypoint counts whose full distance table
+    would not fit in memory) gives kornia's matches; the keypoint cap is a
+    setting."""
+    import numpy as np
+    import torch as th
+    import kornia.feature as KF
+    import automatch_engine as E
+    import automatch_job as J
+    th.manual_seed(0)
+    n = 2000
+    d1 = th.nn.functional.normalize(th.randn(n, 128), dim=1)
+    perm = th.randperm(n)
+    d2 = th.nn.functional.normalize(d1[perm][:1700] + 0.08 * th.randn(1700, 128), dim=1)
+    old = E.MATCH_SLICE_ELEMS
+    E.MATCH_SLICE_ELEMS = 1700 * 97          # ~20 slices
+    try:
+        same = {}
+        for name, ref in (('nn', KF.match_nn(d1, d2)), ('mnn', KF.match_mnn(d1, d2)),
+                          ('snn', KF.match_snn(d1, d2, 0.8)), ('smnn', KF.match_smnn(d1, d2, 0.95))):
+            got = E.match_sliced(name, d1, d2, 0.8 if name == 'snn' else 0.95)
+            same[name] = ({tuple(r) for r in ref[1].tolist()} == {tuple(r) for r in got[1].tolist()}
+                          and len(ref[1]) > 0)
+        check('slices: nn / mnn / snn / smnn give kornia\'s matches', same, {k: True for k in same})
+        img, img2 = _texture(384)
+        n1, n2 = E.BaseMatcher._norm_img(img, 0.0), E.BaseMatcher._norm_img(img2, 0.0)
+        t1, t2 = th.from_numpy(n1)[None, None].float(), th.from_numpy(n2)[None, None].float()
+        m = E.build_detector('sift', E.PipelineConfig(num_features=1500, use_amp=False))
+        with th.inference_mode():
+            l1, f1, l2, f2 = m.detect_and_describe(t1, t2)
+        f1, f2, hw = f1.squeeze(0), f2.squeeze(0), th.tensor(t1.shape[2:])
+        th.manual_seed(3)
+        ref = KF.match_adalam(f1, f2, l1, l2, config=dict(m.adalam_config), hw1=hw, hw2=hw)
+        E.MATCH_SLICE_ELEMS = f2.shape[0] * 61
+        th.manual_seed(3)
+        got = E.match_adalam_sliced(f1, f2, l1, l2, dict(m.adalam_config), hw, hw)
+        check('slices: AdaLAM gives kornia\'s matches', ({tuple(r) for r in ref[1].tolist()}
+                                                        == {tuple(r) for r in got[1].tolist()}, len(ref[1]) > 50),
+              (True, True))
+        fg = E.match_fginn_sliced(f1, f2, l2, 0.8, 10.0, False)
+        c1, c2 = KF.get_laf_center(l1)[0], KF.get_laf_center(l2)[0]
+        d = (c1[fg[1][:, 0]] - c2[fg[1][:, 1]]).numpy()
+        check('slices: FGINN (row by row) finds the shift',
+              (len(d) > 50, float(np.mean((np.abs(d[:, 0] + 7) < 1.5) & (np.abs(d[:, 1] - 4) < 1.5))) > 0.85),
+              (True, True))
+    finally:
+        E.MATCH_SLICE_ELEMS = old
+    big = E.PipelineConfig(num_features=40000, use_amp=False)
+    m = E.build_detector('sift', big)
+    a = th.zeros(1, 40000, 128)
+    check('slices: used above the table limit only', (E._needs_slices(a[0], a[0]),
+                                                      E._needs_slices(a[0, :3000], a[0, :3000])), (True, False))
+    cfg = J._config_for(J.normalize({'max_num_features': 90000}), 3072, None, 45.0, '/tmp/x')
+    cfg2 = J._config_for(J.normalize({}), 3072, None, 45.0, '/tmp/x')
+    check('keypoints: the cap is a job setting (density kept at 3072 px when raised)',
+          (cfg.num_features, cfg2.num_features), (int(9000 * 3072 * 3072 / 1e6), 32000))
+
+
+def test_kornia_catalogue():
+    """The matchers on a synthetic pair shifted by (7, -4) px: every kornia
+    matcher recovers it, and LightGlue gets matches for SIFT / DoG-HardNet
+    (their (1, N, D) descriptors once made it return nothing)."""
+    import automatch_engine as E
+    img, img2 = _texture()
+    cfg = E.PipelineConfig(num_features=600, use_amp=False, smnn_thresholds=[0.95])
+    m = E.build_detector('sift', cfg)
+    got = {mn: _shift_of(m._process_single_window(img, img2, 0, 0, 0, 0, dict(_META), mn,
+                                                  0.95 if mn == 'smnn' else None, 0.0, 0.0))
+           for mn in ['smnn', 'ada'] + E.GENERIC_MATCHERS}
+    check('matchers: smnn / ada / mnn / snn / nn / fginn recover the shift',
+          {k: (v[1:] if v else None) for k, v in got.items()}, {k: (-7, -4) for k in got})
+    for det, params in (('sift', {}), ('dog', {})):
+        m = E.build_detector(det, cfg, params)
+        fname = os.path.join(E._default_hub_dir(), 'checkpoints', {
+            'sift': 'sift_lightglue_v0-1_arxiv-pth', 'dog': 'doghardnet_v0-1_arxiv-pth'}[det])
+        if det == 'dog' and not os.path.exists(os.path.join(E._default_hub_dir(), 'checkpoints',
+                                                            'checkpoint_liberty_with_aug.pth')):
+            print('SKIP  DoG-HardNet: HardNet weights not cached here')
+            continue
+        if not os.path.exists(fname):
+            print(f'SKIP  {det} LightGlue: weights not cached here')
+            continue
+        rec = m._process_single_window(img, img2, 0, 0, 0, 0, dict(_META), 'lgm', None, 0.0, 0.0)
+        res = _shift_of(rec)
+        check(f'LightGlue: {det} gets matches and the shift', (res[0] > 50, res[1:]) if res else None,
+              (True, (-7, -4)))
+        m.unload_model()
+
+
+def test_weights_check(tmp):
+    """automatch_weights against a private weights folder: found / missing /
+    truncated reported with folder and URL, nothing downloaded, nothing read
+    in quick mode; --load reads; the HuggingFace lookup finds imcui files in
+    other caches."""
+    import types
+    import torch as th
+    import automatch_engine as E
+    import automatch_imcui as IM
+    import automatch_weights as W
+    hub = os.path.join(tmp, 'wt_hub')
+    ck = os.path.join(hub, 'checkpoints')
+    os.makedirs(ck, exist_ok=True)
+    th.save({'not': th.zeros(1)}, os.path.join(ck, 'depth-save.pth'))       # wrong content on purpose
+    th.save({'x': th.zeros(1000)}, os.path.join(tmp, 'full.pth'))
+    with open(os.path.join(tmp, 'full.pth'), 'rb') as f:
+        head = f.read(200)
+    with open(os.path.join(ck, 'disk_lightglue_v0-1_arxiv-pth'), 'wb') as f:
+        f.write(head)                                                    # an interrupted download
+    old_dir, default_hub, orig = th.hub.get_dir(), E._default_hub_dir, E._ORIG_LOAD_STATE_DICT
+    calls = []
+
+    def offline(url, *a, **k):
+        calls.append(url)
+        raise OSError('offline')
+    try:
+        th.hub.set_dir(hub)
+        E._default_hub_dir = lambda: hub
+        E._ORIG_LOAD_STATE_DICT = offline
+        rep = W.check(detectors=['disk'], imcui=False, quiet=True)
+        files = {f['file']: f for f in rep['detectors'][0]['files']}
+        check('weights: found / missing / truncated',
+              (files['depth-save.pth']['status'], files['epipolar-save.pth']['status'],
+               files['disk_lightglue_v0-1_arxiv-pth']['status']), ('ok', 'MISSING', 'TRUNCATED'))
+        check('weights: folder and URL reported',
+              (files['depth-save.pth']['folder'] == ck, files['epipolar-save.pth']['source'].endswith(
+                  'epipolar-save.pth'), files['epipolar-save.pth']['needed_by']), (True, True, ['disk_epipolar']))
+        check('weights: quick check downloads nothing and reads nothing (the bad file passed)',
+              (calls, [v['status'] for v in rep['detectors'][0]['variants']]), ([], ['missing', 'missing']))
+        text = W.format_report(rep)
+        check('weights: report says where to put the missing files',
+              'epipolar-save.pth' in text and 'UNDER THE NAME SHOWN' in text and ck in text)
+        rep = W.check(detectors=['keynet'], imcui=False, quiet=True)
+        ori = {f['file']: f for f in rep['detectors'][0]['files']}.get('OriNet.pth', {})
+        check('weights: OriNet needed only by the non-upright KeyNet variants',
+              sorted(ori.get('needed_by', [])), ['keynet-aff0-up0', 'keynet-up0'])
+        rep = W.check(job={'detectors': ['disk'], 'detector_params': {'disk': {'checkpoint': ['epipolar']}},
+                           'matchers': {'disk': ['smnn']}}, imcui=False, quiet=True)
+        check('weights: a job checks only what it runs (no LightGlue without lgm)',
+              [f['file'] for f in rep['detectors'][0]['files']], ['epipolar-save.pth'])
+        rep = W.check(detectors=['disk'], imcui=False, quiet=True, load=True)
+        st = {v['variant']: v for v in rep['detectors'][0]['variants']}
+        check('weights: --load reads the files (the wrong content is caught)',
+              (st['disk_depth']['status'], 'extractor' in st['disk_depth']['error'],
+               st['disk_epipolar']['status'], calls), ('error', True, 'missing', []))
+        check('weights: tracing leaves nothing behind',
+              (E.WEIGHTS_TRACE_HOOK, dict(E.FAILED_MODELS), E.MODEL_LABELS,
+               th.nn.Module.load_state_dict.__name__), (None, {}, [], 'load_state_dict'))
+    finally:
+        th.hub.set_dir(old_dir)
+        E._default_hub_dir = default_hub
+        E._ORIG_LOAD_STATE_DICT = orig
+
+    # HuggingFace: a file cached in the default HF cache is used although
+    # HF_HOME points at the (empty) weights folder -- as for kornia's weights
+    fake = types.ModuleType('huggingface_hub')
+    fd = types.ModuleType('huggingface_hub.file_download')
+    consts = types.ModuleType('huggingface_hub.constants')
+    consts.HF_HUB_CACHE = os.path.join(tmp, 'wf', 'huggingface', 'hub')
+    hf_calls = []
+
+    def try_to_load_from_cache(repo_id, filename, cache_dir=None, revision=None, repo_type=None):
+        p = os.path.join(cache_dir or '', repo_id.replace('/', '--'), filename)
+        return p if os.path.isfile(p) else None
+
+    def hf_hub_download(repo_id, filename, **kw):
+        hf_calls.append(filename)
+        raise OSError('offline')
+    fake.try_to_load_from_cache, fake.hf_hub_download, fake.constants = try_to_load_from_cache, hf_hub_download, consts
+    fd.hf_hub_download = hf_hub_download
+    saved = {k: sys.modules.get(k) for k in ('huggingface_hub', 'huggingface_hub.file_download',
+                                             'huggingface_hub.constants')}
+    old_xdg, old_orig = os.environ.get('XDG_CACHE_HOME'), IM._ORIG_HF
+    try:
+        sys.modules.update({'huggingface_hub': fake, 'huggingface_hub.file_download': fd,
+                            'huggingface_hub.constants': consts})
+        os.environ['XDG_CACHE_HOME'] = os.path.join(tmp, 'xdg')
+        target = os.path.join(tmp, 'xdg', 'huggingface', 'hub', 'Realcat--imcui_checkpoints', 'roma')
+        os.makedirs(target, exist_ok=True)
+        open(os.path.join(target, 'roma_outdoor.pth'), 'wb').write(b'x' * 10)
+        IM._ORIG_HF = None
+        check('weights: HF lookup installed', IM.install_hf_lookup(), True)
+        got = fake.hf_hub_download('Realcat/imcui_checkpoints', 'roma/roma_outdoor.pth')
+        check('weights: imcui file found in the default HuggingFace cache, no download',
+              (got == os.path.join(target, 'roma_outdoor.pth'), hf_calls), (True, []))
+        tr = W.Tracer()
+        with tr.active():
+            miss = fake.hf_hub_download('Realcat/imcui_checkpoints', 'dkm/dkm_outdoor.pth')
+        check('weights: traced HF request, missing file answered with a stand-in',
+              (tr.requests[-1]['kind'], tr.requests[-1]['status'], tr.requests[-1]['repo_file'],
+               miss.startswith(W.STUB_PREFIX), hf_calls), ('hf', 'MISSING', 'dkm/dkm_outdoor.pth', True, []))
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+        if old_xdg is None:
+            os.environ.pop('XDG_CACHE_HOME', None)
+        else:
+            os.environ['XDG_CACHE_HOME'] = old_xdg
+        IM._ORIG_HF = old_orig
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--e2e', action='store_true')
+    ap.add_argument('--gui', action='store_true', help='also test the Configure… dialog (needs Qt)')
+    ap.add_argument('--rival', default='')
+    ap.add_argument('--keep', action='store_true')
+    a = ap.parse_args()
+    tmp = tempfile.mkdtemp(prefix='automatch_test_')
+    try:
+        test_refs(tmp)
+        test_rival_parity(a.rival)
+        test_engine_helpers()
+        test_nisar_h5(tmp)
+        test_detector_params()
+        test_distortion_helpers()
+        test_weights_and_failfast(tmp)
+        test_imcui_mock()
+        test_weights_check(tmp)
+        test_truth_helpers(tmp)
+        test_server(tmp)
+        test_gpuaas_args(tmp)
+        test_version_skew_and_coarse(tmp)
+        test_gpu_windows(tmp)
+        test_jobs_312_317(tmp)
+        test_jobs_318_323(tmp)
+        test_coarse_outliers()
+        test_partial_cover()
+        test_shared_coarse(tmp)
+        test_coarse_trend()
+        test_cross_check(tmp)
+        test_bench(tmp)
+        test_cloud_mask(tmp)
+        test_cloud_sweep(tmp)
+        test_stretch()
+        test_parallel_share(tmp)
+        test_match_accuracy(tmp)
+        test_subcells(tmp)
+        test_accuracy_finished_job(tmp)
+        test_auto_bands(tmp)
+        test_kornia_versions(tmp)
+        test_warmup_and_padding()
+        test_sliced_matching()
+        test_kornia_catalogue()
+        if a.gui:
+            test_gui_dialog()
+            test_gui_queue()
+            test_gui_cross()
+            test_gui_cloud()
+        if a.e2e:
+            test_e2e(tmp)
+            test_e2e_variants(tmp)
+            test_e2e_rerun(tmp)
+            test_e2e_distortion(tmp)
+            test_e2e_missing_weights(tmp)
+            test_e2e_truth(tmp)
+            test_e2e_cloud(tmp)
+            test_pack(tmp)
+    finally:
+        if not a.keep:
+            shutil.rmtree(tmp, ignore_errors=True)
+    print(f'\n{len(FAILS)} failure(s)' + (': ' + ', '.join(FAILS) if FAILS else ''))
+    return 1 if FAILS else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

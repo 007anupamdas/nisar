@@ -1,0 +1,113 @@
+{
+  "mode": "run",
+  "input_path": "/maintenance/ICIGDev/GPUPOC/input/dqe/g1a/267403461/input/cog.tif",
+  "channels": [
+    "band1"
+  ],
+  "reference_dir": "/maintenance/ICIGDev/GPUPOC/input/dqe/g1a/267403461/reference/L8Ref",
+  "reference_label": "",
+  "reference_mode": "auto",
+  "reference_band": 1,
+  "reference_band_map": {},
+  "reference_fill_values": [
+    0.0,
+    3.0
+  ],
+  "reference_scale": 1.0,
+  "output_dir": "/maintenance/ICIGDev/GPUPOC/output/output334",
+  "temp_dir": "/maintenance/ICIGDev/GPUPOC/output/output334/_cache",
+  "resume": true,
+  "detectors": [
+    "all"
+  ],
+  "matchers": "all",
+  "detector_params": {
+    "disk": {
+      "checkpoint": [
+        "depth",
+        "epipolar"
+      ]
+    },
+    "dedode": {
+      "detector_weights": [
+        "L-upright",
+        "L-C4",
+        "L-C4-v2"
+      ],
+      "descriptor_weights": [
+        "B-upright",
+        "B-C4"
+      ],
+      "fginn.mutual": [
+        true
+      ]
+    },
+    "aliked": {
+      "model_name": [
+        "aliked-t16",
+        "aliked-n16",
+        "aliked-n16rot",
+        "aliked-n32"
+      ]
+    },
+    "loftr": {
+      "pretrained": [
+        "outdoor",
+        "indoor",
+        "indoor_new"
+      ]
+    }
+  },
+  "smnn_thresholds": [
+    0.9
+  ],
+  "weights_cache_dir": "/maintenance/ICIGDev/GPUPOC/input/dqe/imw_runtime/imw_cache",
+  "window_sizes": [
+    2048
+  ],
+  "num_features": [
+    null
+  ],
+  "keypoint_density": 9000,
+  "max_num_features": 32000,
+  "gpu_window_px": 0,
+  "target_resolution": null,
+  "max_expected_error_m": 35000.0,
+  "coarse_method": "auto",
+  "coarse_resolution_m": 60.0,
+  "initial_offset_m": null,
+  "search_margin_m": 1500.0,
+  "coarse_local": true,
+  "coarse_cell_km": 0.0,
+  "ransac_methods": [
+    "magsac",
+    "lmeds"
+  ],
+  "ransac_thresholds_px": [
+    2.0
+  ],
+  "ransac_thresholds_m": [],
+  "ransac_confidences": [
+    0.99
+  ],
+  "consensus_tolerance_px": 100.0,
+  "consensus_tolerance_m": null,
+  "consensus_mode_bin_px": 0.5,
+  "min_inliers_per_chip": 6,
+  "min_surviving_chips": 1,
+  "consensus_model": "surface",
+  "consensus_surface": "auto",
+  "manual_gcp_csv": "",
+  "truth_csv": "/maintenance/ICIGDev/GPUPOC/input/dqe/g1a/267403461/truth/267403461.csv",
+  "truth_radius_m": 5000.0,
+  "rival_max_points_per_chip": 200,
+  "device": "cuda",
+  "use_amp": true,
+  "min_valid_fraction": 0.3,
+  "min_area_km2": 50.0,
+  "min_gpu_free_gb": 1.5,
+  "save_match_images": true,
+  "nisar_band": "auto",
+  "nisar_frequency": "A",
+  "debug": false
+}
