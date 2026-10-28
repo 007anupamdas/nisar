@@ -229,7 +229,12 @@ def detectors_of(d: str) -> pd.DataFrame:
     p = os.path.join(d, 'TRUTH_RANKING.csv')
     if not os.path.exists(p):
         return pd.DataFrame()
-    r = pd.read_csv(p)
+    try:
+        r = pd.read_csv(p)
+    except Exception as e:           # empty or cut off (job 313): no ranking, not the end of the benchmark
+        print(f'[Bench] {os.path.basename(os.path.normpath(d))}: TRUTH_RANKING.csv unreadable '
+              f'({type(e).__name__}: {e}); no detector results from it')
+        return pd.DataFrame()
     if r.empty or 'detector' not in r.columns:
         return pd.DataFrame()
     r = r.sort_values('rank') if 'rank' in r.columns else r
@@ -486,8 +491,19 @@ def batch(parent: str, jobs: str = '', success_px: float = 3.0, recompute: bool 
                           'used': False, 'superseded_by': sup[m['job']]})
             continue
         if cross is not None:
-            xrows += X.cross_job(d, m['job'], recompute=recompute, **cross)
-        row, det = bench_job(d, recompute, cloud_model_dir)
+            try:
+                xrows += X.cross_job(d, m['job'], recompute=recompute, **cross)
+            except Exception as e:
+                print(f"[Bench] {m['job']}: cross-check failed ({type(e).__name__}: {e})")
+        try:
+            row, det = bench_job(d, recompute, cloud_model_dir)
+        except Exception as e:           # one broken job must not stop the benchmark of the others
+            import traceback
+            print(f"[Bench] {m['job']}: skipped, {type(e).__name__}: {e}")
+            traceback.print_exc()
+            jrows.append({'job': m['job'], 'scene': m['scene'], 'automatch': m['version'], 'code': m['code'],
+                          'used': False, 'superseded_by': '', 'error': f'{type(e).__name__}: {e}'})
+            continue
         row.update({'automatch': m['version'], 'code': m['code'], 'used': True, 'superseded_by': ''})
         note = notes.get(row['job']) or notes.get(row['scene'])
         if note is not None:

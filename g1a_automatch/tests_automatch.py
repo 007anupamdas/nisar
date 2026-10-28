@@ -3250,7 +3250,8 @@ def test_accuracy_finished_job(tmp):
     kinds = sorted(set(zip(acc['window_size'], acc['ransac'])))
     check('accuracy (finished job): every window size, plain and 512 px sub-cells made from the saved matches',
           kinds, [(1024, 'magsac90'), (1024, 'magsac90-sc512'), (2048, 'magsac90'), (2048, 'magsac90-sc512')])
-    own = glob.glob(os.path.join(jd, 'win*', '*', 'filtered_sift', '*-sc*'))
+    own = glob.glob(os.path.join(jd, 'win*', '*', 'filtered_sift', '*-sc*')) + \
+        glob.glob(os.path.join(jd, 'win*', '*', 'final_sift', '*'))     # nothing rebuilt in the job's folders
     check('accuracy (finished job): sub-cells in SUBCELLS_512/, the job\'s folders and TRUTH_RANKING untouched',
           (bool(glob.glob(os.path.join(jd, 'SUBCELLS_512', 'win2048_nfauto', 'band1_toC1', 'filtered_sift', '*'))),
            own, os.path.exists(os.path.join(jd, 'TRUTH_RANKING.csv')),
@@ -3275,6 +3276,16 @@ def test_accuracy_finished_job(tmp):
     check('accuracy (finished job): asking for 256 after 512 keeps both in the one file (subcell_px column)',
           (sorted(set(acc2['subcell_px'])), sorted(set(acc2[acc2['subcell_px'] == 256]['ransac']))),
           ([0, 256, 512], ['magsac90-sc256']))
+    import automatch_bench as B
+    empty = os.path.join(tmp, 'output313')
+    os.makedirs(empty, exist_ok=True)
+    open(os.path.join(empty, 'TRUTH_RANKING.csv'), 'w').close()           # job 313: an empty file
+    with contextlib.redirect_stdout(io.StringIO()):
+        det313 = B.detectors_of(empty)
+        T.compare(empty, tcsv, 5000.0, 'consensus', crs, runs=[], quiet=True)
+    check('accuracy (finished job): an empty TRUTH_RANKING.csv is skipped, and an empty ranking is written with '
+          'its header', (det313.empty, list(pd.read_csv(os.path.join(empty, 'TRUTH_RANKING.csv')).columns[:3])),
+          (True, ['rank', 'channel', 'sweep']))
     s = A.summarize(acc.assign(job='output999', sensor='MV'))
     txt = A.format_summary(s)
     check('accuracy (finished job): summary per sensor x window size, plain and sub-cells',

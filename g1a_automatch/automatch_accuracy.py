@@ -183,9 +183,16 @@ def job_accuracy(job_dir: str, truth_csv: str, subcell_px=(), keep: int = 10, ra
         settings = T.consensus_settings(job_dir)
         for px in sizes:
             runs = runs + subcell_runs(job_dir, px, int(keep), res, settings, recompute and px in asked)
-    r = T.compare(job_dir, truth_csv, radius_m, 'consensus', crs, write=False, quiet=quiet, runs=runs)
+    # nothing rebuilt or written in the job's own folders: a run without its chip consensus is still
+    # scored match by match
+    r = T.compare(job_dir, truth_csv, radius_m, 'consensus', crs, write=False, quiet=quiet, runs=runs,
+                  rebuild=False)
     acc = r.get('accuracy')
     acc = acc if isinstance(acc, pd.DataFrame) else pd.DataFrame()
+    if acc.empty:
+        print(f'[Accuracy] {os.path.basename(os.path.normpath(job_dir))}: no match files that this version reads '
+              f'(raw_matches_* / filtered_*); no match accuracy')
+        return acc
     acc.to_csv(path, index=False)
     if sizes and not r['ranking'].empty:
         r['ranking'].to_csv(os.path.join(job_dir, 'TRUTH_RANKING_SUBCELLS.csv'), index=False)

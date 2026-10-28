@@ -739,19 +739,22 @@ def working_crs_of(output_dir: str) -> Optional[str]:
 def compare(output_dir: str, truth_csv: str, radius_m: float = 5000.0, chips: str = 'consensus',
             working_crs: Optional[str] = None, write: bool = True, quiet: bool = False,
             runs: Optional[List[Dict]] = None, local: str = 'plane',
-            max_points_per_chip: int = 200) -> Dict:
+            max_points_per_chip: int = 200, rebuild: bool = True) -> Dict:
     """Score every configuration of the given runs ({'filtered_dir',
     'final_dir', 'sweep'}; default: every run found under output_dir), write
     the TRUTH_* files and, per channel, the RIVAL CSV of the configuration that
     agrees best with the truth (RIVAL_TRUTH_BEST_<channel>.csv). Returns
-    {'by_detector_matcher', 'ranking', 'points', 'truth', 'crs', 'best'}."""
+    {'by_detector_matcher', 'ranking', 'points', 'truth', 'crs', 'best'}.
+    rebuild=False: runs whose chip consensus is missing are not rebuilt (and
+    nothing is written into them); their matches are still scored match by
+    match."""
     crs = working_crs or working_crs_of(output_dir)
     if not crs:
         raise ValueError('working CRS unknown: pass working_crs (e.g. EPSG:32640)')
     truth = truth_in_crs(load_truth(truth_csv), crs)
     rows, point_rows, acc_rows = [], [], []
     chip_files: Dict[Tuple, Tuple[str, List[str]]] = {}
-    settings = consensus_settings(output_dir)
+    settings = consensus_settings(output_dir) if rebuild else None
     field = truth_field(truth)
     for run in (runs if runs is not None else find_runs(output_dir)):
         if field is not None:
@@ -764,7 +767,10 @@ def compare(output_dir: str, truth_csv: str, radius_m: float = 5000.0, chips: st
         timing = {}
         tpath = os.path.join(run['final_dir'], 'PASS_TIMING.csv')
         if os.path.exists(tpath):
-            timing = {r['matcher']: r for r in pd.read_csv(tpath).to_dict('records')}
+            try:
+                timing = {r['matcher']: r for r in pd.read_csv(tpath).to_dict('records')}
+            except Exception:                         # empty or cut off: no timing, still scored
+                timing = {}
         for key, cfg in config_points(run['filtered_dir'], run['final_dir'], chips, settings).items():
             summary, prow = score_config(cfg, truth, radius_m, local)
             t = timing.get(cfg['matcher'], {})
@@ -815,9 +821,14 @@ def compare(output_dir: str, truth_csv: str, radius_m: float = 5000.0, chips: st
                               key=lambda s: s.map(lambda v: (0, int(v)) if str(v).isdigit() else (1, str(v))))
     best: Dict[str, Dict] = {}
     if write:
-        by.to_csv(os.path.join(output_dir, 'TRUTH_BY_DETECTOR_MATCHER.csv'), index=False)
-        ranking.to_csv(os.path.join(output_dir, 'TRUTH_RANKING.csv'), index=False)
-        points.to_csv(os.path.join(output_dir, 'TRUTH_POINTS.csv'), index=False)
+        # with nothing to rank, a header only: an empty file stops whatever reads it later (job 313)
+        (by if len(by.columns) else pd.DataFrame(columns=RANK_COLS)).to_csv(
+            os.path.join(output_dir, 'TRUTH_BY_DETECTOR_MATCHER.csv'), index=False)
+        (ranking if len(ranking.columns) else pd.DataFrame(columns=RANK_COLS)).to_csv(
+            os.path.join(output_dir, 'TRUTH_RANKING.csv'), index=False)
+        (points if len(points.columns) else pd.DataFrame(columns=['channel', 'sweep', 'detector', 'matcher',
+                                                                  'ransac', 'truth_id'])).to_csv(
+            os.path.join(output_dir, 'TRUTH_POINTS.csv'), index=False)
         if not acc.empty:
             acc.to_csv(os.path.join(output_dir, 'TRUTH_MATCH_ACCURACY.csv'), index=False)
         best = write_truth_best(by, chip_files, crs, output_dir, max_points_per_chip)
