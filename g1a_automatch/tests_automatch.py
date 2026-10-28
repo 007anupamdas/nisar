@@ -819,7 +819,7 @@ def test_gui_cross():
     w.settings = G.QtCore.QSettings(os.path.join(tempfile.mkdtemp(), 'cross.ini'), fmt)
     try:
         check('gui: one button for benchmark and cross-check, no separate cross-check button',
-              (w.btn_benchmark.text(), hasattr(w, 'btn_cross_check')), ('Benchmark & cross-check…', False))
+              (w.btn_benchmark.text().replace('&&', '&'), hasattr(w, 'btn_cross_check')), ('Benchmark & cross-check…', False))
         dlg = w.bench_dialog(run=False)
         dlg.folder.setText(tempfile.mkdtemp())
         dlg.top.setValue(4)
@@ -868,6 +868,10 @@ def test_gui_cloud():
     w.settings = G.QtCore.QSettings(os.path.join(tmp, 'cloud.ini'), fmt)
     try:
         check('gui: a Cloud mask test button', w.btn_cloud.text(), 'Cloud mask test…')
+        tools = [a.text().replace('&&', '&') for a in w.menuBar().actions()[0].menu().actions()]
+        check('gui: the analysis tools in their own row and in the Tools menu; the version in the title',
+              (w.btn_cloud_sweep.parentWidget() is not None, tools, G.AUTOMATCH_VERSION in w.windowTitle()),
+              (True, ['Benchmark & cross-check…', 'Cloud mask test…', 'Cloud sweep…'], True))
         w.in_path.setText(img)
         w.cloud_conf.setValue(0.8)
         w.cloud_bands.setText('band3, band2, band6')

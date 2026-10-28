@@ -49,7 +49,7 @@ PROGRESS_PREFIX = '@@AUTOMATCH '
 # Printed at the start of every run log and in PACK_REPORT.txt, so a log says
 # which code made it. Not a job key: settings files stay readable by other
 # versions.
-AUTOMATCH_VERSION = '2026.10.27'
+AUTOMATCH_VERSION = '2026.10.28'
 CODE_FILES = ('automatch_engine.py', 'automatch_job.py', 'automatch_imcui.py', 'automatch_refs.py',
               'automatch_rival.py', 'automatch_truth.py', 'automatch_weights.py', 'automatch_gpuaas.py',
               'automatch_native.py', 'imw_configs.py', 'automatch_cross.py', 'automatch_bench.py',

@@ -41,7 +41,7 @@ except ImportError:
 HERE = os.path.dirname(os.path.abspath(__file__))
 JOB_SCRIPT = os.path.join(HERE, 'automatch_job.py')
 sys.path.insert(0, HERE)
-from automatch_job import DEFAULT_JOB, PROGRESS_PREFIX  # noqa: E402  (no torch import)
+from automatch_job import AUTOMATCH_VERSION, DEFAULT_JOB, PROGRESS_PREFIX  # noqa: E402  (no torch import)
 
 Qt = QtCore.Qt
 CHECKED = Qt.CheckState.Checked if QT_API != 'PyQt5' else Qt.Checked
@@ -1472,7 +1472,7 @@ class CloudResultDialog(QtWidgets.QDialog):
 class AutoMatchWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('DPQED AutoMatch — geolocation vs reference')
+        self.setWindowTitle(f'DPQED AutoMatch {AUTOMATCH_VERSION} — geolocation vs reference')
         self.resize(1250, 900)
         self.proc = None
         self.proc_kind = None
@@ -1504,24 +1504,31 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         bottom = QtWidgets.QWidget()
         bl = QtWidgets.QVBoxLayout(bottom)
         bl.setContentsMargins(0, 0, 0, 0)
-        btns = QtWidgets.QHBoxLayout()
-        for label, slot in (('Load job…', self.load_job_dialog), ('Save job…', self.save_job_dialog),
-                            ('Preflight', self.preflight), ('Run', self.run_job),
-                            ('Queue run', self.queue_run),
-                            ('Stop', self.stop), ('Open output', self.open_output),
-                            ('Pack for server…', self.pack_dialog),
-                            ('Benchmark & cross-check…', self.bench_dialog),
-                            ('Cloud mask test…', self.cloud_dialog),
-                            ('Cloud sweep…', self.cloud_sweep_dialog)):
-            b = QtWidgets.QPushButton(label)
-            b.clicked.connect(slot)
-            btns.addWidget(b)
-            name = 'btn_' + label.split()[0].lower().rstrip('…').replace('-', '_')
-            if hasattr(self, name):                  # 'Cloud sweep…' after 'Cloud mask test…': btn_cloud_sweep
-                name = 'btn_' + '_'.join(w.lower().rstrip('…') for w in label.split()[:2])
-            setattr(self, name, b)
+        # two rows, so no button ends up past the window's edge: the job, then the tools on finished results
+        job_tools = (('Load job…', self.load_job_dialog), ('Save job…', self.save_job_dialog),
+                     ('Preflight', self.preflight), ('Run', self.run_job), ('Queue run', self.queue_run),
+                     ('Stop', self.stop), ('Open output', self.open_output), ('Pack for server…', self.pack_dialog))
+        analysis = (('Benchmark & cross-check…', self.bench_dialog), ('Cloud mask test…', self.cloud_dialog),
+                    ('Cloud sweep…', self.cloud_sweep_dialog))
+        menu = self.menuBar().addMenu('Tools')
+        for row_items, title in ((job_tools, ''), (analysis, 'Analysis:')):
+            btns = QtWidgets.QHBoxLayout()
+            if title:
+                btns.addWidget(QtWidgets.QLabel(title))
+            for label, slot in row_items:
+                b = QtWidgets.QPushButton(label.replace('&', '&&'))   # a lone & would show as _
+                b.clicked.connect(slot)
+                btns.addWidget(b)
+                name = 'btn_' + label.split()[0].lower().rstrip('…').replace('-', '_')
+                if hasattr(self, name):              # 'Cloud sweep…' after 'Cloud mask test…': btn_cloud_sweep
+                    name = 'btn_' + '_'.join(w.lower().rstrip('…') for w in label.split()[:2])
+                setattr(self, name, b)
+                if title:
+                    menu.addAction(label.replace('&', '&&'), slot)   # also in the menu bar: Tools
+            if title:
+                btns.addStretch(1)
+            bl.addLayout(btns)
         self.btn_stop.setEnabled(False)
-        bl.addLayout(btns)
         self.lbl_status = QtWidgets.QLabel('Ready.')
         bl.addWidget(self.lbl_status)
         self.bar_sweep = QtWidgets.QProgressBar()
@@ -1567,7 +1574,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
     def _form_tab(self, title):
         w = QtWidgets.QWidget()
         form = QtWidgets.QFormLayout(w)
-        self.tabs.addTab(w, title)
+        self.tabs.addTab(w, title.replace('&', '&&'))      # a lone & would mark a shortcut, shown as _
         return form
 
     def _build_data_tab(self):
@@ -1764,7 +1771,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.lbl_imcui.setWordWrap(True)
         form.addRow(self.lbl_imcui)
         lay.addLayout(form)
-        self.tabs.addTab(w, 'Detectors & matchers')
+        self.tabs.addTab(w, 'Detectors && matchers')
 
     def _build_offset_tab(self):
         f = self._form_tab('Windows & offsets')
