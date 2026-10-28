@@ -306,7 +306,8 @@ def main(argv: List[str] = None) -> int:
                os.path.join(job['output_dir'], 'cloud_sweep'), list(job.get('cloud_sweep_reference') or []), '',
                job['cloud_sweep_conf'], job['cloud_sweep_bright'], job['cloud_sweep_blob_km2'],
                job['cloud_sweep_shadow_km'], int(job['cloud_sweep_crisp']), True,
-               job.get('cloud_mask_classes') or [1], C.model_dir_for(job), job.get('cloud_device') or None)
+               job.get('cloud_mask_classes') or [1], C.model_dir_for(job), job.get('cloud_device') or None,
+               pngs=str(job.get('cloud_sweep_pngs') or 'grid'))
         return 0
     if mode == 'preflight':
         res = J.preflight(job)

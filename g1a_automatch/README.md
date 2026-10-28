@@ -600,7 +600,7 @@ to no data, and the job matches that copy.
       python automatch_job.py cloudsweep <image> [<image> ...] --out <folder>
           [--conf 0.6-0.99:0.1] [--crisp 6] [--no-spec] [--bright 60-90:5]
           [--blob-km2 0.25 1 4] [--shadow-km 5 10 20]
-          [--reference <mask .tif | outlines .geojson / .shp> ...]
+          [--reference <mask .tif | outlines .geojson / .shp> ...] [--images grid|all|none] [--sheets]
 
   - **Ranges:** `lo-hi:step`, keeping the end (`0.6-0.99:0.1` = 0.6, 0.7,
     0.8, 0.9, 0.99), or a list.
@@ -617,9 +617,18 @@ to no data, and the job matches that copy.
     `brightness_gap`. The gap is how far the clouds' median brightness
     stands above the clear ground's 95th percentile, in robust standard
     deviations.
-  - **Contact sheets:** a `SHEET_<image>_<band set>.png` per band set has
-    rows for thresholds and columns for the model alone and each
-    brightness. They show the whole grid at a glance.
+  - **Quicklooks, one PNG per combination:** in `<image>/<band set>/`, e.g.
+    `conf0.7_model.png` and `conf0.7_bright75_blob1_shadow10.png`, with the
+    settings written above the picture. The `png` column of
+    `CLOUD_SWEEP.csv` names each row's image.
+    - `--images grid` (the default) writes, per threshold, the model alone
+      and each brightness at the middle blob and shadow values.
+    - `--images all` writes every combination (thousands of images);
+      `none` writes none.
+    - `--sheets` also stacks a band set's grid into one
+      `SHEET_<image>_<band set>.png`.
+    - The GUI's results have an image browser: pick a combination from the
+      list to see it.
   - **With references** (a cloud mask raster, or outlines drawn in QGIS as
     polygons, one per image): IoU, precision, recall and F1 of the masked
     classes. `CLOUD_SWEEP_SUMMARY.csv` is then ranked by the median F1 over
@@ -630,8 +639,8 @@ to no data, and the job matches that copy.
     `CLOUD_SWEEP_PARAMS_<time>.txt`.
   - **GPU service:** mode `cloudsweep`, with `cloud_sweep_conf`,
     `cloud_sweep_bright`, `cloud_sweep_blob_km2`, `cloud_sweep_shadow_km`,
-    `cloud_sweep_crisp`, `cloud_sweep_reference` and `cloud_sweep_images`
-    (more images than `input_path`).
+    `cloud_sweep_crisp`, `cloud_sweep_reference`, `cloud_sweep_images` (more
+    images than `input_path`) and `cloud_sweep_pngs` (grid / all / none).
 
 Checked here on two cloudy Sentinel-2 scenes over India (tile 43QGU,
 52–59 % cloud), against the scenes' own cloud classification:

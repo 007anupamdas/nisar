@@ -109,6 +109,7 @@ DEFAULT_JOB: Dict = {
     'cloud_sweep_crisp': 6,       # every 3 of the N crispest bands (0: none); the spec bands always
     'cloud_sweep_reference': [],  # reference cloud masks, one per image (raster or .geojson / .shp outlines)
     'cloud_sweep_images': [],     # more images than input_path, e.g. other MV scenes
+    'cloud_sweep_pngs': 'grid',   # one PNG per combination: grid (model alone + each brightness), all, none
     'reference_dir': '',         # L8_ref / C1 / any RIVAL-readable collection
     'reference_label': '',       # tag in file names; default from folder name
     'reference_mode': 'auto',    # auto | index-shp | sidecar | degree-tile

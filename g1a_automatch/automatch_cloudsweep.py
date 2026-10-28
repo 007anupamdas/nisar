@@ -7,6 +7,7 @@ images, without a matching run.
         [--bright 60-90:5] [--blob-km2 0.25 1 4] [--shadow-km 5 10 20]
         [--reference <cloud mask raster | polygons .geojson / .shp> ...]
         [--model-dir <weights>/omnicloudmask] [--device cpu] [--max-side 2048]
+        [--images grid|all|none] [--sheets]
 
 Ranges are lo-hi:step (the end is kept when the steps miss it: 0.6-0.99:0.1
 is 0.6, 0.7, 0.8, 0.9, 0.99) or a list of values.
@@ -32,15 +33,21 @@ mask -- a raster on any grid (non-zero = cloud) or cloud outlines drawn as
 polygons (GeoJSON or shapefile) -- also IoU, precision, recall and F1 of the
 masked classes against it; that is the benchmark proper. Without a reference
 the numbers describe the masks but cannot say which is right: look at the
-contact sheets.
+quicklooks.
 
 Writes into <folder>/<YYYYmmdd_HHMMSS>_sweep/:
     CLOUD_SWEEP.csv             one row per image x band set x combination
     CLOUD_SWEEP_SUMMARY.csv     per combination over the images (medians;
                                 ranked by F1 when there are references)
-    SHEET_<image>_<band set>.png  thumbnails: threshold (rows) x the model
-                                alone and each brightness (columns), at the
-                                middle blob and shadow values
+    <image>/<band set>/conf0.7_model.png, conf0.7_bright75_blob1_shadow10.png ...
+                                one quicklook per combination, its settings
+                                in a bar above (--images grid: the model alone
+                                and each brightness at the middle blob and
+                                shadow values, per threshold; all: every
+                                combination); the png column of
+                                CLOUD_SWEEP.csv names each row's
+    SHEET_<image>_<band set>.png  with --sheets: the same as one stacked
+                                image (threshold rows x brightness columns)
     CLOUD_SWEEP_PARAMS_<time>.txt  the sweep's settings
     top_<k>_<...>/              with references: the --write-top best
                                 combinations at full resolution (mask,
@@ -181,6 +188,38 @@ def _metrics(masked: np.ndarray, ref: Optional[np.ndarray], known: Optional[np.n
             'ref_f1': None if f1 is None else round(f1, 4), 'ref_cloud_pct': round(100.0 * r.sum() / max(known.sum(), 1), 2)}
 
 
+def _render(a: np.ndarray, cls: np.ndarray, v: np.ndarray, max_side: int, label: str) -> np.ndarray:
+    """One combination's quicklook (false colour NIR, red, green; thick cloud
+    purple, thin yellow, shadow blue) at most max_side pixels, its settings in
+    a bar above."""
+    import cv2
+    step = max(1, int(np.ceil(max(cls.shape) / float(max_side))))
+    aa, cc, vv = a[:, ::step, ::step], cls[::step, ::step], v[::step, ::step]
+    chans = []
+    for b in (2, 0, 1):
+        x = aa[b][vv]
+        lo, hi = (np.percentile(x, [2, 98]) if x.size else (0.0, 1.0))
+        chans.append(np.clip((aa[b] - lo) / max(hi - lo, 1e-9) * 255, 0, 255).astype(np.uint8))
+    rgb = np.dstack(chans[::-1]).copy()
+    for k, colour in ((1, (200, 0, 200)), (2, (0, 255, 255)), (3, (255, 0, 0))):
+        m = cc == k
+        rgb[m] = (0.45 * rgb[m] + 0.55 * np.array(colour)).astype(np.uint8)
+    rgb[~vv] = (40, 40, 40)
+    font, scale = cv2.FONT_HERSHEY_SIMPLEX, 0.5
+    lines, cur = [], ''
+    for part in re.split(r'(?<=,) |  ', label):           # wrap at ', ' and double spaces to the image's width
+        nxt = f'{cur} {part}'.strip() if cur else part
+        if cur and cv2.getTextSize(nxt, font, scale, 1)[0][0] > rgb.shape[1] - 8:
+            lines.append(cur)
+            nxt = part
+        cur = nxt
+    lines.append(cur)
+    bar = np.full((22 * len(lines) + 6, rgb.shape[1], 3), 255, np.uint8)
+    for i, ln in enumerate(lines):
+        cv2.putText(bar, ln, (4, 18 + 22 * i), font, scale, (0, 0, 0), 1, cv2.LINE_AA)
+    return np.vstack([bar, rgb])
+
+
 def _thumb(a: np.ndarray, cls: np.ndarray, v: np.ndarray, side: int, label: str) -> np.ndarray:
     import cv2
     step = max(1, int(np.ceil(max(cls.shape) / float(side))))
@@ -206,9 +245,13 @@ def sweep_image(path: str, out_dir: str, sensor: str = '', sets: Optional[List] 
                 confs: Sequence[float] = (0.6, 0.7, 0.8, 0.9, 0.99), brights: Sequence[float] = (60, 70, 80, 90),
                 blobs: Sequence[float] = (1.0,), shadows: Sequence[float] = (10.0,), classes: Sequence[int] = (1,),
                 model_dir: str = '', device: Optional[str] = None, reference: str = '', predictor=None,
-                max_side: int = 2048, sheet_side: int = 260) -> List[Dict]:
-    """Every combination on one image; rows of CLOUD_SWEEP.csv. Contact
-    sheets go to out_dir."""
+                max_side: int = 2048, sheet_side: int = 260, images: str = 'grid', image_side: int = 1600,
+                sheets: bool = False) -> List[Dict]:
+    """Every combination on one image; rows of CLOUD_SWEEP.csv. One PNG per
+    combination into out_dir/<image>/<band set>/ (images 'grid': the model
+    alone and each brightness at the middle blob and shadow values, per
+    threshold; 'all': every combination; 'none'); with sheets also the
+    stacked SHEET_<image>_<band set>.png."""
     import cv2
     import rasterio as rio
     import automatch_bench as B
@@ -266,11 +309,20 @@ def sweep_image(path: str, out_dir: str, sensor: str = '', sets: Optional[List] 
                     'shadow_near_km': s, 'thick_pct': pct[1], 'thin_pct': pct[2], 'shadow_pct': pct[3],
                     'cloud_pct': round(pct[1] + pct[2], 3), 'masked_pct': round(100.0 * masked.sum() / nv, 3),
                     'blobs': nblobs, 'dark_cloud_pct': dark, 'brightness_gap': gap, **_metrics(masked, ref, known)}
+        img_dir = os.path.join(out_dir, stem, name)
+
+        def png(cls, label, fname):
+            os.makedirs(img_dir, exist_ok=True)
+            cv2.imwrite(os.path.join(img_dir, fname), _render(a, cls, v, image_side, f'{stem}  {name}  {label}'))
+            return os.path.relpath(os.path.join(img_dir, fname), out_dir)
         for conf in confs:
             c0 = C.classify(p, conf)
             c0 = np.where(v, c0, 255).astype(np.uint8)
             rows.append(row(c0, conf, 'none'))
-            tiles[(conf, 'model')] = _thumb(a, c0, v, sheet_side, f'{name} {conf:g} model')
+            if images in ('grid', 'all'):
+                rows[-1]['png'] = png(c0, f'confidence {conf:g}, the model alone', f'conf{conf:g}_model.png')
+            if sheets:
+                tiles[(conf, 'model')] = _thumb(a, c0, v, sheet_side, f'{name} {conf:g} model')
             model_cloud = np.isin(c0, (1, 2)) & v
             shadow0 = (c0 == 3) & v
             clear = v & (c0 == 0)
@@ -294,13 +346,19 @@ def sweep_image(path: str, out_dir: str, sensor: str = '', sets: Optional[List] 
                         cls[model_cloud & ~cloud] = 0
                         cls[shadow0 & ~near] = 0
                         rows.append(row(cls, conf, 'bright blobs', q, bk, s, int(keep.sum())))
-                        if bk == mid_blob and s == mid_shadow:
+                        middle = bk == mid_blob and s == mid_shadow
+                        if images == 'all' or (images == 'grid' and middle):
+                            rows[-1]['png'] = png(cls, f'confidence {conf:g}, brighter than {q:g}th pct, blob >= '
+                                                       f'{bk:g} km2, shadow within {s:g} km',
+                                                  f'conf{conf:g}_bright{q:g}_blob{bk:g}_shadow{s:g}.png')
+                        if sheets and middle:
                             tiles[(conf, f'{q:g}')] = _thumb(a, cls, v, sheet_side,
                                                              f'{conf:g} bright {q:g} blob {bk:g} sh {s:g}')
-        cols = ['model'] + [f'{q:g}' for q in brights]
-        sheet = np.vstack([np.hstack([tiles.get((c, k), np.full((sheet_side + 22, sheet_side, 3), 255, np.uint8))
-                                      for k in cols]) for c in confs])
-        cv2.imwrite(os.path.join(out_dir, f'SHEET_{stem}_{name}.png'), sheet)
+        if sheets:
+            cols = ['model'] + [f'{q:g}' for q in brights]
+            sheet = np.vstack([np.hstack([tiles.get((c, k), np.full((sheet_side + 22, sheet_side, 3), 255, np.uint8))
+                                          for k in cols]) for c in confs])
+            cv2.imwrite(os.path.join(out_dir, f'SHEET_{stem}_{name}.png'), sheet)
     return rows
 
 
@@ -323,7 +381,7 @@ def summarize(df: pd.DataFrame) -> pd.DataFrame:
 def run(images: List[str], out_dir: str, references: Optional[List[str]] = None, sensor: str = '',
         conf='0.6-0.99:0.1', bright='60-90:5', blob_km2=(0.25, 1.0, 4.0), shadow_km=(5.0, 10.0, 20.0),
         crisp: int = 6, spec: bool = True, classes=(1,), model_dir: str = '', device: Optional[str] = None,
-        max_side: int = 2048, write_top: int = 3, predictor=None) -> Dict:
+        max_side: int = 2048, write_top: int = 3, predictor=None, pngs: str = 'grid', sheets: bool = False) -> Dict:
     """The sweep over the images into <out_dir>/<time>_sweep/; returns
     {'folder', 'rows', 'summary'}."""
     stamp = C.run_stamp()
@@ -356,7 +414,7 @@ def run(images: List[str], out_dir: str, references: Optional[List[str]] = None,
         n = len(confs) * (1 + len(brights) * len(blobs) * len(shadows))
         print(f'[Sweep] {os.path.basename(img)}: {len(sets)} band set(s) x {n} combination(s)', flush=True)
         rows += sweep_image(img, folder, sensor, sets, confs, brights, blobs, shadows, classes, model_dir, device,
-                            refs[i] if refs else '', predictor, max_side)
+                            refs[i] if refs else '', predictor, max_side, images=pngs, sheets=sheets)
         pd.DataFrame(rows).to_csv(os.path.join(folder, 'CLOUD_SWEEP.csv'), index=False)    # as it goes
     df = pd.DataFrame(rows)
     df.to_csv(os.path.join(folder, 'CLOUD_SWEEP.csv'), index=False)
@@ -375,7 +433,8 @@ def run(images: List[str], out_dir: str, references: Optional[List[str]] = None,
             C.write_params(sub, {'rank': k, 'ref_f1': r.get('ref_f1'), 'ref_iou': r.get('ref_iou')}, merge=True,
                            stamp=stamp)
     print(format_summary(s))
-    print(f'[Sweep] {len(df)} combination(s) in {folder} (CLOUD_SWEEP.csv, CLOUD_SWEEP_SUMMARY.csv, SHEET_*.png)',
+    print(f'[Sweep] {len(df)} combination(s) in {folder} (CLOUD_SWEEP.csv, CLOUD_SWEEP_SUMMARY.csv; one PNG per '
+          f'combination shown in <image>/<band set>/, its name in the png column)',
           flush=True)
     return {'folder': folder, 'rows': df, 'summary': s}
 
@@ -401,8 +460,8 @@ def format_summary(s: pd.DataFrame, top: int = 15) -> str:
                          f"{r.cloud_pct:>8}")
         return '\n'.join(lines)
     return ('[Sweep] no reference masks: CLOUD_SWEEP_SUMMARY.csv describes every combination (cloud %, '
-            'dark_cloud_pct, brightness_gap) but cannot say which is right -- look at the SHEET_*.png contact '
-            'sheets, or give --reference cloud outlines for a few images')
+            'dark_cloud_pct, brightness_gap) but cannot say which is right -- look at the PNGs in <image>/<band '
+            'set>/, or give --reference cloud outlines for a few images')
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -426,6 +485,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument('--device', default=None)
     ap.add_argument('--max-side', type=int, default=DEFAULTS['max_side'])
     ap.add_argument('--write-top', type=int, default=DEFAULTS['write_top'])
+    ap.add_argument('--images', dest='pngs', choices=['grid', 'all', 'none'], default='grid',
+                    help="one PNG per combination: grid = the model alone and each brightness at the middle blob "
+                         "and shadow values (default); all = every combination (thousands); none")
+    ap.add_argument('--sheets', action='store_true', help='also the stacked contact sheets SHEET_*.png')
     a = ap.parse_args(argv)
     problems = C.check({'cloud_model_dir': a.model_dir})
     if problems:
@@ -433,7 +496,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
     out = a.out or os.path.join(os.path.dirname(os.path.abspath(a.images[0])), 'cloud_sweep')
     run(a.images, out, a.reference, a.sensor, a.conf, a.bright, ' '.join(a.blob_km2), ' '.join(a.shadow_km),
-        a.crisp, not a.no_spec, a.classes, a.model_dir, a.device, a.max_side, a.write_top)
+        a.crisp, not a.no_spec, a.classes, a.model_dir, a.device, a.max_side, a.write_top, pngs=a.pngs,
+        sheets=a.sheets)
     return 0
 
 

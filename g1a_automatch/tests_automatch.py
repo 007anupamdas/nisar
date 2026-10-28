@@ -911,17 +911,19 @@ def test_gui_cloud():
         check('gui: the cloud sweep dialog counts the combinations and builds the command',
               (w.btn_cloud.text(), w.btn_cloud_sweep.text(), sa[:2], sa[sa.index('--conf') + 1],
                sa[sa.index('--bright') + 1], sa[sa.index('--blob-km2') + 1:sa.index('--blob-km2') + 4],
-               '21 band set' in sd.lbl_n.text()),
+               '21 band set' in sd.lbl_n.text(), sa[sa.index('--images') + 1], '--sheets' in sa),
               ('Cloud mask test…', 'Cloud sweep…', ['cloudsweep', img], '0.6-0.9:0.1', '60-90:15', ['0.25', '1', '4'],
-               True))
+               True, 'grid', False))
         import automatch_cloudsweep as CS
         with contextlib.redirect_stdout(io.StringIO()):
             sres = CS.run([img], os.path.join(tmp, 'sw'), [], '', '0.7, 0.9', '90', [1], [10], 0, True, [1], '',
                           None, 2048, 0, predictor=fake)
         swd = G.CloudSweepResultDialog(sres['folder'], w)
         stabs = swd.findChild(G.QtWidgets.QTabWidget)
-        check('gui: the sweep result shows the summary and a contact sheet per band set',
-              (stabs.count(), stabs.tabText(0), stabs.tabText(1).endswith('_spec')), (2, 'Summary', True))
+        check('gui: the sweep result shows the summary and an image browser (one quicklook per combination)',
+              (stabs.count(), stabs.tabText(0), stabs.tabText(1), swd.png_list.count(),
+               swd.png_view.pixmap() is not None and not swd.png_view.pixmap().isNull()),
+              (2, 'Summary', 'Images (4)', 4, True))
         check('gui: the cloud result shows each threshold\'s quicklook and the table',
               (tabs.count(), 'bands_1-2-4 @ 0.8' in tabs.tabText(0),
                'bands_3-2-6 @ 0.8' in tabs.tabText(2),
@@ -3040,11 +3042,14 @@ def test_cloud_sweep(tmp):
           (best['check'], best['ref_f1'] > 0.95, model['ref_f1'] < 0.8, model['ref_precision'] < 0.6),
           ('bright blobs', True, True, True))
     f = res['folder']
-    check('sweep: summary, a contact sheet per band set, the best combination at full size, its settings',
-          (os.path.exists(os.path.join(f, 'CLOUD_SWEEP_SUMMARY.csv')),
+    pngs = glob.glob(os.path.join(f, 'G1A_MV_G_SWEEP', '*', '*.png'))
+    check('sweep: summary, one PNG per threshold x (model alone, each brightness) and band set, named in the CSV; '
+          'no stacked sheets unless asked; the best combination at full size; its settings',
+          (os.path.exists(os.path.join(f, 'CLOUD_SWEEP_SUMMARY.csv')), len(pngs), int(df['png'].notna().sum()),
+           os.path.exists(os.path.join(f, 'G1A_MV_G_SWEEP', 'spec', 'conf0.7_bright75_blob1_shadow10.png')),
            len(glob.glob(os.path.join(f, 'SHEET_*.png'))), bool(glob.glob(os.path.join(f, 'top_1_*', 'CLOUD_MASK.tif'))),
            len(glob.glob(os.path.join(f, 'CLOUD_SWEEP_PARAMS_*.txt'))), 'against the reference' in buf.getvalue()),
-          (True, 21, True, 1, True))
+          (True, 21 * 4 * 4, 21 * 4 * 4, True, 0, True, 1, True))
     to_ll = Transformer.from_crs(crs, 'EPSG:4326', always_xy=True)
     xs, ys = [500000 + 60 * 45, 500000 + 140 * 45], [1700000 - 50 * 45, 1700000 - 110 * 45]
     ring = [to_ll.transform(x, y) for x, y in ((xs[0], ys[0]), (xs[1], ys[0]), (xs[1], ys[1]), (xs[0], ys[1]),

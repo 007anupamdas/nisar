@@ -1275,6 +1275,14 @@ class CloudSweepDialog(QtWidgets.QDialog):
         self.device = QtWidgets.QComboBox()
         self.device.addItems(['GPU when there is one', 'cpu'])
         f.addRow('Device', self.device)
+        self.pngs = QtWidgets.QComboBox()
+        self.pngs.addItems(['one per threshold x brightness (at the middle blob and shadow)',
+                            'one per combination (thousands)', 'none'])
+        self.sheets = QtWidgets.QCheckBox('also stacked contact sheets')
+        hp = QtWidgets.QHBoxLayout()
+        hp.addWidget(self.pngs, 1)
+        hp.addWidget(self.sheets)
+        f.addRow('Images', hp)
         self.lbl_n = QtWidgets.QLabel('')
         f.addRow('', self.lbl_n)
         for w in (self.conf, self.bright, self.blob, self.shadow):
@@ -1352,6 +1360,9 @@ class CloudSweepDialog(QtWidgets.QDialog):
             a += ['--model-dir', self.model_dir.text()]
         if self.device.currentIndex() == 1:
             a += ['--device', 'cpu']
+        a += ['--images', ['grid', 'all', 'none'][self.pngs.currentIndex()]]
+        if self.sheets.isChecked():
+            a += ['--sheets']
         return a
 
 
@@ -1370,13 +1381,37 @@ class CloudSweepResultDialog(QtWidgets.QDialog):
         self.setWindowTitle('Cloud sweep')
         self.resize(1300, 900)
         lay = QtWidgets.QVBoxLayout(self)
-        note = QtWidgets.QLabel('Each combination: median over the images (ranked by F1 when reference masks were '
-                                'given). Sheets: threshold (rows) x the model alone and each brightness (columns), at '
-                                'the middle blob and shadow values; thick cloud purple, thin yellow, shadow blue.')
+        note = QtWidgets.QLabel('Summary: each combination, median over the images (ranked by F1 when reference '
+                                'masks were given). Images: pick a combination to see its quicklook (thick cloud '
+                                'purple, thin yellow, shadow blue).')
         note.setWordWrap(True)
         lay.addWidget(note)
         tabs = QtWidgets.QTabWidget()
         tabs.addTab(csv_table(os.path.join(folder, 'CLOUD_SWEEP_SUMMARY.csv'), self.COLS), 'Summary')
+        pngs = sorted(os.path.relpath(p, folder) for p in _glob.glob(os.path.join(folder, '*', '*', '*.png')))
+        if pngs:
+            w = QtWidgets.QWidget()
+            hl = QtWidgets.QHBoxLayout(w)
+            self.png_list = QtWidgets.QListWidget()
+            self.png_list.addItems(pngs)
+            self.png_list.setMaximumWidth(460)
+            self.png_view = QtWidgets.QLabel()
+            self.png_view.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter if QT_API != 'PyQt5'
+                                       else QtCore.Qt.AlignCenter)
+            sc = QtWidgets.QScrollArea()
+            sc.setWidget(self.png_view)
+            sc.setWidgetResizable(True)
+
+            def show(row):
+                pm = QtGui.QPixmap(os.path.join(folder, pngs[row])) if 0 <= row < len(pngs) else QtGui.QPixmap()
+                self.png_view.setPixmap(pm.scaled(1000, 760, QtCore.Qt.AspectRatioMode.KeepAspectRatio
+                                                  if QT_API != 'PyQt5' else QtCore.Qt.KeepAspectRatio)
+                                        if not pm.isNull() else pm)
+            self.png_list.currentRowChanged.connect(show)
+            hl.addWidget(self.png_list)
+            hl.addWidget(sc, 1)
+            tabs.addTab(w, f'Images ({len(pngs)})')
+            self.png_list.setCurrentRow(0)
         for p in sorted(_glob.glob(os.path.join(folder, 'SHEET_*.png'))):
             lab = QtWidgets.QLabel()
             pm = QtGui.QPixmap(p)
