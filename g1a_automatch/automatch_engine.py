@@ -4108,13 +4108,13 @@ def subcell_select(p1: np.ndarray, p2: np.ndarray, inliers: np.ndarray, cell_m: 
     r = d - A @ coef
     cell = np.floor((p1 - p1.min(0)) / cell_m).astype(int)
     ids = cell[:, 0] * 100003 + cell[:, 1]
-    for c in np.unique(ids):
-        idx = np.flatnonzero(ids == c)
-        anc = idx[inl[idx]]
+    order = np.argsort(ids, kind='stable')               # the points grouped by cell, once
+    for idx in np.split(order, np.flatnonzero(np.diff(ids[order])) + 1):
+        k = inl[idx]
+        anc = idx[k]
         fix = np.zeros((len(idx), 2))
         if len(anc) >= 6:                                # the cell's own tilt
             B = np.column_stack([np.ones(len(idx)), (p1[idx] - p1[anc].mean(0)) / cell_m])
-            k = np.isin(idx, anc)
             cf, *_ = np.linalg.lstsq(B[k], r[anc], rcond=None)
             m = np.hypot(*(r[anc] - B[k] @ cf).T)
             k2 = np.flatnonzero(k)[m <= max(np.median(m) * 3.0, 1e-9)]   # one trimming pass

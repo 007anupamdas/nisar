@@ -498,7 +498,7 @@ def field_covers(field: Dict, E: np.ndarray, N: np.ndarray, radius_m: float) -> 
 
 
 def match_accuracy(filtered_dir: str, field: Dict, radius_m: float = 5000.0,
-                   raw_dir: Optional[str] = None) -> List[Dict]:
+                   raw_dir: Optional[str] = None, misfits: Optional[Dict] = None) -> List[Dict]:
     """Per configuration (channel, detector, matcher, RANSAC) of one run, how
     many of each window's matches are right: a match is good when its
     displacement is within tolerance of the truth field at its position;
@@ -511,7 +511,7 @@ def match_accuracy(filtered_dir: str, field: Dict, radius_m: float = 5000.0,
     truth points' area are not judged."""
     import automatch_engine as E
 
-    misfits: Dict[str, Tuple[int, np.ndarray]] = {}
+    misfits = {} if misfits is None else misfits      # {file: (matches, misfit of the judged ones)}
 
     def score(path, cols, thr):
         """(n, judged, good) of a match file, judged at tolerance thr (each
@@ -739,7 +739,7 @@ def working_crs_of(output_dir: str) -> Optional[str]:
 def compare(output_dir: str, truth_csv: str, radius_m: float = 5000.0, chips: str = 'consensus',
             working_crs: Optional[str] = None, write: bool = True, quiet: bool = False,
             runs: Optional[List[Dict]] = None, local: str = 'plane',
-            max_points_per_chip: int = 200, rebuild: bool = True) -> Dict:
+            max_points_per_chip: int = 200, rebuild: bool = True, progress: str = '') -> Dict:
     """Score every configuration of the given runs ({'filtered_dir',
     'final_dir', 'sweep'}; default: every run found under output_dir), write
     the TRUTH_* files and, per channel, the RIVAL CSV of the configuration that
@@ -747,7 +747,8 @@ def compare(output_dir: str, truth_csv: str, radius_m: float = 5000.0, chips: st
     {'by_detector_matcher', 'ranking', 'points', 'truth', 'crs', 'best'}.
     rebuild=False: runs whose chip consensus is missing are not rebuilt (and
     nothing is written into them); their matches are still scored match by
-    match."""
+    match. progress: a line per run, starting with it. Each raw match file
+    is read once, however many runs (plain, sub-cell variants) use it."""
     crs = working_crs or working_crs_of(output_dir)
     if not crs:
         raise ValueError('working CRS unknown: pass working_crs (e.g. EPSG:32640)')
@@ -756,12 +757,18 @@ def compare(output_dir: str, truth_csv: str, radius_m: float = 5000.0, chips: st
     chip_files: Dict[Tuple, Tuple[str, List[str]]] = {}
     settings = consensus_settings(output_dir) if rebuild else None
     field = truth_field(truth)
-    for run in (runs if runs is not None else find_runs(output_dir)):
+    misfits: Dict = {}                                 # raw match files scored once, shared by the runs
+    run_list = runs if runs is not None else find_runs(output_dir)
+    for k, run in enumerate(run_list, 1):
+        if progress:
+            print(f"[Truth] {progress}scoring run {k}/{len(run_list)}: "
+                  f"{os.path.relpath(run['filtered_dir'], output_dir)}", flush=True)
         if field is not None:
             win, nf = sweep_parts(run['sweep'])
             try:
                 acc_rows += [{'sweep': run['sweep'], 'window_size': win, 'num_features': nf, **r}
-                             for r in match_accuracy(run['filtered_dir'], field, radius_m, run.get('raw_dir'))]
+                             for r in match_accuracy(run['filtered_dir'], field, radius_m, run.get('raw_dir'),
+                                                     misfits)]
             except Exception as e:
                 print(f"[Truth] match accuracy of {run['filtered_dir']}: {type(e).__name__}: {e}")
         timing = {}

@@ -25,11 +25,13 @@ ACCURACY_SUMMARY.csv there.
 """
 from __future__ import annotations
 
-import csv
+import contextlib
 import glob
+import io
 import json
 import os
 import sys
+import time
 from typing import Dict, List, Optional
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -51,91 +53,122 @@ def _raw_dir(filtered_dir: str) -> str:
                         'raw_matches_' + os.path.basename(filtered_dir)[len('filtered_'):])
 
 
-def subcell_runs(job_dir: str, px: int, keep: int, res: float, settings: Optional[Dict],
-                 recompute: bool = False) -> List[Dict]:
-    """The sub-cell variant of every run of a finished job, made from its
-    saved matches into <job>/SUBCELLS_<px>/; [{'filtered_dir', 'final_dir',
-    'sweep', 'raw_dir'}]. Reused when made with the same px and keep."""
+def subcell_runs(job_dir: str, px, keep: int, res: float, settings: Optional[Dict],
+                 recompute: bool = False, label: str = '') -> List[Dict]:
+    """The sub-cell variants (px: one size or a list) of every run of a
+    finished job, made from its saved matches into <job>/SUBCELLS_<px>/;
+    [{'filtered_dir', 'final_dir', 'sweep', 'raw_dir'}]. A size already made
+    with the same keep is reused; the others are made in one pass over the
+    windows (each raw match file read once for every size and RANSAC
+    setting), with a line per run."""
     import automatch_engine as E
     import automatch_truth as T
-    base = os.path.join(job_dir, f'SUBCELLS_{int(px)}')
-    marker = os.path.join(base, 'SUBCELLS.json')
-    want = {'px': int(px), 'keep': int(keep), 'res': float(res), 'v': VERSION}
-    done = False
-    if not recompute and os.path.exists(marker):
+    sizes = sorted({int(v) for v in (px if isinstance(px, (list, tuple)) else [px])})
+    todo = []
+    for s in sizes:
+        marker = os.path.join(job_dir, f'SUBCELLS_{s}', 'SUBCELLS.json')
+        want = {'px': s, 'keep': int(keep), 'res': float(res), 'v': VERSION}
         try:
             with open(marker, encoding='utf-8') as f:
-                done = json.load(f) == want
+                done = json.load(f) == want and not recompute
         except (OSError, ValueError):
             done = False
+        if not done:
+            todo.append(s)
+    runs = [r for r in T.find_runs(job_dir) if os.path.isdir(_raw_dir(r['filtered_dir']))]
     out = []
-    for run in T.find_runs(job_dir):
+    for k, run in enumerate(runs, 1):
         raw_dir = _raw_dir(run['filtered_dir'])
         rel = os.path.relpath(os.path.dirname(run['filtered_dir']), job_dir)
-        dfilt = os.path.join(base, rel, os.path.basename(run['filtered_dir']))
-        dfinal = os.path.join(base, rel, os.path.basename(run['final_dir']))
-        if not os.path.isdir(raw_dir):
-            continue
-        if not done:
-            _subcell_run(run['filtered_dir'], raw_dir, dfilt, float(px) * float(res), int(px), int(keep))
-            if settings is not None and glob.glob(os.path.join(dfilt, '*.csv')):
+        dirs = {s: (os.path.join(job_dir, f'SUBCELLS_{s}', rel, os.path.basename(run['filtered_dir'])),
+                    os.path.join(job_dir, f'SUBCELLS_{s}', rel, os.path.basename(run['final_dir']))) for s in sizes}
+        if todo:
+            t0 = time.time()
+            n = _subcell_run(run['filtered_dir'], raw_dir, {s: dirs[s][0] for s in todo}, res, int(keep))
+            print(f"[Accuracy] {label}sub-cells {', '.join(str(s) for s in todo)} px: run {k}/{len(runs)} "
+                  f"{rel}/{os.path.basename(run['filtered_dir'])}: {n} window(s) in {time.time() - t0:.0f} s",
+                  flush=True)
+            for s in todo:
+                dfilt, dfinal = dirs[s]
+                if settings is not None and glob.glob(os.path.join(dfilt, '*.csv')):
+                    os.makedirs(dfinal, exist_ok=True)
+                    try:
+                        with contextlib.redirect_stdout(io.StringIO()):     # its "Saved: ..." lines, per run
+                            E.ChipConsensusSelector.select_configs(csv_dir=dfilt, output_dir=dfinal,
+                                                                   manual_gcp_csv='', **settings)
+                    except Exception as e:
+                        print(f'[Accuracy] sub-cell consensus of {rel}: {type(e).__name__}: {e}')
+        for s in sizes:
+            dfilt, dfinal = dirs[s]
+            if os.path.isdir(dfilt):
                 os.makedirs(dfinal, exist_ok=True)
-                try:
-                    E.ChipConsensusSelector.select_configs(csv_dir=dfilt, output_dir=dfinal, manual_gcp_csv='',
-                                                           **settings)
-                except Exception as e:
-                    print(f'[Accuracy] sub-cell consensus of {rel}: {type(e).__name__}: {e}')
-        if os.path.isdir(dfilt):
-            os.makedirs(dfinal, exist_ok=True)
-            out.append({'filtered_dir': dfilt, 'final_dir': dfinal, 'sweep': run['sweep'], 'raw_dir': raw_dir})
-    if not done:
+                out.append({'filtered_dir': dfilt, 'final_dir': dfinal, 'sweep': run['sweep'], 'raw_dir': raw_dir})
+    for s in todo:
+        base = os.path.join(job_dir, f'SUBCELLS_{s}')
         os.makedirs(base, exist_ok=True)
-        with open(marker, 'w', encoding='utf-8') as f:
-            json.dump(want, f)
+        with open(os.path.join(base, 'SUBCELLS.json'), 'w', encoding='utf-8') as f:
+            json.dump({'px': s, 'keep': int(keep), 'res': float(res), 'v': VERSION}, f)
     return out
 
 
-def _subcell_run(filtered_dir: str, raw_dir: str, out_dir: str, cell_m: float, px: int, keep: int) -> int:
-    """Sub-cell picks of every window and RANSAC setting of one run; files
-    written."""
+def _inliers(raw: pd.DataFrame, filt: pd.DataFrame) -> np.ndarray:
+    """Which raw matches the RANSAC file kept (by their coordinates, vectorised)."""
+    if filt.empty:
+        return np.zeros(len(raw), bool)
+    rk = pd.MultiIndex.from_frame(raw[['x1_map', 'y1_map', 'x2_map', 'y2_map']].astype(float).round(4))
+    fk = pd.MultiIndex.from_frame(filt[['x1-map', 'y1-map', 'x2-map', 'y2-map']].astype(float).round(4)
+                                  .set_axis(['x1_map', 'y1_map', 'x2_map', 'y2_map'], axis=1))
+    return np.asarray(rk.isin(fk), bool)
+
+
+def _subcell_run(filtered_dir: str, raw_dir: str, out_dirs: Dict[int, str], res: float, keep: int) -> int:
+    """Sub-cell picks of every window and RANSAC setting of one run, for every
+    size in out_dirs ({px: folder}); each raw file read once. Windows done."""
     import automatch_engine as E
     raws = {os.path.basename(p)[:-len('_raw.csv')]: p for p in glob.glob(os.path.join(raw_dir, '*_raw.csv'))}
-    n = 0
+    by_win: Dict[str, List[str]] = {}
     for path in sorted(glob.glob(os.path.join(filtered_dir, '*.csv'))):
         name = os.path.basename(path)
-        p = E.MatchStatistics._parse_filename(name) or {}
-        if not p or '-sc' in str(p.get('ransac_method')) or '_aff_' not in name:
+        if '_aff_' not in name or '-sc' in name:
             continue
         win = name[:name.index('_aff_')]
-        if win not in raws:
-            continue
+        if win in raws:
+            by_win.setdefault(win, []).append(path)
+    n = 0
+    for win, paths in by_win.items():
         try:
             raw = pd.read_csv(raws[win])
-            filt = pd.read_csv(path)
         except Exception:
             continue
         if raw.empty or not set(RAW_COLS) <= set(raw.columns):
             continue
-        key = lambda a, b, c, d: tuple(np.round(np.column_stack([a, b, c, d]).astype(float), 6).tolist())  # noqa: E731
-        kept = set(map(tuple, key(filt['x1-map'], filt['y1-map'], filt['x2-map'], filt['y2-map']))) \
-            if len(filt) else set()
-        rk = key(raw['x1_map'], raw['y1_map'], raw['x2_map'], raw['y2_map'])
-        inl = np.array([tuple(r) in kept for r in rk], bool)
         p1 = raw[['x1_map', 'y1_map']].to_numpy(float)
         p2 = raw[['x2_map', 'y2_map']].to_numpy(float)
-        thr = float(p['ransac_threshold'])
-        sel = E.subcell_select(p1, p2, inl, cell_m, thr, keep)
-        if not sel.any():
-            continue
-        tail = name[name.index('_aff_') + len('_aff_'):].split('_')       # <method>_<thr>_<conf>_.csv
-        label = f'{tail[0]}-sc{px}'
-        os.makedirs(out_dir, exist_ok=True)
-        with open(os.path.join(out_dir, f"{win}_aff_{label}_{'_'.join(tail[1:])}"), 'w', newline='') as f:
-            w = csv.writer(f)
-            w.writerow(OUT_COLS)
-            for r in raw[sel].itertuples(index=False):
-                w.writerow([r.x1, r.y1, r.x2, r.y2, r.x1_map, r.y1_map, r.x2_map, r.y2_map, r.distance, r.along,
-                            r.across, label, tail[1], tail[2], True])
+        for path in paths:
+            name = os.path.basename(path)
+            p = E.MatchStatistics._parse_filename(name) or {}
+            if not p:
+                continue
+            try:
+                filt = pd.read_csv(path)
+            except Exception:
+                continue
+            inl = _inliers(raw, filt)
+            thr = float(p['ransac_threshold'])
+            tail = name[name.index('_aff_') + len('_aff_'):].split('_')       # <method>_<thr>_<conf>_.csv
+            for px, out_dir in out_dirs.items():
+                sel = E.subcell_select(p1, p2, inl, float(px) * float(res), thr, keep)
+                if not sel.any():
+                    continue
+                label = f'{tail[0]}-sc{px}'
+                r = raw[sel]
+                os.makedirs(out_dir, exist_ok=True)
+                pd.DataFrame({'x1': r['x1'], 'y1': r['y1'], 'x2': r['x2'], 'y2': r['y2'], 'x1-map': r['x1_map'],
+                              'y1-map': r['y1_map'], 'x2-map': r['x2_map'], 'y2-map': r['y2_map'],
+                              'Distance': r['distance'], 'along': r['along'], 'across': r['across'],
+                              'model-type': label, 'threshold': tail[1], 'confidence': tail[2], 'inliers': True}
+                             )[OUT_COLS].to_csv(os.path.join(out_dir, f"{win}_aff_{label}_{'_'.join(tail[1:])}"),
+                                                index=False)
         n += 1
     return n
 
@@ -181,12 +214,12 @@ def job_accuracy(job_dir: str, truth_csv: str, subcell_px=(), keep: int = 10, ra
         if not res:
             raise ValueError('working resolution unknown: sub-cells need it')
         settings = T.consensus_settings(job_dir)
-        for px in sizes:
-            runs = runs + subcell_runs(job_dir, px, int(keep), res, settings, recompute and px in asked)
+        runs = runs + subcell_runs(job_dir, sizes, int(keep), res, settings, recompute,
+                                   label=f'{os.path.basename(os.path.normpath(job_dir))}: ')
     # nothing rebuilt or written in the job's own folders: a run without its chip consensus is still
     # scored match by match
     r = T.compare(job_dir, truth_csv, radius_m, 'consensus', crs, write=False, quiet=quiet, runs=runs,
-                  rebuild=False)
+                  rebuild=False, progress=f'{os.path.basename(os.path.normpath(job_dir))}: ')
     acc = r.get('accuracy')
     acc = acc if isinstance(acc, pd.DataFrame) else pd.DataFrame()
     if acc.empty:
