@@ -36,6 +36,12 @@ A job file may hold "mode":
                {"mode": "compare", "compare_dir": "/maintenance/.../output297"};
                TRUTH_*.csv and RIVAL_TRUTH_BEST_*.csv go into that folder and
                into this job's output folder
+    cloudsweep the cloud mask benchmark: every combination of thresholds
+               (cloud_sweep_conf), band sets (spec + every 3 of the
+               cloud_sweep_crisp crispest) and bright-blob settings
+               (cloud_sweep_bright / _blob_km2 / _shadow_km) on input_path and
+               cloud_sweep_images; with cloud_sweep_reference masks also
+               IoU / F1 -> <output>/cloud_sweep/
     cloud      the cloud mask alone, no matching: OmniCloudMask runs once on
                input_path (with the job's cloud_* settings, cloud_mask_from
                for HS) and each threshold in cloud_test_confidences (default
@@ -61,7 +67,7 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 import automatch_native  # noqa: F401,E402  (rasterio's C++ runtime before any other)
 
-MODES = ('run', 'preflight', 'weights', 'env', 'compare', 'cloud')
+MODES = ('run', 'preflight', 'weights', 'env', 'compare', 'cloud', 'cloudsweep')
 
 
 def _value(text: str):
@@ -288,6 +294,19 @@ def main(argv: List[str] = None) -> int:
                      C.model_dir_for(job), job.get('cloud_device') or None, job.get('cloud_mask_from') or '',
                      int(job.get('cloud_from_margin_px') or 0) + int(job.get('cloud_dilate_px') or 0),
                      refine_opts=C.refine_options(job))
+        return 0
+    if mode == 'cloudsweep':               # the cloud mask benchmark: every combination of the settings
+        import automatch_cloud as C
+        import automatch_cloudsweep as CS
+        problems = C.check(job)
+        if problems:
+            print('\n'.join(problems))
+            return 2
+        CS.run([job['input_path']] + list(job.get('cloud_sweep_images') or []),
+               os.path.join(job['output_dir'], 'cloud_sweep'), list(job.get('cloud_sweep_reference') or []), '',
+               job['cloud_sweep_conf'], job['cloud_sweep_bright'], job['cloud_sweep_blob_km2'],
+               job['cloud_sweep_shadow_km'], int(job['cloud_sweep_crisp']), True,
+               job.get('cloud_mask_classes') or [1], C.model_dir_for(job), job.get('cloud_device') or None)
         return 0
     if mode == 'preflight':
         res = J.preflight(job)

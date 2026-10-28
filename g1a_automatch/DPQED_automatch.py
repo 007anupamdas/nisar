@@ -1203,6 +1203,200 @@ class CloudTestDialog(QtWidgets.QDialog):
         return a
 
 
+class CloudSweepDialog(QtWidgets.QDialog):
+    """The cloud mask benchmark (automatch_cloudsweep): every combination of
+    thresholds, band sets and bright-blob settings on one or more images."""
+
+    def __init__(self, settings, job, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('Cloud sweep (benchmark)')
+        self.settings = settings
+        self.resize(760, 560)
+        f = QtWidgets.QFormLayout(self)
+        head = QtWidgets.QLabel('Every combination of the cloud settings, nothing matched. The model runs once per band '
+                                'set (the spec bands, and every 3 of the N crispest); thresholds and bright-blob '
+                                'settings are applied to its result. Ranges: lo-hi:step (0.6-0.99:0.1 = 0.6, 0.7, 0.8, '
+                                '0.9, 0.99) or values. With reference cloud masks (a raster, or outlines drawn as '
+                                '.geojson / .shp polygons, one per image), each combination gets IoU / F1.')
+        head.setWordWrap(True)
+        f.addRow(head)
+
+        def paths_box(key, first=''):
+            box = QtWidgets.QPlainTextEdit()
+            box.setPlaceholderText('one path per line')
+            box.setPlainText(settings.value(key, '') or first)
+            box.setMaximumHeight(70)
+            b = QtWidgets.QPushButton('Add…')
+            b.clicked.connect(lambda: box.appendPlainText('\n'.join(QtWidgets.QFileDialog.getOpenFileNames(
+                self, 'Add files', '', 'Rasters and outlines (*.tif *.tiff *.vrt *.img *.geojson *.json *.shp);;All (*)'
+            )[0])))
+            w = QtWidgets.QWidget()
+            hl = QtWidgets.QHBoxLayout(w)
+            hl.setContentsMargins(0, 0, 0, 0)
+            hl.addWidget(box, 1)
+            hl.addWidget(b)
+            return box, w
+        self.images, wi = paths_box('cloud_sweep/images', job.get('input_path') or '')
+        f.addRow('Images', wi)
+        self.refs, wr = paths_box('cloud_sweep/refs')
+        f.addRow('Reference masks (optional)', wr)
+        self.job_out = job.get('output_dir') or ''
+        self.out = PathRow('dir')
+        self.out.edit.setPlaceholderText('<job output folder>/cloud_sweep' if self.job_out
+                                         else '<first image folder>/cloud_sweep')
+        self.out.setText(settings.value('cloud_sweep/out', '') or '')
+        f.addRow('Output folder', self.out)
+        self.conf = QtWidgets.QLineEdit(settings.value('cloud_sweep/conf', '') or '0.6-0.99:0.1')
+        f.addRow('Confidence thresholds', self.conf)
+        self.spec = QtWidgets.QCheckBox('the spec bands (red / green / NIR)')
+        self.spec.setChecked(True)
+        self.crisp = QtWidgets.QSpinBox()
+        self.crisp.setRange(0, 12)
+        self.crisp.setValue(6)
+        self.crisp.setPrefix('+ every 3 of the ')
+        self.crisp.setSuffix(' crispest')
+        self.crisp.setSpecialValueText('no crisp combinations')
+        hb = QtWidgets.QHBoxLayout()
+        hb.addWidget(self.spec)
+        hb.addWidget(self.crisp)
+        f.addRow('Band sets', hb)
+        self.bright = QtWidgets.QLineEdit(settings.value('cloud_sweep/bright', '') or '60-90:5')
+        f.addRow('Brighter than (percentile)', self.bright)
+        self.blob = QtWidgets.QLineEdit(settings.value('cloud_sweep/blob', '') or '0.25, 1, 4')
+        f.addRow('Blob at least (km²)', self.blob)
+        self.shadow = QtWidgets.QLineEdit(settings.value('cloud_sweep/shadow', '') or '5, 10, 20')
+        f.addRow('Shadow within (km)', self.shadow)
+        wdir = job.get('cloud_model_dir') or (os.path.join(job['weights_cache_dir'], 'omnicloudmask')
+                                              if job.get('weights_cache_dir') else '')
+        self.model_dir = PathRow('dir')
+        self.model_dir.setText(wdir)
+        self.model_dir.edit.setPlaceholderText("OmniCloudMask's own folder")
+        f.addRow('Model weights', self.model_dir)
+        self.device = QtWidgets.QComboBox()
+        self.device.addItems(['GPU when there is one', 'cpu'])
+        f.addRow('Device', self.device)
+        self.lbl_n = QtWidgets.QLabel('')
+        f.addRow('', self.lbl_n)
+        for w in (self.conf, self.bright, self.blob, self.shadow):
+            w.textChanged.connect(self._count)
+        self.crisp.valueChanged.connect(self._count)
+        self.spec.toggled.connect(self._count)
+        self._count()
+        bb = QtWidgets.QDialogButtonBox()
+        bb.addButton('Run sweep', QtWidgets.QDialogButtonBox.ButtonRole.AcceptRole
+                     if QT_API != 'PyQt5' else QtWidgets.QDialogButtonBox.AcceptRole)
+        bb.addButton(QtWidgets.QDialogButtonBox.StandardButton.Cancel if QT_API != 'PyQt5'
+                     else QtWidgets.QDialogButtonBox.Cancel)
+        bb.accepted.connect(self._ok)
+        bb.rejected.connect(self.reject)
+        f.addRow(bb)
+
+    @staticmethod
+    def _lines(box):
+        return [ln.strip() for ln in box.toPlainText().splitlines() if ln.strip()]
+
+    def _ranges(self):
+        import automatch_cloudsweep as CS
+        return (CS.parse_range(self.conf.text()), CS.parse_range(self.bright.text()), CS.parse_range(self.blob.text()),
+                CS.parse_range(self.shadow.text()))
+
+    def _count(self, *_):
+        try:
+            c, b, k, s = self._ranges()
+        except ValueError as e:
+            self.lbl_n.setText(str(e))
+            return
+        import math
+        sets = int(self.spec.isChecked()) + (math.comb(self.crisp.value(), 3) if self.crisp.value() >= 3 else 0)
+        n = len(c) * (1 + len(b) * len(k) * len(s))
+        self.lbl_n.setText(f'{sets} band set(s) (model runs per image) x {n} combinations = {sets * n} rows per image')
+
+    def out_dir(self):
+        imgs = self._lines(self.images)
+        return self.out.text() or os.path.join(self.job_out or os.path.dirname(os.path.abspath(imgs[0] if imgs else '.')),
+                                               'cloud_sweep')
+
+    def _ok(self):
+        imgs, refs = self._lines(self.images), self._lines(self.refs)
+        try:
+            if not imgs or not all(os.path.isfile(p) for p in imgs):
+                raise ValueError('give existing images, one per line')
+            if refs and len(refs) != len(imgs):
+                raise ValueError(f'{len(refs)} reference(s) for {len(imgs)} image(s): one per image, in order '
+                                 f'(or none)')
+            c, *_ = self._ranges()
+            if any(not 0 < v < 1 for v in c):
+                raise ValueError('confidence thresholds lie between 0 and 1')
+        except ValueError as e:
+            QtWidgets.QMessageBox.warning(self, 'Cloud sweep', str(e))
+            return
+        for k, w in (('images', self.images), ('refs', self.refs)):
+            self.settings.setValue(f'cloud_sweep/{k}', w.toPlainText())
+        for k, w in (('out', self.out), ('conf', self.conf), ('bright', self.bright), ('blob', self.blob),
+                     ('shadow', self.shadow)):
+            self.settings.setValue(f'cloud_sweep/{k}', w.text())
+        self.accept()
+
+    def args(self):
+        a = ['cloudsweep'] + self._lines(self.images) + ['--out', self.out_dir(), '--conf', self.conf.text().strip(),
+                                                         '--bright', self.bright.text().strip(),
+                                                         '--crisp', str(self.crisp.value())]
+        a += ['--blob-km2'] + [f'{v:g}' for v in self._ranges()[2]]
+        a += ['--shadow-km'] + [f'{v:g}' for v in self._ranges()[3]]
+        if not self.spec.isChecked():
+            a += ['--no-spec']
+        refs = self._lines(self.refs)
+        if refs:
+            a += ['--reference'] + refs
+        if self.model_dir.text():
+            a += ['--model-dir', self.model_dir.text()]
+        if self.device.currentIndex() == 1:
+            a += ['--device', 'cpu']
+        return a
+
+
+class CloudSweepResultDialog(QtWidgets.QDialog):
+    """CLOUD_SWEEP_SUMMARY.csv and the contact sheets of one sweep."""
+
+    COLS = [('band_set', 'band set'), ('confidence', 'confidence'), ('check', 'check'), ('bright_pct', 'bright'),
+            ('min_blob_km2', 'blob km²'), ('shadow_near_km', 'shadow km'), ('images', 'images'), ('ref_f1', 'F1'),
+            ('ref_iou', 'IoU'), ('ref_precision', 'precision'), ('ref_recall', 'recall'), ('cloud_pct', 'cloud %'),
+            ('masked_pct', 'masked %'), ('dark_cloud_pct', 'dark cloud %'), ('brightness_gap', 'brightness gap'),
+            ('blobs', 'blobs')]
+
+    def __init__(self, folder, parent=None):
+        super().__init__(parent)
+        import glob as _glob
+        self.setWindowTitle('Cloud sweep')
+        self.resize(1300, 900)
+        lay = QtWidgets.QVBoxLayout(self)
+        note = QtWidgets.QLabel('Each combination: median over the images (ranked by F1 when reference masks were '
+                                'given). Sheets: threshold (rows) x the model alone and each brightness (columns), at '
+                                'the middle blob and shadow values; thick cloud purple, thin yellow, shadow blue.')
+        note.setWordWrap(True)
+        lay.addWidget(note)
+        tabs = QtWidgets.QTabWidget()
+        tabs.addTab(csv_table(os.path.join(folder, 'CLOUD_SWEEP_SUMMARY.csv'), self.COLS), 'Summary')
+        for p in sorted(_glob.glob(os.path.join(folder, 'SHEET_*.png'))):
+            lab = QtWidgets.QLabel()
+            pm = QtGui.QPixmap(p)
+            if not pm.isNull():
+                lab.setPixmap(pm)
+            sc = QtWidgets.QScrollArea()
+            sc.setWidget(lab)
+            tabs.addTab(sc, os.path.splitext(os.path.basename(p))[0][len('SHEET_'):])
+        lay.addWidget(tabs, 1)
+        row = QtWidgets.QHBoxLayout()
+        b = QtWidgets.QPushButton('Open folder')
+        b.clicked.connect(lambda: QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(folder)))
+        row.addWidget(b)
+        row.addStretch(1)
+        close = QtWidgets.QPushButton('Close')
+        close.clicked.connect(self.accept)
+        row.addWidget(close)
+        lay.addLayout(row)
+
+
 class CloudResultDialog(QtWidgets.QDialog):
     """Every cloud test made in a folder (CLOUD_TEST_ALL.csv: each band choice
     at each threshold), and each one's quicklook beside the model's own."""
@@ -1317,11 +1511,15 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
                             ('Stop', self.stop), ('Open output', self.open_output),
                             ('Pack for server…', self.pack_dialog),
                             ('Benchmark & cross-check…', self.bench_dialog),
-                            ('Cloud mask test…', self.cloud_dialog)):
+                            ('Cloud mask test…', self.cloud_dialog),
+                            ('Cloud sweep…', self.cloud_sweep_dialog)):
             b = QtWidgets.QPushButton(label)
             b.clicked.connect(slot)
             btns.addWidget(b)
-            setattr(self, 'btn_' + label.split()[0].lower().rstrip('…').replace('-', '_'), b)
+            name = 'btn_' + label.split()[0].lower().rstrip('…').replace('-', '_')
+            if hasattr(self, name):                  # 'Cloud sweep…' after 'Cloud mask test…': btn_cloud_sweep
+                name = 'btn_' + '_'.join(w.lower().rstrip('…') for w in label.split()[:2])
+            setattr(self, name, b)
         self.btn_stop.setEnabled(False)
         bl.addLayout(btns)
         self.lbl_status = QtWidgets.QLabel('Ready.')
@@ -2142,10 +2340,10 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.proc_buffer = ''
         self._events = []
         self.proc.start(sys.executable, [JOB_SCRIPT] + args)
-        busy = kind in ('run', 'preflight', 'pack', 'bench', 'cloud')
+        busy = kind in ('run', 'preflight', 'pack', 'bench', 'cloud', 'cloudsweep')
         self.btn_run.setEnabled(not busy)
         self.btn_preflight.setEnabled(not busy)
-        self.btn_stop.setEnabled(kind in ('run', 'pack', 'bench', 'cloud'))
+        self.btn_stop.setEnabled(kind in ('run', 'pack', 'bench', 'cloud', 'cloudsweep'))
         self.lbl_status.setText(f'{kind} …')
         return True
 
@@ -2239,6 +2437,18 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
                 self.lbl_status.setText(f'Cloud test written in {folder}')
             else:
                 self.lbl_status.setText('Cloud test failed — see Log.')
+        elif kind == 'cloudsweep':
+            import glob as _glob
+            parent = getattr(self, '_sweep_dir', '')
+            made = sorted(p for p in _glob.glob(os.path.join(parent, '*_sweep*'))
+                          if os.path.exists(os.path.join(p, 'CLOUD_SWEEP_SUMMARY.csv')))
+            if code == 0 and made:
+                dlg = CloudSweepResultDialog(max(made, key=os.path.getmtime), self)
+                dlg.show()
+                self._last_sweep_dialog = dlg
+                self.lbl_status.setText(f'Cloud sweep written in {made[-1]}')
+            else:
+                self.lbl_status.setText('Cloud sweep failed — see Log.')
         elif kind == 'weights':
             tmp_job = getattr(self, '_weights_job_file', None)
             if tmp_job:
@@ -2438,6 +2648,22 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         if run:
             dlg.exec() if hasattr(dlg, 'exec') else dlg.exec_()
         return dlg
+
+    def cloud_sweep_dialog(self, *_, run=True):
+        """The cloud mask benchmark; run=False returns the dialog unshown (tests)."""
+        job = dict(DEFAULT_JOB, input_path=self.in_path.text(), weights_cache_dir=self.weights_cache.text(),
+                   output_dir=self.out_path.text())
+        dlg = CloudSweepDialog(self.settings, job, self)
+        dlg.accepted.connect(lambda: self._start_sweep(dlg))
+        if run:
+            dlg.exec() if hasattr(dlg, 'exec') else dlg.exec_()
+        return dlg
+
+    def _start_sweep(self, dlg):
+        self._sweep_dir = dlg.out_dir()
+        args = dlg.args()
+        self.log.appendPlainText('--- ' + ' '.join(args))
+        self._start(args, 'cloudsweep')
 
     def _start_cloud(self, dlg):
         self._cloud_dir = dlg.out_dir()

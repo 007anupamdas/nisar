@@ -53,7 +53,7 @@ AUTOMATCH_VERSION = '2026.10.27'
 CODE_FILES = ('automatch_engine.py', 'automatch_job.py', 'automatch_imcui.py', 'automatch_refs.py',
               'automatch_rival.py', 'automatch_truth.py', 'automatch_weights.py', 'automatch_gpuaas.py',
               'automatch_native.py', 'imw_configs.py', 'automatch_cross.py', 'automatch_bench.py',
-              'automatch_cloud.py', 'automatch_accuracy.py')
+              'automatch_cloud.py', 'automatch_accuracy.py', 'automatch_cloudsweep.py')
 
 
 def code_fingerprint() -> str:
@@ -101,6 +101,14 @@ DEFAULT_JOB: Dict = {
     'cloud_model_dir': '',       # OmniCloudMask weights; '' = <weights folder>/omnicloudmask
     'cloud_device': '',          # '' = GPU when there is one      # [first, last] band searched by auto_bands, e.g. [1, 70]; [] = all
     'cloud_test_confidences': [],  # mode "cloud" only: thresholds to compare; [] = 0.5, cloud_min_confidence, 0.85
+    # mode "cloudsweep" only (automatch_cloudsweep): every combination; ranges lo-hi:step or lists
+    'cloud_sweep_conf': '0.6-0.99:0.1',
+    'cloud_sweep_bright': '60-90:5',
+    'cloud_sweep_blob_km2': [0.25, 1.0, 4.0],
+    'cloud_sweep_shadow_km': [5.0, 10.0, 20.0],
+    'cloud_sweep_crisp': 6,       # every 3 of the N crispest bands (0: none); the spec bands always
+    'cloud_sweep_reference': [],  # reference cloud masks, one per image (raster or .geojson / .shp outlines)
+    'cloud_sweep_images': [],     # more images than input_path, e.g. other MV scenes
     'reference_dir': '',         # L8_ref / C1 / any RIVAL-readable collection
     'reference_label': '',       # tag in file names; default from folder name
     'reference_mode': 'auto',    # auto | index-shp | sidecar | degree-tile
@@ -1177,6 +1185,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     sub.add_parser('cloud', help='test the cloud mask of one image at several confidence thresholds, without '
                                  'a matching run (options: python automatch_cloud.py -h)'
                    ).add_argument('rest', nargs=argparse.REMAINDER)
+    sub.add_parser('cloudsweep', help='cloud mask benchmark: every combination of thresholds, band sets and '
+                                      'bright-blob settings (options: python automatch_cloudsweep.py -h)'
+                   ).add_argument('rest', nargs=argparse.REMAINDER)
     k = sub.add_parser('pack', help='copy a scene, the references it needs and server settings for the '
                                     'GPU server (options: python automatch_pack.py -h)')
     k.add_argument('rest', nargs=argparse.REMAINDER)
@@ -1194,6 +1205,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     if argv and argv[0] == 'cloud':
         import automatch_cloud as C
         return C.main(list(argv[1:]))
+    if argv and argv[0] == 'cloudsweep':
+        import automatch_cloudsweep as CS
+        return CS.main(list(argv[1:]))
     if argv and argv[0] == 'pack':
         import automatch_pack as P
         return P.main(list(argv[1:]))

@@ -898,6 +898,26 @@ def test_gui_cloud():
             C.standalone(img, os.path.join(tmp, 'ct'), '', ['band1', 'band2', 'band4'], 'spec', [0.8], predictor=fake)
         res = G.CloudResultDialog(os.path.join(tmp, 'ct'), w)
         tabs = res.findChild(G.QtWidgets.QTabWidget)
+        sd = w.cloud_sweep_dialog(run=False)
+        sd.images.setPlainText(img)
+        sd.conf.setText('0.6-0.9:0.1')
+        sd.bright.setText('60-90:15')
+        sd.crisp.setValue(6)
+        sa = sd.args()
+        check('gui: the cloud sweep dialog counts the combinations and builds the command',
+              (w.btn_cloud.text(), w.btn_cloud_sweep.text(), sa[:2], sa[sa.index('--conf') + 1],
+               sa[sa.index('--bright') + 1], sa[sa.index('--blob-km2') + 1:sa.index('--blob-km2') + 4],
+               '21 band set' in sd.lbl_n.text()),
+              ('Cloud mask test…', 'Cloud sweep…', ['cloudsweep', img], '0.6-0.9:0.1', '60-90:15', ['0.25', '1', '4'],
+               True))
+        import automatch_cloudsweep as CS
+        with contextlib.redirect_stdout(io.StringIO()):
+            sres = CS.run([img], os.path.join(tmp, 'sw'), [], '', '0.7, 0.9', '90', [1], [10], 0, True, [1], '',
+                          None, 2048, 0, predictor=fake)
+        swd = G.CloudSweepResultDialog(sres['folder'], w)
+        stabs = swd.findChild(G.QtWidgets.QTabWidget)
+        check('gui: the sweep result shows the summary and a contact sheet per band set',
+              (stabs.count(), stabs.tabText(0), stabs.tabText(1).endswith('_spec')), (2, 'Summary', True))
         check('gui: the cloud result shows each threshold\'s quicklook and the table',
               (tabs.count(), 'bands_1-2-4 @ 0.8' in tabs.tabText(0),
                'bands_3-2-6 @ 0.8' in tabs.tabText(2),
@@ -2956,6 +2976,104 @@ def test_cloud_mask(tmp):
         check('cloud test: without omnicloudmask the command line and service mode say so (exit 2)', (rc, rc2), (2, 2))
 
 
+def test_cloud_sweep(tmp):
+    """Cloud benchmark: every combination of thresholds, band sets (spec + every
+    3 of the crispest) and bright-blob settings from one model run per band
+    set; against a reference mask (raster or polygons) the bright-blob check
+    beats the model alone where the model took vegetation for thick cloud."""
+    import contextlib
+    import glob
+    import io
+    import cv2
+    import numpy as np
+    import pandas as pd
+    import rasterio
+    from rasterio.transform import from_origin
+    from pyproj import Transformer
+    import automatch_cloudsweep as S
+    check('sweep: ranges lo-hi:step keep the end; lists as given',
+          (S.parse_range('0.6-0.99:0.1'), S.parse_range('60-90:5'), S.parse_range('0.25, 1, 4'), S.parse_range([10, 5])),
+          ([0.6, 0.7, 0.8, 0.9, 0.99], [60, 65, 70, 75, 80, 85, 90], [0.25, 1.0, 4.0], [5.0, 10.0]))
+    rng = np.random.default_rng(31)
+    H, W, crs = 400, 500, 'EPSG:32643'
+    tr = from_origin(500000, 1700000, 45, 45)
+    img = os.path.join(tmp, 'G1A_MV_G_SWEEP.tif')
+    with rasterio.open(img, 'w', driver='GTiff', height=H, width=W, count=6, dtype='uint16', crs=crs, transform=tr,
+                       nodata=0) as d:
+        for b in range(1, 7):
+            t = cv2.GaussianBlur(rng.normal(size=(H, W)).astype(np.float32), (0, 0), 2)
+            a = 600 + 120 * t / t.std() + rng.normal(0, 6, (H, W))
+            a[50:110, 60:140] = 2400                           # a thick cloud, bright in every band
+            a[250:320, 300:400] = 250 if b <= 3 else 1800      # vegetation: dark visible, bright NIR
+            d.write(np.clip(a, 1, 65000).astype('uint16'), b)
+    ref = os.path.join(tmp, 'sweep_ref.tif')
+    with rasterio.open(ref, 'w', driver='GTiff', height=H, width=W, count=1, dtype='uint8', crs=crs, transform=tr) as d:
+        m = np.zeros((H, W), np.uint8)
+        m[50:110, 60:140] = 1
+        d.write(m, 1)
+    calls = []
+
+    def fake(arr, nodata, model_dir, device):                   # the model takes the vegetation for thick cloud too
+        calls.append(1)
+        p = np.zeros((4,) + arr.shape[1:], np.float32)
+        p[0] = 1.0
+        p[:, 50:110, 60:140] = np.array([0.02, 0.95, 0.03, 0.0])[:, None, None]
+        p[:, 250:320, 300:400] = np.array([0.04, 0.93, 0.03, 0.0])[:, None, None]
+        return p
+    out = os.path.join(tmp, 'sweep_out')
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        res = S.run([img], out, [ref], '', '0.6-0.9:0.1', '60-90:15', [0.25, 1], [10], 6, True, [1], '', None,
+                    2048, 1, predictor=fake)
+    df = res['rows']
+    sets = df['band_set'].unique().tolist()
+    check('sweep: one model run per band set (spec + every 3 of the 6 crispest; + 1 for the best at full size), '
+          'every combination from it',
+          (len(calls), len(sets), 'spec' in sets, len(df), len(df) == len(sets) * 4 * (1 + 3 * 2 * 1)),
+          (len(sets) + 1, 21, True, len(sets) * 28, True))
+    best = df.sort_values('ref_f1', ascending=False).iloc[0]
+    model = df[(df['band_set'] == 'spec') & (df['check'] == 'none') & (df['confidence'] == 0.7)].iloc[0]
+    check('sweep: against the reference the bright-blob check is right (F1 ~1), the model alone is not',
+          (best['check'], best['ref_f1'] > 0.95, model['ref_f1'] < 0.8, model['ref_precision'] < 0.6),
+          ('bright blobs', True, True, True))
+    f = res['folder']
+    check('sweep: summary, a contact sheet per band set, the best combination at full size, its settings',
+          (os.path.exists(os.path.join(f, 'CLOUD_SWEEP_SUMMARY.csv')),
+           len(glob.glob(os.path.join(f, 'SHEET_*.png'))), bool(glob.glob(os.path.join(f, 'top_1_*', 'CLOUD_MASK.tif'))),
+           len(glob.glob(os.path.join(f, 'CLOUD_SWEEP_PARAMS_*.txt'))), 'against the reference' in buf.getvalue()),
+          (True, 21, True, 1, True))
+    to_ll = Transformer.from_crs(crs, 'EPSG:4326', always_xy=True)
+    xs, ys = [500000 + 60 * 45, 500000 + 140 * 45], [1700000 - 50 * 45, 1700000 - 110 * 45]
+    ring = [to_ll.transform(x, y) for x, y in ((xs[0], ys[0]), (xs[1], ys[0]), (xs[1], ys[1]), (xs[0], ys[1]),
+                                                (xs[0], ys[0]))]
+    gj = os.path.join(tmp, 'sweep_ref.geojson')
+    with open(gj, 'w') as fh:
+        json.dump({'type': 'FeatureCollection', 'features': [{'type': 'Feature', 'properties': {},
+                                                              'geometry': {'type': 'Polygon', 'coordinates': [ring]}}]},
+                  fh)
+    import automatch_cloud as Cm
+    import automatch_gpuaas as G
+    mf = os.path.join(tmp, 'mode_cloudsweep.json')
+    with open(mf, 'w') as fh:
+        json.dump({'mode': 'cloudsweep', 'cloud_sweep_conf': '0.7', 'cloud_sweep_bright': '90',
+                   'cloud_sweep_blob_km2': [1], 'cloud_sweep_shadow_km': [10], 'cloud_sweep_crisp': 0,
+                   'cloud_sweep_reference': [ref]}, fh)
+    real, real_check = Cm.predict, Cm.check
+    Cm.predict, Cm.check = fake, (lambda job: [])
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = G.main(['gpuaas', '.', os.path.join(tmp, 'svc_sweep'), f'{img},{tmp},{mf}'])
+    finally:
+        Cm.predict, Cm.check = real, real_check
+    made = glob.glob(os.path.join(tmp, 'svc_sweep', 'cloud_sweep', '*_sweep', 'CLOUD_SWEEP.csv'))
+    check('sweep: the GPU service mode "cloudsweep" runs it from the job file (with its reference)',
+          (rc, len(made), 'ref_f1' in pd.read_csv(made[0]).columns if made else None), (0, 1, True))
+    a_r, _ = S.load_reference(ref, img)
+    a_g, kg = S.load_reference(gj, img)
+    iou = (a_r & a_g).sum() / max((a_r | a_g).sum(), 1)
+    check('sweep: cloud outlines drawn as polygons (GeoJSON) give the same reference as the raster',
+          (iou > 0.95, bool(kg.all())), (True, True))
+
+
 def J_default_classes():
     import automatch_job as J
     return J.normalize({})['cloud_mask_classes']
@@ -3744,6 +3862,7 @@ def main():
         test_cross_check(tmp)
         test_bench(tmp)
         test_cloud_mask(tmp)
+        test_cloud_sweep(tmp)
         test_stretch()
         test_parallel_share(tmp)
         test_match_accuracy(tmp)

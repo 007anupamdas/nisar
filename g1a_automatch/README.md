@@ -594,6 +594,44 @@ to no data, and the job matches that copy.
   `{"mode": "cloud", "cloud_test_confidences": [0.5, 0.7, 0.85]}`. The
   job's other `cloud_*` settings apply (`cloud_mask_from` for HS), and the
   results go to `<output>/cloud_test/`.
+- **Benchmark: every combination** (`automatch_cloudsweep.py`; GUI: *Cloud
+  sweep…*):
+
+      python automatch_job.py cloudsweep <image> [<image> ...] --out <folder>
+          [--conf 0.6-0.99:0.1] [--crisp 6] [--no-spec] [--bright 60-90:5]
+          [--blob-km2 0.25 1 4] [--shadow-km 5 10 20]
+          [--reference <mask .tif | outlines .geojson / .shp> ...]
+
+  - **Ranges:** `lo-hi:step`, keeping the end (`0.6-0.99:0.1` = 0.6, 0.7,
+    0.8, 0.9, 0.99), or a list.
+  - **Band sets:** the spec bands, plus every 3 of the N crispest (MV: all
+    20 combinations of its 6 bands).
+  - **What runs:** the model runs once per band set. Every threshold, and
+    every brightness × blob × shadow setting, is applied to its
+    probabilities on an overview (at most 2048 px). The model alone is
+    included each time.
+  - **Cost:** on MV, about 21 model runs, then minutes, for about 7000
+    combinations per image.
+  - **Per combination** (`CLOUD_SWEEP.csv`): cloud, thick, thin and shadow
+    %, the masked share, cloud blobs, `dark_cloud_pct` and
+    `brightness_gap`. The gap is how far the clouds' median brightness
+    stands above the clear ground's 95th percentile, in robust standard
+    deviations.
+  - **Contact sheets:** a `SHEET_<image>_<band set>.png` per band set has
+    rows for thresholds and columns for the model alone and each
+    brightness. They show the whole grid at a glance.
+  - **With references** (a cloud mask raster, or outlines drawn in QGIS as
+    polygons, one per image): IoU, precision, recall and F1 of the masked
+    classes. `CLOUD_SWEEP_SUMMARY.csv` is then ranked by the median F1 over
+    the images, and the best combinations are written at full size
+    (`top_<k>_*/`). Without references the numbers describe the masks but
+    cannot say which one is right.
+  - **Output:** each sweep goes into its own `<time>_sweep/` folder, with
+    `CLOUD_SWEEP_PARAMS_<time>.txt`.
+  - **GPU service:** mode `cloudsweep`, with `cloud_sweep_conf`,
+    `cloud_sweep_bright`, `cloud_sweep_blob_km2`, `cloud_sweep_shadow_km`,
+    `cloud_sweep_crisp`, `cloud_sweep_reference` and `cloud_sweep_images`
+    (more images than `input_path`).
 
 Checked here on two cloudy Sentinel-2 scenes over India (tile 43QGU,
 52–59 % cloud), against the scenes' own cloud classification:
