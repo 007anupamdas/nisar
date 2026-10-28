@@ -549,7 +549,7 @@ to no data, and the job matches that copy.
   brighter, so above 20 % the log warns that ground is probably being taken
   for cloud (with the bright-blob check on, little such cloud is left).
   `CLOUD_QUICKLOOK.png` in the
-  output folder shows false colour (NIR, red, green) with thick cloud red,
+  output folder shows false colour (NIR, red, green) with thick cloud purple,
   thin yellow and shadow blue.
 - **Outputs and reuse:** the mask (`CLOUD_MASK.tif`) and its statistics are
   kept in the job's cache and reused for the same image. `CLOUD_INFO.json`

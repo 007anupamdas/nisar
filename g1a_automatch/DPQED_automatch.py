@@ -1076,7 +1076,7 @@ class CloudTestDialog(QtWidgets.QDialog):
         self.settings = settings
         f = QtWidgets.QFormLayout(self)
         head = QtWidgets.QLabel('Runs OmniCloudMask once on one image and makes a mask and a quicklook for each '
-                                'confidence threshold (thick cloud red, thin yellow, shadow blue), with their cloud '
+                                'confidence threshold (thick cloud purple, thin yellow, shadow blue), with their cloud '
                                 '% side by side. Nothing is matched.')
         head.setWordWrap(True)
         f.addRow(head)
@@ -1220,7 +1220,7 @@ class CloudResultDialog(QtWidgets.QDialog):
         self.setWindowTitle('Cloud mask test')
         self.resize(1250, 860)
         lay = QtWidgets.QVBoxLayout(self)
-        note = QtWidgets.QLabel('Left: the mask kept (thick cloud red, thin yellow, shadow blue); right: what the '
+        note = QtWidgets.QLabel('Left: the mask kept (thick cloud purple, thin yellow, shadow blue); right: what the '
                                 'model alone said. dark cloud %: the share of "cloud" darker than the median clear '
                                 'ground -- over 20 % means ground is taken for cloud.')
         note.setWordWrap(True)

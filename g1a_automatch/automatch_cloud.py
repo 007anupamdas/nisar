@@ -273,7 +273,7 @@ def refine(cls: np.ndarray, arr: np.ndarray, valid: np.ndarray, px_m: float, wl:
 
 
 def quicklook(arr: np.ndarray, cls: np.ndarray, valid: np.ndarray, path: str, max_side: int = 1600) -> None:
-    """False colour (NIR, red, green) with thick cloud in red, thin cloud in
+    """False colour (NIR, red, green) with thick cloud in purple, thin cloud in
     yellow and shadow in blue, for looking at locally."""
     import cv2
     step = max(1, int(np.ceil(max(cls.shape) / float(max_side))))
@@ -284,7 +284,7 @@ def quicklook(arr: np.ndarray, cls: np.ndarray, valid: np.ndarray, path: str, ma
         lo, hi = (np.percentile(x, [2, 98]) if x.size else (0.0, 1.0))
         chans.append(np.clip((a[b] - lo) / max(hi - lo, 1e-9) * 255, 0, 255).astype(np.uint8))
     rgb = np.dstack(chans[::-1])              # OpenCV wants B, G, R
-    for k, colour in ((1, (0, 0, 255)), (2, (0, 255, 255)), (3, (255, 0, 0))):
+    for k, colour in ((1, (200, 0, 200)), (2, (0, 255, 255)), (3, (255, 0, 0))):   # B, G, R: purple, yellow, blue
         m = c == k
         rgb[m] = (0.45 * rgb[m] + 0.55 * np.array(colour)).astype(np.uint8)
     rgb[~v] = (40, 40, 40)
