@@ -899,8 +899,8 @@ def test_gui_cloud():
         res = G.CloudResultDialog(os.path.join(tmp, 'ct'), w)
         tabs = res.findChild(G.QtWidgets.QTabWidget)
         check('gui: the cloud result shows each threshold\'s quicklook and the table',
-              (tabs.count(), tabs.tabText(1).startswith('bands_3-2-6 @ 0.8'),
-               tabs.tabText(2).startswith('bands_1-2-4 @ 0.8'),
+              (tabs.count(), 'bands_1-2-4 @ 0.8' in tabs.tabText(0),
+               'bands_3-2-6 @ 0.8' in tabs.tabText(2),
                res.findChild(G.QtWidgets.QTableWidget).rowCount()), (3, True, True, 3))
     finally:
         w.close()
@@ -2722,6 +2722,7 @@ def test_cloud_mask(tmp):
     mask, masked copies of the matched bands, the cache, the engine reading
     the masked copy, and the benchmark taking the model's cloud %."""
     import contextlib
+    import glob
     import io
     import numpy as np
     import pandas as pd
@@ -2794,6 +2795,11 @@ def test_cloud_mask(tmp):
     check('cloud: the matched bands are copied with cloud and shadow (grown 1 px) set to no data',
           (int(a[H // 3, W // 3]), int(a[H // 2 + 5, W // 3]), int(a[H // 4 - 1, W // 3]), int(a[5, 5]) == int(orig[5, 5])),
           (0, 0, 0, True))
+    jp = glob.glob(os.path.join(out, 'CLOUD_PARAMS_*.txt'))
+    jtxt = open(jp[0], encoding='utf-8').read() if len(jp) == 1 else ''
+    check('cloud: CLOUD_PARAMS.txt in the job folder names what was masked and how',
+          ('masked_classes: thick cloud, thin cloud, shadow' in jtxt, 'grown_px: 1' in jtxt,
+           "check: none: the model's result as it is" in jtxt), (True, True, True))
     check('cloud: statistics and CLOUD_INFO.json in the job folder',
           (round(info['thick_pct']), os.path.exists(os.path.join(out, 'CLOUD_INFO.json'))), (6, True))
     with contextlib.redirect_stdout(io.StringIO()) as buf:
@@ -2900,10 +2906,22 @@ def test_cloud_mask(tmp):
     check('cloud test: the model runs once; each threshold has its mask, quicklook and row in CLOUD_TEST.csv',
           (len(calls), [r['confidence'] for r in rows], all(os.path.exists(r['mask']) and os.path.exists(r['quicklook'])
                                                              for r in rows),
-           len(pd.read_csv(os.path.join(tdir, 'bands_3-2-6_model_only', 'CLOUD_TEST.csv'))), rows[0]['sensor'],
+           len(pd.read_csv(os.path.join(tdir, rows[0]['folder'], 'CLOUD_TEST.csv'))), rows[0]['sensor'],
            rows[0]['bands']),
           (1, [0.5, 0.7, 0.85], True, 3, 'MV', '3 2 6'))
     check('cloud test: a stricter threshold drops the unsure ring', (pct[0] > pct[1], pct[1] == pct[2]), (True, True))
+    pp = os.path.join(tdir, rows[0]['folder'], 'conf_0.7', f"CLOUD_PARAMS_{rows[0]['run']}.txt")
+    params = dict(l.rstrip('\n').split(': ', 1) for l in open(pp, encoding='utf-8')) if os.path.exists(pp) else {}
+    check('cloud test: CLOUD_PARAMS.txt beside each mask says how it was made and what it found',
+          (params.get('bands'), params.get('confidence'), params.get('check', '').startswith('none'),
+           params.get('variant'), 'automatch' in params, params.get('cloud_pct') == str(rows[1]['cloud_pct'])),
+          ('band3, band2, band6', '0.7', True, 'bands_3-2-6_model_only', True, True))
+    with contextlib.redirect_stdout(io.StringIO()):
+        rows2 = C.standalone(mv, tdir, '', None, 'spec', [0.7], predictor=prob_fake, refine_opts=None)
+    check('cloud test: a second run with the same bands gets its own folder; CLOUD_TEST_ALL.csv keeps both',
+          (rows2[0]['folder'] != rows[0]['folder'], rows2[0]['folder'].endswith('bands_3-2-6_model_only')
+           or rows2[0]['folder'].endswith('bands_3-2-6_model_only_2'),
+           len(pd.read_csv(os.path.join(tdir, 'CLOUD_TEST_ALL.csv')))), (True, True, 4))
     calls.clear()
     with contextlib.redirect_stdout(io.StringIO()):
         hrows = C.standalone(hs2, os.path.join(tmp, 'cloud_test_hs'), '', None, 'spec', [0.7], mask_from=hv2,
@@ -2920,7 +2938,7 @@ def test_cloud_mask(tmp):
     try:
         with contextlib.redirect_stdout(io.StringIO()) as buf:
             rc = J.main(['cloud', mv, '--out', os.path.join(tmp, 'cloud_cli'), '--conf', '0.7', '--model-dir', ''])
-        cli_ok = os.path.exists(os.path.join(tmp, 'cloud_cli', 'bands_3-2-6', 'conf_0.7', 'CLOUD_MASK.tif'))
+        cli_ok = bool(glob.glob(os.path.join(tmp, 'cloud_cli', '*_bands_3-2-6', 'conf_0.7', 'CLOUD_MASK.tif')))
         mf = os.path.join(tmp, 'mode_cloud.json')
         with open(mf, 'w') as f:
             json.dump({'mode': 'cloud', 'cloud_test_confidences': [0.6, 0.9]}, f)
@@ -2931,8 +2949,9 @@ def test_cloud_mask(tmp):
     have_ocm = not C.check({})
     if have_ocm:
         check('cloud test: command line (automatch_job.py cloud) and service mode "cloud"',
-              (rc, cli_ok, rc2, sorted(os.listdir(os.path.join(tmp, 'svc_cloud', 'cloud_test')))),
-              (0, True, 0, ['CLOUD_TEST_ALL.csv', 'bands_3-2-6']))
+              (rc, cli_ok, rc2, sorted(re.sub(r'^\d{8}_\d{6}_', '<time>_', n)
+                                       for n in os.listdir(os.path.join(tmp, 'svc_cloud', 'cloud_test')))),
+              (0, True, 0, ['<time>_bands_3-2-6', 'CLOUD_TEST_ALL.csv']))
     else:
         check('cloud test: without omnicloudmask the command line and service mode say so (exit 2)', (rc, rc2), (2, 2))
 

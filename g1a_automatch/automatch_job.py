@@ -53,7 +53,7 @@ AUTOMATCH_VERSION = '2026.10.27'
 CODE_FILES = ('automatch_engine.py', 'automatch_job.py', 'automatch_imcui.py', 'automatch_refs.py',
               'automatch_rival.py', 'automatch_truth.py', 'automatch_weights.py', 'automatch_gpuaas.py',
               'automatch_native.py', 'imw_configs.py', 'automatch_cross.py', 'automatch_bench.py',
-              'automatch_cloud.py')
+              'automatch_cloud.py', 'automatch_accuracy.py')
 
 
 def code_fingerprint() -> str:

@@ -1207,7 +1207,7 @@ class CloudResultDialog(QtWidgets.QDialog):
     """Every cloud test made in a folder (CLOUD_TEST_ALL.csv: each band choice
     at each threshold), and each one's quicklook beside the model's own."""
 
-    COLS = [('variant', 'bands'), ('confidence', 'confidence'), ('cloud_pct', 'cloud %'),
+    COLS = [('run', 'run'), ('variant', 'bands'), ('confidence', 'confidence'), ('cloud_pct', 'cloud %'),
             ('thick_pct', 'thick %'), ('thin_pct', 'thin %'), ('shadow_pct', 'shadow %'),
             ('model_cloud_pct', 'model said cloud %'), ('removed_dark_cloud_pct', 'removed: not bright %'),
             ('removed_small_blob_pct', 'removed: specks %'), ('removed_far_shadow_pct', 'removed: far shadow %'),
@@ -1233,6 +1233,13 @@ class CloudResultDialog(QtWidgets.QDialog):
         lay.addWidget(table)
         tabs = QtWidgets.QTabWidget()
         rows = list(_csv.DictReader(open(path, encoding='utf-8'))) if os.path.exists(path) else []
+        runs = []                                    # the newest run first, thresholds in order within a run
+        for r in rows:
+            key = (r.get('run'), r.get('folder') or r.get('variant'))
+            if not runs or runs[-1][0] != key:
+                runs.append((key, []))
+            runs[-1][1].append(r)
+        rows = [r for _, g in reversed(runs) for r in g][:40]
 
         def image(p):
             lab = QtWidgets.QLabel()
@@ -1254,8 +1261,8 @@ class CloudResultDialog(QtWidgets.QDialog):
             sc.setWidget(w)
             sc.setWidgetResizable(True)
             model = f" (model {float(r['model_cloud_pct']):.1f} %)" if r.get('model_cloud_pct') else ''
-            tabs.addTab(sc, f"{r.get('variant', '')} @ {float(r['confidence']):g}: "
-                            f"{float(r['cloud_pct']):.1f} % cloud{model}")
+            tabs.addTab(sc, f"{r.get('run', '')} {r.get('variant', '')} @ {float(r['confidence']):g}: "
+                            f"{float(r['cloud_pct']):.1f} % cloud{model}".strip())
         lay.addWidget(tabs, 1)
         row = QtWidgets.QHBoxLayout()
         b = QtWidgets.QPushButton('Open folder')

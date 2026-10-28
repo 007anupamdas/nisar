@@ -48,10 +48,13 @@ confidence threshold gets its own mask and quicklook):
         [--bright-pct 90 --min-blob-km2 1 --shadow-near-km 10]
     (also: automatch_job.py cloud ..., and the GPU service's mode "cloud")
 
-Each band choice gets its own folder, so tests do not overwrite each other:
-<folder>/bands_3-2-6/conf_<c>/CLOUD_MASK.tif, CLOUD_QUICKLOOK.png (and
-CLOUD_QUICKLOOK_MODEL.png, the model's own result), CLOUD_TEST.csv there, and
-<folder>/CLOUD_TEST_ALL.csv listing every test made in the folder: cloud /
+Every run gets its own folder, named by when it ran and its bands, so runs
+never overwrite each other: <folder>/20261028_101500_bands_3-2-6/conf_<c>/
+CLOUD_MASK.tif, CLOUD_QUICKLOOK.png (and CLOUD_QUICKLOOK_MODEL.png, the
+model's own result) and CLOUD_PARAMS_20261028_101500.txt (how it was made:
+image, bands, confidence, the bright-blob settings, model, code version, and
+what it found), CLOUD_TEST.csv there, and <folder>/CLOUD_TEST_ALL.csv
+listing every run made in the folder: cloud /
 thick / thin / shadow %, what the model alone said, what the bright-blob
 check removed, and dark_cloud_pct (the share of "cloud" darker than the
 median clear ground: high means ground taken for cloud).
@@ -293,7 +296,7 @@ def quicklook(arr: np.ndarray, cls: np.ndarray, valid: np.ndarray, path: str, ma
 
 def compute(path: str, bands: List[int], out_dir: str, model_dir: str = '', device: Optional[str] = None,
             predictor=None, min_conf: float = 0.7, refine_opts: Optional[Dict] = None,
-            wl: Optional[List] = None) -> Dict:
+            wl: Optional[List] = None, stamp: Optional[str] = None) -> Dict:
     """CLOUD_MASK.tif and CLOUD_QUICKLOOK.png in out_dir for the image, and its
     statistics, with a check that the clouds are bright: dark_cloud_pct is the
     share of cloud pixels darker in red than the median clear pixel (real
@@ -341,8 +344,58 @@ def compute(path: str, bands: List[int], out_dir: str, model_dir: str = '', devi
         quicklook(arr, cls, valid, os.path.join(out_dir, 'CLOUD_QUICKLOOK.png'))
     except Exception as e:
         print(f'[Cloud] quicklook not written: {type(e).__name__}: {e}')
-    return {'mask': mask_path, 'thick_pct': pct[1], 'thin_pct': pct[2], 'shadow_pct': pct[3],
-            'cloud_pct': round(pct[1] + pct[2], 2), 'dark_cloud_pct': dark, 'min_confidence': min_conf, **extra}
+    res = {'mask': mask_path, 'thick_pct': pct[1], 'thin_pct': pct[2], 'shadow_pct': pct[3],
+           'cloud_pct': round(pct[1] + pct[2], 2), 'dark_cloud_pct': dark, 'min_confidence': min_conf, **extra}
+    stamp = stamp or run_stamp()
+    res['params'] = write_params(out_dir, {
+        'image': os.path.abspath(path), 'bands': ', '.join(f'band{b}' for b in bands),
+        'wavelengths_nm': ', '.join(f'{w:.0f}' if w else '?' for w in (wl or [])), 'pixel_m': round(px, 2),
+        'confidence': min_conf, 'check': _check_text(refine_opts),
+        'model_weights': model_dir or "OmniCloudMask's own folder", 'device': device or 'GPU when there is one',
+        **{k: v for k, v in res.items() if k not in ('mask', 'min_confidence', 'refine')}}, stamp=stamp)
+    res['stamp'] = stamp
+    return res
+
+
+def run_stamp() -> str:
+    return time.strftime('%Y%m%d_%H%M%S')
+
+
+def _check_text(refine_opts: Optional[Dict]) -> str:
+    if refine_opts is None:
+        return "none: the model's result as it is"
+    return (f"bright blobs only: brighter than the {refine_opts['bright_pct']:g}th percentile of the clear ground "
+            f"in both visible bands, blobs of {refine_opts['min_blob_km2']:g} km2 or more, shadows within "
+            f"{refine_opts['shadow_near_km']:g} km of a blob")
+
+
+def write_params(folder: str, fields: Dict, merge: bool = False, stamp: Optional[str] = None) -> str:
+    """CLOUD_PARAMS_<stamp>.txt (stamp: when the mask was made,
+    YYYYmmdd_HHMMSS): how the mask in folder was made and what it found, one
+    'name: value' per line, so several runs never overwrite each other's.
+    merge: add to that run's file instead of starting it afresh."""
+    path = os.path.join(folder, f'CLOUD_PARAMS_{stamp or run_stamp()}.txt')
+    head = {'made': time.strftime('%Y-%m-%d %H:%M:%S'), 'model': 'OmniCloudMask'}
+    try:
+        import automatch_job as J
+        head['automatch'] = J.version_line()
+    except Exception:
+        pass
+    keep = {}
+    if merge and os.path.exists(path):
+        try:
+            with open(path, encoding='utf-8') as f:
+                for line in f:
+                    k, sep, v = line.rstrip('\n').partition(': ')
+                    if sep:
+                        keep[k] = v
+        except OSError:
+            keep = {}
+    out = {**keep, **head, **{k: v for k, v in fields.items() if v is not None and v != ''}}
+    os.makedirs(folder, exist_ok=True)
+    with open(path, 'w', encoding='utf-8') as f:
+        f.writelines(f'{k}: {v}\n' for k, v in out.items())
+    return path
 
 
 REFINE_DEFAULTS = {'bright_pct': 90.0, 'min_blob_km2': 1.0, 'shadow_near_km': 10.0}
@@ -496,6 +549,20 @@ def _finish(job: Dict, path: str, info: Dict, channels: List[str], cache_dir: st
         import shutil
         os.makedirs(out_dir, exist_ok=True)
         shutil.copyfile(ql, os.path.join(out_dir, 'CLOUD_QUICKLOOK.png'))
+    if out_dir:
+        pp = info.get('params') or ''
+        stamp = info.get('stamp') or run_stamp()
+        if os.path.exists(pp) and os.path.abspath(os.path.dirname(pp)) != os.path.abspath(out_dir):
+            import shutil
+            os.makedirs(out_dir, exist_ok=True)
+            shutil.copyfile(pp, os.path.join(out_dir, os.path.basename(pp)))
+        write_params(out_dir, {'image': os.path.abspath(path), 'sensor': info.get('sensor'),
+                               'band_choice': info.get('band_choice'), 'mask_from': job.get('cloud_mask_from') or '',
+                               'masked_classes': ', '.join({1: 'thick cloud', 2: 'thin cloud', 3: 'shadow'}.get(c, str(c))
+                                                           for c in classes),
+                               'grown_px': dilate,
+                               'cloud_pct': info.get('cloud_pct'), 'thick_pct': info.get('thick_pct'),
+                               'shadow_pct': info.get('shadow_pct')}, merge=True, stamp=stamp)
     out = {}
     for ch in channels:
         b = int(re.sub(r'\D', '', ch) or 1)
@@ -515,14 +582,23 @@ def _finish(job: Dict, path: str, info: Dict, channels: List[str], cache_dir: st
 def standalone(path: str, out_dir: str, sensor: str = '', bands: Optional[List[str]] = None, choice: str = 'spec',
                confidences=(0.5, 0.7, 0.85), model_dir: str = '', device: Optional[str] = None,
                mask_from: str = '', margin_px: int = 10, predictor=None,
-               refine_opts: Optional[Dict] = 'default') -> List[Dict]:
+               refine_opts: Optional[Dict] = 'default', stamp: Optional[str] = None) -> List[Dict]:
     """The cloud mask of one image at each confidence threshold, without a
     matching run (module docstring). refine_opts: refine()'s settings
-    ('default': REFINE_DEFAULTS; None: the model alone). Each band choice
-    goes into its own folder <out_dir>/bands_<b>-<b>-<b>/, and every test
-    made in out_dir is listed in CLOUD_TEST_ALL.csv. Rows of CLOUD_TEST.csv."""
+    ('default': REFINE_DEFAULTS; None: the model alone). Every run goes into
+    its own folder <out_dir>/<YYYYmmdd_HHMMSS>_bands_<b>-<b>-<b>/ (the time it
+    ran, then the bands), so no run overwrites another; every run made in
+    out_dir is listed in CLOUD_TEST_ALL.csv. Rows of CLOUD_TEST.csv."""
     if refine_opts == 'default':
         refine_opts = dict(REFINE_DEFAULTS)
+    stamp = stamp or run_stamp()
+
+    def run_folder(variant):
+        name, k = f'{stamp}_{variant}', 1
+        while os.path.exists(os.path.join(out_dir, name)):       # two runs in one second
+            k += 1
+            name = f'{stamp}_{variant}_{k}'
+        return name
     import rasterio as rio
     import pandas as pd
     import automatch_bench as B
@@ -535,18 +611,26 @@ def standalone(path: str, out_dir: str, sensor: str = '', bands: Optional[List[s
     confs = sorted({round(float(c), 3) for c in confidences}) or [0.7]
     if mask_from:              # HS: the mask is made on the VNIR product of the same pass and laid on
         src_rows = standalone(mask_from, out_dir, '', bands, choice, confs, model_dir, device, '', 0, predictor,
-                              refine_opts)
+                              refine_opts, stamp)
         variant = f"from_{os.path.splitext(os.path.basename(mask_from))[0]}_{src_rows[0]['variant']}"
+        folder = run_folder(variant)
         rows = []
         for r in src_rows:
-            sub = os.path.join(out_dir, variant, f"conf_{r['confidence']:g}")
+            sub = os.path.join(out_dir, folder, f"conf_{r['confidence']:g}")
             os.makedirs(sub, exist_ok=True)
             mask = transfer(r['mask'], path, os.path.join(sub, 'CLOUD_MASK.tif'), int(margin_px))
             with rio.open(mask) as m:
                 cls = m.read(1)
             nv = max(int((cls != 255).sum()), 1)
             pct = {k: round(100.0 * int((cls == k).sum()) / nv, 2) for k in (1, 2, 3)}
-            rows.append(dict(r, image=path, sensor=sensor, variant=variant, mask=mask, quicklook=r['quicklook'],
+            write_params(sub, {'image': os.path.abspath(path), 'sensor': sensor, 'variant': variant,
+                               'mask_from': os.path.abspath(mask_from),
+                               'mask_made_as': os.path.join(os.path.dirname(r['mask']), f'CLOUD_PARAMS_{stamp}.txt'),
+                               'laid_on': f'by map coordinates, grown {int(margin_px)} px',
+                               'confidence': r['confidence'], 'thick_pct': pct[1], 'thin_pct': pct[2],
+                               'shadow_pct': pct[3], 'cloud_pct': round(pct[1] + pct[2], 2)}, stamp=stamp)
+            rows.append(dict(r, image=path, sensor=sensor, variant=variant, folder=folder, mask=mask,
+                             quicklook=r['quicklook'],
                              thick_pct=pct[1], thin_pct=pct[2], shadow_pct=pct[3],
                              cloud_pct=round(pct[1] + pct[2], 2), dark_cloud_pct=None,
                              band_choice=f"from {os.path.basename(mask_from)} ({r['band_choice']}), "
@@ -555,6 +639,7 @@ def standalone(path: str, out_dir: str, sensor: str = '', bands: Optional[List[s
         bsel, how, wl = choose_bands(path, sensor, bands or None, choice)
         # each band choice in its own folder: a second test (other bands) does not overwrite the first
         variant = f"bands_{'-'.join(str(b) for b in bsel)}" + ('' if refine_opts is not None else '_model_only')
+        folder = run_folder(variant)
         print(f'[Cloud] {os.path.basename(path)} ({sensor}): OmniCloudMask on bands {bsel} ({how}; '
               f'{", ".join(f"{w:.0f} nm" for w in wl if w)})'
               + ('; bright blobs only' if refine_opts is not None else '; the model alone'), flush=True)
@@ -568,9 +653,12 @@ def standalone(path: str, out_dir: str, sensor: str = '', bands: Optional[List[s
             return memo['p']
         rows = []
         for c in confs:
-            sub = os.path.join(out_dir, variant, f'conf_{c:g}')
-            info = compute(path, bsel, sub, model_dir, device, once, c, refine_opts, wl)
-            rows.append({'image': path, 'sensor': sensor, 'variant': variant, 'confidence': c,
+            sub = os.path.join(out_dir, folder, f'conf_{c:g}')
+            info = compute(path, bsel, sub, model_dir, device, once, c, refine_opts, wl, stamp)
+            write_params(sub, {'sensor': sensor, 'variant': variant, 'band_choice': how,
+                               'model_seconds': memo.get('s')}, merge=True, stamp=stamp)
+            rows.append({'run': stamp, 'image': path, 'sensor': sensor, 'variant': variant, 'folder': folder,
+                         'confidence': c,
                          'cloud_pct': info['cloud_pct'], 'thick_pct': info['thick_pct'],
                          'thin_pct': info['thin_pct'], 'shadow_pct': info['shadow_pct'],
                          'model_cloud_pct': info.get('model_cloud_pct'),
@@ -584,15 +672,14 @@ def standalone(path: str, out_dir: str, sensor: str = '', bands: Optional[List[s
                          'quicklook': os.path.join(sub, 'CLOUD_QUICKLOOK.png'),
                          'quicklook_model': (os.path.join(sub, 'CLOUD_QUICKLOOK_MODEL.png')
                                              if refine_opts is not None else '')})
-    pd.DataFrame(rows).to_csv(os.path.join(out_dir, variant, 'CLOUD_TEST.csv'), index=False)
-    allp = os.path.join(out_dir, 'CLOUD_TEST_ALL.csv')          # every test made in this folder
+    pd.DataFrame(rows).to_csv(os.path.join(out_dir, folder, 'CLOUD_TEST.csv'), index=False)
+    allp = os.path.join(out_dir, 'CLOUD_TEST_ALL.csv')          # every run made in this folder
     try:
         old = pd.read_csv(allp)
-        old = old[~((old['image'] == path) & (old['variant'] == variant))]
     except Exception:
         old = pd.DataFrame()
     pd.concat([old, pd.DataFrame(rows)], ignore_index=True).to_csv(allp, index=False)
-    print(f"[Cloud] {variant}:")
+    print(f"[Cloud] {folder}:")
     print(f"[Cloud] {'confidence':>10} {'cloud %':>8} {'thick':>6} {'thin':>6} {'shadow':>7} {'dark cloud %':>13}"
           f"{'   model said cloud %':>21}")
     for r in rows:
@@ -601,8 +688,8 @@ def standalone(path: str, out_dir: str, sensor: str = '', bands: Optional[List[s
         print(f"[Cloud] {r['confidence']:>10g} {r['cloud_pct']:>8.1f} {r['thick_pct']:>6.1f} {r['thin_pct']:>6.1f} "
               f"{r['shadow_pct']:>7.1f} {dk:>13}{ms}" + ('   <- ground taken for cloud?' if r['dark_cloud_pct']
                                                          and r['dark_cloud_pct'] > 20 else ''))
-    print(f"[Cloud] masks and quicklooks: {os.path.join(out_dir, variant)}/conf_<c>/ ; every test in this folder: "
-          f"CLOUD_TEST_ALL.csv", flush=True)
+    print(f"[Cloud] masks, quicklooks and CLOUD_PARAMS_{stamp}.txt: {os.path.join(out_dir, folder)}/conf_<c>/ ; "
+          f"every run in this folder: CLOUD_TEST_ALL.csv", flush=True)
     return rows
 
 

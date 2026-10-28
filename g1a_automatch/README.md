@@ -572,15 +572,22 @@ to no data, and the job matches that copy.
   (GUI: *Cloud mask test…*; its output folder defaults to the job's output
   folder, not the image's.)
   - **One model pass:** the model runs once for all the thresholds.
-  - **One folder per band choice:** e.g. `bands_3-2-6/` and
-    `bands_12-30-45/`, so a test with other bands does not overwrite the
-    first.
+  - **One folder per run,** named by when it ran and its bands, e.g.
+    `20261028_101500_bands_3-2-6/`. No run overwrites another, whether it
+    used other bands or other settings.
   - **In each folder:** every threshold has its `conf_<c>/CLOUD_MASK.tif`,
-    `CLOUD_QUICKLOOK.png` and `CLOUD_QUICKLOOK_MODEL.png`.
-  - **`CLOUD_TEST_ALL.csv`** in the output folder lists every test made
+    `CLOUD_QUICKLOOK.png` (thick cloud purple, thin yellow, shadow blue),
+    `CLOUD_QUICKLOOK_MODEL.png` (the model alone) and
+    `CLOUD_PARAMS_<time>.txt`. The params file records how the mask was made
+    (image, bands and wavelengths, confidence, the bright-blob settings,
+    model weights, device, code version) and what it found.
+  - **`CLOUD_TEST_ALL.csv`** in the output folder lists every run made
     there: cloud, thick, thin and shadow %, what the model alone said, what
     the bright-blob check removed, and `dark_cloud_pct`.
-  - **The GUI** shows each test's quicklook beside the model's own.
+  - **The GUI** shows the runs newest first, each quicklook beside the
+    model's own.
+  - **A job with cloud masking** also writes `CLOUD_PARAMS_<time>.txt` into
+    its output folder, with what it masked and how far it grew the mask.
 
   On the GPU service, use
   `<image>,<reference folder>,<mode_cloud.json>` with
