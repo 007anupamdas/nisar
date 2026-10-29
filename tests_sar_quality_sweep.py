@@ -200,44 +200,80 @@ check("and the last marked size wins",
 
 
 # ── reading sar_quality's output ─────────────────────────────────────────────
-section("band_rows and collate: what comes out of a report")
+section("band_rows, window_flags and collate: what comes out of a report")
 
 report = {"path": "/data/L_gcov.tif", "bands": [
     {"band": 1, "name": "HHHH", "oversmp_x": 1.42, "oversmp_y": 1.44,
-     "res_eff_x_m": 14.2, "res_eff_y_m": 14.4, "px_m": 10.0, "valid": 1.0},
+     "res_eff_x_m": 14.2, "res_eff_y_m": 14.4, "px_m": 10.0, "valid": 1.0,
+     "cv_scene": 0.12, "bright_ratio": 2.1},
     {"band": 2, "name": "HVHV", "valid": 0.31,
      "note": "under half the window is data"},
     {"band": 3, "name": "rtcGammaToSigma", "oversmp_x": 9.0, "oversmp_y": 9.0,
-     "res_eff_x_m": 160.0, "res_eff_y_m": 160.0, "px_m": 10.0, "valid": 1.0},
+     "res_eff_x_m": 160.0, "res_eff_y_m": 160.0, "px_m": 10.0, "valid": 1.0,
+     "cv_scene": 0.02, "bright_ratio": 1.4},
 ]}
 
 check("a skipped band holds no statistics and is not read",
-      [r[0] for r in H["band_rows"](report)], ["HHHH", "rtcGammaToSigma"])
+      [r["name"] for r in H["band_rows"](report)],
+      ["HHHH", "rtcGammaToSigma"])
 check("and a name filter is how you avoid measuring the RTC factor",
-      [r[0] for r in H["band_rows"](report, "HHHH")], ["HHHH"])
+      [r["name"] for r in H["band_rows"](report, "HHHH")], ["HHHH"])
+check("the guards travel with the number, not separately",
+      sorted(k for k in H["band_rows"](report)[0]
+             if k in ("cv_scene", "bright_ratio")),
+      ["bright_ratio", "cv_scene"])
 
-runs = [{"size": 256, "max_lag": 16, "reports": [report]},
-        {"size": 128, "max_lag": 16, "reports": [report]}]
+section("window_flags: the module's own guards, read back")
+
+clean = {"res_eff_x_m": 14.2, "res_eff_y_m": 14.4, "px_m": 10.0, "valid": 1.0,
+         "cv_scene": 0.12, "bright_ratio": 2.1}
+check("a good window carries nothing", H["window_flags"](clean, 16), ())
+check("the city is flagged by its bright ratio, at the module's own 33",
+      H["window_flags"](dict(clean, bright_ratio=33.0), 16), ("bright 33",))
+check("a field-filled window is flagged as scene",
+      H["window_flags"](dict(clean, cv_scene=0.42), 16), ("scene",))
+check("0.30 exactly is not over the threshold",
+      H["window_flags"](dict(clean, cv_scene=0.30), 16), ())
+check("15.0 exactly likewise",
+      H["window_flags"](dict(clean, bright_ratio=15.0), 16), ())
+check("a window that slid off the raster says how much it kept",
+      H["window_flags"](dict(clean, valid=0.62), 16), ("valid 62%",))
+check("and several faults are all reported",
+      H["window_flags"](dict(clean, res_eff_x_m=160.0, cv_scene=0.5,
+                             bright_ratio=40.0, valid=0.5), 16),
+      ("saturated", "scene", "bright 40", "valid 50%"))
+
+section("the copied thresholds have not drifted from sar_quality.py")
+
+src = open(os.path.join(HERE, "sar_quality.py"), encoding="utf-8").read()
+for name in ("SCENE_DOMINATES_CV", "BRIGHT_TARGET_RATIO"):
+    theirs = float(re.search(rf"^{name}\s*=\s*([0-9.]+)", src,
+                             re.MULTILINE).group(1))
+    check(f"{name} matches the module it was copied from", H[name], theirs)
+
+section("collate: a series per centre, raster and band")
+
+runs = [{"size": 256, "max_lag": 16, "center": [78.3, 17.33],
+         "reports": [report]},
+        {"size": 128, "max_lag": 16, "center": [78.3, 17.33],
+         "reports": [report]},
+        {"size": 128, "max_lag": 16, "center": [78.5, 17.4],
+         "reports": [report]}]
 series = H["collate"](runs)
-check("a series per raster and band",
-      sorted(series), [("L_gcov.tif", "HHHH"), ("L_gcov.tif", "rtcGammaToSigma")])
+check("two centres do not pool into one series",
+      sorted({k[0] for k in series}), ["78.3000,17.3300", "78.5000,17.4000"])
 check("ordered by ascending size, which is the order the verdict reads",
-      [p[0] for p in series[("L_gcov.tif", "HHHH")]], [128, 256])
+      [p[0] for p in series[("78.3000,17.3300", "L_gcov.tif", "HHHH")]],
+      [128, 256])
 check("the RTC factor's saturated res_eff is flagged, not averaged in",
-      series[("L_gcov.tif", "rtcGammaToSigma")][0][4], ("saturated",))
-check("a measured band carries no flags",
-      series[("L_gcov.tif", "HHHH")][0][4], ())
-check("filtering by name keeps one series",
-      sorted(H["collate"](runs, "HHHH")), [("L_gcov.tif", "HHHH")])
-
-partial = H["collate"]([{"size": 256, "max_lag": 16, "reports": [
-    {"path": "S.tif", "bands": [
-        {"name": "HHHH", "oversmp_x": 1.4, "oversmp_y": 1.4,
-         "res_eff_x_m": 14.0, "res_eff_y_m": 14.0, "px_m": 10.0,
-         "valid": 0.62}]}]}])
-check("a window that slid off the raster is flagged with how much it kept",
-      partial[("S.tif", "HHHH")][0][4], ("valid 62%",))
-
+      series[("78.3000,17.3300", "L_gcov.tif", "rtcGammaToSigma")][0][4],
+      ("saturated",))
+check("no centre is labelled rather than guessed at",
+      sorted(H["collate"]([{"size": 128, "max_lag": 16, "center": None,
+                            "reports": [report]}]))[0][0],
+      "mid-scene")
+check("fmt_center rounds to four places, which is ~10 m",
+      H["fmt_center"]((78.299999, 17.33)), "78.3000,17.3300")
 
 # ── conclusions ──────────────────────────────────────────────────────────────
 section("conclude: a series into the figure that goes in the report")
@@ -266,11 +302,65 @@ check("every run saturating leaves nothing to conclude",
       "no data")
 
 
+# ── unusable centres and agreement ──────────────────────────────────────────
+section("unusable: a patch of ground that cannot answer at any size")
+
+allbright = [(64, 2.0, 2.0, 4.0, ("bright 33",)),
+             (128, 2.4, 2.4, 5.8, ("bright 31", "scene"))]
+check("every window bright-dominated means the centre is unusable",
+      H["unusable"](allbright), True)
+check("one clean window is enough to keep it",
+      H["unusable"](allbright + [(96, 1.4, 1.4, 1.96, ())]), False)
+check("a scene-dominated big window alone does not condemn a centre",
+      H["unusable"]([(64, 1.4, 1.4, 1.96, ()),
+                     (256, 2.6, 2.6, 6.8, ("scene",))]), False)
+check("saturation is its own verdict, not unusability",
+      H["unusable"]([(256, 16.0, 16.0, 256.0, ("saturated",))]), False)
+
+section("agree: do several centres say the same thing")
+
+check("two centres within the tolerance agree",
+      H["agree"]([2.04, 2.10])[0], "centres agree")
+check("and the median is reported, not the mean",
+      H["agree"]([2.0, 2.1, 6.0])[1], 2.1)
+check("a wide spread is reported as disagreement",
+      H["agree"]([2.0, 4.0])[0], "centres disagree")
+close("the spread is the half-range over the median",
+      H["agree"]([1.9, 2.1])[2], 0.05, 1e-9)
+check("one centre is not agreement", H["agree"]([2.04])[0], "one centre")
+check("none at all says so", H["agree"]([])[0], "no centres")
+check("four agreeing centres is the result worth reporting",
+      H["agree"]([2.02, 2.04, 2.07, 2.10])[0], "centres agree")
+
+section("across_centres: only centres that reached a plateau are pooled")
+
+many = {
+    ("78.3,17.3", "L.tif", "HHHH"): [(64, 1.42, 1.44, 2.04, ()),
+                                     (96, 1.43, 1.45, 2.07, ())],
+    ("78.5,17.4", "L.tif", "HHHH"): [(64, 1.44, 1.46, 2.10, ()),
+                                     (96, 1.45, 1.46, 2.12, ())],
+    # still falling: an upper bound, so it must not join the median
+    ("78.7,17.5", "L.tif", "HHHH"): [(64, 2.10, 2.12, 4.45, ()),
+                                     (96, 2.80, 2.82, 7.90, ()),
+                                     (128, 3.60, 3.62, 13.03, ())],
+    # unusable: bright at every size
+    ("78.9,17.6", "L.tif", "HHHH"): [(64, 1.9, 1.9, 3.61, ("bright 33",))],
+}
+summary = H["across_centres"](many)
+check("one entry per raster and band", sorted(summary), [("L.tif", "HHHH")])
+verdict, mid, spread, centres = summary[("L.tif", "HHHH")]
+check("only the two that plateaued are pooled", sorted(centres),
+      ["78.3,17.3", "78.5,17.4"])
+check("and they agree", verdict, "centres agree")
+close("at a median near two pixels per sample", mid, 2.07, 0.005)
+
+
 # ── the table ────────────────────────────────────────────────────────────────
 section("format_table: the block that goes in the report")
 
-text = H["format_table"]({("L_gcov.tif", "HHHH"): points})
-check("the raster and band head the block", "L_gcov.tif  HHHH" in text, True)
+text = H["format_table"]({("78.3,17.3", "L_gcov.tif", "HHHH"): points})
+check("the centre, raster and band head the block",
+      "78.3,17.3  L_gcov.tif  HHHH" in text, True)
 check("every swept size appears",
       all(f"  {s:6d}" in text for s in (64, 96, 128, 256, 512)), True)
 check("the verdict is stated, not left to be inferred",
@@ -278,11 +368,45 @@ check("the verdict is stated, not left to be inferred",
 check("and it names the constant it bears on",
       "DPQED_radial.py" in text, True)
 
-bound = H["format_table"]({("S_gcov.tif", "HHHH"): [
+bound = H["format_table"]({("78.3,17.3", "S_gcov.tif", "HHHH"): [
     (64, 2.10, 2.12, 4.45, ()), (128, 2.80, 2.82, 7.90, ()),
     (256, 3.60, 3.62, 13.03, ())]})
 check("an upper bound is unmissable in the table too",
       "UPPER BOUND" in bound, True)
+
+multi = H["format_table"](many)
+check("several centres bring an across-centres block",
+      "ACROSS CENTRES" in multi, True)
+check("which states the agreement", "centres agree" in multi, True)
+check("and an unusable centre says so where it was tried",
+      "cannot measure resolution" in multi, True)
+
+section("parse_centers: the forms a person actually pastes")
+
+check("semicolon separated",
+      H["parse_centers"]("78.30,17.33; 78.50,17.40"),
+      [(78.30, 17.33), (78.50, 17.40)])
+check("newline separated with comments",
+      H["parse_centers"]("78.30,17.33  # lake\n78.50,17.40 # farmland"),
+      [(78.30, 17.33), (78.50, 17.40)])
+check("whitespace instead of a comma",
+      H["parse_centers"]("78.30 17.33"), [(78.30, 17.33)])
+check("negative longitudes, for the Amazon",
+      H["parse_centers"]("-60.25,-3.10"), [(-60.25, -3.10)])
+check("a blank list is empty rather than an error",
+      H["parse_centers"]("  \n # nothing\n"), [])
+check("nothing at all", H["parse_centers"](None), [])
+try:
+    H["parse_centers"]("78.30,17.33,99")
+    check("three numbers are refused rather than truncated", False, True)
+except ValueError as e:
+    check("three numbers are refused rather than truncated",
+          "not a lon,lat pair" in str(e), True)
+try:
+    H["parse_centers"]("lake")
+    check("a word is refused", False, True)
+except ValueError:
+    check("a word is refused", True, True)
 
 print("\n" + "=" * 70)
 if failures:

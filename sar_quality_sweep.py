@@ -99,6 +99,20 @@ PLATEAU_MIN_RUNS = 2
 # What DPQED_radial.py assumes, and what this script measures against.
 PIXELS_PER_SAMPLE_ASSUMED = 2.0
 
+# sar_quality's own two guards, copied rather than imported: that module opens
+# rasterio at import, and the slice below is meant to stay readable on a
+# machine that has none. tests_sar_quality_sweep.py reads the figures back out
+# of sar_quality.py as text and fails if these drift from them, so a copy
+# cannot quietly go stale.
+SCENE_DOMINATES_CV = 0.30
+BRIGHT_TARGET_RATIO = 15.0
+
+# Plateau values from two centres count as agreeing within this fraction of
+# their median. Looser than PLATEAU_TOL because two patches of ground are not
+# two window sizes over one patch: different surfaces, different brightness,
+# different distance from the floor.
+AGREE_TOL = 0.15
+
 # ── BEGIN PURE HELPERS ───────────────────────────────────────────────────────
 # Everything below is arithmetic on numbers sar_quality already produced: no
 # rasterio, no numpy, no file reading. tests_sar_quality_sweep.py execs this
@@ -236,50 +250,112 @@ def size_from_name(name):
 
 
 def band_rows(report, band_name=None):
-    """(name, oversmp_x, oversmp_y, res_eff_x, res_eff_y, px_m, valid) per band.
+    """The fields this script reads, per band of one sar_quality report.
+
+    Dicts rather than a tuple because what a window is worth takes more than
+    its oversmp: cv_scene and bright_ratio are how the module itself decides
+    whether a res_eff is a resolution at all, and a sweep over several centres
+    is exactly the case where that has to travel with the number.
 
     Bands carrying a `note` are the ones sar_quality skipped for having under
     half a window of data, and they hold no statistics to read.
     """
+    nan = float("nan")
     out = []
     for b in report.get("bands", []):
         if "note" in b:
             continue
         if band_name is not None and b.get("name") != band_name:
             continue
-        out.append((b.get("name", "?"),
-                    b.get("oversmp_x", float("nan")),
-                    b.get("oversmp_y", float("nan")),
-                    b.get("res_eff_x_m", float("nan")),
-                    b.get("res_eff_y_m", float("nan")),
-                    b.get("px_m", float("nan")),
-                    b.get("valid", float("nan"))))
+        out.append({"name": b.get("name", "?"),
+                    "oversmp_x": b.get("oversmp_x", nan),
+                    "oversmp_y": b.get("oversmp_y", nan),
+                    "res_eff_x_m": b.get("res_eff_x_m", nan),
+                    "res_eff_y_m": b.get("res_eff_y_m", nan),
+                    "px_m": b.get("px_m", nan),
+                    "valid": b.get("valid", nan),
+                    "cv_scene": b.get("cv_scene", nan),
+                    "bright_ratio": b.get("bright_ratio", nan)})
     return out
 
 
+def window_flags(row, max_lag):
+    """What is wrong with this window, in the module's own terms.
+
+    `saturated` disqualifies the number -- the 1/e crossing was never found.
+    `scene` and `bright` do not: a big window IS expected to be scene-dominated
+    and that is the premise of the sweep, so these two are recorded and carried
+    into the table rather than used to drop a point. What they are for is the
+    centre that is scene- or bright-dominated at EVERY size, which is a patch
+    of ground that cannot answer the question however small the window gets.
+    """
+    flags = []
+    if (saturated(row["res_eff_x_m"], row["px_m"], max_lag)
+            or saturated(row["res_eff_y_m"], row["px_m"], max_lag)):
+        flags.append("saturated")
+    cv_scene, bright = row["cv_scene"], row["bright_ratio"]
+    if math.isfinite(cv_scene) and cv_scene > SCENE_DOMINATES_CV:
+        flags.append("scene")
+    if math.isfinite(bright) and bright > BRIGHT_TARGET_RATIO:
+        flags.append(f"bright {bright:.0f}")
+    valid = row["valid"]
+    if math.isfinite(valid) and valid < 0.999:
+        flags.append(f"valid {valid:.0%}")
+    return tuple(flags)
+
+
 def collate(runs, band_name=None):
-    """Sweep runs into {(raster, band): [(size, ox, oy, areal, flags), ...]}.
+    """Sweep runs into {(centre, raster, band): [(size, ox, oy, areal, flags)]}.
 
     Ordered by ascending size, which is the order `classify` reads. Saturated
     runs are kept with a flag rather than dropped: a sweep where the big
     windows all saturated looks identical to one where they were never run,
     and the table should be able to say which.
+
+    The centre is part of the key, so coordinates are never pooled. Two
+    patches of ground measured at one size are not a sweep, and silently
+    averaging them would turn "these four centres agree" -- the finding -- into
+    a single number that cannot be checked.
     """
     series = {}
-    for run in sorted(runs, key=lambda r: r["size"]):
+    for run in sorted(runs, key=lambda r: (str(r.get("center")), r["size"])):
         size, max_lag = run["size"], run["max_lag"]
+        centre = fmt_center(run.get("center"))
         for report in run.get("reports", []):
             raster = os.path.basename(report.get("path", "?"))
-            for name, ox, oy, rx, ry, px, valid in band_rows(report, band_name):
-                flags = []
-                if saturated(rx, px, max_lag) or saturated(ry, px, max_lag):
-                    flags.append("saturated")
-                if math.isfinite(valid) and valid < 0.999:
-                    flags.append(f"valid {valid:.0%}")
-                areal = pixels_per_sample(ox, oy)
-                series.setdefault((raster, name), []).append(
-                    (size, ox, oy, areal, tuple(flags)))
+            for row in band_rows(report, band_name):
+                areal = pixels_per_sample(row["oversmp_x"], row["oversmp_y"])
+                series.setdefault((centre, raster, row["name"]), []).append(
+                    (size, row["oversmp_x"], row["oversmp_y"], areal,
+                     window_flags(row, max_lag)))
     return series
+
+
+def fmt_center(center):
+    """A centre as a short label, or 'mid-scene' when none was given."""
+    if not center:
+        return "mid-scene"
+    return f"{float(center[0]):.4f},{float(center[1]):.4f}"
+
+
+def agree(values, tol=AGREE_TOL):
+    """Do several centres' plateaus say the same thing?
+
+    Returns (verdict, median, spread) where spread is the half-range as a
+    fraction of the median. Agreement across patches of different ground is
+    what makes the figure a property of the PRODUCT rather than of one patch,
+    so it is reported separately from any single centre's plateau and never
+    folded into it.
+    """
+    usable = sorted(v for v in values if v is not None and math.isfinite(v))
+    if not usable:
+        return "no centres", float("nan"), float("nan")
+    mid = (usable[len(usable) // 2] if len(usable) % 2
+           else (usable[len(usable) // 2 - 1] + usable[len(usable) // 2]) / 2.0)
+    if len(usable) == 1:
+        return "one centre", mid, 0.0
+    spread = (usable[-1] - usable[0]) / 2.0 / mid if mid else float("inf")
+    return ("centres agree" if spread <= tol else "centres disagree"), mid, spread
 
 
 def conclude(points):
@@ -299,11 +375,47 @@ def conclude(points):
             "runs": len(points)}
 
 
+def unusable(points):
+    """Was every window at this centre scene- or bright-dominated?
+
+    A centre like that is a patch of ground that cannot answer the question:
+    the module's own guards say its res_eff is not a resolution at any size
+    swept, so its plateau -- if it has one -- is a plateau in something else.
+    """
+    clean = [p for p in points if "saturated" not in p[4]]
+    if not clean:
+        return False                 # saturation is its own verdict
+    return all(any(f == "scene" or f.startswith("bright") for f in p[4])
+               for p in clean)
+
+
+def across_centres(series):
+    """{(raster, band): (verdict, median, spread, centres)} over the centres.
+
+    Centres the guards rule out are excluded here but stay in the table, so a
+    coordinate that could not answer is visible as having been tried rather
+    than missing.
+    """
+    by_band = {}
+    for (centre, raster, band), points in series.items():
+        if unusable(points):
+            continue
+        c = conclude(points)
+        if c["verdict"] in ("plateau", "flat throughout"):
+            by_band.setdefault((raster, band), []).append(
+                (centre, c["pixels_per_sample"]))
+    out = {}
+    for key, found in by_band.items():
+        verdict, mid, spread = agree([v for _, v in found])
+        out[key] = (verdict, mid, spread, [c for c, _ in found])
+    return out
+
+
 def format_table(series):
-    """The sweep as text: a block per raster and band, then its verdict."""
+    """The sweep as text: a block per centre, raster and band, then verdicts."""
     lines = []
-    for (raster, band), points in sorted(series.items()):
-        lines.append(f"\n{raster}  {band}")
+    for (centre, raster, band), points in sorted(series.items()):
+        lines.append(f"\n{centre}  {raster}  {band}")
         lines.append(f"  {'size':>6s} {'oversmp x':>10s} {'oversmp y':>10s} "
                      f"{'px/sample':>10s}  flags")
         for size, ox, oy, areal, flags in points:
@@ -321,37 +433,39 @@ def format_table(series):
         if c["saturated"]:
             lines.append(f"     {c['saturated']} of {c['runs']} runs saturated "
                          f"and were excluded from the verdict")
+        if unusable(points):
+            lines.append("     EVERY window here was scene- or bright-dominated: "
+                         "this centre cannot measure resolution")
+    summary = across_centres(series)
+    if summary:
+        lines.append("\nACROSS CENTRES")
+        for (raster, band), (verdict, mid, spread, centres) in sorted(summary.items()):
+            lines.append(f"  {raster}  {band}: {verdict} -- median "
+                         f"{mid:.2f} px/sample, spread {spread:+.0%}, "
+                         f"{len(centres)} centre(s)")
+            lines.append(f"     ENL precisions scale by "
+                         f"{precision_factor(mid):.2f}x against "
+                         f"{PIXELS_PER_SAMPLE_ASSUMED:g} assumed")
     return "\n".join(lines)
-# ── END PURE HELPERS ─────────────────────────────────────────────────────────
+def parse_centers(text, path=None):
+    """lon,lat pairs from a --centers string or a file, one pair per entry.
 
-
-def run_sweep(paths, center, sizes, band, hist_bins=1):
-    """Call sar_quality.report once per size, keeping only what it returns.
-
-    Imported here rather than at the top so the pure slice above stays usable
-    -- and testable -- on a machine with no rasterio.
+    Accepts the forms a person actually pastes: pairs separated by semicolons
+    or newlines, with or without spaces, and '#' starting a comment so a list
+    of coordinates can say what each one is over.
     """
-    import sar_quality
-
-    runs = []
-    for size in sorted(sizes):
-        max_lag = lag_for_size(size)
-        print(f"[sweep] size {size} px, max_lag {max_lag}", file=sys.stderr)
-        reports = []
-        for path in paths:
-            # report() prints a page per raster; the sweep's own table is the
-            # output that matters, so its stdout is captured and dropped.
-            buf = io.StringIO()
-            try:
-                with contextlib.redirect_stdout(buf):
-                    reports.append(sar_quality.report(
-                        path, size, center, max_lag, band,
-                        hist_bins=hist_bins, show_hist=False))
-            except Exception as e:              # one bad size is not the sweep
-                print(f"[sweep] {os.path.basename(path)} at {size}: {e}",
-                      file=sys.stderr)
-        runs.append({"size": size, "max_lag": max_lag, "reports": reports})
-    return runs
+    if path:
+        text = open(path, encoding="utf-8").read()
+    out = []
+    for chunk in re.split(r"[;\n]", text or ""):
+        chunk = chunk.split("#", 1)[0].strip()
+        if not chunk:
+            continue
+        parts = [p for p in re.split(r"[,\s]+", chunk) if p]
+        if len(parts) != 2:
+            raise ValueError(f"not a lon,lat pair: {chunk!r}")
+        out.append((float(parts[0]), float(parts[1])))
+    return out
 
 
 def load_runs(patterns):
@@ -375,6 +489,42 @@ def load_runs(patterns):
     return runs
 
 
+# ── END PURE HELPERS ─────────────────────────────────────────────────────────
+
+
+def run_sweep(paths, centers, sizes, band, hist_bins=1):
+    """Call sar_quality.report once per centre and size, keeping what it returns.
+
+    Imported here rather than at the top so the pure slice above stays usable
+    -- and testable -- on a machine with no rasterio.
+    """
+    import sar_quality
+
+    runs = []
+    for center in centers:
+        for size in sorted(sizes):
+            max_lag = lag_for_size(size)
+            print(f"[sweep] {fmt_center(center)}  size {size} px, "
+                  f"max_lag {max_lag}", file=sys.stderr)
+            reports = []
+            for path in paths:
+                # report() prints a page per raster; the sweep's own table is
+                # the output that matters, so its stdout is captured, dropped.
+                buf = io.StringIO()
+                try:
+                    with contextlib.redirect_stdout(buf):
+                        reports.append(sar_quality.report(
+                            path, size, center, max_lag, band,
+                            hist_bins=hist_bins, show_hist=False))
+                except Exception as e:          # one bad size is not the sweep
+                    print(f"[sweep] {os.path.basename(path)} at {size}: {e}",
+                          file=sys.stderr)
+            runs.append({"size": size, "max_lag": max_lag,
+                         "center": list(center) if center else None,
+                         "reports": reports})
+    return runs
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(
         description=__doc__,
@@ -385,6 +535,11 @@ def main(argv=None):
     p.add_argument("--center", help="lon,lat to centre every window on. "
                                     "Without it the windows sit mid-scene, "
                                     "which for a slanted swath may be nodata")
+    p.add_argument("--centers", help="several centres, 'lon,lat; lon,lat; ...' "
+                                     "-- the whole size sweep is run at each "
+                                     "and the table reports whether they agree")
+    p.add_argument("--centers-file", help="the same list, one lon,lat per line; "
+                                          "'#' starts a comment")
     p.add_argument("--sizes", help="comma-separated window sides in pixels "
                                    f"(default {','.join(str(s) for s in SIZES_DEFAULT)})")
     p.add_argument("--band", type=int, action="append", dest="band",
@@ -414,11 +569,14 @@ def main(argv=None):
             sizes = [s for s in sizes if s >= SIZE_MIN]
         if not sizes:
             p.error(f"no window size at or above {SIZE_MIN} px")
-        center = None
-        if args.center:
-            lon, lat = (float(v) for v in args.center.split(","))
-            center = (lon, lat)
-        runs = run_sweep(args.rasters, center, sizes, args.band)
+        try:
+            centers = parse_centers(args.centers or args.center,
+                                    args.centers_file)
+        except (ValueError, OSError) as e:
+            p.error(str(e))
+        if not centers:
+            centers = [None]            # mid-scene, as sar_quality does
+        runs = run_sweep(args.rasters, centers, sizes, args.band)
 
     series = collate(runs, args.band_name)
     if not series:
@@ -431,8 +589,10 @@ def main(argv=None):
     if args.json:
         with open(args.json, "w", encoding="utf-8") as fh:
             json.dump({"runs": runs,
-                       "conclusions": {f"{r}|{b}": conclude(pts)
-                                       for (r, b), pts in series.items()}},
+                       "conclusions": {f"{c}|{r}|{b}": conclude(pts)
+                                       for (c, r, b), pts in series.items()},
+                       "across_centres": {f"{r}|{b}": v for (r, b), v
+                                          in across_centres(series).items()}},
                       fh, indent=2)
         print(f"\nwrote {args.json}")
     return 0
