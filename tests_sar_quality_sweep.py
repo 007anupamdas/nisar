@@ -182,6 +182,11 @@ check("the tolerance is on the plateau's own base, not its neighbour",
 check("one noisy step does not disqualify a rising tail",
       H["classify"]([1.50, 2.00, 1.98, 2.60]), ("no plateau", 1.50, 1))
 
+check("the tolerance is relative, so a small cell is not called a slope",
+      H["classify"]([1.52, 1.61, 1.64]), ("flat throughout", 1.52, 3))
+check("and a large cell is not given a free pass by the same figure",
+      H["classify"]([9.00, 9.80, 11.00])[0], "no plateau")
+
 check("every verdict carries a note", sorted(
       k for k in ("plateau", "flat throughout", "no plateau", "unstable",
                   "single run", "no data")
@@ -246,18 +251,56 @@ clean = {"res_eff_x_m": 14.2, "res_eff_y_m": 14.4, "px_m": 10.0, "valid": 1.0,
 check("a good window carries nothing", H["window_flags"](clean, 16), ())
 check("the city is flagged by its bright ratio, at the module's own 33",
       H["window_flags"](dict(clean, bright_ratio=33.0), 16), ("bright 33",))
-check("a field-filled window is flagged as scene",
-      H["window_flags"](dict(clean, cv_scene=0.42), 16), ("scene",))
+check("15.0 exactly is not over the threshold",
+      H["window_flags"](dict(clean, bright_ratio=15.0), 16), ())
+check("a high cv_scene is recorded as a number, not as a verdict",
+      H["window_flags"](dict(clean, cv_scene=0.42), 16), ("cv_scene 0.42",))
 check("0.30 exactly is not over the threshold",
       H["window_flags"](dict(clean, cv_scene=0.30), 16), ())
-check("15.0 exactly likewise",
-      H["window_flags"](dict(clean, bright_ratio=15.0), 16), ())
 check("a window that slid off the raster says how much it kept",
       H["window_flags"](dict(clean, valid=0.62), 16), ("valid 62%",))
 check("and several faults are all reported",
       H["window_flags"](dict(clean, res_eff_x_m=160.0, cv_scene=0.5,
                              bright_ratio=40.0, valid=0.5), 16),
-      ("saturated", "scene", "bright 40", "valid 50%"))
+      ("saturated", "bright 40", "cv_scene 0.50", "valid 50%"))
+
+section("disqualified: which flags mean the window cannot measure resolution")
+
+check("saturation disqualifies", H["disqualified"](("saturated",)), True)
+check("so does a bright target, whose sidelobes shrinking cannot remove",
+      H["disqualified"](("bright 33",)), True)
+check("cv_scene does NOT -- on power it is the fewer-looks product's own "
+      "speckle, misread", H["disqualified"](("cv_scene 0.38",)), False)
+check("nor does a partial window, which is reported and kept",
+      H["disqualified"](("valid 62%",)), False)
+check("nothing flagged, nothing disqualified", H["disqualified"](()), False)
+
+# The measurement that forced cv_scene to be demoted. Over one patch of water
+# at 78.3578,17.3251 the two products report cv_scene 0.000 and 0.377, and the
+# whole of S's figure is its own speckle above an amplitude-calibrated cap.
+section("cv_scene on power: why it cannot be a disqualifier")
+
+CV1 = math.sqrt(4.0 / math.pi - 1.0)
+
+
+def cv_scene_of(cv_total, cv_floor):
+    capped = min(cv_floor, CV1)
+    v = (cv_total ** 2 - capped ** 2) / (1.0 + capped ** 2)
+    return math.sqrt(v) if v > 0 else 0.0
+
+
+close("the amplitude cap is 0.523", CV1, 0.5227, 1e-4)
+close("L-band, ENL 4.9 as power, sits under the cap and reports no scene",
+      cv_scene_of(0.477, 0.450), 0.144, 0.001)
+close("S-band over the SAME water, ENL 2.7, is capped and reports 0.377",
+      cv_scene_of(0.674, 0.612), 0.377, 0.001)
+check("which is above the threshold that would have ruled the window out",
+      cv_scene_of(0.674, 0.612) > H["SCENE_DOMINATES_CV"], True)
+close("the cap binds for any power product below ENL 3.66",
+      1.0 / CV1 ** 2, 3.660, 0.001)
+check("so the flag fires on the fewer-looks product and not on the scene",
+      H["disqualified"](H["window_flags"](
+          dict(clean, cv_scene=0.377, bright_ratio=2.0), 16)), False)
 
 section("the copied thresholds have not drifted from sar_quality.py")
 
@@ -311,7 +354,7 @@ check("a saturated run is excluded from the verdict", c["verdict"],
       "flat throughout")
 close("so it cannot drag pixels-per-sample", c["pixels_per_sample"], 2.04,
       0.005)
-check("but it is counted and reported", (c["saturated"], c["runs"]), (1, 3))
+check("but it is counted and reported", (c["excluded"], c["runs"]), (1, 3))
 
 check("every run saturating leaves nothing to conclude",
       H["conclude"]([(256, 16.0, 16.0, 256.0, ("saturated",))])["verdict"],
@@ -322,16 +365,16 @@ check("every run saturating leaves nothing to conclude",
 section("unusable: a patch of ground that cannot answer at any size")
 
 allbright = [(64, 2.0, 2.0, 4.0, ("bright 33",)),
-             (128, 2.4, 2.4, 5.8, ("bright 31", "scene"))]
+             (128, 2.4, 2.4, 5.8, ("bright 31",))]
 check("every window bright-dominated means the centre is unusable",
       H["unusable"](allbright), True)
 check("one clean window is enough to keep it",
       H["unusable"](allbright + [(96, 1.4, 1.4, 1.96, ())]), False)
-check("a scene-dominated big window alone does not condemn a centre",
-      H["unusable"]([(64, 1.4, 1.4, 1.96, ()),
-                     (256, 2.6, 2.6, 6.8, ("scene",))]), False)
-check("saturation is its own verdict, not unusability",
-      H["unusable"]([(256, 16.0, 16.0, 256.0, ("saturated",))]), False)
+check("a high cv_scene alone does not condemn a centre",
+      H["unusable"]([(64, 1.4, 1.4, 1.96, ("cv_scene 0.38",)),
+                     (256, 2.6, 2.6, 6.8, ("cv_scene 0.44",))]), False)
+check("a wholly saturated centre is unusable too",
+      H["unusable"]([(256, 16.0, 16.0, 256.0, ("saturated",))]), True)
 
 section("agree: do several centres say the same thing")
 
@@ -360,7 +403,8 @@ many = {
                                      (96, 2.80, 2.82, 7.90, ()),
                                      (128, 3.60, 3.62, 13.03, ())],
     # unusable: bright at every size
-    ("78.9,17.6", "L.tif", "HHHH"): [(64, 1.9, 1.9, 3.61, ("bright 33",))],
+    ("78.9,17.6", "L.tif", "HHHH"): [(64, 1.9, 1.9, 3.61, ("bright 33",)),
+                                     (96, 2.1, 2.1, 4.41, ("bright 29",))],
 }
 summary = H["across_centres"](many)
 check("one entry per raster and band", sorted(summary), [("L.tif", "HHHH")])

@@ -98,10 +98,12 @@ SIZE_MIN = 64
 MAX_LAG_CAP = 16
 LAG_FRACTION = 4
 
-# Two oversmp figures count as the same plateau within this much. The 1/e
-# crossing is interpolated between whole lags, so a window that shifts the
-# crossing by a fifth of a pixel moves oversmp by about this -- tightening it
-# would report scene where there is only interpolation.
+# Two pixels-per-sample figures count as the same plateau within this FRACTION
+# of the smaller. Relative rather than absolute because the quantity compared
+# is a product of two oversmp values: an absolute 0.08 is 5% at 1.5 and 1% at 9,
+# so it would call a tight plateau a slope wherever the cell is small. The
+# figure itself is set by the 1/e crossing being interpolated between whole
+# lags, which moves either axis by a few percent on its own.
 PLATEAU_TOL = 0.08
 
 # A plateau wants more than one point agreeing with itself.
@@ -204,7 +206,7 @@ def classify(values, tol=PLATEAU_TOL, min_runs=PLATEAU_MIN_RUNS):
         return "single run", usable[0], 1
     base = usable[0]
     run = 1
-    while run < len(usable) and abs(usable[run] - base) <= tol:
+    while run < len(usable) and abs(usable[run] - base) <= tol * abs(base):
         run += 1
     if run == len(usable):
         return "flat throughout", base, run
@@ -214,7 +216,8 @@ def classify(values, tol=PLATEAU_TOL, min_runs=PLATEAU_MIN_RUNS):
     # window, which is the expected shape and leaves the smallest value as a
     # bound rather than a plateau. Falling or bouncing is not a trend at all.
     rest = usable[1:]
-    if all(v > base + tol for v in rest) and _monotone_up(rest, tol):
+    if (all(v > base * (1.0 + tol) for v in rest)
+            and _monotone_up(rest, tol * abs(base))):
         return "no plateau", base, 1
     return "unstable", base, 1
 
@@ -293,26 +296,48 @@ def band_rows(report, band_name=None):
 def window_flags(row, max_lag):
     """What is wrong with this window, in the module's own terms.
 
-    `saturated` disqualifies the number -- the 1/e crossing was never found.
-    `scene` and `bright` do not: a big window IS expected to be scene-dominated
-    and that is the premise of the sweep, so these two are recorded and carried
-    into the table rather than used to drop a point. What they are for is the
-    centre that is scene- or bright-dominated at EVERY size, which is a patch
-    of ground that cannot answer the question however small the window gets.
+    Two flags disqualify the number and are named in DISQUALIFYING:
+
+    `saturated` -- the 1/e crossing was never found, so res_eff is the ceiling
+    it hit rather than a width.
+
+    `bright` -- strong scatterers' sidelobes dominate the autocorrelation, so
+    res_eff measures the brightest targets' impulse response and not the
+    product's. The module's own remedy is to move, not to shrink: a bright
+    target inside a 64-pixel window is still inside it. Measured from max/p99,
+    which is a ratio of percentiles and so carries no calibration constant and
+    is valid on power.
+
+    `cv_scene` is recorded and NEVER disqualifies, because on a power product
+    it does not mean what its name says. `scene_contrast` subtracts a speckle
+    cv capped at SPECKLE_CV_1LOOK = 0.523, the Rayleigh figure for single-look
+    AMPLITUDE. Multilooked power has speckle cv 1/sqrt(ENL), which exceeds that
+    cap for any product below ENL 3.66 -- so the excess speckle of a
+    fewer-looks product is misread as scene. Measured on the Hyderabad pair
+    over one patch of water: L (ENL 4.9) reports cv_scene 0.000 and S (ENL 2.7)
+    reports 0.377 over the SAME ground, the whole of S's figure being its own
+    speckle. A flag that fires on the product with fewer looks regardless of
+    what is under it cannot be allowed to rule a window out.
     """
     flags = []
     if (saturated(row["res_eff_x_m"], row["px_m"], max_lag)
             or saturated(row["res_eff_y_m"], row["px_m"], max_lag)):
         flags.append("saturated")
-    cv_scene, bright = row["cv_scene"], row["bright_ratio"]
-    if math.isfinite(cv_scene) and cv_scene > SCENE_DOMINATES_CV:
-        flags.append("scene")
+    bright = row["bright_ratio"]
     if math.isfinite(bright) and bright > BRIGHT_TARGET_RATIO:
         flags.append(f"bright {bright:.0f}")
+    cv_scene = row["cv_scene"]
+    if math.isfinite(cv_scene) and cv_scene > SCENE_DOMINATES_CV:
+        flags.append(f"cv_scene {cv_scene:.2f}")
     valid = row["valid"]
     if math.isfinite(valid) and valid < 0.999:
         flags.append(f"valid {valid:.0%}")
     return tuple(flags)
+
+
+def disqualified(flags):
+    """Do these flags mean the window cannot measure a resolution at all?"""
+    return any(f == "saturated" or f.startswith("bright") for f in flags)
 
 
 def collate(runs, band_name=None):
@@ -376,28 +401,24 @@ def conclude(points):
     saturated run says the window was too structured to measure, which is
     evidence about the window and none about the product.
     """
-    clean = [p for p in points if "saturated" not in p[4]]
+    clean = [p for p in points if not disqualified(p[4])]
     verdict, areal, run = classify([p[3] for p in clean])
     sizes = [p[0] for p in clean[:run]] if run else []
     return {"verdict": verdict, "pixels_per_sample": areal,
             "precision_factor": precision_factor(areal),
             "plateau_runs": run, "plateau_sizes": sizes,
-            "saturated": sum(1 for p in points if "saturated" in p[4]),
+            "excluded": sum(1 for p in points if disqualified(p[4])),
             "runs": len(points)}
 
 
 def unusable(points):
-    """Was every window at this centre scene- or bright-dominated?
+    """Was every window at this centre disqualified?
 
     A centre like that is a patch of ground that cannot answer the question:
     the module's own guards say its res_eff is not a resolution at any size
     swept, so its plateau -- if it has one -- is a plateau in something else.
     """
-    clean = [p for p in points if "saturated" not in p[4]]
-    if not clean:
-        return False                 # saturation is its own verdict
-    return all(any(f == "scene" or f.startswith("bright") for f in p[4])
-               for p in clean)
+    return bool(points) and all(disqualified(p[4]) for p in points)
 
 
 def across_centres(series):
@@ -441,12 +462,12 @@ def format_table(series):
                 f"ENL precisions scale by {c['precision_factor']:.2f}x")
             if c["plateau_sizes"]:
                 lines.append(f"     over sizes {c['plateau_sizes']}")
-        if c["saturated"]:
-            lines.append(f"     {c['saturated']} of {c['runs']} runs saturated "
-                         f"and were excluded from the verdict")
+        if c["excluded"]:
+            lines.append(f"     {c['excluded']} of {c['runs']} runs saturated or "
+                         f"bright-dominated, excluded from the verdict")
         if unusable(points):
-            lines.append("     EVERY window here was scene- or bright-dominated: "
-                         "this centre cannot measure resolution")
+            lines.append("     EVERY window here was disqualified: this centre "
+                         "cannot measure resolution")
     summary = across_centres(series)
     if summary:
         lines.append("\nACROSS CENTRES")
