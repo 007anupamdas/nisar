@@ -63,6 +63,22 @@ import os
 import re
 import sys
 
+# ── WHAT TO SWEEP ────────────────────────────────────────────────────────────
+# Set these and run the file, as DPQED_gcov2tif.py is set and run. Anything
+# passed on the command line overrides them, so one script serves both habits:
+# edit-and-run while a scene is being explored, and an explicit command once a
+# figure is going in a report, where the command line IS the record of what was
+# measured and a constant edited three runs ago is not.
+RASTERS = ()                 # ('L_gcov.tif', 'S_gcov.tif')
+CENTERS = ()                 # ((78.30, 17.33), (78.50, 17.40))
+BAND_NAME = None             # 'HHHH' -- a description, not an index
+
+# Window sides in pixels, swept at every centre. Geometric rather than linear:
+# the question is which power of two the plateau sits above, and a linear sweep
+# spends its runs in the large sizes where the answer is already known to be
+# wrong.
+SIZES = (512, 384, 256, 192, 128, 96, 64)
+
 # Smallest window worth fitting an autocorrelation to. At lag L the sum runs
 # over N-L shifted rows, so a small window spends most of its samples on the
 # longest lags and the 1/e crossing starts moving between runs over the same
@@ -74,11 +90,6 @@ import sys
 # -- none of which this script reports -- and leaves res_eff, oversmp and aniso
 # untouched, which is why going under 160 is safe here and would not be there.
 SIZE_MIN = 64
-
-# Sizes swept when none are given. Geometric rather than linear: the question
-# is which power of two the plateau sits above, and a linear sweep spends its
-# runs in the large sizes where the answer is already known to be wrong.
-SIZES_DEFAULT = (512, 384, 256, 192, 128, 96, 64)
 
 # Correlation lags. sar_quality defaults to 16, which at 10 m posting puts the
 # measurable ceiling at 160 m -- far beyond any real resolution. The cap only
@@ -498,7 +509,19 @@ def run_sweep(paths, centers, sizes, band, hist_bins=1):
     Imported here rather than at the top so the pure slice above stays usable
     -- and testable -- on a machine with no rasterio.
     """
-    import sar_quality
+    try:
+        import sar_quality
+    except ImportError as e:
+        # The same courtesy DPQED_gcov2tif.py extends for h5py: a missing
+        # dependency is a sentence, not a traceback through someone else's
+        # module. sar_quality opens rasterio and numpy at import, so this
+        # catches either, and --from-json still works without both.
+        raise SystemExit(
+            f"sar_quality_sweep needs sar_quality.py and what it imports "
+            f"({e.name}) to open rasters.\n"
+            f"  pip install rasterio numpy\n"
+            f"  -- or work from JSON already written: "
+            f"sar_quality_sweep.py --from-json 'sweep_*.json'")
 
     runs = []
     for center in centers:
@@ -541,7 +564,7 @@ def main(argv=None):
     p.add_argument("--centers-file", help="the same list, one lon,lat per line; "
                                           "'#' starts a comment")
     p.add_argument("--sizes", help="comma-separated window sides in pixels "
-                                   f"(default {','.join(str(s) for s in SIZES_DEFAULT)})")
+                                   f"(default {','.join(str(s) for s in SIZES)})")
     p.add_argument("--band", type=int, action="append", dest="band",
                    help="band to analyse; repeatable, default all. An index is "
                         "not the same channel in two products -- check the "
@@ -554,14 +577,16 @@ def main(argv=None):
                    help="read runs already written instead of opening rasters")
     args = p.parse_args(argv)
 
-    if not args.rasters and not args.from_json:
-        p.error("give at least one raster, or --from-json")
+    rasters = args.rasters or list(RASTERS)
+    if not rasters and not args.from_json:
+        p.error("give at least one raster, set RASTERS at the top of this "
+                "file, or pass --from-json")
 
     if args.from_json:
         runs = load_runs(args.from_json)
     else:
         sizes = ([int(s) for s in args.sizes.split(",")] if args.sizes
-                 else list(SIZES_DEFAULT))
+                 else list(SIZES))
         small = [s for s in sizes if s < SIZE_MIN]
         if small:
             print(f"[sweep] {small} below {SIZE_MIN} px: too few samples for a "
@@ -575,10 +600,10 @@ def main(argv=None):
         except (ValueError, OSError) as e:
             p.error(str(e))
         if not centers:
-            centers = [None]            # mid-scene, as sar_quality does
-        runs = run_sweep(args.rasters, centers, sizes, args.band)
+            centers = [tuple(c) for c in CENTERS] or [None]
+        runs = run_sweep(rasters, centers, sizes, args.band)
 
-    series = collate(runs, args.band_name)
+    series = collate(runs, args.band_name or BAND_NAME)
     if not series:
         print("nothing to report: no band carried statistics", file=sys.stderr)
         return 1

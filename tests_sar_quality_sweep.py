@@ -62,6 +62,22 @@ def section(title):
     print(title)
 
 
+# ── the editable block ──────────────────────────────────────────────────────
+section("WHAT TO SWEEP: the constants a person edits instead of passing flags")
+
+check("every default size is at or above the floor",
+      [s for s in H["SIZES"] if s < H["SIZE_MIN"]], [])
+check("and the sweep spans at least three octaves, or there is no plateau "
+      "to find", max(H["SIZES"]) // min(H["SIZES"]) >= 8, True)
+check("the smallest default size is the floor itself, so the plateau is "
+      "reached if it exists", min(H["SIZES"]), H["SIZE_MIN"])
+check("nothing is swept twice", len(set(H["SIZES"])), len(H["SIZES"]))
+check("RASTERS is empty so the command line is the default path",
+      tuple(H["RASTERS"]), ())
+check("CENTERS likewise", tuple(H["CENTERS"]), ())
+check("and BAND_NAME is unset rather than a guess", H["BAND_NAME"], None)
+
+
 # ── lags ─────────────────────────────────────────────────────────────────────
 section("lag_for_size: a quarter of the side, capped, never under two")
 
