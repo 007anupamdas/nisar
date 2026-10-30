@@ -1267,16 +1267,26 @@ def stats_rows(summary):
     return rows
 
 
-def export_paths(folder, input_path):
-    """{'csv', 'shp', 'stats'} in folder, named after the INPUT'S FOLDER.
+def export_paths(folder, input_path, name_from="folder"):
+    """{'csv', 'shp', 'stats'} in folder, named after the input.
 
-    /data/NISAR_L2_0042/G1A_ort.tif -> NISAR_L2_0042_rival.csv, .shp and
-    _stats.csv: the folder carries the product name, the tif inside is often
-    generic. The name is taken whole -- a folder has no extension to drop.
-    With no input loaded (or one at a filesystem root) the stem is 'rival'.
+    name_from="folder" (Load Input Folder): after the folder the input sits
+    in -- /data/NISAR_L2_0042/G1A_ort.tif -> NISAR_L2_0042_rival.csv, since
+    the folder carries the product name and the tif inside is often generic.
+    Taken whole: a folder has no extension to drop.
+
+    name_from="file" (Load Input TIF): after the file itself --
+    /data/scenes/G1A_ort.tif -> G1A_ort_rival.csv. Only the extension goes.
+
+    With no input loaded (or a folder at a filesystem root) the stem is 'rival'.
     """
-    parent = os.path.dirname(os.path.abspath(input_path)) if input_path else ""
-    stem = os.path.basename(parent.rstrip("/\\")) if parent else ""
+    if not input_path:
+        stem = ""
+    elif name_from == "file":
+        stem = os.path.splitext(os.path.basename(input_path))[0]
+    else:
+        parent = os.path.dirname(os.path.abspath(input_path))
+        stem = os.path.basename(parent.rstrip("/\\"))
     name = (stem + EXPORT_SUFFIX) if stem else "rival"
     sub = lambda k: os.path.join(folder, EXPORT_SUBDIRS[k], name)
     return {"csv": sub("csv") + ".csv", "shp": sub("shp") + ".shp",
@@ -1900,6 +1910,8 @@ class QCDashboard(QMainWindow):
         self._last_sync_offset = None
         self.lbl_input_path    = None
         self.input_path        = None
+        self.input_naming      = "folder"   # "file" when loaded by Load Input TIF
+        self.input_source      = None
         # Panning moves the reference centre at once and swaps the tile under it
         # once the view settles; see _sync_reference_tile.
         self._sync_tile_timer = QTimer(self)
@@ -1992,7 +2004,13 @@ class QCDashboard(QMainWindow):
         self.btn_input_tif.setToolTip(
             "Choose a scene folder: its *GTD_*_1.tif or *ITD_*_1.tif is picked, you\n"
             "choose the bands, and a COG of them is built beside it and loaded.\n"
+            "Exports are named after the folder.\n"
             "Bands are remembered per product type; Shift+click to choose again.")
+        self.btn_input_file       = QPushButton("Load Input TIF")
+        self.btn_input_file.setToolTip(
+            "Choose one raster: its bands are picked, a COG of them is built\n"
+            "beside it and loaded, as with a folder. Exports are named after\n"
+            "this file.")
         self.btn_clear_input      = QPushButton("Clear Input")
         self.btn_clear_input.setToolTip(
             "Unload the input raster so a new one can be given.\n"
@@ -2078,7 +2096,7 @@ class QCDashboard(QMainWindow):
         map_layout.addWidget(self.canvas_right)
 
         btn_layout = QHBoxLayout()
-        for w in ([self.btn_input_tif, self.btn_clear_input,
+        for w in ([self.btn_input_tif, self.btn_input_file, self.btn_clear_input,
                    self.btn_reference_folder,
                    self.btn_load, self.btn_add, self.btn_export,
                    self.btn_del, self.btn_clear, self.btn_out_folder]
@@ -2097,6 +2115,7 @@ class QCDashboard(QMainWindow):
         self.setCentralWidget(central)
 
         self.btn_input_tif.clicked.connect(self.load_input_folder)
+        self.btn_input_file.clicked.connect(self.load_input_tif)
         self.btn_clear_input.clicked.connect(self.clear_input)
         self.btn_out_folder.clicked.connect(self.choose_output_folder)
         self.btn_reference_folder.clicked.connect(self.select_reference_folder)
@@ -4254,7 +4273,10 @@ class QCDashboard(QMainWindow):
         folder = self._saved_output_folder() or self.choose_output_folder()
         if not folder:
             return None
-        targets = export_paths(folder, self.input_path)
+        # named after the scene, not the COG made from it: <tif>_b3-2-1_cog
+        # would otherwise leak into every export name
+        targets = export_paths(folder, self.input_source or self.input_path,
+                               self.input_naming)
         wanted = list(kinds) + ["stats"]
         for k in wanted:
             os.makedirs(os.path.dirname(targets[k]), exist_ok=True)
@@ -4375,8 +4397,15 @@ class QCDashboard(QMainWindow):
                 self, "Load Input", "Which scene raster?", found, 0, False)
             if not ok:
                 return
-        src = os.path.join(folder, name)
+        self._load_as_cog(os.path.join(folder, name), naming="folder")
 
+    def _load_as_cog(self, src, naming):
+        """Choose bands, build (or reuse) their COG beside src, and load it.
+
+        Shared by Load Input Folder and Load Input TIF: the only difference
+        between them is how src is found and what the exports are named after.
+        A COG for the same bands that is newer than src is reused.
+        """
         bands = self._ask_bands(src)
         if not bands:
             return
@@ -4388,7 +4417,7 @@ class QCDashboard(QMainWindow):
                                  f"Could not build the COG for\n{src}\n"
                                  f"(see the Python console)")
             return
-        self.load_input_path(cog, source=src)
+        self.load_input_path(cog, source=src, naming=naming)
 
     def _ask_bands(self, src):
         """Red / Green / Blue band for the COG, as 1-based bands, or None.
@@ -4502,6 +4531,8 @@ class QCDashboard(QMainWindow):
         self.input_tif_layer = None
         self.input_ring = None
         self.input_path = None
+        self.input_source = None
+        self.input_naming = "folder"
         self.canvas_left.setLayers([])
         self.clear_markers()
         self.show_input_path(None)
@@ -4509,7 +4540,36 @@ class QCDashboard(QMainWindow):
             self.filter_reference_tifs()
         print("[INPUT] cleared")
 
-    def load_input_path(self, path, source=None):
+    def load_input_tif(self):
+        """Load one chosen raster as the input, through a COG of its bands.
+
+        The same band pick and COG build as Load Input Folder; the exports are
+        named after this file rather than its folder, since a file picked by
+        hand is usually named for what it is.
+        """
+        start = ""
+        try:
+            saved = self._settings().value("input_tif_dir", "")
+            if isinstance(saved, str) and os.path.isdir(saved):
+                start = saved
+        except Exception:
+            pass
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select the input TIF", start,
+            "TIF (*.tif *.tiff *.TIF *.TIFF *.vrt)")
+        if not path:
+            return
+        try:
+            self._settings().setValue("input_tif_dir", os.path.dirname(path))
+        except Exception:
+            pass
+        if os.path.splitext(path)[0].endswith(COG_SUFFIX):
+            # already a COG this tool made: no COG of a COG
+            self.load_input_path(path, naming="file")
+        else:
+            self._load_as_cog(path, naming="file")
+
+    def load_input_path(self, path, source=None, naming="folder"):
         """Load a raster as the input scene. source: the file it was made from."""
         lyr = QgsRasterLayer(path, "Input_TIF")
         if not lyr.isValid():
@@ -4519,7 +4579,7 @@ class QCDashboard(QMainWindow):
             QgsProject.instance().removeMapLayer(self.input_tif_layer.id())
         self.input_tif_layer = None
         QgsProject.instance().addMapLayer(lyr, False)
-        self.adopt_input_layer(lyr, path, source=source)
+        self.adopt_input_layer(lyr, path, source=source, naming=naming)
         if self.ref_folder_path:
             self.filter_reference_tifs()
 
@@ -4563,8 +4623,11 @@ class QCDashboard(QMainWindow):
         except Exception as e:
             print(f"[STATUS] {e}")
 
-    def adopt_input_layer(self, layer, path, source=None):
+    def adopt_input_layer(self, layer, path, source=None, naming="folder"):
         """Everything that has to happen once, however the input scene arrives.
+
+        naming: what the exports are named after -- "file" for Load Input TIF,
+        "folder" otherwise (see export_paths).
 
         The Load Input TIF button and the auto-connect of a layer already open
         in QGIS both end here, so the footprint cannot be read on one path and
@@ -4573,6 +4636,8 @@ class QCDashboard(QMainWindow):
         """
         self.show_input_path(path)
         self.input_path = path
+        self.input_source = source or path    # the scene a COG was made from
+        self.input_naming = naming
         self.input_tif_layer = layer
         self.ensure_overviews(path)
         # the footprint sidecar sits beside the ORIGINAL scene and is named

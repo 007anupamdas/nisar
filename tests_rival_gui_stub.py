@@ -2083,6 +2083,7 @@ class _Settings:
 R.QSettings = _Settings
 out_dir = tempfile.mkdtemp()
 win.input_path = "/data/NISAR_0042/G1A_ort.tif"
+win.input_source, win.input_naming = None, "folder"
 qw.QFileDialog.getExistingDirectory = MagicMock(return_value=out_dir)
 asked = []
 qw.QMessageBox.question = lambda *a, **k: asked.append(a) or qw.QMessageBox.No
@@ -2317,6 +2318,7 @@ for name in ("export_all", "_export_targets", "_export_target"):
 out32 = tempfile.mkdtemp()
 store.clear(); store["export_folder"] = out32
 win.input_path = "/data/NISAR_0042/G1A_ort.tif"
+win.input_source, win.input_naming = None, "folder"
 win.export_rows = MagicMock(return_value=[{"row": 1}])
 win.save_csv, win.save_shapefile = MagicMock(), MagicMock()
 asked = []
@@ -2424,6 +2426,58 @@ assert asked_n, "Shift did not open the dialog"
 R.QApplication.keyboardModifiers = MagicMock(return_value=0)
 print("a hand choice for this product type still wins; Shift opens the dialog")
 shutil.rmtree(d33, ignore_errors=True)
+
+# ── 34. Load Input TIF: a COG too, exports named after the TIF ─────────────
+for name in ("load_input_tif", "_load_as_cog", "load_input_path",
+             "_export_targets", "_export_target"):
+    setattr(win, name, getattr(R.QCDashboard, name).__get__(win))
+d34 = tempfile.mkdtemp()
+tif34 = os.path.join(d34, "G1A_ort.tif")
+with rasterio.open(tif34, "w", driver="GTiff", width=64, height=48, count=4,
+                   dtype="float32", crs="EPSG:32644",
+                   transform=from_origin(300000, 1900000, 10, 10)) as dd:
+    for b in range(1, 5):
+        dd.write(np.full((48, 64), float(b), "float32"), b)
+store.clear()
+qw.QFileDialog.getOpenFileName = MagicMock(return_value=(tif34, ""))
+win._ask_bands = MagicMock(return_value=[4, 2, 1])
+win._build_cog_with_progress = lambda s_, d_, b_: R.build_cog(s_, d_, b_)
+adopted = {}
+def _adopt(layer, path, source=None, naming="folder"):
+    adopted.update(path=path, source=source, naming=naming)
+    win.input_path, win.input_source, win.input_naming = path, source or path, naming
+win.adopt_input_layer = _adopt
+win.input_tif_layer = None
+R.QgsRasterLayer = lambda p_, n_: MagicMock(isValid=lambda: True)
+win.ref_folder_path = None
+win.load_input_tif()
+cog34 = os.path.join(d34, "G1A_ort_b4-2-1_cog.tif")
+assert os.path.exists(cog34), os.listdir(d34)
+assert adopted == {"path": cog34, "source": tif34, "naming": "file"}, adopted
+assert store["input_tif_dir"] == d34
+print("\nLoad Input TIF builds G1A_ort_b4-2-1_cog.tif beside the TIF and loads it")
+
+out34 = tempfile.mkdtemp(); store["export_folder"] = out34
+qw.QMessageBox.question = lambda *a, **k: qw.QMessageBox.Yes
+t34 = win._export_targets(("csv", "shp"), "Export")
+assert t34["csv"] == os.path.join(out34, "csv", "G1A_ort_rival.csv"), t34
+assert t34["shp"] == os.path.join(out34, "shp", "G1A_ort_rival.shp"), t34
+print("its exports are named after the TIF (G1A_ort_rival), not the COG "
+      "and not the folder")
+
+# picking a COG this tool made loads it directly
+win._load_as_cog = MagicMock()
+qw.QFileDialog.getOpenFileName = MagicMock(return_value=(cog34, ""))
+win.load_input_tif()
+assert not win._load_as_cog.called and adopted["path"] == cog34
+print("choosing an existing *_cog.tif loads it as it is: no COG of a COG")
+
+# the folder route still names after the folder
+win.input_naming, win.input_source = "folder", tif34
+assert win._export_targets(("csv",), "x")["csv"] == os.path.join(
+    out34, "csv", os.path.basename(d34) + "_rival.csv")
+print("Load Input Folder still names exports after the folder")
+shutil.rmtree(d34, ignore_errors=True); shutil.rmtree(out34, ignore_errors=True)
 
 for d in (d1, d2, d3, d4, d5, d6):
     shutil.rmtree(d, ignore_errors=True)

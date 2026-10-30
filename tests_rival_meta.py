@@ -763,6 +763,17 @@ check("each band count is its own product type",
 check("first guess: 1, 2, 3", H["default_rgb"](155), [1, 2, 3])
 check("first guess on two bands", H["default_rgb"](2), [1, 2])
 
+# ── 25. export names for a hand-picked TIF ───────────────────────────────────
+print("\n-- export names: file vs folder --")
+f = H["export_paths"]
+check("Load Input TIF names exports after the file",
+      f("/out", "/data/scenes/G1A_ort.tif", "file")["csv"], "/out/csv/G1A_ort_rival.csv")
+check("dots in a file name survive; only the extension goes",
+      f("/out", "/d/NISAR_L2.v1.tif", "file")["shp"], "/out/shp/NISAR_L2.v1_rival.shp")
+check("Load Input Folder still names them after the folder",
+      f("/out", "/data/scenes/G1A_ort.tif")["csv"], "/out/csv/scenes_rival.csv")
+check("no input, either way: 'rival'", f("/out", None, "file")["csv"], "/out/csv/rival.csv")
+
 print()
 if failures:
     print(f"{len(failures)} FAILURE(S)")
