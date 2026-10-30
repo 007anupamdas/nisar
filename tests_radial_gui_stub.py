@@ -1886,6 +1886,97 @@ else:
     finally:
         win._write_shapefile = real_writer
 
+# ── N. the Quality button ─────────────────────────────────────────────────────
+print("\n── Quality: what the product delivers over marked ground ──")
+
+# A raster big enough for the sweep's crops: 512 px at 30 m is 15.36 km, so
+# several 4.5 km ROIs fit inside it with room to spare.
+qrng = np.random.default_rng(99)
+q_hh = qrng.gamma(shape=4.0, scale=0.25, size=(512, 512))
+q_hv = qrng.gamma(shape=4.0, scale=0.25, size=(512, 512))
+install_gdal([q_hh, q_hv], GT)
+win.raster_layer = fake_layer()
+win.raster_path = "/data/quality.vrt"
+win.band_labels = ["HHHH", "HVHV"]
+win.measure_bands = list(enumerate(win.band_labels, start=1))
+win.factor_band = None
+win.rois = []
+
+qmb = R.QMessageBox
+qmb.information = MagicMock()
+
+# Two ROIs of one class and one of another, each 150 px a side.
+for x0, y0, cls in ((500300.0, 3995000.0, "water"),
+                    (505300.0, 3995000.0, "water"),
+                    (500300.0, 3989000.0, "vegetation")):
+    win.add_roi(R.rect_ring(x0, y0, x0 + 4500.0, y0 + 4500.0), "rect",
+                roi_class=cls)
+check("three ROIs of 150 px a side were drawn",
+      [roi["npix"] for roi in win.rois], [22500, 22500, 22500])
+
+win.run_quality()
+measured = [r for r in win.rois if r.get("quality")]
+ok("every ROI was measured", len(measured) == 3, f"{len(measured)} measured")
+check("each carries a block per band", sorted(measured[0]["quality"]),
+      ["HHHH", "HVHV"])
+
+first = measured[0]["quality"]["HHHH"]
+ok("with a verdict rather than a bare number",
+   first["verdict"] in ("plateau", "flat throughout", "no plateau",
+                        "unstable", "single crop", "no data"),
+   first["verdict"])
+check("and one row per concentric crop that fitted",
+      [r["size"] for r in first["rows"]], [64, 96, 128])
+ok("uncorrelated speckle comes back near one pixel per sample",
+   abs(first["pixels_per_sample"] - 1.0) < 0.3,
+   f"{first['pixels_per_sample']:.2f}")
+ok("and its ENL near the four looks it was generated with",
+   abs(first["row"]["enl"] - 4.0) < 1.2, f"{first['row']['enl']:.2f}")
+
+summary = R.quality_summary((r.get("class"), r["quality"]) for r in measured)
+check("the summary is band first, class second", sorted(summary),
+      ["HHHH", "HVHV"])
+check("and carries both classes", sorted(summary["HHHH"]),
+      ["vegetation", "water"])
+check("pooling the two water ROIs", summary["HHHH"]["water"]["rois"], 2)
+check("and the one vegetation ROI", summary["HHHH"]["vegetation"]["rois"], 1)
+ok("over one product, so the two classes agree",
+   abs(summary["HHHH"]["water"]["pixels_per_sample"]
+       - summary["HHHH"]["vegetation"]["pixels_per_sample"]) < 0.3,
+   f"{summary['HHHH']['water']['pixels_per_sample']:.2f} vs "
+   f"{summary['HHHH']['vegetation']['pixels_per_sample']:.2f}")
+
+ok("the dialog reported the result", qmb.information.called)
+text = qmb.information.call_args[0][-1]
+ok("naming each class", "water" in text and "vegetation" in text, text[:90])
+ok("and saying how many ROIs each figure rests on", "ROI(s)" in text,
+   text[:90])
+
+# An ROI below the crop floor is refused rather than measured badly.
+win.rois = []
+win.add_roi(R.rect_ring(500300.0, 3995000.0, 500300.0 + 900.0,
+                        3995000.0 + 900.0), "rect", roi_class="water")
+check("a 30-pixel ROI was drawn", win.rois[0]["npix"], 900)
+qmb.information = MagicMock()
+win.run_quality()
+ok("it is refused, not measured", win.rois[0].get("quality") is None)
+ok("and the dialog says why", qmb.information.called)
+small_text = qmb.information.call_args[0][-1]
+ok("naming the crop floor", str(R.QUALITY_SIZE_MIN) in small_text,
+   small_text[:110])
+ok("and the ROI side this raster would need",
+   f"{R.quality_side_for_sweep(30.0):,.0f}" in small_text, small_text[:160])
+
+# No ROIs at all is a message, not a traceback.
+win.rois = []
+qmb.information = MagicMock()
+win.run_quality()
+ok("an empty canvas is told to draw something", qmb.information.called)
+
+ok("the button exists and is wired to the handler",
+   hasattr(win, "btn_quality") and callable(win.run_quality))
+
+
 print("\n" + "=" * 70)
 if failures:
     print(f"{len(failures)} FAILURE(S):")

@@ -2041,6 +2041,51 @@ def quality_by_class(per_roi):
     return out
 
 
+def quality_summary(entries):
+    """{band: {class: figure}} from (class, {band: conclusion}) pairs.
+
+    Band first, class second, because a band is a different measurement
+    while a class is a different place: pooling two polarisations would
+    average two products, and pooling two classes is the comparison the
+    summary exists to show.
+    """
+    by_band = {}
+    for roi_class, per_band in entries:
+        if not per_band:
+            continue
+        for label, conclusion in per_band.items():
+            by_band.setdefault(label, []).append(
+                (roi_class or ROI_CLASS_UNSET, conclusion))
+    return {label: quality_by_class(rows) for label, rows in by_band.items()}
+
+
+def quality_summary_text(summary, refused=0):
+    """The summary as the few lines a dialog can hold.
+
+    A class figure is shown with how many ROIs it rests on, because a median
+    over one ROI and a median over nine are different claims and a bare number
+    does not say which this is.
+    """
+    lines = []
+    for label in sorted(summary):
+        lines.append(label)
+        for name in sorted(summary[label]):
+            f = summary[label][name]
+            if f["settled"]:
+                lines.append(
+                    f"    {name}: {f['pixels_per_sample']:.2f} px per "
+                    f"independent sample, {f['settled']} of {f['rois']} "
+                    f"ROI(s), spread {f['spread']:+.0%}")
+            else:
+                lines.append(
+                    f"    {name}: no ROI settled, {f['rois']} tried")
+    if refused:
+        lines.append("")
+        lines.append(f"{refused} ROI(s) were too small to measure or could "
+                     f"not be read.")
+    return "\n".join(lines) if lines else "Nothing could be measured."
+
+
 def quality_side_for_sweep(pixel_m, largest=max(QUALITY_SIZES)):
     """The ROI side, in metres, that supports the whole crop sweep.
 
@@ -2547,6 +2592,15 @@ class RadiometricDashboard(QMainWindow):
         self.btn_csv = QPushButton("Export CSV")
         self.btn_csv.setToolTip(
             "Write the statistics alone, one row per ROI and band  (Ctrl+S).")
+        self.btn_quality = QPushButton("Quality")
+        self.btn_quality.setToolTip(
+            "Measure what the product delivers over every ROI: effective\n"
+            "resolution, oversampling, looks and surviving texture, pooled\n"
+            "by ROI class.\n\n"
+            "This needs a far larger ROI than backscatter does. The figures\n"
+            "come from concentric crops of the ROI, and the smallest useful\n"
+            "crop is 64 pixels a side; the full sweep wants 512. Suggest\n"
+            "sizes the point buffer for it.")
         self.btn_del = QPushButton("Delete ROI")
         self.btn_del.setToolTip("Delete the selected ROI  (Ctrl+Delete)")
         self.btn_clear = QPushButton("Clear ROIs")
@@ -2745,7 +2799,8 @@ class RadiometricDashboard(QMainWindow):
 
         action_row = QHBoxLayout()
         for widget in (self.btn_load, self.btn_load_rois, self.btn_shp,
-                       self.btn_csv, self.btn_del, self.btn_clear):
+                       self.btn_csv, self.btn_quality, self.btn_del,
+                       self.btn_clear):
             action_row.addWidget(widget)
         action_row.addStretch()
         action_row.addWidget(self.lbl_context)
@@ -2771,6 +2826,7 @@ class RadiometricDashboard(QMainWindow):
         self.btn_load_rois.clicked.connect(self.load_rois)
         self.btn_shp.clicked.connect(self.export_shapefile)
         self.btn_csv.clicked.connect(self.export_csv)
+        self.btn_quality.clicked.connect(self.run_quality)
         self.btn_del.clicked.connect(self.delete_roi)
         self.btn_clear.clicked.connect(self.clear_rois)
         self.btn_norm.clicked.connect(self.normalize_to_view)
@@ -4177,6 +4233,128 @@ class RadiometricDashboard(QMainWindow):
             roi["backscat"] = (wanted if wanted in available
                                else (available[0] if available
                                      else BACKSCATTER_GAMMA0))
+        self.refresh_table()
+
+    # ── QUALITY ──────────────────────────────────────────────────────────────
+    def measure_quality(self, roi):
+        """Sweep one ROI's concentric crops and store what they say about it.
+
+        Measured on gamma0, never sigma0: the RTC factor varies per pixel with
+        the terrain, so applying it would add the terrain's variation to a
+        figure that is meant to describe the product. A constant rescaling
+        cancels in every statistic here, which is why the convention makes no
+        difference as long as one is fixed.
+        """
+        roi["quality"] = None
+        layer = self.raster_layer
+        if layer is None or not layer.isValid() or not self.measure_bands:
+            return False
+        try:
+            from osgeo import gdal
+            ds = gdal.Open(layer.source(), gdal.GA_ReadOnly)
+        except Exception as e:
+            print(f"[QUALITY] GDAL could not open the raster: {e}")
+            return False
+        if ds is None:
+            print(f"[QUALITY] GDAL could not open {layer.source()}")
+            return False
+        try:
+            gt = ds.GetGeoTransform()
+            if gt is None or gt[2] or gt[4] or gt[5] > 0:
+                print("[QUALITY] this needs a north-up grid")
+                return False
+            px, py = abs(gt[1]), abs(gt[5])
+            ring = self._ring_in_layer_crs(roi["ring"])
+            window = pixel_window(ring_bounds(ring), gt[0], gt[3], px, py,
+                                  ds.RasterXSize, ds.RasterYSize)
+            if window is None:
+                print(f"[QUALITY] {roi['name']} does not overlap the raster")
+                return False
+            col0, row0, ncol, nrow = window
+            if min(ncol, nrow) < QUALITY_SIZE_MIN:
+                print(f"[QUALITY] {roi['name']} is {ncol} x {nrow} px, under "
+                      f"the {QUALITY_SIZE_MIN} px a correlation needs")
+                return False
+            if ncol * nrow > ROI_MAX_PIXELS:
+                print(f"[QUALITY] {roi['name']} spans {ncol * nrow:,} px, "
+                      f"past the {ROI_MAX_PIXELS:,} this reads")
+                return False
+            mask = polygon_mask(
+                ring_to_pixels(ring, gt[0], gt[3], px, py, col0, row0),
+                ncol, nrow)
+            domain = self.domain()
+            zero_nodata = self.zero_is_nodata()
+            found = {}
+            for index, label in self.measure_bands:
+                band = ds.GetRasterBand(index)
+                if band is None:
+                    continue
+                data = band.ReadAsArray(col0, row0, ncol, nrow)
+                if data is None or np.iscomplexobj(data):
+                    continue
+                data = data.astype(float)
+                good = mask & valid_mask(data, band.GetNoDataValue(),
+                                         zero_nodata, domain)
+                rows = quality_sweep_roi(to_power(data, domain), good, px, py)
+                if not rows:
+                    continue
+                conclusion = quality_conclude_roi(rows)
+                conclusion["rows"] = rows
+                found[label] = conclusion
+            roi["quality"] = found or None
+            return bool(found)
+        except Exception as e:
+            print(f"[QUALITY] {roi['name']}: {e}")
+            return False
+        finally:
+            ds = None
+
+    def run_quality(self):
+        """Measure every ROI, then pool what they say by the class they carry.
+
+        Every ROI rather than the selected one, because a single ROI's plateau
+        is a property of one patch of ground: agreement between ROIs over
+        different ground is what makes a figure a property of the product.
+        Classes are what the tool already groups backscatter by, so quality is
+        grouped the same way and the two summaries can be read together.
+        """
+        if not self.rois:
+            QMessageBox.information(self, "Quality",
+                                    "Draw an ROI first. This measures what "
+                                    "the product delivers over\nground you "
+                                    "have marked, so it needs ROIs to read.")
+            return
+        measured, refused = [], []
+        for roi in self.rois:
+            if self.measure_quality(roi) and roi.get("quality"):
+                measured.append(roi)
+            else:
+                refused.append(roi)
+        if not measured:
+            side = quality_side_for_sweep(self.raster_pixel_m() or 0.0)
+            hint = (f"\n\nAt this raster's posting the sweep wants an ROI "
+                    f"about {side:,.0f} m a side.\nSuggest sets the point "
+                    f"buffer to it." if side else "")
+            QMessageBox.information(
+                self, "Quality",
+                f"None of the {len(self.rois)} ROI(s) could be measured. The "
+                f"figures come from\nconcentric crops, and the smallest "
+                f"useful crop is {QUALITY_SIZE_MIN} pixels a side.{hint}")
+            return
+        summary = quality_summary(
+            (roi.get("class"), roi["quality"]) for roi in measured)
+        for label in sorted(summary):
+            print(f"[QUALITY] {label}")
+            for name in sorted(summary[label]):
+                figure = summary[label][name]
+                print(f"[QUALITY]   {name}: "
+                      f"{figure['pixels_per_sample']:.2f} px/sample over "
+                      f"{figure['settled']} of {figure['rois']} ROI(s), "
+                      f"spread {figure['spread']:+.0%}")
+        if refused:
+            print(f"[QUALITY] {len(refused)} ROI(s) too small or unreadable")
+        QMessageBox.information(self, "Quality",
+                                quality_summary_text(summary, len(refused)))
         self.refresh_table()
 
     def recompute_all(self, reason=""):
