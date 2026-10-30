@@ -378,6 +378,78 @@ GCOV_GRID_RE = re.compile(
     r"(?P<term>[A-Z]{4})$")
 
 
+# ── QUALITY: what a product delivers, beside what it reports ─────────────────
+# roi_statistics answers "how bright is this surface". These answer "how well
+# did the product render it": how much ground a pixel really represents, how
+# much of the variation is speckle, and whether anything else survives it.
+#
+# Everything here is calibrated for POWER, because that is what a GCOV holds
+# and what this tool converts to before any statistic is taken. The published
+# figure for fully developed speckle, sigma/mean = sqrt(4/pi - 1) = 0.523, is
+# the SINGLE-LOOK AMPLITUDE value; using it on power reads ENL 3.66x low and
+# makes a product with fewer looks appear to carry scene contrast it has not
+# got. Single-look power has cv = 1 exactly, and L-look power 1/sqrt(L).
+SPECKLE_CV_1LOOK_POWER = 1.0
+
+# Sub-crop sides, in pixels, taken concentrically from each ROI. res_eff is
+# measured over the whole crop, so scene structure inside it widens the
+# autocorrelation and the figure reads coarse. Shrinking the crop drives that
+# structure out; where the answer stops changing, what is left is the impulse
+# response and speckle. Geometric rather than linear: the question is which
+# power of two the plateau sits above.
+QUALITY_SIZES = (512, 384, 256, 192, 128, 96, 64)
+
+# Below this the autocorrelation spends most of its samples on the longest
+# lags and the 1/e crossing moves between crops over the same ground. An ROI
+# smaller than this gets no quality figures rather than unreliable ones -- at
+# 10 m posting that is a 640 m side, about four times the point buffer's
+# default, which is sized for backscatter and not for this.
+QUALITY_SIZE_MIN = 64
+
+# Correlation lags, and the fraction of a crop's side they may not exceed.
+QUALITY_MAX_LAG = 16
+QUALITY_LAG_FRACTION = 4
+
+# The 1/e width of a perfectly uncorrelated field is not zero: with rho(1) = 0
+# the interpolated crossing lands at 1 - 1/e of a pixel. Dividing by that makes
+# a critically sampled product read 1.00 rather than 0.63.
+QUALITY_RES_EFF_FLOOR = 1.0 - 1.0 / math.e
+
+# Block side for the speckle floor, and the percentile of block cv taken as it.
+# Small enough to land inside one homogeneous patch, large enough for a stable
+# variance. The strict minimum over many blocks is an order statistic and reads
+# low; the 5th percentile is as robust to an edge crossing the sample and very
+# nearly unbiased.
+QUALITY_BLOCK = 32
+QUALITY_PERCENTILE = 5.0
+
+# Blocks of padding around the quietest one when a speckle reference is taken.
+# The reference needs more than one block to be a stable variance and few
+# enough that it stays inside one homogeneous patch; two each way makes a
+# five-block square, which is 160 pixels at the default block.
+QUALITY_QUIET_PAD = 2
+
+# Two pixels-per-sample figures count as one plateau within this FRACTION of
+# the smaller. Relative, not absolute, because the quantity compared is a
+# product of two oversampling factors: an absolute tolerance is generous where
+# the correlation cell is small and punishing where it is large.
+QUALITY_PLATEAU_TOL = 0.08
+
+# max/p99 above this means a few very bright scatterers dominate the crop.
+# Their sidelobes widen the autocorrelation, so res_eff measures the brightest
+# targets' impulse response rather than the product's, and shrinking the crop
+# does not remove a scatterer that is inside it. A pure-speckle field sits near
+# 1.8; a window over a city reaches the thirties, and over an airfield higher.
+QUALITY_BRIGHT_RATIO = 15.0
+
+# Ground scales, in metres, at which surviving texture is reported.
+QUALITY_TEXTURE_SCALES_M = (10.0, 20.0, 40.0)
+
+# A crop must keep at least this fraction of valid pixels to be measured. Holes
+# are filled with the mean, which contributes nothing to a mean-removed
+# product; too many of them and the fill is what is being correlated.
+QUALITY_MIN_VALID = 0.9
+
 # ── BEGIN PURE HELPERS ────────────────────────────────────────────────────────
 # Everything between these markers is plain Python and numpy -- no Qt, no QGIS,
 # no GDAL -- so the statistics, the polygon rasterization and the field naming
@@ -1553,6 +1625,439 @@ def gcov_vrt_xml(sources, width, height, geotransform, srs, dtype="Float32",
         ]
     lines.append('</VRTDataset>')
     return "\n".join(lines) + "\n"
+
+
+
+
+def quality_lag_for_size(size, cap=QUALITY_MAX_LAG,
+                         fraction=QUALITY_LAG_FRACTION):
+    """Correlation lags a crop of `size` pixels can support.
+
+    A quarter of the side, capped. Two is the floor: the 1/e crossing is
+    interpolated between lags, and a profile of one point can only return its
+    own length.
+    """
+    return max(2, min(int(cap), int(size) // int(fraction)))
+
+
+def quality_centred(a, size):
+    """The concentric `size`-square sub-array, or None if it does not fit.
+
+    Concentric rather than from a corner so every crop in a sweep samples the
+    same ground, which is what makes the sequence a measurement of window size
+    rather than of four different places.
+    """
+    size = int(size)
+    if size < 1 or a.ndim != 2 or a.shape[0] < size or a.shape[1] < size:
+        return None
+    r0 = (a.shape[0] - size) // 2
+    c0 = (a.shape[1] - size) // 2
+    return a[r0:r0 + size, c0:c0 + size]
+
+
+def quality_fill(a, mask, min_valid=QUALITY_MIN_VALID):
+    """Invalid pixels replaced by the valid mean, or None if too many.
+
+    A single hole poisons a correlation sum, and the mean contributes nothing
+    to a mean-removed product, so it is the neutral fill. Past `min_valid` the
+    fill is most of what would be correlated and the crop is refused instead.
+    """
+    if mask is None:
+        mask = np.isfinite(a)
+    mask = np.asarray(mask, dtype=bool)
+    if mask.shape != a.shape or not mask.any():
+        return None
+    if float(mask.mean()) < float(min_valid):
+        return None
+    values = np.asarray(a, dtype=float)[mask]
+    return np.where(mask, a, float(values.mean())).astype(float)
+
+
+def quality_bright_ratio(values):
+    """max / p99, which says whether a few scatterers dominate the crop.
+
+    A ratio of two order statistics, so it carries no calibration constant and
+    means the same on power as on amplitude.
+    """
+    v = np.asarray(values, dtype=float).ravel()
+    v = v[np.isfinite(v)]
+    if v.size == 0:
+        return float("nan")
+    p99 = float(np.percentile(v, 99))
+    return float(v.max()) / p99 if p99 > 0 else float("inf")
+
+
+def quality_speckle_floor(a, block=QUALITY_BLOCK, pct=QUALITY_PERCENTILE):
+    """cv of the quietest blocks, and the looks that implies ON POWER.
+
+    Estimating looks over a whole crop measures the scene: any edge inflates
+    the variance and the answer comes out below one look, which is meaningless.
+    The quietest blocks are the closest thing to a homogeneous target the crop
+    offers without being told where one is.
+
+    ENL is (1 / cv)^2 because this is power. On amplitude the numerator would
+    be 0.523, and using that here would divide every ENL by 3.66.
+    """
+    a = np.asarray(a, dtype=float)
+    h = (a.shape[0] // block) * block
+    w = (a.shape[1] // block) * block
+    if h < block or w < block:
+        return float("nan"), float("nan")
+    blocks = a[:h, :w].reshape(h // block, block, w // block, block)
+    means = blocks.mean(axis=(1, 3))
+    stds = blocks.std(axis=(1, 3))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        cvs = np.where(means > 0, stds / means, np.nan)
+    finite = cvs[np.isfinite(cvs)]
+    if finite.size == 0:
+        return float("nan"), float("nan")
+    cv_floor = float(np.percentile(finite, pct))
+    looks = ((SPECKLE_CV_1LOOK_POWER / cv_floor) ** 2
+             if cv_floor > 0 else float("inf"))
+    return cv_floor, looks
+
+
+def quality_quiet_region(a, block=QUALITY_BLOCK, pad=QUALITY_QUIET_PAD):
+    """The quietest block and its neighbours, or None if the crop is too small.
+
+    The speckle reference has to come from somewhere the scene is not, and it
+    must not come from cv_floor: that is the 5th percentile of many block
+    estimates, an order statistic a few percent low, and a reference below the
+    true speckle manufactures scene contrast out of a crop that has none. On a
+    uniform patch of water it invents about 0.14, which is the whole of what a
+    scene figure would then report.
+
+    A region of (2*pad+1) blocks a side is needed, so a crop under 160 pixels
+    at the default settings has none and the caller must say its scene figure
+    is unreliable rather than quote it.
+    """
+    a = np.asarray(a, dtype=float)
+    h = (a.shape[0] // block) * block
+    w = (a.shape[1] // block) * block
+    side = block * (2 * pad + 1)
+    if h < side or w < side:
+        return None
+    blocks = a[:h, :w].reshape(h // block, block, w // block, block)
+    means = blocks.mean(axis=(1, 3))
+    stds = blocks.std(axis=(1, 3))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        cvs = np.where(means > 0, stds / means, np.nan)
+    if not np.isfinite(cvs).any():
+        return None
+    by, bx = np.unravel_index(
+        np.nanargmin(np.where(np.isfinite(cvs), cvs, np.inf)), cvs.shape)
+    by = min(max(int(by), pad), cvs.shape[0] - pad - 1)
+    bx = min(max(int(bx), pad), cvs.shape[1] - pad - 1)
+    y0, x0 = (by - pad) * block, (bx - pad) * block
+    return a[y0:y0 + side, x0:x0 + side]
+
+
+def quality_autocorr(a, axis, max_lag):
+    """Correlation of the mean-removed field with itself shifted along `axis`."""
+    a = np.asarray(a, dtype=float)
+    a = a - a.mean()
+    denom = float((a * a).sum())
+    out = []
+    for lag in range(1, int(max_lag) + 1):
+        if axis == 0:
+            num = float((a[lag:, :] * a[:-lag, :]).sum())
+        else:
+            num = float((a[:, lag:] * a[:, :-lag]).sum())
+        out.append(num / denom if denom else float("nan"))
+    return out
+
+
+def quality_one_over_e(profile):
+    """Lag where the correlation first drops below 1/e, linearly interpolated.
+
+    Returns the profile's length when it never does, which is the ceiling the
+    search hit rather than a width it found. `quality_saturated` is how a
+    caller tells the two apart.
+    """
+    target = 1.0 / math.e
+    prev = 1.0
+    for i, c in enumerate(profile, start=1):
+        if c < target:
+            span = prev - c
+            return (i - 1) + (prev - target) / span if span else float(i)
+        prev = c
+    return float(len(profile))
+
+
+def quality_saturated(res_eff_m, px_m, max_lag):
+    """Did the 1/e crossing fall outside the lags computed?
+
+    Relative rather than absolute, since the sentinel arrives as a float
+    multiplication whose last bits depend on the posting.
+    """
+    if not (px_m and math.isfinite(res_eff_m) and math.isfinite(px_m)):
+        return True
+    return res_eff_m >= px_m * max_lag * (1.0 - 1e-6)
+
+
+def quality_correlation_length(res_eff_m, px_m):
+    """Spacing between independent samples, in metres, floored at one pixel."""
+    return max(float(px_m), float(res_eff_m) / QUALITY_RES_EFF_FLOOR)
+
+
+def quality_pixels_per_sample(oversmp_x, oversmp_y):
+    """Posted pixels in one independent speckle sample.
+
+    The correlation cell has two dimensions, so the areal figure is the product
+    of the two axes and not either one. Floored at 1.0: a cell smaller than a
+    pixel would make neighbours more independent than the sampling allows,
+    which is an artefact rather than a property of the product.
+    """
+    if not (math.isfinite(oversmp_x) and math.isfinite(oversmp_y)):
+        return float("nan")
+    return max(1.0, float(oversmp_x) * float(oversmp_y))
+
+
+def quality_scene_cv(cv_total, cv_speckle):
+    """cv of the scene alone, speckle divided out, ON POWER.
+
+    Speckle is multiplicative: observed = scene * speckle, so the variances
+    combine as cv_t^2 = cv_s^2 + cv_n^2 + cv_s^2 cv_n^2. Everything at or below
+    the speckle floor returns zero rather than a negative root. The reference
+    is capped at the single-look POWER figure of 1.0; capping it at the
+    amplitude figure of 0.523, as a tool written for single-look amplitude
+    does, reports the excess speckle of a fewer-looks product as scene.
+    """
+    cv_speckle = min(float(cv_speckle), SPECKLE_CV_1LOOK_POWER)
+    v = (float(cv_total) ** 2 - cv_speckle ** 2) / (1.0 + cv_speckle ** 2)
+    return math.sqrt(v) if v > 0 else 0.0
+
+
+def quality_texture(a, cv_floor, px_m, corr_m,
+                    scales=QUALITY_TEXTURE_SCALES_M):
+    """How much variation survives averaging, against what speckle predicts.
+
+    Averaging k by k pixels divides speckle by the root of the number of
+    INDEPENDENT samples in the block, which is not k^2 where the product is
+    oversampled, since neighbours repeat each other. Referred to the crop's own
+    speckle floor rather than to a constant, so it needs no calibration and
+    means the same on power as on amplitude. Above 1.0 is scene.
+    """
+    a = np.asarray(a, dtype=float)
+    out = {}
+    for scale in scales:
+        k = max(1, int(round(float(scale) / float(px_m))))
+        h = (a.shape[0] // k) * k
+        w = (a.shape[1] // k) * k
+        if h < k * 4 or w < k * 4 or not (cv_floor > 0):
+            out[f"tex@{scale:g}m"] = float("nan")
+            continue
+        means = a[:h, :w].reshape(h // k, k, w // k, k).mean(axis=(1, 3))
+        m = float(means.mean())
+        cv_obs = float(means.std()) / m if m else float("nan")
+        indep = max(1.0, (k * float(px_m) / corr_m) ** 2) if corr_m > 0 else k * k
+        expected = cv_floor / math.sqrt(indep)
+        out[f"tex@{scale:g}m"] = cv_obs / expected if expected else float("nan")
+    return out
+
+
+def quality_cnr(cv_scene, cv_speckle, px_m, corr_m,
+                scales=QUALITY_TEXTURE_SCALES_M):
+    """Speckle sigmas a typical feature stands out by, per averaging scale."""
+    out = {}
+    for scale in scales:
+        k = max(1, int(round(float(scale) / float(px_m))))
+        indep = (max(1.0, (k * float(px_m) / corr_m) ** 2) if corr_m > 0
+                 else float(k * k))
+        residual = cv_speckle / math.sqrt(indep)
+        out[f"cnr@{scale:g}m"] = cv_scene / residual if residual else float("nan")
+    return out
+
+
+def quality_of_crop(a, px_m, py_m, max_lag=None):
+    """Every quality figure for one filled, rectangular crop.
+
+    The crop is assumed already filled and already large enough; the callers
+    that assemble crops are where those two are decided.
+    """
+    a = np.asarray(a, dtype=float)
+    max_lag = (quality_lag_for_size(min(a.shape)) if max_lag is None
+               else int(max_lag))
+    rows = quality_autocorr(a, 0, max_lag)
+    cols = quality_autocorr(a, 1, max_lag)
+    res_y = quality_one_over_e(rows) * float(py_m)
+    res_x = quality_one_over_e(cols) * float(px_m)
+    cv_floor, looks = quality_speckle_floor(a)
+    mean = float(a.mean())
+    cv_total = float(a.std()) / mean if mean else float("nan")
+    corr_m = quality_correlation_length((res_x + res_y) / 2.0,
+                                        (float(px_m) + float(py_m)) / 2.0)
+    quiet = quality_quiet_region(a)
+    if quiet is not None:
+        q_mean = float(quiet.mean())
+        speckle = float(quiet.std()) / q_mean if q_mean else float("nan")
+        scene_ok = math.isfinite(speckle)
+    else:
+        speckle, scene_ok = cv_floor, False
+    if not math.isfinite(speckle):
+        speckle, scene_ok = SPECKLE_CV_1LOOK_POWER, False
+    speckle = min(speckle, SPECKLE_CV_1LOOK_POWER)
+    scene = quality_scene_cv(cv_total, speckle)
+    out = {
+        "px": int(a.shape[1]), "py": int(a.shape[0]),
+        "max_lag": max_lag,
+        "mean": mean, "cv": cv_total,
+        "rho1_y": rows[0] if rows else float("nan"),
+        "rho1_x": cols[0] if cols else float("nan"),
+        "res_eff_y_m": res_y, "res_eff_x_m": res_x,
+        "oversmp_y": quality_correlation_length(res_y, py_m) / float(py_m),
+        "oversmp_x": quality_correlation_length(res_x, px_m) / float(px_m),
+        "cv_floor": cv_floor, "enl": looks,
+        "cv_speckle": speckle,
+        "cv_scene": scene,
+        "scene_ok": bool(scene_ok),
+        "corr_m": corr_m,
+        "bright_ratio": quality_bright_ratio(a),
+    }
+    out["aniso"] = res_x / res_y if res_y else float("nan")
+    out["pixels_per_sample"] = quality_pixels_per_sample(out["oversmp_x"],
+                                                         out["oversmp_y"])
+    out["saturated"] = bool(quality_saturated(res_x, px_m, max_lag)
+                            or quality_saturated(res_y, py_m, max_lag))
+    out["bright"] = bool(math.isfinite(out["bright_ratio"])
+                         and out["bright_ratio"] > QUALITY_BRIGHT_RATIO)
+    out.update(quality_texture(a, cv_floor, px_m, corr_m))
+    out.update(quality_cnr(scene, out["cv_speckle"], px_m, corr_m))
+    return out
+
+
+def quality_sweep_roi(a, mask, px_m, py_m, sizes=QUALITY_SIZES):
+    """One ROI measured at every concentric crop it is large enough to hold.
+
+    Ordered smallest crop first, which is the order `quality_plateau` reads.
+    An ROI smaller than QUALITY_SIZE_MIN returns nothing at all rather than one
+    unreliable row.
+    """
+    a = np.asarray(a, dtype=float)
+    if a.ndim != 2 or min(a.shape) < QUALITY_SIZE_MIN:
+        return []
+    out = []
+    for size in sorted(s for s in sizes if s >= QUALITY_SIZE_MIN):
+        crop = quality_centred(a, size)
+        if crop is None:
+            continue
+        crop_mask = quality_centred(np.asarray(mask, dtype=bool), size) \
+            if mask is not None else None
+        filled = quality_fill(crop, crop_mask)
+        if filled is None:
+            continue
+        row = quality_of_crop(filled, px_m, py_m)
+        row["size"] = int(size)
+        out.append(row)
+    return out
+
+
+def quality_plateau(values, tol=QUALITY_PLATEAU_TOL):
+    """Read pixels-per-sample ordered by ascending crop into a verdict.
+
+    Returns (verdict, value, run). The distinction that matters is between a
+    plateau and a sequence still falling at the smallest crop: the first is a
+    measurement of the product, the second an upper bound on it, and nothing
+    downstream can recover that from the number alone.
+    """
+    usable = [float(v) for v in values
+              if v is not None and math.isfinite(float(v))]
+    if not usable:
+        return "no data", float("nan"), 0
+    if len(usable) == 1:
+        return "single crop", usable[0], 1
+    base = usable[0]
+    run = 1
+    while run < len(usable) and abs(usable[run] - base) <= tol * abs(base):
+        run += 1
+    if run == len(usable):
+        return "flat throughout", base, run
+    if run >= 2:
+        return "plateau", base, run
+    rest = usable[1:]
+    if (all(v > base * (1.0 + tol) for v in rest)
+            and all(b >= a - tol * abs(base) for a, b in zip(rest, rest[1:]))):
+        return "no plateau", base, 1
+    return "unstable", base, 1
+
+
+def quality_conclude_roi(rows):
+    """One ROI's sweep into the figure that represents it.
+
+    Crops the guards disqualify are excluded from the verdict and kept in the
+    rows: saturation means the crossing was never found, and a bright target's
+    sidelobes are not removed by shrinking the crop around them. A high
+    cv_scene is NOT a disqualifier -- a large crop is expected to carry scene,
+    which is the premise of the sweep.
+    """
+    clean = [r for r in rows if not (r.get("saturated") or r.get("bright"))]
+    clean.sort(key=lambda r: r["size"])
+    verdict, value, run = quality_plateau(
+        [r["pixels_per_sample"] for r in clean])
+    best = clean[0] if clean else None
+    return {
+        "verdict": verdict,
+        "pixels_per_sample": value,
+        "plateau_crops": run,
+        "sizes": [r["size"] for r in clean[:run]],
+        "excluded": len(rows) - len(clean),
+        "crops": len(rows),
+        "row": best,
+    }
+
+
+def quality_by_class(per_roi):
+    """Pool ROI conclusions by class: median, half-range spread, count.
+
+    `per_roi` is an iterable of (class, conclusion). Only ROIs whose sweep
+    settled contribute to a class figure, because an ROI still falling at its
+    smallest crop carries an upper bound and pooling it with measurements would
+    pull the median towards a number no ROI measured. The ones left out are
+    counted, so a class figure says how much of the class it rests on.
+    """
+    gathered = {}
+    for name, concl in per_roi:
+        bucket = gathered.setdefault(name, {"values": [], "rois": 0,
+                                            "settled": 0})
+        bucket["rois"] += 1
+        if concl.get("verdict") in ("plateau", "flat throughout"):
+            value = concl.get("pixels_per_sample")
+            if value is not None and math.isfinite(value):
+                bucket["values"].append(float(value))
+                bucket["settled"] += 1
+    out = {}
+    for name, bucket in gathered.items():
+        values = sorted(bucket["values"])
+        if values:
+            mid = len(values) // 2
+            median = (values[mid] if len(values) % 2
+                      else (values[mid - 1] + values[mid]) / 2.0)
+            spread = ((values[-1] - values[0]) / 2.0 / median
+                      if median else float("inf"))
+        else:
+            median, spread = float("nan"), float("nan")
+        out[name] = {"pixels_per_sample": median, "spread": spread,
+                     "rois": bucket["rois"], "settled": bucket["settled"]}
+    return out
+
+
+def quality_side_for_sweep(pixel_m, largest=max(QUALITY_SIZES)):
+    """The ROI side, in metres, that supports the whole crop sweep.
+
+    The quality figures need a far larger ROI than backscatter does: the
+    sweep's largest crop is 512 pixels, which at 10 m posting is 5.12 km and
+    about 290 times the area of the 300 m point buffer the tool defaults to.
+    Rounded up to something a person would type.
+    """
+    try:
+        posting = float(pixel_m)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(posting) or posting <= 0.0:
+        return None
+    side = posting * float(largest)
+    step = 10.0 if side < 1000.0 else 100.0
+    return math.ceil(side / step) * step
 
 
 # ── END PURE HELPERS ──────────────────────────────────────────────────────────
