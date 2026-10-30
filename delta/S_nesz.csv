@@ -1,0 +1,3 @@
+﻿band,class,rois,n,nonpos,nesz_db,floor_db,note
+Band 1: HHHH,water,290,158700,0,-17.133392215642417,-19.588297730709872,"upper bound: mean sigma0 over water, scene+noise, not a measured NESZ"
+Band 2: HVHV,water,290,158700,0,-19.63225966527827,-21.9380094034705,"upper bound: mean sigma0 over water, scene+noise, not a measured NESZ"
