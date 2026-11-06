@@ -1,0 +1,1255 @@
+kornia version: 0.8.2
+Using device: cuda
+GPU: Quadro RTX 5000
+CUDA: 12.1
+GPU Memory: 16.0 GB
+[imcui] weights cache: V:/ICIGDev/GPUPOC/input/dqe/imw_runtime/imw_cache (offline)
+[2026/10/28 10:31:51 hloc INFO] ARCSizeAwareModelCache initialized.
+[imw_configs] 37 of 37 imcui configurations resolved
+[imcui] disk-lg: not offered (disk is provided by kornia: use 'disk' with lgm)
+[imcui] sift-lg: not offered (sift is provided by kornia: use 'sift' with lgm)
+[imcui] dedode-nn: not offered (dedode is provided by kornia: use 'dedode' with mnn)
+[imcui] rootsift-nn: not offered (dog, rootsift is provided by kornia: use 'sift' (RootSIFT on) with mnn)
+[imcui] sosnet-nn: not offered (dog, sosnet is provided by kornia: use 'dog' (descriptor sosnet) with mnn)
+[imcui] hardnet-nn: not offered (dog, hardnet is provided by kornia: use 'dog' (descriptor hardnet) with mnn)
+[imcui] disk-adalam: not offered (disk is provided by kornia: use 'disk' with ada)
+[imcui] loftr: not offered (loftr is provided by kornia: use 'loftr')
+sift                   kornia  matchers: smnn, lgm, ada (+ mnn, snn, nn, fginn when selected) settings: rootsift, upright, score_threshold
+disk                   kornia  matchers: smnn, lgm, ada (+ mnn, snn, nn, fginn when selected) settings: checkpoint
+dedode                 kornia  matchers: smnn, lgm, ada (+ mnn, snn, nn, fginn when selected) settings: detector_weights, descriptor_weights
+keynet                 kornia  matchers: smnn, lgm, ada (+ mnn, snn, nn, fginn when selected) settings: affnet, upright, score_threshold
+dog                    kornia  matchers: smnn, lgm, ada (+ mnn, snn, nn, fginn when selected) settings: descriptor, affnet, upright, score_threshold
+gftt                   kornia  matchers: smnn, ada (+ mnn, snn, nn, fginn when selected)      settings: upright
+hessian                kornia  matchers: smnn, ada (+ mnn, snn, nn, fginn when selected)      settings: upright
+loftr                  kornia  matchers: loftr_internal                                       settings: pretrained, coarse_threshold
+imw-sp-lg              imcui   matchers: internal                                             settings: api.detect_threshold, api.match_threshold, feature.nms_radius, matcher.width_confidence, matcher.depth_confidence
+imw-aliked-lg          imcui   matchers: internal                                             settings: api.detect_threshold, api.match_threshold, feature.nms_radius, matcher.width_confidence, matcher.depth_confidence
+imw-sp-sg              imcui   matchers: internal                                             settings: api.detect_threshold, api.match_threshold, feature.nms_radius, matcher.weights, matcher.sinkhorn_iterations
+imw-sp-nn              imcui   matchers: internal                                             settings: api.detect_threshold, api.match_threshold, feature.nms_radius, matcher.do_mutual_check
+imw-r2d2-nn            imcui   matchers: internal                                             settings: api.detect_threshold, api.match_threshold, feature.reliability_threshold, feature.repetability_threshold, matcher.do_mutual_check
+imw-rord-nn            imcui   matchers: internal                                             settings: api.detect_threshold, api.match_threshold, feature.multiscale, matcher.do_mutual_check
+imw-d2net-nn           imcui   matchers: internal                                             settings: api.detect_threshold, api.match_threshold, feature.multiscale, matcher.do_mutual_check
+imw-alike-nn           imcui   matchers: internal                                             settings: api.detect_threshold, api.match_threshold, feature.use_relu, feature.multiscale, feature.top_k, feature.sub_pixel, matcher.do_mutual_check
+imw-sfd2-nn            imcui   matchers: internal                                             settings: api.detect_threshold, api.match_threshold, matcher.do_mutual_check
+imw-rdd-nn             imcui   matchers: internal                                             settings: api.detect_threshold, api.match_threshold, matcher.do_mutual_check
+imw-liftfeat-nn        imcui   matchers: internal                                             settings: api.detect_threshold, api.match_threshold, matcher.do_mutual_check
+imw-ripe-nn            imcui   matchers: internal                                             settings: api.detect_threshold, api.match_threshold, matcher.do_mutual_check
+imw-darkfeat-nn        imcui   matchers: internal                                             settings: api.detect_threshold, api.match_threshold, feature.reliability_threshold, feature.repetability_threshold, matcher.do_mutual_check
+imw-lanet-nn           imcui   matchers: internal                                             settings: api.detect_threshold, api.match_threshold, matcher.do_mutual_check
+imw-minima-loftr       imcui   matchers: internal                                             settings: api.match_threshold, matcher.weights, matcher.max_keypoints
+imw-minima-roma        imcui   matchers: internal                                             settings: api.match_threshold, matcher.weights, matcher.max_keypoints
+imw-xoftr              imcui   matchers: internal                                             settings: api.match_threshold, matcher.weights, matcher.max_keypoints
+imw-omniglue           imcui   matchers: internal                                             settings: api.match_threshold, matcher.max_keypoints
+imw-gim-roma           imcui   matchers: internal                                             settings: api.match_threshold, matcher.max_keypoints
+imw-gim-dkm            imcui   matchers: internal                                             settings: api.match_threshold, matcher.max_keypoints
+imw-eloftr             imcui   matchers: internal                                             settings: api.match_threshold, matcher.max_keypoints
+imw-aspanformer        imcui   matchers: internal                                             settings: api.match_threshold, matcher.weights, matcher.max_keypoints
+imw-topicfm            imcui   matchers: internal                                             settings: api.match_threshold, matcher.weights, matcher.max_keypoints
+imw-roma               imcui   matchers: internal                                             settings: api.match_threshold, matcher.weights, matcher.max_keypoints
+imw-dkm                imcui   matchers: internal                                             settings: api.match_threshold, matcher.weights, matcher.max_keypoints
+imw-dad-roma           imcui   matchers: internal                                             settings: api.match_threshold, matcher.weights, matcher.max_keypoints
+imw-rdd-dense          imcui   matchers: internal                                             settings: api.match_threshold, matcher.max_keypoints
+imw-xfeat-lg           imcui   matchers: internal                                             settings: api.match_threshold, matcher.max_keypoints
+imw-xfeat-dense        imcui   matchers: internal                                             settings: api.match_threshold, matcher.max_keypoints
+aliked                 kornia  not available here: kornia 0.8.2 has no ALIKED
+xfeat                  kornia  not available here: kornia 0.8.2 has no XFeat
+xfeatstar              kornia  not available here: kornia 0.8.2 has no XFeat
+imw-disk-lg            not offered: disk is provided by kornia: use 'disk' with lgm
+imw-sift-lg            not offered: sift is provided by kornia: use 'sift' with lgm
+imw-dedode-nn          not offered: dedode is provided by kornia: use 'dedode' with mnn
+imw-rootsift-nn        not offered: dog, rootsift is provided by kornia: use 'sift' (RootSIFT on) with mnn
+imw-sosnet-nn          not offered: dog, sosnet is provided by kornia: use 'dog' (descriptor sosnet) with mnn
+imw-hardnet-nn         not offered: dog, hardnet is provided by kornia: use 'dog' (descriptor hardnet) with mnn
+imw-disk-adalam        not offered: disk is provided by kornia: use 'disk' with ada
+imw-loftr              not offered: loftr is provided by kornia: use 'loftr'
+[0m
+--- bench V:/ICIGDev/GPUPOC/output --success-px 3 --jobs 300-370 --share-local V:\ --share-server /maintenance/ --all-jobs --accuracy --subcell-px 256 512 --subcell-keep 10 --top 5 --min-agree 0 --keep 3 --cell-km 25
+[Bench] output340: skipped, still running
+[Bench] 43 finished job(s) under V:/ICIGDev/GPUPOC/output
+[Cross] ===== output300
+[Cross] output300: cross-check on the matches read back from CROSS_SUMMARY.csv (same settings)
+[Cross] output300: truth-point replay read back from CROSS_FROM_TRUTH_POINTS.csv
+[Cross] output300 band1: cross-checked nan m at 0/7 points; best single 3040 m (imw-minima-roma + internal win2048_nfauto)
+[Bench] output300: HV band1, error 8.5 km, clouds 0.0 %, best imw-minima-roma + internal 3039.918133644023 m
+kornia version: 0.8.2
+Using device: cuda
+GPU: Quadro RTX 5000
+CUDA: 12.1
+GPU Memory: 16.0 GB
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+No valid chip CSV files found.
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+No configuration survived the chip consensus filter.
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+No valid chip CSV files found.
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+No valid chip CSV files found.
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+No valid chip CSV files found.
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+No configuration survived the chip consensus filter.
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+No valid chip CSV files found.
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+No valid chip CSV files found.
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+[Truth] final_same-res_imw-alike-nn: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-omniglue: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-sp-nn: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-alike-nn: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-omniglue: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-sp-nn: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-alike-nn: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-omniglue: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-sp-nn: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Cross] ===== output312
+[Cross] output312: cross-check on the matches read back from CROSS_SUMMARY.csv (same settings)
+[Cross] output312: truth-point replay read back from CROSS_FROM_TRUTH_POINTS.csv
+[Cross] output312 band1: cross-checked nan m at 0/6 points; best single 33046 m (dedode_L-C4-v2_B-C4 + nn win2048_nfauto)
+[Bench] output312: HS band1, error 16.72 km, clouds 0.0 %, best dedode_L-C4-v2_B-C4 + nn 33045.98398805518 m
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+No valid chip CSV files found.
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+No valid chip CSV files found.
+No valid chip CSV files found.
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+No configuration survived the chip consensus filter.
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+No valid chip CSV files found.
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+No valid chip CSV files found.
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+No valid chip CSV files found.
+No valid chip CSV files found.
+No valid chip CSV files found.
+No valid chip CSV files found.
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+No configuration survived the chip consensus filter.
+No valid chip CSV files found.
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+No valid chip CSV files found.
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+No valid chip CSV files found.
+No valid chip CSV files found.
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+No configuration survived the chip consensus filter.
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+No valid chip CSV files found.
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+No valid chip CSV files found.
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+No valid chip CSV files found.
+No valid chip CSV files found.
+No valid chip CSV files found.
+No valid chip CSV files found.
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+No configuration survived the chip consensus filter.
+No valid chip CSV files found.
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+Saved:
+ CHIP_STATS_ALL.csv
+ CHIP_STATS_SURVIVORS.csv
+ CONSENSUS_SCORES.csv
+ BEST_CHIP_SET.csv
+ BEST_CHIP_MANIFEST.csv
+ BEST_FINAL_SUMMARY.csv
+[Truth] final_same-res_imw-omniglue: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-r2d2-nn: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-rdd-dense: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-rord-nn: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-sfd2-nn: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-sp-lg: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-sp-nn: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_disk_epipolar: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-alike-nn: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-aliked-lg: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-r2d2-nn: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-ripe-nn: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-rord-nn: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-sfd2-nn: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-sp-lg: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-sp-nn: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-xfeat-lg: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_disk_epipolar: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-alike-nn: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-aliked-lg: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-r2d2-nn: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-ripe-nn: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-rord-nn: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-sfd2-nn: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-sp-lg: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-sp-nn: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-xfeat-lg: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Cross] ===== output313
+[Cross] output313: ground truth V:\ICIGDev\GPUPOC\input\dqe\g1a\267422221\truth\267422221.csv
+[Truth] final_same-res_dedode_L-C4-v2_B-C4: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_dedode_L-C4-v2_B-upright: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_dedode_L-C4_B-C4: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_dedode_L-C4_B-upright: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_dedode_L-upright_B-C4: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_dedode_L-upright_B-upright: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_disk_depth: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_disk_epipolar: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_dog_hardnet: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_gftt: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_hessian: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-alike-nn: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-aliked-lg: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-aspanformer: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-d2net-nn: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-dad-roma: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-darkfeat-nn: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-dkm: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-eloftr: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-gim-dkm: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-gim-roma: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-lanet-nn: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-liftfeat-nn: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-minima-loftr: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-minima-roma: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-omniglue: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-r2d2-nn: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-rdd-dense: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-rdd-nn: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-ripe-nn: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-roma: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-rord-nn: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-sfd2-nn: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-sp-lg: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-sp-nn: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-sp-sg: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-topicfm: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-xfeat-dense: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-xfeat-lg: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_imw-xoftr: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_keynet: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_loftr: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Truth] final_same-res_sift: no consensus tables -- rebuilding them from the saved matches
+No valid chip CSV files found.
+[Cross] output313: EmptyDataError: No columns to parse from file
+[Cross] output313 truth points: EmptyDataError: No columns to parse from file
+Traceback (most recent call last):
+  File "C:\Users\dqe\PycharmProjects\g1a_automatch\automatch_job.py", line 1248, in <module>
+    sys.exit(main())
+  File "C:\Users\dqe\PycharmProjects\g1a_automatch\automatch_job.py", line 1193, in main
+    return B.main(list(argv[1:]))
+  File "C:\Users\dqe\PycharmProjects\g1a_automatch\automatch_bench.py", line 597, in main
+    return batch(a.folder, a.jobs, a.success_px, a.recompute, a.all_jobs, cross,
+  File "C:\Users\dqe\PycharmProjects\g1a_automatch\automatch_bench.py", line 490, in batch
+    row, det = bench_job(d, recompute, cloud_model_dir)
+  File "C:\Users\dqe\PycharmProjects\g1a_automatch\automatch_bench.py", line 343, in bench_job
+    det = detectors_of(d)
+  File "C:\Users\dqe\PycharmProjects\g1a_automatch\automatch_bench.py", line 232, in detectors_of
+    r = pd.read_csv(p)
+  File "C:\Users\dqe\anaconda3\envs\immi\lib\site-packages\pandas\io\parsers\readers.py", line 1026, in read_csv
+    return _read(filepath_or_buffer, kwds)
+  File "C:\Users\dqe\anaconda3\envs\immi\lib\site-packages\pandas\io\parsers\readers.py", line 620, in _read
+    parser = TextFileReader(filepath_or_buffer, **kwds)
+  File "C:\Users\dqe\anaconda3\envs\immi\lib\site-packages\pandas\io\parsers\readers.py", line 1620, in __init__
+    self._engine = self._make_engine(f, self.engine)
+  File "C:\Users\dqe\anaconda3\envs\immi\lib\site-packages\pandas\io\parsers\readers.py", line 1898, in _make_engine
+    return mapping[engine](f, **self.options)
+  File "C:\Users\dqe\anaconda3\envs\immi\lib\site-packages\pandas\io\parsers\c_parser_wrapper.py", line 93, in __init__
+    self._reader = parsers.TextReader(src, **kwds)
+  File "pandas/_libs/parsers.pyx", line 581, in pandas._libs.parsers.TextReader.__cinit__
+pandas.errors.EmptyDataError: No columns to parse from file
+[0m

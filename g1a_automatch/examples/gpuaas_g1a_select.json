@@ -1,0 +1,31 @@
+{
+  "input_path": "/maintenance/ICIGDev/GPUPOC/input/g1a/<set>/input/<scene>.tif",
+  "reference_dir": "/maintenance/ICIGDev/GPUPOC/input/g1a/<set>/reference/L8_ref",
+  "truth_csv": "/maintenance/ICIGDev/GPUPOC/input/g1a/<set>/truth/<scene>_manual.csv",
+  "channels": [
+    "band1"
+  ],
+  "detectors": [
+    "all"
+  ],
+  "matchers": "all",
+  "window_sizes": [
+    3072
+  ],
+  "max_expected_error_m": 50000,
+  "coarse_local": true,
+  "ransac_methods": [
+    "magsac"
+  ],
+  "ransac_thresholds_px": [
+    2.0
+  ],
+  "ransac_confidences": [
+    0.99
+  ],
+  "manual_gcp_csv": "",
+  "weights_cache_dir": "/maintenance/ICIGDev/GPUPOC/input/dqe/imw_runtime/imw_cache",
+  "device": "auto",
+  "use_amp": true,
+  "min_gpu_free_gb": 2.0
+}

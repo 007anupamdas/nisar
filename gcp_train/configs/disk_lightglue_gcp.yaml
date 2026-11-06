@@ -1,0 +1,50 @@
+# Fine-tune LightGlue (on frozen DISK keypoints) on the tie-point pairs,
+# told each view's modality and the pair's pixel size (gf_cond_lightglue).
+# Based on Glue Factory's disk+lightglue_homography.yaml; starts from the
+# official DISK LightGlue weights instead of from scratch.
+data:
+    name: gf_gcp                   # gcp_train/gf_gcp.py (gcp_train on PYTHONPATH)
+    index: ???                     # pairs/pairs.csv, set on the command line: data.index=...
+    channels: 3
+    sensors: null                  # e.g. [MicroSat] to train on one sensor
+    modalities: null               # e.g. [lwir] to train on thermal inputs only
+    augment: true
+    train_batch_size: 16
+    val_batch_size: 16
+    test_batch_size: 16
+    num_workers: 8
+model:
+    name: two_view_pipeline
+    extractor:
+        name: extractors.disk_kornia
+        max_num_keypoints: 1024
+        detection_threshold: 0.0
+        trainable: False
+    detector:
+        name: null
+    descriptor:
+        name: null
+    ground_truth:
+        name: matchers.homography_matcher
+        th_positive: 3
+        th_negative: 3
+    matcher:
+        name: gf_cond_lightglue      # gcp_train/gf_cond_lightglue.py: LightGlue told modality and pixel size
+        condition: true              # false (or matcher name matchers.lightglue): plain LightGlue
+        filter_threshold: 0.1
+        flash: false
+        checkpointed: true
+        input_dim: 128
+        weights: disk              # official disk_lightglue.pth (v0.1_arxiv); a local path also works
+train:
+    seed: 0
+    epochs: 20
+    log_every_iter: 50
+    eval_every_iter: 500
+    lr: 1e-5
+    lr_scaling: [[100, [matcher.condition.]]]    # the condition starts at zero and learns faster (1e-3)
+    lr_schedule:
+        start: 10
+        type: exp
+        on_epoch: true
+        exp_div_10: 10

@@ -1,0 +1,888 @@
+group_by,group,detector,jobs,success_rate,median_rmse_px,median_rmse_m,times_first
+sensor,HS,imw-aspanformer,7,0.714,2.06,371.3,0
+sensor,HS,imw-d2net-nn-kt0p2,6,0.667,1.83,330.2,0
+sensor,HS,imw-xoftr,8,0.625,1.62,292.3,1
+sensor,HS,imw-minima-roma,8,0.625,1.83,329.5,0
+sensor,HS,imw-gim-roma,8,0.625,1.98,356.9,0
+sensor,HS,imw-roma,8,0.625,2.58,464.3,1
+sensor,HS,imw-d2net-nn-kt0p2-fm1,7,0.571,1.64,295.2,0
+sensor,HS,imw-minima-loftr,8,0.5,1.57,283.2,0
+sensor,HS,imw-sfd2-nn-kt0p2,8,0.5,1.57,282.2,0
+sensor,HS,imw-topicfm,8,0.5,1.93,347.7,0
+sensor,HS,imw-ripe-nn-kt0p2,8,0.5,2.02,363.9,1
+sensor,HS,imw-rdd-nn-kt0p2,8,0.5,2.07,372.4,0
+sensor,HS,imw-eloftr,8,0.5,2.2,396.4,0
+sensor,HS,disk_epipolar,8,0.5,2.3,413.9,1
+sensor,HS,imw-rord-nn-kt0p2,6,0.5,2.35,423.2,0
+sensor,HS,dog_hardnet8,6,0.5,2.36,424.0,0
+sensor,HS,imw-dkm,8,0.5,2.44,439.9,0
+sensor,HS,dog_hardnet,8,0.5,2.7,485.7,0
+sensor,HS,dedode_L-upright_B-upright,8,0.5,2.74,493.3,1
+sensor,HS,imw-xfeat-dense,7,0.429,2.2,396.1,0
+sensor,HS,imw-xfeat-lg,7,0.429,3.3,593.8,0
+sensor,HS,imw-lanet-nn-kt0p2,8,0.375,2.46,442.3,0
+sensor,HS,dedode_L-C4-v2_B-upright,8,0.375,3.14,564.6,0
+sensor,HS,imw-darkfeat-nn-kt0p2,8,0.375,3.19,575.0,0
+sensor,HS,dedode_L-C4-v2_B-C4,8,0.375,3.3,593.4,0
+sensor,HS,dedode_L-C4-v2_G-C4,8,0.375,3.4,612.6,1
+sensor,HS,disk_depth,8,0.375,3.43,617.3,0
+sensor,HS,loftr,8,0.375,3.51,631.9,0
+sensor,HS,dedode_L-C4_B-upright,8,0.375,3.59,645.9,0
+sensor,HS,dedode_L-upright_B-C4,8,0.375,3.73,671.3,0
+sensor,HS,dog_hynet,8,0.375,16.64,2996.0,0
+sensor,HS,imw-aliked-lg-kt0p2,7,0.286,3.65,657.4,0
+sensor,HS,dedode_L-C4_B-C4,8,0.25,3.78,680.3,0
+sensor,HS,dedode_L-upright_G-C4,8,0.25,3.9,702.3,0
+sensor,HS,dog_sosnet,8,0.25,3.97,715.5,0
+sensor,HS,imw-liftfeat-nn-kt0p2,8,0.25,4.12,741.6,0
+sensor,HS,sift,8,0.25,6.84,1231.9,0
+sensor,HS,gftt,8,0.25,7.42,1335.6,0
+sensor,HS,keynet,8,0.25,11.6,2087.8,0
+sensor,HS,hessian,8,0.25,18.22,3279.2,2
+sensor,HS,imw-omniglue,5,0.2,3.24,583.1,0
+sensor,HS,loftr-windoornew,6,0.167,3.24,583.6,0
+sensor,HS,imw-rord-nn-kt0p2-fm1,6,0.167,3.28,589.6,0
+sensor,HS,loftr-windoor,6,0.167,9.42,1694.8,0
+sensor,HS,dog_tfeat,6,0.167,18.18,3272.4,0
+sensor,HS,imw-alike-nn-kt0p2,7,0.143,2.28,410.6,0
+sensor,HS,imw-alike-nn-kt0p2-fm1,7,0.143,2.28,410.6,0
+sensor,HS,imw-r2d2-nn-kt0p2,8,0.125,3.37,606.1,0
+sensor,HS,dedode_L-C4_G-C4,8,0.125,4.7,845.3,0
+sensor,HS,imw-alike-nn-kt0p2-fm1-fsp1,8,0.125,4.8,863.6,0
+sensor,HS,imw-alike-nn-kt0p2-fsp1,8,0.125,4.8,863.6,0
+sensor,HS,imw-dad-roma,8,0.125,11.79,2122.3,0
+sensor,HS,imw-sp-lg-kt0p2,7,0.0,14.06,2530.1,0
+sensor,HS,imw-gim-dkm,8,0.0,15.9,2861.2,0
+sensor,HS,imw-sp-sg-kt0p2,7,0.0,21.48,3866.6,0
+sensor,HS,imw-sp-nn-kt0p2,6,0.0,41.47,7464.3,0
+sensor,HS,imw-rdd-dense,4,0.0,,,0
+sensor,HV,disk_depth,4,0.75,2.43,767.0,1
+sensor,HV,imw-minima-roma,4,0.75,2.43,766.3,0
+sensor,HV,disk_epipolar,4,0.75,2.46,775.5,0
+sensor,HV,imw-darkfeat-nn-kt0p2,4,0.75,2.47,777.2,0
+sensor,HV,imw-minima-loftr,4,0.75,2.55,802.5,0
+sensor,HV,imw-rdd-nn-kt0p2,4,0.75,2.6,820.1,0
+sensor,HV,imw-topicfm,4,0.75,2.64,832.9,0
+sensor,HV,keynet,4,0.75,2.7,850.1,0
+sensor,HV,imw-lanet-nn-kt0p2,4,0.75,2.74,863.5,0
+sensor,HV,dedode_L-upright_B-C4,4,0.75,2.78,875.4,0
+sensor,HV,imw-ripe-nn-kt0p2,4,0.75,2.79,877.3,0
+sensor,HV,imw-d2net-nn-kt0p2-fm1,4,0.75,2.81,883.6,0
+sensor,HV,imw-sfd2-nn-kt0p2,4,0.75,2.87,903.9,0
+sensor,HV,imw-d2net-nn-kt0p2,4,0.75,2.9,914.8,0
+sensor,HV,imw-dad-roma,4,0.5,1.7,535.2,0
+sensor,HV,imw-r2d2-nn-kt0p2,4,0.5,1.84,579.3,0
+sensor,HV,imw-rdd-dense,4,0.5,1.86,584.7,0
+sensor,HV,imw-alike-nn-kt0p2,4,0.5,1.94,609.7,0
+sensor,HV,imw-alike-nn-kt0p2-fm1,4,0.5,1.94,609.7,0
+sensor,HV,imw-xfeat-dense,4,0.5,2.22,698.9,0
+sensor,HV,imw-aspanformer,4,0.5,2.42,763.7,0
+sensor,HV,imw-dkm,4,0.5,2.6,820.6,0
+sensor,HV,dedode_L-C4-v2_B-C4,4,0.5,2.67,841.6,1
+sensor,HV,imw-xfeat-lg,4,0.5,2.83,892.2,0
+sensor,HV,loftr,4,0.5,2.89,909.8,0
+sensor,HV,dog_hardnet,4,0.5,2.92,920.0,0
+sensor,HV,imw-alike-nn-kt0p2-fm1-fsp1,4,0.5,2.92,918.8,0
+sensor,HV,imw-alike-nn-kt0p2-fsp1,4,0.5,2.92,918.8,0
+sensor,HV,imw-aliked-lg-kt0p2,4,0.5,2.96,933.9,0
+sensor,HV,imw-eloftr,4,0.5,2.96,933.7,0
+sensor,HV,dedode_L-C4_B-upright,4,0.5,3.15,992.7,0
+sensor,HV,dedode_L-C4-v2_B-upright,4,0.5,3.99,1258.2,0
+sensor,HV,dedode_L-upright_B-upright,4,0.5,4.07,1282.8,0
+sensor,HV,sift,4,0.5,7.91,2493.2,0
+sensor,HV,dedode_L-upright_G-C4,4,0.5,8.42,2652.6,0
+sensor,HV,hessian,4,0.5,10.13,3189.4,0
+sensor,HV,imw-xoftr,4,0.5,10.8,3401.7,0
+sensor,HV,imw-roma,4,0.5,11.25,3543.9,0
+sensor,HV,dog_sosnet,4,0.5,12.24,3856.2,0
+sensor,HV,dog_hardnet8,4,0.5,22.04,6943.2,0
+sensor,HV,dog_hynet,4,0.5,24.71,7785.1,2
+sensor,HV,gftt,4,0.5,24.86,7829.9,0
+sensor,HV,dedode_L-C4_G-C4,4,0.5,25.99,8187.1,0
+sensor,HV,dog_tfeat,4,0.5,26.63,8389.5,0
+sensor,HV,dedode_L-C4-v2_G-C4,4,0.5,31.87,10039.0,0
+sensor,HV,imw-gim-roma,4,0.5,43.58,13726.7,0
+sensor,HV,imw-sp-sg-kt0p2,4,0.25,0.9,283.7,0
+sensor,HV,imw-sp-nn-kt0p2,4,0.25,1.0,314.6,0
+sensor,HV,imw-sp-lg-kt0p2,4,0.25,1.07,337.1,0
+sensor,HV,imw-rord-nn-kt0p2,4,0.25,2.06,647.8,0
+sensor,HV,imw-omniglue,4,0.25,3.01,947.2,0
+sensor,HV,imw-liftfeat-nn-kt0p2,4,0.25,3.22,1014.7,0
+sensor,HV,imw-rord-nn-kt0p2-fm1,4,0.25,3.23,1017.7,0
+sensor,HV,loftr-windoor,4,0.25,3.87,1218.6,0
+sensor,HV,dedode_L-C4_B-C4,4,0.25,4.01,1262.1,0
+sensor,HV,loftr-windoornew,4,0.25,40.83,12860.1,0
+sensor,HV,imw-gim-dkm,4,0.0,34.85,10979.1,0
+sensor,MV,imw-eloftr,2,0.0,3.75,168.8,1
+sensor,MV,imw-xfeat-dense,2,0.0,3.85,173.1,0
+sensor,MV,imw-darkfeat-nn-kt0p2,2,0.0,4.45,200.3,0
+sensor,MV,imw-sfd2-nn-kt0p2,2,0.0,4.51,203.2,0
+sensor,MV,imw-minima-roma,2,0.0,4.59,206.4,0
+sensor,MV,imw-rdd-nn-kt0p2,2,0.0,4.63,208.3,0
+sensor,MV,imw-lanet-nn-kt0p2,2,0.0,4.94,222.3,0
+sensor,MV,imw-rdd-dense,2,0.0,4.98,224.1,0
+sensor,MV,imw-xfeat-lg,2,0.0,5.08,228.8,0
+sensor,MV,imw-xoftr,2,0.0,5.61,252.2,1
+sensor,MV,imw-aliked-lg-kt0p2,2,0.0,5.9,265.7,0
+sensor,MV,imw-gim-roma,2,0.0,6.02,270.8,0
+sensor,MV,imw-d2net-nn-kt0p2-fm1,2,0.0,6.13,275.7,0
+sensor,MV,imw-minima-loftr,2,0.0,6.17,277.8,0
+sensor,MV,imw-omniglue,2,0.0,6.32,284.5,0
+sensor,MV,imw-topicfm,2,0.0,6.55,294.7,0
+sensor,MV,imw-sp-sg-kt0p2,2,0.0,6.85,308.4,0
+sensor,MV,imw-d2net-nn-kt0p2,2,0.0,7.18,323.3,0
+sensor,MV,imw-liftfeat-nn-kt0p2,2,0.0,7.55,339.5,0
+sensor,MV,imw-sp-nn-kt0p2,2,0.0,7.66,344.6,0
+sensor,MV,imw-ripe-nn-kt0p2,2,0.0,8.03,361.5,0
+sensor,MV,imw-aspanformer,2,0.0,8.09,364.3,0
+sensor,MV,imw-r2d2-nn-kt0p2,2,0.0,8.19,368.7,0
+sensor,MV,imw-alike-nn-kt0p2-fm1-fsp1,2,0.0,8.88,399.4,0
+sensor,MV,imw-alike-nn-kt0p2-fsp1,2,0.0,8.88,399.4,0
+sensor,MV,imw-rord-nn-kt0p2-fm1,2,0.0,9.46,425.8,0
+sensor,MV,imw-rord-nn-kt0p2,2,0.0,9.61,432.5,0
+sensor,MV,imw-alike-nn-kt0p2,2,0.0,9.7,436.6,0
+sensor,MV,imw-alike-nn-kt0p2-fm1,2,0.0,9.7,436.6,0
+sensor,MV,loftr,2,0.0,9.9,445.3,0
+sensor,MV,imw-sp-lg-kt0p2,2,0.0,10.21,459.4,0
+sensor,MV,dog_hardnet,2,0.0,22.67,1020.1,0
+sensor,MV,dog_sosnet,2,0.0,23.62,1062.8,0
+sensor,MV,sift,2,0.0,24.29,1093.2,0
+sensor,MV,hessian,2,0.0,24.3,1093.6,0
+sensor,MV,imw-roma,2,0.0,25.45,1145.4,0
+sensor,MV,dedode_L-C4-v2_B-C4,2,0.0,25.79,1160.8,0
+sensor,MV,disk_depth,2,0.0,26.21,1179.6,0
+sensor,MV,dedode_L-C4_G-C4,2,0.0,33.25,1496.2,0
+sensor,MV,keynet,2,0.0,33.89,1525.2,0
+sensor,MV,disk_epipolar,2,0.0,34.94,1572.1,0
+sensor,MV,gftt,2,0.0,36.1,1624.5,0
+sensor,MV,dedode_L-C4-v2_G-C4,2,0.0,36.56,1645.0,0
+sensor,MV,dog_hynet,2,0.0,36.65,1649.4,0
+sensor,MV,dedode_L-upright_B-C4,2,0.0,36.98,1664.1,0
+sensor,MV,dedode_L-C4-v2_B-upright,2,0.0,40.9,1840.5,0
+sensor,MV,dedode_L-C4_B-C4,2,0.0,41.37,1861.7,0
+sensor,MV,imw-dad-roma,2,0.0,44.63,2008.2,0
+sensor,MV,dedode_L-upright_B-upright,2,0.0,46.4,2088.0,0
+sensor,MV,dedode_L-upright_G-C4,2,0.0,48.73,2192.6,0
+sensor,MV,imw-dkm,2,0.0,71.4,3213.2,0
+sensor,MV,dedode_L-C4_B-upright,2,0.0,71.53,3218.7,0
+sensor,MV,imw-gim-dkm,2,0.0,545.41,24543.6,0
+sensor,MV,loftr-windoornew,1,0.0,,,0
+sensor,other,imw-aliked-lg-kt0p2,1,1.0,0.48,152.7,1
+sensor,other,disk_depth,1,1.0,0.62,195.2,0
+sensor,other,imw-minima-roma,1,1.0,0.65,203.5,0
+sensor,other,imw-dkm,1,1.0,0.67,212.0,0
+sensor,other,imw-lanet-nn-kt0p2,1,1.0,0.74,233.3,0
+sensor,other,keynet,1,1.0,0.75,235.9,0
+sensor,other,imw-darkfeat-nn-kt0p2,1,1.0,0.81,256.1,0
+sensor,other,imw-roma,1,1.0,0.82,258.7,0
+sensor,other,imw-dad-roma,1,1.0,0.83,260.4,0
+sensor,other,disk_epipolar,1,1.0,0.85,266.6,0
+sensor,other,imw-ripe-nn-kt0p2,1,1.0,0.89,280.7,0
+sensor,other,imw-xoftr,1,1.0,0.89,281.2,0
+sensor,other,imw-gim-roma,1,1.0,0.91,285.6,0
+sensor,other,imw-topicfm,1,1.0,0.91,288.1,0
+sensor,other,imw-rdd-nn-kt0p2,1,1.0,0.92,290.8,0
+sensor,other,dog_hynet,1,1.0,0.98,309.1,0
+sensor,other,imw-aspanformer,1,1.0,0.99,310.9,0
+sensor,other,imw-xfeat-lg,1,1.0,1.01,319.2,0
+sensor,other,dog_sosnet,1,1.0,1.08,339.1,0
+sensor,other,dedode_L-upright_B-upright,1,1.0,1.1,346.5,0
+sensor,other,loftr,1,1.0,1.1,347.8,0
+sensor,other,dog_hardnet,1,1.0,1.12,353.5,0
+sensor,other,imw-eloftr,1,1.0,1.12,352.0,0
+sensor,other,imw-minima-loftr,1,1.0,1.12,351.9,0
+sensor,other,imw-d2net-nn-kt0p2,1,1.0,1.17,367.7,0
+sensor,other,hessian,1,1.0,1.28,404.6,0
+sensor,other,sift,1,1.0,1.42,446.9,0
+sensor,other,dedode_L-C4_B-C4,1,1.0,1.68,528.3,0
+sensor,other,dedode_L-upright_B-C4,1,1.0,2.21,695.5,0
+sensor,other,dedode_L-C4_B-upright,1,1.0,2.31,728.7,0
+sensor,other,dedode_L-C4_G-C4,1,1.0,2.66,839.2,0
+sensor,other,dedode_L-C4-v2_B-C4,1,0.0,3.39,1068.2,0
+sensor,other,dedode_L-C4-v2_B-upright,1,0.0,3.46,1088.9,0
+sensor,other,dedode_L-C4-v2_G-C4,1,0.0,4.07,1283.0,0
+sensor,other,dedode_L-upright_G-C4,1,0.0,6.54,2058.9,0
+sensor,other,gftt,1,0.0,14.36,4524.9,0
+sensor,other,imw-sp-nn-kt0p2,1,0.0,25.11,7910.5,0
+sensor,other,imw-gim-dkm,1,0.0,35.66,11231.5,0
+sensor,other,imw-alike-nn-kt0p2,1,0.0,,,0
+sensor,other,imw-alike-nn-kt0p2-fm1,1,0.0,,,0
+sensor,other,imw-alike-nn-kt0p2-fm1-fsp1,1,0.0,,,0
+sensor,other,imw-alike-nn-kt0p2-fsp1,1,0.0,,,0
+sensor,other,imw-d2net-nn-kt0p2-fm1,1,0.0,,,0
+sensor,other,imw-liftfeat-nn-kt0p2,1,0.0,,,0
+sensor,other,imw-omniglue,1,0.0,,,0
+sensor,other,imw-r2d2-nn-kt0p2,1,0.0,,,0
+sensor,other,imw-rdd-dense,1,0.0,,,0
+sensor,other,imw-rord-nn-kt0p2,1,0.0,,,0
+sensor,other,imw-rord-nn-kt0p2-fm1,1,0.0,,,0
+sensor,other,imw-sfd2-nn-kt0p2,1,0.0,,,0
+sensor,other,imw-sp-lg-kt0p2,1,0.0,,,0
+sensor,other,imw-sp-sg-kt0p2,1,0.0,,,0
+sensor,other,imw-xfeat-dense,1,0.0,,,0
+sensor + cloud,HS / clear (<10 %),imw-aspanformer,6,0.667,2.18,393.1,0
+sensor + cloud,HS / clear (<10 %),imw-d2net-nn-kt0p2,5,0.6,2.11,380.1,0
+sensor + cloud,HS / clear (<10 %),imw-xoftr,7,0.571,1.89,340.4,1
+sensor + cloud,HS / clear (<10 %),imw-minima-roma,7,0.571,2.29,411.4,0
+sensor + cloud,HS / clear (<10 %),imw-gim-roma,7,0.571,2.33,419.6,0
+sensor + cloud,HS / clear (<10 %),imw-roma,7,0.571,2.62,471.2,1
+sensor + cloud,HS / clear (<10 %),imw-d2net-nn-kt0p2-fm1,6,0.5,1.93,347.6,0
+sensor + cloud,HS / clear (<10 %),imw-minima-loftr,7,0.429,1.79,322.1,0
+sensor + cloud,HS / clear (<10 %),imw-topicfm,7,0.429,2.0,359.7,0
+sensor + cloud,HS / clear (<10 %),imw-ripe-nn-kt0p2,7,0.429,2.13,382.9,1
+sensor + cloud,HS / clear (<10 %),imw-rdd-nn-kt0p2,7,0.429,2.19,393.7,0
+sensor + cloud,HS / clear (<10 %),imw-sfd2-nn-kt0p2,7,0.429,2.27,408.1,0
+sensor + cloud,HS / clear (<10 %),imw-eloftr,7,0.429,2.29,411.5,0
+sensor + cloud,HS / clear (<10 %),disk_epipolar,7,0.429,2.38,428.1,1
+sensor + cloud,HS / clear (<10 %),imw-dkm,7,0.429,2.67,481.0,0
+sensor + cloud,HS / clear (<10 %),dog_hardnet,7,0.429,2.74,494.0,0
+sensor + cloud,HS / clear (<10 %),dedode_L-upright_B-upright,7,0.429,2.89,520.6,1
+sensor + cloud,HS / clear (<10 %),imw-rord-nn-kt0p2,5,0.4,2.53,455.1,0
+sensor + cloud,HS / clear (<10 %),dog_hardnet8,5,0.4,3.58,644.5,0
+sensor + cloud,HS / clear (<10 %),imw-xfeat-dense,6,0.333,2.77,499.2,0
+sensor + cloud,HS / clear (<10 %),imw-xfeat-lg,6,0.333,3.76,677.2,0
+sensor + cloud,HS / clear (<10 %),imw-lanet-nn-kt0p2,7,0.286,3.5,629.8,0
+sensor + cloud,HS / clear (<10 %),dedode_L-C4-v2_B-upright,7,0.286,3.91,702.9,0
+sensor + cloud,HS / clear (<10 %),imw-darkfeat-nn-kt0p2,7,0.286,4.12,741.1,0
+sensor + cloud,HS / clear (<10 %),dedode_L-C4-v2_B-C4,7,0.286,4.18,753.2,0
+sensor + cloud,HS / clear (<10 %),dedode_L-C4-v2_G-C4,7,0.286,4.36,785.2,1
+sensor + cloud,HS / clear (<10 %),loftr,7,0.286,4.52,812.8,0
+sensor + cloud,HS / clear (<10 %),disk_depth,7,0.286,4.63,832.9,0
+sensor + cloud,HS / clear (<10 %),dedode_L-upright_B-C4,7,0.286,4.78,859.9,0
+sensor + cloud,HS / clear (<10 %),dedode_L-C4_B-upright,7,0.286,5.16,929.2,0
+sensor + cloud,HS / clear (<10 %),dog_hynet,7,0.286,30.69,5523.7,0
+sensor + cloud,HS / clear (<10 %),imw-rord-nn-kt0p2-fm1,5,0.2,9.88,1779.3,0
+sensor + cloud,HS / clear (<10 %),imw-aliked-lg-kt0p2,6,0.167,4.83,869.4,0
+sensor + cloud,HS / clear (<10 %),dedode_L-C4_B-C4,7,0.143,4.21,757.7,0
+sensor + cloud,HS / clear (<10 %),dedode_L-upright_G-C4,7,0.143,4.7,846.5,0
+sensor + cloud,HS / clear (<10 %),dog_sosnet,7,0.143,4.77,858.0,0
+sensor + cloud,HS / clear (<10 %),imw-liftfeat-nn-kt0p2,7,0.143,5.18,932.0,0
+sensor + cloud,HS / clear (<10 %),dedode_L-C4_G-C4,7,0.143,5.2,935.2,0
+sensor + cloud,HS / clear (<10 %),imw-dad-roma,7,0.143,8.15,1467.8,0
+sensor + cloud,HS / clear (<10 %),sift,7,0.143,8.89,1600.5,0
+sensor + cloud,HS / clear (<10 %),gftt,7,0.143,9.95,1791.9,0
+sensor + cloud,HS / clear (<10 %),keynet,7,0.143,18.79,3381.6,0
+sensor + cloud,HS / clear (<10 %),hessian,7,0.143,31.57,5682.4,1
+sensor + cloud,HS / clear (<10 %),imw-alike-nn-kt0p2,6,0.0,3.29,593.0,0
+sensor + cloud,HS / clear (<10 %),imw-alike-nn-kt0p2-fm1,6,0.0,3.29,593.0,0
+sensor + cloud,HS / clear (<10 %),loftr-windoornew,5,0.0,3.4,611.6,0
+sensor + cloud,HS / clear (<10 %),imw-r2d2-nn-kt0p2,7,0.0,4.18,751.8,0
+sensor + cloud,HS / clear (<10 %),imw-omniglue,4,0.0,5.37,967.1,0
+sensor + cloud,HS / clear (<10 %),imw-alike-nn-kt0p2-fm1-fsp1,7,0.0,6.6,1187.4,0
+sensor + cloud,HS / clear (<10 %),imw-alike-nn-kt0p2-fsp1,7,0.0,6.6,1187.4,0
+sensor + cloud,HS / clear (<10 %),loftr-windoor,5,0.0,10.84,1950.3,0
+sensor + cloud,HS / clear (<10 %),imw-sp-lg-kt0p2,6,0.0,14.06,2530.1,0
+sensor + cloud,HS / clear (<10 %),imw-gim-dkm,7,0.0,18.96,3413.6,0
+sensor + cloud,HS / clear (<10 %),imw-sp-sg-kt0p2,6,0.0,21.48,3866.6,0
+sensor + cloud,HS / clear (<10 %),imw-sp-nn-kt0p2,5,0.0,22.58,4064.8,0
+sensor + cloud,HS / clear (<10 %),dog_tfeat,5,0.0,30.44,5478.5,0
+sensor + cloud,HS / clear (<10 %),imw-rdd-dense,3,0.0,,,0
+sensor + cloud,HS / cloudy (>30 %),hessian,1,1.0,0.6,107.6,1
+sensor + cloud,HS / cloudy (>30 %),disk_epipolar,1,1.0,0.68,122.0,0
+sensor + cloud,HS / cloudy (>30 %),imw-ripe-nn-kt0p2,1,1.0,0.76,136.5,0
+sensor + cloud,HS / cloudy (>30 %),imw-r2d2-nn-kt0p2,1,1.0,0.77,138.1,0
+sensor + cloud,HS / cloudy (>30 %),imw-darkfeat-nn-kt0p2,1,1.0,0.78,140.5,0
+sensor + cloud,HS / cloudy (>30 %),gftt,1,1.0,0.79,142.5,0
+sensor + cloud,HS / cloudy (>30 %),imw-sfd2-nn-kt0p2,1,1.0,0.79,142.8,0
+sensor + cloud,HS / cloudy (>30 %),disk_depth,1,1.0,0.82,147.7,0
+sensor + cloud,HS / cloudy (>30 %),imw-rdd-nn-kt0p2,1,1.0,0.85,153.0,0
+sensor + cloud,HS / cloudy (>30 %),keynet,1,1.0,0.89,159.3,0
+sensor + cloud,HS / cloudy (>30 %),imw-lanet-nn-kt0p2,1,1.0,0.9,162.1,0
+sensor + cloud,HS / cloudy (>30 %),dog_hynet,1,1.0,0.97,175.5,0
+sensor + cloud,HS / cloudy (>30 %),imw-minima-roma,1,1.0,0.99,178.4,0
+sensor + cloud,HS / cloudy (>30 %),imw-xfeat-lg,1,1.0,0.99,179.0,0
+sensor + cloud,HS / cloudy (>30 %),dog_hardnet8,1,1.0,1.0,179.3,0
+sensor + cloud,HS / cloudy (>30 %),imw-eloftr,1,1.0,1.02,184.3,0
+sensor + cloud,HS / cloudy (>30 %),dog_hardnet,1,1.0,1.04,186.4,0
+sensor + cloud,HS / cloudy (>30 %),imw-roma,1,1.0,1.07,192.3,0
+sensor + cloud,HS / cloudy (>30 %),imw-minima-loftr,1,1.0,1.09,195.5,0
+sensor + cloud,HS / cloudy (>30 %),sift,1,1.0,1.09,196.1,0
+sensor + cloud,HS / cloudy (>30 %),imw-aspanformer,1,1.0,1.11,200.5,0
+sensor + cloud,HS / cloudy (>30 %),imw-omniglue,1,1.0,1.11,199.1,0
+sensor + cloud,HS / cloudy (>30 %),dog_sosnet,1,1.0,1.13,203.5,0
+sensor + cloud,HS / cloudy (>30 %),imw-topicfm,1,1.0,1.13,203.1,0
+sensor + cloud,HS / cloudy (>30 %),imw-dkm,1,1.0,1.14,205.0,0
+sensor + cloud,HS / cloudy (>30 %),imw-liftfeat-nn-kt0p2,1,1.0,1.15,206.2,0
+sensor + cloud,HS / cloudy (>30 %),imw-aliked-lg-kt0p2,1,1.0,1.16,208.5,0
+sensor + cloud,HS / cloudy (>30 %),imw-alike-nn-kt0p2-fm1-fsp1,1,1.0,1.2,215.9,0
+sensor + cloud,HS / cloudy (>30 %),imw-alike-nn-kt0p2-fsp1,1,1.0,1.2,215.9,0
+sensor + cloud,HS / cloudy (>30 %),imw-xoftr,1,1.0,1.23,221.9,0
+sensor + cloud,HS / cloudy (>30 %),imw-d2net-nn-kt0p2,1,1.0,1.24,224.0,0
+sensor + cloud,HS / cloudy (>30 %),imw-gim-roma,1,1.0,1.25,224.7,0
+sensor + cloud,HS / cloudy (>30 %),imw-alike-nn-kt0p2,1,1.0,1.27,228.2,0
+sensor + cloud,HS / cloudy (>30 %),imw-alike-nn-kt0p2-fm1,1,1.0,1.27,228.2,0
+sensor + cloud,HS / cloudy (>30 %),dog_tfeat,1,1.0,1.3,233.4,0
+sensor + cloud,HS / cloudy (>30 %),loftr,1,1.0,1.35,243.5,0
+sensor + cloud,HS / cloudy (>30 %),loftr-windoor,1,1.0,1.4,252.4,0
+sensor + cloud,HS / cloudy (>30 %),loftr-windoornew,1,1.0,1.4,251.5,0
+sensor + cloud,HS / cloudy (>30 %),imw-d2net-nn-kt0p2-fm1,1,1.0,1.45,261.7,0
+sensor + cloud,HS / cloudy (>30 %),dedode_L-C4_B-upright,1,1.0,1.46,262.0,0
+sensor + cloud,HS / cloudy (>30 %),dedode_L-C4_B-C4,1,1.0,1.54,277.9,0
+sensor + cloud,HS / cloudy (>30 %),imw-xfeat-dense,1,1.0,1.63,293.1,0
+sensor + cloud,HS / cloudy (>30 %),dedode_L-C4-v2_G-C4,1,1.0,1.72,310.4,0
+sensor + cloud,HS / cloudy (>30 %),dedode_L-C4-v2_B-upright,1,1.0,1.77,318.6,0
+sensor + cloud,HS / cloudy (>30 %),imw-rord-nn-kt0p2,1,1.0,1.79,322.9,0
+sensor + cloud,HS / cloudy (>30 %),dedode_L-upright_B-upright,1,1.0,1.8,324.4,0
+sensor + cloud,HS / cloudy (>30 %),dedode_L-upright_B-C4,1,1.0,1.87,335.9,0
+sensor + cloud,HS / cloudy (>30 %),dedode_L-C4-v2_B-C4,1,1.0,1.88,338.8,0
+sensor + cloud,HS / cloudy (>30 %),dedode_L-upright_G-C4,1,1.0,2.61,469.7,0
+sensor + cloud,HS / cloudy (>30 %),dedode_L-C4_G-C4,1,0.0,3.1,558.7,0
+sensor + cloud,HS / cloudy (>30 %),imw-rord-nn-kt0p2-fm1,1,0.0,3.28,589.6,0
+sensor + cloud,HS / cloudy (>30 %),imw-gim-dkm,1,0.0,4.87,875.9,0
+sensor + cloud,HS / cloudy (>30 %),imw-dad-roma,1,0.0,24.2,4356.4,0
+sensor + cloud,HS / cloudy (>30 %),imw-sp-nn-kt0p2,1,0.0,60.35,10863.7,0
+sensor + cloud,HS / cloudy (>30 %),imw-rdd-dense,1,0.0,,,0
+sensor + cloud,HS / cloudy (>30 %),imw-sp-lg-kt0p2,1,0.0,,,0
+sensor + cloud,HS / cloudy (>30 %),imw-sp-sg-kt0p2,1,0.0,,,0
+sensor + cloud,HV / clear (<10 %),disk_depth,4,0.75,2.43,767.0,1
+sensor + cloud,HV / clear (<10 %),imw-minima-roma,4,0.75,2.43,766.3,0
+sensor + cloud,HV / clear (<10 %),disk_epipolar,4,0.75,2.46,775.5,0
+sensor + cloud,HV / clear (<10 %),imw-darkfeat-nn-kt0p2,4,0.75,2.47,777.2,0
+sensor + cloud,HV / clear (<10 %),imw-minima-loftr,4,0.75,2.55,802.5,0
+sensor + cloud,HV / clear (<10 %),imw-rdd-nn-kt0p2,4,0.75,2.6,820.1,0
+sensor + cloud,HV / clear (<10 %),imw-topicfm,4,0.75,2.64,832.9,0
+sensor + cloud,HV / clear (<10 %),keynet,4,0.75,2.7,850.1,0
+sensor + cloud,HV / clear (<10 %),imw-lanet-nn-kt0p2,4,0.75,2.74,863.5,0
+sensor + cloud,HV / clear (<10 %),dedode_L-upright_B-C4,4,0.75,2.78,875.4,0
+sensor + cloud,HV / clear (<10 %),imw-ripe-nn-kt0p2,4,0.75,2.79,877.3,0
+sensor + cloud,HV / clear (<10 %),imw-d2net-nn-kt0p2-fm1,4,0.75,2.81,883.6,0
+sensor + cloud,HV / clear (<10 %),imw-sfd2-nn-kt0p2,4,0.75,2.87,903.9,0
+sensor + cloud,HV / clear (<10 %),imw-d2net-nn-kt0p2,4,0.75,2.9,914.8,0
+sensor + cloud,HV / clear (<10 %),imw-dad-roma,4,0.5,1.7,535.2,0
+sensor + cloud,HV / clear (<10 %),imw-r2d2-nn-kt0p2,4,0.5,1.84,579.3,0
+sensor + cloud,HV / clear (<10 %),imw-rdd-dense,4,0.5,1.86,584.7,0
+sensor + cloud,HV / clear (<10 %),imw-alike-nn-kt0p2,4,0.5,1.94,609.7,0
+sensor + cloud,HV / clear (<10 %),imw-alike-nn-kt0p2-fm1,4,0.5,1.94,609.7,0
+sensor + cloud,HV / clear (<10 %),imw-xfeat-dense,4,0.5,2.22,698.9,0
+sensor + cloud,HV / clear (<10 %),imw-aspanformer,4,0.5,2.42,763.7,0
+sensor + cloud,HV / clear (<10 %),imw-dkm,4,0.5,2.6,820.6,0
+sensor + cloud,HV / clear (<10 %),dedode_L-C4-v2_B-C4,4,0.5,2.67,841.6,1
+sensor + cloud,HV / clear (<10 %),imw-xfeat-lg,4,0.5,2.83,892.2,0
+sensor + cloud,HV / clear (<10 %),loftr,4,0.5,2.89,909.8,0
+sensor + cloud,HV / clear (<10 %),dog_hardnet,4,0.5,2.92,920.0,0
+sensor + cloud,HV / clear (<10 %),imw-alike-nn-kt0p2-fm1-fsp1,4,0.5,2.92,918.8,0
+sensor + cloud,HV / clear (<10 %),imw-alike-nn-kt0p2-fsp1,4,0.5,2.92,918.8,0
+sensor + cloud,HV / clear (<10 %),imw-aliked-lg-kt0p2,4,0.5,2.96,933.9,0
+sensor + cloud,HV / clear (<10 %),imw-eloftr,4,0.5,2.96,933.7,0
+sensor + cloud,HV / clear (<10 %),dedode_L-C4_B-upright,4,0.5,3.15,992.7,0
+sensor + cloud,HV / clear (<10 %),dedode_L-C4-v2_B-upright,4,0.5,3.99,1258.2,0
+sensor + cloud,HV / clear (<10 %),dedode_L-upright_B-upright,4,0.5,4.07,1282.8,0
+sensor + cloud,HV / clear (<10 %),sift,4,0.5,7.91,2493.2,0
+sensor + cloud,HV / clear (<10 %),dedode_L-upright_G-C4,4,0.5,8.42,2652.6,0
+sensor + cloud,HV / clear (<10 %),hessian,4,0.5,10.13,3189.4,0
+sensor + cloud,HV / clear (<10 %),imw-xoftr,4,0.5,10.8,3401.7,0
+sensor + cloud,HV / clear (<10 %),imw-roma,4,0.5,11.25,3543.9,0
+sensor + cloud,HV / clear (<10 %),dog_sosnet,4,0.5,12.24,3856.2,0
+sensor + cloud,HV / clear (<10 %),dog_hardnet8,4,0.5,22.04,6943.2,0
+sensor + cloud,HV / clear (<10 %),dog_hynet,4,0.5,24.71,7785.1,2
+sensor + cloud,HV / clear (<10 %),gftt,4,0.5,24.86,7829.9,0
+sensor + cloud,HV / clear (<10 %),dedode_L-C4_G-C4,4,0.5,25.99,8187.1,0
+sensor + cloud,HV / clear (<10 %),dog_tfeat,4,0.5,26.63,8389.5,0
+sensor + cloud,HV / clear (<10 %),dedode_L-C4-v2_G-C4,4,0.5,31.87,10039.0,0
+sensor + cloud,HV / clear (<10 %),imw-gim-roma,4,0.5,43.58,13726.7,0
+sensor + cloud,HV / clear (<10 %),imw-sp-sg-kt0p2,4,0.25,0.9,283.7,0
+sensor + cloud,HV / clear (<10 %),imw-sp-nn-kt0p2,4,0.25,1.0,314.6,0
+sensor + cloud,HV / clear (<10 %),imw-sp-lg-kt0p2,4,0.25,1.07,337.1,0
+sensor + cloud,HV / clear (<10 %),imw-rord-nn-kt0p2,4,0.25,2.06,647.8,0
+sensor + cloud,HV / clear (<10 %),imw-omniglue,4,0.25,3.01,947.2,0
+sensor + cloud,HV / clear (<10 %),imw-liftfeat-nn-kt0p2,4,0.25,3.22,1014.7,0
+sensor + cloud,HV / clear (<10 %),imw-rord-nn-kt0p2-fm1,4,0.25,3.23,1017.7,0
+sensor + cloud,HV / clear (<10 %),loftr-windoor,4,0.25,3.87,1218.6,0
+sensor + cloud,HV / clear (<10 %),dedode_L-C4_B-C4,4,0.25,4.01,1262.1,0
+sensor + cloud,HV / clear (<10 %),loftr-windoornew,4,0.25,40.83,12860.1,0
+sensor + cloud,HV / clear (<10 %),imw-gim-dkm,4,0.0,34.85,10979.1,0
+sensor + cloud,MV / clear (<10 %),imw-eloftr,2,0.0,3.75,168.8,1
+sensor + cloud,MV / clear (<10 %),imw-xfeat-dense,2,0.0,3.85,173.1,0
+sensor + cloud,MV / clear (<10 %),imw-darkfeat-nn-kt0p2,2,0.0,4.45,200.3,0
+sensor + cloud,MV / clear (<10 %),imw-sfd2-nn-kt0p2,2,0.0,4.51,203.2,0
+sensor + cloud,MV / clear (<10 %),imw-minima-roma,2,0.0,4.59,206.4,0
+sensor + cloud,MV / clear (<10 %),imw-rdd-nn-kt0p2,2,0.0,4.63,208.3,0
+sensor + cloud,MV / clear (<10 %),imw-lanet-nn-kt0p2,2,0.0,4.94,222.3,0
+sensor + cloud,MV / clear (<10 %),imw-rdd-dense,2,0.0,4.98,224.1,0
+sensor + cloud,MV / clear (<10 %),imw-xfeat-lg,2,0.0,5.08,228.8,0
+sensor + cloud,MV / clear (<10 %),imw-xoftr,2,0.0,5.61,252.2,1
+sensor + cloud,MV / clear (<10 %),imw-aliked-lg-kt0p2,2,0.0,5.9,265.7,0
+sensor + cloud,MV / clear (<10 %),imw-gim-roma,2,0.0,6.02,270.8,0
+sensor + cloud,MV / clear (<10 %),imw-d2net-nn-kt0p2-fm1,2,0.0,6.13,275.7,0
+sensor + cloud,MV / clear (<10 %),imw-minima-loftr,2,0.0,6.17,277.8,0
+sensor + cloud,MV / clear (<10 %),imw-omniglue,2,0.0,6.32,284.5,0
+sensor + cloud,MV / clear (<10 %),imw-topicfm,2,0.0,6.55,294.7,0
+sensor + cloud,MV / clear (<10 %),imw-sp-sg-kt0p2,2,0.0,6.85,308.4,0
+sensor + cloud,MV / clear (<10 %),imw-d2net-nn-kt0p2,2,0.0,7.18,323.3,0
+sensor + cloud,MV / clear (<10 %),imw-liftfeat-nn-kt0p2,2,0.0,7.55,339.5,0
+sensor + cloud,MV / clear (<10 %),imw-sp-nn-kt0p2,2,0.0,7.66,344.6,0
+sensor + cloud,MV / clear (<10 %),imw-ripe-nn-kt0p2,2,0.0,8.03,361.5,0
+sensor + cloud,MV / clear (<10 %),imw-aspanformer,2,0.0,8.09,364.3,0
+sensor + cloud,MV / clear (<10 %),imw-r2d2-nn-kt0p2,2,0.0,8.19,368.7,0
+sensor + cloud,MV / clear (<10 %),imw-alike-nn-kt0p2-fm1-fsp1,2,0.0,8.88,399.4,0
+sensor + cloud,MV / clear (<10 %),imw-alike-nn-kt0p2-fsp1,2,0.0,8.88,399.4,0
+sensor + cloud,MV / clear (<10 %),imw-rord-nn-kt0p2-fm1,2,0.0,9.46,425.8,0
+sensor + cloud,MV / clear (<10 %),imw-rord-nn-kt0p2,2,0.0,9.61,432.5,0
+sensor + cloud,MV / clear (<10 %),imw-alike-nn-kt0p2,2,0.0,9.7,436.6,0
+sensor + cloud,MV / clear (<10 %),imw-alike-nn-kt0p2-fm1,2,0.0,9.7,436.6,0
+sensor + cloud,MV / clear (<10 %),loftr,2,0.0,9.9,445.3,0
+sensor + cloud,MV / clear (<10 %),imw-sp-lg-kt0p2,2,0.0,10.21,459.4,0
+sensor + cloud,MV / clear (<10 %),dog_hardnet,2,0.0,22.67,1020.1,0
+sensor + cloud,MV / clear (<10 %),dog_sosnet,2,0.0,23.62,1062.8,0
+sensor + cloud,MV / clear (<10 %),sift,2,0.0,24.29,1093.2,0
+sensor + cloud,MV / clear (<10 %),hessian,2,0.0,24.3,1093.6,0
+sensor + cloud,MV / clear (<10 %),imw-roma,2,0.0,25.45,1145.4,0
+sensor + cloud,MV / clear (<10 %),dedode_L-C4-v2_B-C4,2,0.0,25.79,1160.8,0
+sensor + cloud,MV / clear (<10 %),disk_depth,2,0.0,26.21,1179.6,0
+sensor + cloud,MV / clear (<10 %),dedode_L-C4_G-C4,2,0.0,33.25,1496.2,0
+sensor + cloud,MV / clear (<10 %),keynet,2,0.0,33.89,1525.2,0
+sensor + cloud,MV / clear (<10 %),disk_epipolar,2,0.0,34.94,1572.1,0
+sensor + cloud,MV / clear (<10 %),gftt,2,0.0,36.1,1624.5,0
+sensor + cloud,MV / clear (<10 %),dedode_L-C4-v2_G-C4,2,0.0,36.56,1645.0,0
+sensor + cloud,MV / clear (<10 %),dog_hynet,2,0.0,36.65,1649.4,0
+sensor + cloud,MV / clear (<10 %),dedode_L-upright_B-C4,2,0.0,36.98,1664.1,0
+sensor + cloud,MV / clear (<10 %),dedode_L-C4-v2_B-upright,2,0.0,40.9,1840.5,0
+sensor + cloud,MV / clear (<10 %),dedode_L-C4_B-C4,2,0.0,41.37,1861.7,0
+sensor + cloud,MV / clear (<10 %),imw-dad-roma,2,0.0,44.63,2008.2,0
+sensor + cloud,MV / clear (<10 %),dedode_L-upright_B-upright,2,0.0,46.4,2088.0,0
+sensor + cloud,MV / clear (<10 %),dedode_L-upright_G-C4,2,0.0,48.73,2192.6,0
+sensor + cloud,MV / clear (<10 %),imw-dkm,2,0.0,71.4,3213.2,0
+sensor + cloud,MV / clear (<10 %),dedode_L-C4_B-upright,2,0.0,71.53,3218.7,0
+sensor + cloud,MV / clear (<10 %),imw-gim-dkm,2,0.0,545.41,24543.6,0
+sensor + cloud,MV / clear (<10 %),loftr-windoornew,1,0.0,,,0
+sensor + cloud,other / clear (<10 %),imw-aliked-lg-kt0p2,1,1.0,0.48,152.7,1
+sensor + cloud,other / clear (<10 %),disk_depth,1,1.0,0.62,195.2,0
+sensor + cloud,other / clear (<10 %),imw-minima-roma,1,1.0,0.65,203.5,0
+sensor + cloud,other / clear (<10 %),imw-dkm,1,1.0,0.67,212.0,0
+sensor + cloud,other / clear (<10 %),imw-lanet-nn-kt0p2,1,1.0,0.74,233.3,0
+sensor + cloud,other / clear (<10 %),keynet,1,1.0,0.75,235.9,0
+sensor + cloud,other / clear (<10 %),imw-darkfeat-nn-kt0p2,1,1.0,0.81,256.1,0
+sensor + cloud,other / clear (<10 %),imw-roma,1,1.0,0.82,258.7,0
+sensor + cloud,other / clear (<10 %),imw-dad-roma,1,1.0,0.83,260.4,0
+sensor + cloud,other / clear (<10 %),disk_epipolar,1,1.0,0.85,266.6,0
+sensor + cloud,other / clear (<10 %),imw-ripe-nn-kt0p2,1,1.0,0.89,280.7,0
+sensor + cloud,other / clear (<10 %),imw-xoftr,1,1.0,0.89,281.2,0
+sensor + cloud,other / clear (<10 %),imw-gim-roma,1,1.0,0.91,285.6,0
+sensor + cloud,other / clear (<10 %),imw-topicfm,1,1.0,0.91,288.1,0
+sensor + cloud,other / clear (<10 %),imw-rdd-nn-kt0p2,1,1.0,0.92,290.8,0
+sensor + cloud,other / clear (<10 %),dog_hynet,1,1.0,0.98,309.1,0
+sensor + cloud,other / clear (<10 %),imw-aspanformer,1,1.0,0.99,310.9,0
+sensor + cloud,other / clear (<10 %),imw-xfeat-lg,1,1.0,1.01,319.2,0
+sensor + cloud,other / clear (<10 %),dog_sosnet,1,1.0,1.08,339.1,0
+sensor + cloud,other / clear (<10 %),dedode_L-upright_B-upright,1,1.0,1.1,346.5,0
+sensor + cloud,other / clear (<10 %),loftr,1,1.0,1.1,347.8,0
+sensor + cloud,other / clear (<10 %),dog_hardnet,1,1.0,1.12,353.5,0
+sensor + cloud,other / clear (<10 %),imw-eloftr,1,1.0,1.12,352.0,0
+sensor + cloud,other / clear (<10 %),imw-minima-loftr,1,1.0,1.12,351.9,0
+sensor + cloud,other / clear (<10 %),imw-d2net-nn-kt0p2,1,1.0,1.17,367.7,0
+sensor + cloud,other / clear (<10 %),hessian,1,1.0,1.28,404.6,0
+sensor + cloud,other / clear (<10 %),sift,1,1.0,1.42,446.9,0
+sensor + cloud,other / clear (<10 %),dedode_L-C4_B-C4,1,1.0,1.68,528.3,0
+sensor + cloud,other / clear (<10 %),dedode_L-upright_B-C4,1,1.0,2.21,695.5,0
+sensor + cloud,other / clear (<10 %),dedode_L-C4_B-upright,1,1.0,2.31,728.7,0
+sensor + cloud,other / clear (<10 %),dedode_L-C4_G-C4,1,1.0,2.66,839.2,0
+sensor + cloud,other / clear (<10 %),dedode_L-C4-v2_B-C4,1,0.0,3.39,1068.2,0
+sensor + cloud,other / clear (<10 %),dedode_L-C4-v2_B-upright,1,0.0,3.46,1088.9,0
+sensor + cloud,other / clear (<10 %),dedode_L-C4-v2_G-C4,1,0.0,4.07,1283.0,0
+sensor + cloud,other / clear (<10 %),dedode_L-upright_G-C4,1,0.0,6.54,2058.9,0
+sensor + cloud,other / clear (<10 %),gftt,1,0.0,14.36,4524.9,0
+sensor + cloud,other / clear (<10 %),imw-sp-nn-kt0p2,1,0.0,25.11,7910.5,0
+sensor + cloud,other / clear (<10 %),imw-gim-dkm,1,0.0,35.66,11231.5,0
+sensor + cloud,other / clear (<10 %),imw-alike-nn-kt0p2,1,0.0,,,0
+sensor + cloud,other / clear (<10 %),imw-alike-nn-kt0p2-fm1,1,0.0,,,0
+sensor + cloud,other / clear (<10 %),imw-alike-nn-kt0p2-fm1-fsp1,1,0.0,,,0
+sensor + cloud,other / clear (<10 %),imw-alike-nn-kt0p2-fsp1,1,0.0,,,0
+sensor + cloud,other / clear (<10 %),imw-d2net-nn-kt0p2-fm1,1,0.0,,,0
+sensor + cloud,other / clear (<10 %),imw-liftfeat-nn-kt0p2,1,0.0,,,0
+sensor + cloud,other / clear (<10 %),imw-omniglue,1,0.0,,,0
+sensor + cloud,other / clear (<10 %),imw-r2d2-nn-kt0p2,1,0.0,,,0
+sensor + cloud,other / clear (<10 %),imw-rdd-dense,1,0.0,,,0
+sensor + cloud,other / clear (<10 %),imw-rord-nn-kt0p2,1,0.0,,,0
+sensor + cloud,other / clear (<10 %),imw-rord-nn-kt0p2-fm1,1,0.0,,,0
+sensor + cloud,other / clear (<10 %),imw-sfd2-nn-kt0p2,1,0.0,,,0
+sensor + cloud,other / clear (<10 %),imw-sp-lg-kt0p2,1,0.0,,,0
+sensor + cloud,other / clear (<10 %),imw-sp-sg-kt0p2,1,0.0,,,0
+sensor + cloud,other / clear (<10 %),imw-xfeat-dense,1,0.0,,,0
+sensor + error,HS / medium (20-80 km),imw-aspanformer,5,0.6,2.31,414.9,0
+sensor + error,HS / medium (20-80 km),imw-xoftr,6,0.5,1.91,344.6,0
+sensor + error,HS / medium (20-80 km),imw-ripe-nn-kt0p2,6,0.5,2.13,382.9,1
+sensor + error,HS / medium (20-80 km),disk_epipolar,6,0.5,2.3,413.9,1
+sensor + error,HS / medium (20-80 km),dog_hardnet8,4,0.5,2.36,424.0,0
+sensor + error,HS / medium (20-80 km),imw-minima-roma,6,0.5,2.37,427.2,0
+sensor + error,HS / medium (20-80 km),imw-d2net-nn-kt0p2,4,0.5,2.39,430.0,0
+sensor + error,HS / medium (20-80 km),imw-gim-roma,6,0.5,2.51,451.2,0
+sensor + error,HS / medium (20-80 km),imw-rord-nn-kt0p2,4,0.5,2.53,455.1,0
+sensor + error,HS / medium (20-80 km),imw-roma,6,0.5,2.58,464.3,1
+sensor + error,HS / medium (20-80 km),dog_hardnet,6,0.5,2.7,485.7,0
+sensor + error,HS / medium (20-80 km),dedode_L-upright_B-upright,6,0.5,2.74,493.3,1
+sensor + error,HS / medium (20-80 km),imw-d2net-nn-kt0p2-fm1,5,0.4,2.22,399.9,0
+sensor + error,HS / medium (20-80 km),imw-xfeat-dense,5,0.4,2.77,499.2,0
+sensor + error,HS / medium (20-80 km),imw-xfeat-lg,5,0.4,3.3,593.8,0
+sensor + error,HS / medium (20-80 km),imw-sfd2-nn-kt0p2,6,0.333,1.57,282.2,0
+sensor + error,HS / medium (20-80 km),imw-minima-loftr,6,0.333,2.0,360.9,0
+sensor + error,HS / medium (20-80 km),imw-rdd-nn-kt0p2,6,0.333,2.07,372.4,0
+sensor + error,HS / medium (20-80 km),imw-topicfm,6,0.333,2.07,371.7,0
+sensor + error,HS / medium (20-80 km),imw-eloftr,6,0.333,2.37,426.7,0
+sensor + error,HS / medium (20-80 km),dedode_L-C4-v2_B-upright,6,0.333,3.14,564.6,0
+sensor + error,HS / medium (20-80 km),imw-darkfeat-nn-kt0p2,6,0.333,3.2,576.8,0
+sensor + error,HS / medium (20-80 km),dedode_L-C4-v2_B-C4,6,0.333,3.3,593.4,0
+sensor + error,HS / medium (20-80 km),dedode_L-C4-v2_G-C4,6,0.333,3.4,612.6,1
+sensor + error,HS / medium (20-80 km),disk_depth,6,0.333,3.43,617.3,0
+sensor + error,HS / medium (20-80 km),imw-lanet-nn-kt0p2,6,0.333,3.5,629.8,0
+sensor + error,HS / medium (20-80 km),loftr,6,0.333,3.51,631.9,0
+sensor + error,HS / medium (20-80 km),dedode_L-C4_B-upright,6,0.333,3.59,645.9,0
+sensor + error,HS / medium (20-80 km),dedode_L-upright_B-C4,6,0.333,3.73,671.3,0
+sensor + error,HS / medium (20-80 km),imw-dkm,6,0.333,7.73,1390.5,0
+sensor + error,HS / medium (20-80 km),dog_hynet,6,0.333,16.64,2996.0,0
+sensor + error,HS / medium (20-80 km),imw-rord-nn-kt0p2-fm1,4,0.25,9.88,1779.3,0
+sensor + error,HS / medium (20-80 km),imw-aliked-lg-kt0p2,5,0.2,3.65,657.4,0
+sensor + error,HS / medium (20-80 km),dedode_L-C4_B-C4,6,0.167,3.78,680.3,0
+sensor + error,HS / medium (20-80 km),dedode_L-upright_G-C4,6,0.167,3.9,702.3,0
+sensor + error,HS / medium (20-80 km),dog_sosnet,6,0.167,3.97,715.5,0
+sensor + error,HS / medium (20-80 km),imw-liftfeat-nn-kt0p2,6,0.167,4.19,753.4,0
+sensor + error,HS / medium (20-80 km),dedode_L-C4_G-C4,6,0.167,4.7,845.3,0
+sensor + error,HS / medium (20-80 km),sift,6,0.167,6.84,1231.9,0
+sensor + error,HS / medium (20-80 km),gftt,6,0.167,7.42,1335.6,0
+sensor + error,HS / medium (20-80 km),imw-dad-roma,6,0.167,8.15,1467.8,0
+sensor + error,HS / medium (20-80 km),keynet,6,0.167,11.6,2087.8,0
+sensor + error,HS / medium (20-80 km),hessian,6,0.167,18.22,3279.2,1
+sensor + error,HS / medium (20-80 km),imw-alike-nn-kt0p2,5,0.0,3.29,593.0,0
+sensor + error,HS / medium (20-80 km),imw-alike-nn-kt0p2-fm1,5,0.0,3.29,593.0,0
+sensor + error,HS / medium (20-80 km),loftr-windoornew,4,0.0,3.4,611.6,0
+sensor + error,HS / medium (20-80 km),imw-r2d2-nn-kt0p2,6,0.0,4.18,751.8,0
+sensor + error,HS / medium (20-80 km),imw-omniglue,3,0.0,5.37,967.1,0
+sensor + error,HS / medium (20-80 km),imw-alike-nn-kt0p2-fm1-fsp1,6,0.0,6.6,1187.4,0
+sensor + error,HS / medium (20-80 km),imw-alike-nn-kt0p2-fsp1,6,0.0,6.6,1187.4,0
+sensor + error,HS / medium (20-80 km),loftr-windoor,4,0.0,12.25,2205.8,0
+sensor + error,HS / medium (20-80 km),imw-sp-lg-kt0p2,5,0.0,14.06,2530.1,0
+sensor + error,HS / medium (20-80 km),imw-gim-dkm,6,0.0,15.9,2861.2,0
+sensor + error,HS / medium (20-80 km),dog_tfeat,4,0.0,18.18,3272.4,0
+sensor + error,HS / medium (20-80 km),imw-sp-sg-kt0p2,5,0.0,21.48,3866.6,0
+sensor + error,HS / medium (20-80 km),imw-sp-nn-kt0p2,4,0.0,22.58,4064.8,0
+sensor + error,HS / medium (20-80 km),imw-rdd-dense,3,0.0,,,0
+sensor + error,HS / small (<20 km),imw-eloftr,2,1.0,1.09,195.7,0
+sensor + error,HS / small (<20 km),imw-xoftr,2,1.0,1.11,200.0,1
+sensor + error,HS / small (<20 km),imw-minima-roma,2,1.0,1.18,212.7,0
+sensor + error,HS / small (<20 km),imw-aspanformer,2,1.0,1.19,214.7,0
+sensor + error,HS / small (<20 km),imw-minima-loftr,2,1.0,1.23,221.4,0
+sensor + error,HS / small (<20 km),imw-topicfm,2,1.0,1.41,254.4,0
+sensor + error,HS / small (<20 km),imw-dkm,2,1.0,1.42,255.8,0
+sensor + error,HS / small (<20 km),imw-gim-roma,2,1.0,1.44,259.5,0
+sensor + error,HS / small (<20 km),imw-d2net-nn-kt0p2,2,1.0,1.54,277.1,0
+sensor + error,HS / small (<20 km),imw-d2net-nn-kt0p2-fm1,2,1.0,1.54,276.8,0
+sensor + error,HS / small (<20 km),imw-rdd-nn-kt0p2,2,1.0,1.58,284.0,0
+sensor + error,HS / small (<20 km),imw-sfd2-nn-kt0p2,2,1.0,1.88,338.4,0
+sensor + error,HS / small (<20 km),imw-roma,2,1.0,1.99,357.7,0
+sensor + error,HS / small (<20 km),imw-ripe-nn-kt0p2,2,0.5,0.76,136.5,0
+sensor + error,HS / small (<20 km),imw-r2d2-nn-kt0p2,2,0.5,0.77,138.1,0
+sensor + error,HS / small (<20 km),imw-lanet-nn-kt0p2,2,0.5,0.9,162.1,0
+sensor + error,HS / small (<20 km),imw-omniglue,2,0.5,1.11,199.1,0
+sensor + error,HS / small (<20 km),imw-alike-nn-kt0p2-fm1-fsp1,2,0.5,1.2,215.9,0
+sensor + error,HS / small (<20 km),imw-alike-nn-kt0p2-fsp1,2,0.5,1.2,215.9,0
+sensor + error,HS / small (<20 km),imw-alike-nn-kt0p2,2,0.5,1.27,228.2,0
+sensor + error,HS / small (<20 km),imw-alike-nn-kt0p2-fm1,2,0.5,1.27,228.2,0
+sensor + error,HS / small (<20 km),loftr-windoornew,2,0.5,1.4,251.5,0
+sensor + error,HS / small (<20 km),imw-xfeat-dense,2,0.5,1.63,293.1,0
+sensor + error,HS / small (<20 km),imw-rord-nn-kt0p2,2,0.5,1.79,322.9,0
+sensor + error,HS / small (<20 km),imw-darkfeat-nn-kt0p2,2,0.5,2.45,440.8,0
+sensor + error,HS / small (<20 km),imw-liftfeat-nn-kt0p2,2,0.5,3.16,569.1,0
+sensor + error,HS / small (<20 km),dedode_L-C4_B-C4,2,0.5,3.26,587.0,0
+sensor + error,HS / small (<20 km),loftr,2,0.5,3.52,634.4,0
+sensor + error,HS / small (<20 km),dedode_L-C4_B-upright,2,0.5,4.54,816.6,0
+sensor + error,HS / small (<20 km),dedode_L-C4-v2_B-C4,2,0.5,4.93,888.0,0
+sensor + error,HS / small (<20 km),loftr-windoor,2,0.5,5.41,973.6,0
+sensor + error,HS / small (<20 km),dedode_L-upright_B-upright,2,0.5,6.26,1127.2,0
+sensor + error,HS / small (<20 km),imw-xfeat-lg,2,0.5,8.43,1517.0,0
+sensor + error,HS / small (<20 km),disk_depth,2,0.5,9.59,1726.3,0
+sensor + error,HS / small (<20 km),dedode_L-upright_G-C4,2,0.5,10.48,1885.7,0
+sensor + error,HS / small (<20 km),imw-aliked-lg-kt0p2,2,0.5,10.59,1906.1,0
+sensor + error,HS / small (<20 km),dedode_L-upright_B-C4,2,0.5,11.86,2134.9,0
+sensor + error,HS / small (<20 km),dedode_L-C4-v2_B-upright,2,0.5,15.38,2769.1,0
+sensor + error,HS / small (<20 km),gftt,2,0.5,25.39,4570.1,0
+sensor + error,HS / small (<20 km),dog_hardnet,2,0.5,31.75,5715.6,0
+sensor + error,HS / small (<20 km),disk_epipolar,2,0.5,33.53,6036.0,0
+sensor + error,HS / small (<20 km),keynet,2,0.5,38.7,6965.3,0
+sensor + error,HS / small (<20 km),dog_tfeat,2,0.5,39.97,7193.7,0
+sensor + error,HS / small (<20 km),dog_hynet,2,0.5,40.33,7258.5,0
+sensor + error,HS / small (<20 km),dog_sosnet,2,0.5,40.59,7305.5,0
+sensor + error,HS / small (<20 km),dedode_L-C4-v2_G-C4,2,0.5,40.68,7322.5,0
+sensor + error,HS / small (<20 km),sift,2,0.5,45.68,8223.1,0
+sensor + error,HS / small (<20 km),hessian,2,0.5,46.69,8403.8,1
+sensor + error,HS / small (<20 km),dog_hardnet8,2,0.5,46.89,8441.0,0
+sensor + error,HS / small (<20 km),imw-rord-nn-kt0p2-fm1,2,0.0,3.28,589.6,0
+sensor + error,HS / small (<20 km),imw-dad-roma,2,0.0,24.2,4356.4,0
+sensor + error,HS / small (<20 km),imw-gim-dkm,2,0.0,31.57,5682.9,0
+sensor + error,HS / small (<20 km),dedode_L-C4_G-C4,2,0.0,33.59,6046.3,0
+sensor + error,HS / small (<20 km),imw-sp-nn-kt0p2,2,0.0,60.35,10863.7,0
+sensor + error,HS / small (<20 km),imw-rdd-dense,1,0.0,,,0
+sensor + error,HS / small (<20 km),imw-sp-lg-kt0p2,2,0.0,,,0
+sensor + error,HS / small (<20 km),imw-sp-sg-kt0p2,2,0.0,,,0
+sensor + error,HV / large (>80 km),dedode_L-C4-v2_B-C4,1,1.0,2.14,673.8,1
+sensor + error,HV / large (>80 km),imw-xfeat-dense,1,1.0,2.22,698.9,0
+sensor + error,HV / large (>80 km),imw-minima-roma,1,1.0,2.23,702.7,0
+sensor + error,HV / large (>80 km),imw-darkfeat-nn-kt0p2,1,1.0,2.33,732.8,0
+sensor + error,HV / large (>80 km),disk_depth,1,1.0,2.49,783.9,0
+sensor + error,HV / large (>80 km),disk_epipolar,1,1.0,2.52,793.6,0
+sensor + error,HV / large (>80 km),loftr,1,1.0,2.57,809.9,0
+sensor + error,HV / large (>80 km),dedode_L-upright_B-C4,1,1.0,2.63,829.0,0
+sensor + error,HV / large (>80 km),keynet,1,1.0,2.65,833.7,0
+sensor + error,HV / large (>80 km),imw-rdd-nn-kt0p2,1,1.0,2.69,846.5,0
+sensor + error,HV / large (>80 km),imw-topicfm,1,1.0,2.72,857.8,0
+sensor + error,HV / large (>80 km),imw-sfd2-nn-kt0p2,1,1.0,2.77,872.6,0
+sensor + error,HV / large (>80 km),imw-ripe-nn-kt0p2,1,1.0,2.79,878.4,0
+sensor + error,HV / large (>80 km),imw-minima-loftr,1,1.0,2.88,907.6,0
+sensor + error,HV / large (>80 km),imw-lanet-nn-kt0p2,1,1.0,2.89,908.9,0
+sensor + error,HV / large (>80 km),imw-d2net-nn-kt0p2,1,1.0,2.9,914.8,0
+sensor + error,HV / large (>80 km),imw-d2net-nn-kt0p2-fm1,1,1.0,2.98,939.5,0
+sensor + error,HV / large (>80 km),imw-xfeat-lg,1,0.0,3.12,981.6,0
+sensor + error,HV / large (>80 km),imw-eloftr,1,0.0,3.19,1005.7,0
+sensor + error,HV / large (>80 km),imw-liftfeat-nn-kt0p2,1,0.0,3.19,1005.3,0
+sensor + error,HV / large (>80 km),dedode_L-C4_B-upright,1,0.0,3.57,1123.6,0
+sensor + error,HV / large (>80 km),imw-omniglue,1,0.0,3.72,1172.5,0
+sensor + error,HV / large (>80 km),dog_hardnet,1,0.0,3.81,1200.2,0
+sensor + error,HV / large (>80 km),loftr-windoor,1,0.0,4.15,1308.3,0
+sensor + error,HV / large (>80 km),dedode_L-C4_B-C4,1,0.0,5.0,1574.9,0
+sensor + error,HV / large (>80 km),dedode_L-C4-v2_B-upright,1,0.0,5.32,1676.3,0
+sensor + error,HV / large (>80 km),dedode_L-upright_B-upright,1,0.0,5.52,1739.3,0
+sensor + error,HV / large (>80 km),imw-rord-nn-kt0p2-fm1,1,0.0,6.76,2129.7,0
+sensor + error,HV / large (>80 km),sift,1,0.0,13.04,4107.8,0
+sensor + error,HV / large (>80 km),dedode_L-upright_G-C4,1,0.0,14.12,4448.2,0
+sensor + error,HV / large (>80 km),imw-aspanformer,1,0.0,15.71,4949.5,0
+sensor + error,HV / large (>80 km),hessian,1,0.0,17.51,5514.3,0
+sensor + error,HV / large (>80 km),imw-xoftr,1,0.0,18.7,5890.0,0
+sensor + error,HV / large (>80 km),imw-roma,1,0.0,19.93,6276.5,0
+sensor + error,HV / large (>80 km),dog_sosnet,1,0.0,21.67,6824.9,0
+sensor + error,HV / large (>80 km),dog_hardnet8,1,0.0,41.16,12966.1,0
+sensor + error,HV / large (>80 km),gftt,1,0.0,46.75,14726.7,0
+sensor + error,HV / large (>80 km),dog_hynet,1,0.0,47.94,15099.9,0
+sensor + error,HV / large (>80 km),imw-dkm,1,0.0,49.29,15527.7,0
+sensor + error,HV / large (>80 km),dedode_L-C4_G-C4,1,0.0,49.53,15601.2,0
+sensor + error,HV / large (>80 km),imw-gim-dkm,1,0.0,49.94,15729.9,0
+sensor + error,HV / large (>80 km),imw-dad-roma,1,0.0,50.0,15749.1,0
+sensor + error,HV / large (>80 km),dog_tfeat,1,0.0,50.57,15929.7,0
+sensor + error,HV / large (>80 km),dedode_L-C4-v2_G-C4,1,0.0,61.06,19232.6,0
+sensor + error,HV / large (>80 km),imw-alike-nn-kt0p2-fm1-fsp1,1,0.0,73.7,23214.8,0
+sensor + error,HV / large (>80 km),imw-alike-nn-kt0p2-fsp1,1,0.0,73.7,23214.8,0
+sensor + error,HV / large (>80 km),imw-aliked-lg-kt0p2,1,0.0,80.84,25465.1,0
+sensor + error,HV / large (>80 km),loftr-windoornew,1,0.0,108.38,34139.0,0
+sensor + error,HV / large (>80 km),imw-gim-roma,1,0.0,110.44,34787.1,0
+sensor + error,HV / large (>80 km),imw-alike-nn-kt0p2,1,0.0,,,0
+sensor + error,HV / large (>80 km),imw-alike-nn-kt0p2-fm1,1,0.0,,,0
+sensor + error,HV / large (>80 km),imw-r2d2-nn-kt0p2,1,0.0,,,0
+sensor + error,HV / large (>80 km),imw-rdd-dense,1,0.0,,,0
+sensor + error,HV / large (>80 km),imw-rord-nn-kt0p2,1,0.0,,,0
+sensor + error,HV / large (>80 km),imw-sp-lg-kt0p2,1,0.0,,,0
+sensor + error,HV / large (>80 km),imw-sp-nn-kt0p2,1,0.0,,,0
+sensor + error,HV / large (>80 km),imw-sp-sg-kt0p2,1,0.0,,,0
+sensor + error,HV / medium (20-80 km),imw-dad-roma,3,0.667,1.3,410.1,0
+sensor + error,HV / medium (20-80 km),dog_hynet,3,0.667,1.49,470.3,2
+sensor + error,HV / medium (20-80 km),imw-aspanformer,3,0.667,1.68,527.7,0
+sensor + error,HV / medium (20-80 km),imw-rdd-nn-kt0p2,3,0.667,1.69,532.3,0
+sensor + error,HV / medium (20-80 km),imw-topicfm,3,0.667,1.75,552.5,0
+sensor + error,HV / medium (20-80 km),imw-r2d2-nn-kt0p2,3,0.667,1.84,579.3,0
+sensor + error,HV / medium (20-80 km),imw-d2net-nn-kt0p2-fm1,3,0.667,1.85,583.1,0
+sensor + error,HV / medium (20-80 km),imw-ripe-nn-kt0p2,3,0.667,1.85,581.2,0
+sensor + error,HV / medium (20-80 km),imw-eloftr,3,0.667,1.86,586.5,0
+sensor + error,HV / medium (20-80 km),imw-rdd-dense,3,0.667,1.86,584.7,0
+sensor + error,HV / medium (20-80 km),imw-aliked-lg-kt0p2,3,0.667,1.87,589.4,0
+sensor + error,HV / medium (20-80 km),imw-lanet-nn-kt0p2,3,0.667,1.89,595.2,0
+sensor + error,HV / medium (20-80 km),imw-alike-nn-kt0p2-fm1-fsp1,3,0.667,1.9,598.8,0
+sensor + error,HV / medium (20-80 km),imw-alike-nn-kt0p2-fsp1,3,0.667,1.9,598.8,0
+sensor + error,HV / medium (20-80 km),imw-alike-nn-kt0p2,3,0.667,1.94,609.7,0
+sensor + error,HV / medium (20-80 km),imw-alike-nn-kt0p2-fm1,3,0.667,1.94,609.7,0
+sensor + error,HV / medium (20-80 km),imw-d2net-nn-kt0p2,3,0.667,1.95,613.3,0
+sensor + error,HV / medium (20-80 km),dog_hardnet,3,0.667,2.03,639.9,0
+sensor + error,HV / medium (20-80 km),imw-dkm,3,0.667,2.15,677.9,0
+sensor + error,HV / medium (20-80 km),imw-minima-loftr,3,0.667,2.21,697.5,0
+sensor + error,HV / medium (20-80 km),disk_depth,3,0.667,2.38,750.2,1
+sensor + error,HV / medium (20-80 km),disk_epipolar,3,0.667,2.4,757.4,0
+sensor + error,HV / medium (20-80 km),dedode_L-C4_G-C4,3,0.667,2.45,772.9,0
+sensor + error,HV / medium (20-80 km),imw-xfeat-lg,3,0.667,2.55,802.7,0
+sensor + error,HV / medium (20-80 km),imw-gim-roma,3,0.667,2.56,807.7,0
+sensor + error,HV / medium (20-80 km),imw-roma,3,0.667,2.58,811.2,0
+sensor + error,HV / medium (20-80 km),imw-darkfeat-nn-kt0p2,3,0.667,2.61,821.6,0
+sensor + error,HV / medium (20-80 km),dedode_L-upright_B-upright,3,0.667,2.62,826.3,0
+sensor + error,HV / medium (20-80 km),imw-minima-roma,3,0.667,2.63,829.9,0
+sensor + error,HV / medium (20-80 km),dedode_L-C4-v2_B-upright,3,0.667,2.67,840.2,0
+sensor + error,HV / medium (20-80 km),dedode_L-C4-v2_G-C4,3,0.667,2.68,845.3,0
+sensor + error,HV / medium (20-80 km),dog_tfeat,3,0.667,2.7,849.3,0
+sensor + error,HV / medium (20-80 km),dedode_L-upright_G-C4,3,0.667,2.72,857.0,0
+sensor + error,HV / medium (20-80 km),dedode_L-C4_B-upright,3,0.667,2.74,861.8,0
+sensor + error,HV / medium (20-80 km),hessian,3,0.667,2.74,864.5,0
+sensor + error,HV / medium (20-80 km),keynet,3,0.667,2.75,866.4,0
+sensor + error,HV / medium (20-80 km),sift,3,0.667,2.79,878.6,0
+sensor + error,HV / medium (20-80 km),dog_sosnet,3,0.667,2.82,887.5,0
+sensor + error,HV / medium (20-80 km),imw-xoftr,3,0.667,2.9,913.4,0
+sensor + error,HV / medium (20-80 km),dog_hardnet8,3,0.667,2.92,920.3,0
+sensor + error,HV / medium (20-80 km),dedode_L-upright_B-C4,3,0.667,2.93,921.8,0
+sensor + error,HV / medium (20-80 km),gftt,3,0.667,2.96,933.2,0
+sensor + error,HV / medium (20-80 km),imw-sfd2-nn-kt0p2,3,0.667,2.97,935.3,0
+sensor + error,HV / medium (20-80 km),imw-sp-sg-kt0p2,3,0.333,0.9,283.7,0
+sensor + error,HV / medium (20-80 km),imw-sp-nn-kt0p2,3,0.333,1.0,314.6,0
+sensor + error,HV / medium (20-80 km),imw-sp-lg-kt0p2,3,0.333,1.07,337.1,0
+sensor + error,HV / medium (20-80 km),imw-rord-nn-kt0p2-fm1,3,0.333,1.96,617.7,0
+sensor + error,HV / medium (20-80 km),imw-omniglue,3,0.333,1.98,624.5,0
+sensor + error,HV / medium (20-80 km),imw-rord-nn-kt0p2,3,0.333,2.06,647.8,0
+sensor + error,HV / medium (20-80 km),imw-xfeat-dense,3,0.333,2.56,805.7,0
+sensor + error,HV / medium (20-80 km),dedode_L-C4_B-C4,3,0.333,3.01,949.3,0
+sensor + error,HV / medium (20-80 km),dedode_L-C4-v2_B-C4,3,0.333,3.2,1009.4,0
+sensor + error,HV / medium (20-80 km),loftr,3,0.333,3.21,1009.8,0
+sensor + error,HV / medium (20-80 km),imw-liftfeat-nn-kt0p2,3,0.333,3.25,1024.2,0
+sensor + error,HV / medium (20-80 km),loftr-windoor,3,0.333,3.58,1128.8,0
+sensor + error,HV / medium (20-80 km),loftr-windoornew,3,0.333,3.63,1143.3,0
+sensor + error,HV / medium (20-80 km),imw-gim-dkm,3,0.0,19.77,6228.2,0
+sensor + error,MV / medium (20-80 km),imw-xoftr,1,0.0,4.46,200.6,1
+sensor + error,MV / medium (20-80 km),imw-lanet-nn-kt0p2,1,0.0,4.68,210.6,0
+sensor + error,MV / medium (20-80 km),dog_hardnet,1,0.0,39.89,1795.1,0
+sensor + error,MV / medium (20-80 km),dog_sosnet,1,0.0,40.78,1835.1,0
+sensor + error,MV / medium (20-80 km),sift,1,0.0,41.51,1867.7,0
+sensor + error,MV / medium (20-80 km),hessian,1,0.0,42.91,1931.0,0
+sensor + error,MV / medium (20-80 km),dedode_L-C4-v2_B-C4,1,0.0,45.07,2028.0,0
+sensor + error,MV / medium (20-80 km),imw-roma,1,0.0,45.65,2054.3,0
+sensor + error,MV / medium (20-80 km),disk_depth,1,0.0,47.36,2131.4,0
+sensor + error,MV / medium (20-80 km),dedode_L-C4_G-C4,1,0.0,56.72,2552.5,0
+sensor + error,MV / medium (20-80 km),keynet,1,0.0,63.96,2878.1,0
+sensor + error,MV / medium (20-80 km),disk_epipolar,1,0.0,64.75,2913.6,0
+sensor + error,MV / medium (20-80 km),dedode_L-C4-v2_G-C4,1,0.0,66.38,2987.3,0
+sensor + error,MV / medium (20-80 km),gftt,1,0.0,66.39,2987.7,0
+sensor + error,MV / medium (20-80 km),dedode_L-upright_B-C4,1,0.0,66.94,3012.2,0
+sensor + error,MV / medium (20-80 km),dog_hynet,1,0.0,67.3,3028.7,0
+sensor + error,MV / medium (20-80 km),dedode_L-C4_B-C4,1,0.0,76.31,3433.8,0
+sensor + error,MV / medium (20-80 km),dedode_L-C4-v2_B-upright,1,0.0,77.45,3485.2,0
+sensor + error,MV / medium (20-80 km),imw-dad-roma,1,0.0,82.04,3691.9,0
+sensor + error,MV / medium (20-80 km),dedode_L-upright_B-upright,1,0.0,88.04,3961.9,0
+sensor + error,MV / medium (20-80 km),dedode_L-upright_G-C4,1,0.0,88.2,3968.9,0
+sensor + error,MV / medium (20-80 km),dedode_L-C4_B-upright,1,0.0,135.54,6099.4,0
+sensor + error,MV / medium (20-80 km),imw-dkm,1,0.0,137.62,6193.0,0
+sensor + error,MV / medium (20-80 km),imw-gim-dkm,1,0.0,1071.98,48238.9,0
+sensor + error,MV / medium (20-80 km),imw-alike-nn-kt0p2,1,0.0,,,0
+sensor + error,MV / medium (20-80 km),imw-alike-nn-kt0p2-fm1,1,0.0,,,0
+sensor + error,MV / medium (20-80 km),imw-alike-nn-kt0p2-fm1-fsp1,1,0.0,,,0
+sensor + error,MV / medium (20-80 km),imw-alike-nn-kt0p2-fsp1,1,0.0,,,0
+sensor + error,MV / medium (20-80 km),imw-aliked-lg-kt0p2,1,0.0,,,0
+sensor + error,MV / medium (20-80 km),imw-aspanformer,1,0.0,,,0
+sensor + error,MV / medium (20-80 km),imw-d2net-nn-kt0p2,1,0.0,,,0
+sensor + error,MV / medium (20-80 km),imw-d2net-nn-kt0p2-fm1,1,0.0,,,0
+sensor + error,MV / medium (20-80 km),imw-darkfeat-nn-kt0p2,1,0.0,,,0
+sensor + error,MV / medium (20-80 km),imw-eloftr,1,0.0,,,0
+sensor + error,MV / medium (20-80 km),imw-gim-roma,1,0.0,,,0
+sensor + error,MV / medium (20-80 km),imw-liftfeat-nn-kt0p2,1,0.0,,,0
+sensor + error,MV / medium (20-80 km),imw-minima-loftr,1,0.0,,,0
+sensor + error,MV / medium (20-80 km),imw-minima-roma,1,0.0,,,0
+sensor + error,MV / medium (20-80 km),imw-omniglue,1,0.0,,,0
+sensor + error,MV / medium (20-80 km),imw-r2d2-nn-kt0p2,1,0.0,,,0
+sensor + error,MV / medium (20-80 km),imw-rdd-dense,1,0.0,,,0
+sensor + error,MV / medium (20-80 km),imw-rdd-nn-kt0p2,1,0.0,,,0
+sensor + error,MV / medium (20-80 km),imw-ripe-nn-kt0p2,1,0.0,,,0
+sensor + error,MV / medium (20-80 km),imw-rord-nn-kt0p2,1,0.0,,,0
+sensor + error,MV / medium (20-80 km),imw-rord-nn-kt0p2-fm1,1,0.0,,,0
+sensor + error,MV / medium (20-80 km),imw-sfd2-nn-kt0p2,1,0.0,,,0
+sensor + error,MV / medium (20-80 km),imw-sp-lg-kt0p2,1,0.0,,,0
+sensor + error,MV / medium (20-80 km),imw-sp-nn-kt0p2,1,0.0,,,0
+sensor + error,MV / medium (20-80 km),imw-sp-sg-kt0p2,1,0.0,,,0
+sensor + error,MV / medium (20-80 km),imw-topicfm,1,0.0,,,0
+sensor + error,MV / medium (20-80 km),imw-xfeat-dense,1,0.0,,,0
+sensor + error,MV / medium (20-80 km),imw-xfeat-lg,1,0.0,,,0
+sensor + error,MV / medium (20-80 km),loftr,1,0.0,,,0
+sensor + error,MV / medium (20-80 km),loftr-windoornew,1,0.0,,,0
+sensor + error,MV / small (<20 km),imw-eloftr,1,0.0,3.75,168.8,1
+sensor + error,MV / small (<20 km),keynet,1,0.0,3.83,172.4,0
+sensor + error,MV / small (<20 km),imw-xfeat-dense,1,0.0,3.85,173.1,0
+sensor + error,MV / small (<20 km),dedode_L-C4-v2_B-upright,1,0.0,4.35,195.9,0
+sensor + error,MV / small (<20 km),imw-darkfeat-nn-kt0p2,1,0.0,4.45,200.3,0
+sensor + error,MV / small (<20 km),imw-sfd2-nn-kt0p2,1,0.0,4.51,203.2,0
+sensor + error,MV / small (<20 km),imw-minima-roma,1,0.0,4.59,206.4,0
+sensor + error,MV / small (<20 km),imw-rdd-nn-kt0p2,1,0.0,4.63,208.3,0
+sensor + error,MV / small (<20 km),dedode_L-upright_B-upright,1,0.0,4.76,214.0,0
+sensor + error,MV / small (<20 km),imw-rdd-dense,1,0.0,4.98,224.1,0
+sensor + error,MV / small (<20 km),disk_depth,1,0.0,5.06,227.7,0
+sensor + error,MV / small (<20 km),imw-xfeat-lg,1,0.0,5.08,228.8,0
+sensor + error,MV / small (<20 km),disk_epipolar,1,0.0,5.12,230.6,0
+sensor + error,MV / small (<20 km),imw-dkm,1,0.0,5.19,233.3,0
+sensor + error,MV / small (<20 km),imw-lanet-nn-kt0p2,1,0.0,5.2,234.0,0
+sensor + error,MV / small (<20 km),imw-roma,1,0.0,5.25,236.4,0
+sensor + error,MV / small (<20 km),dog_hardnet,1,0.0,5.45,245.2,0
+sensor + error,MV / small (<20 km),hessian,1,0.0,5.69,256.2,0
+sensor + error,MV / small (<20 km),gftt,1,0.0,5.81,261.3,0
+sensor + error,MV / small (<20 km),imw-aliked-lg-kt0p2,1,0.0,5.9,265.7,0
+sensor + error,MV / small (<20 km),dog_hynet,1,0.0,6.0,270.1,0
+sensor + error,MV / small (<20 km),imw-gim-roma,1,0.0,6.02,270.8,0
+sensor + error,MV / small (<20 km),imw-d2net-nn-kt0p2-fm1,1,0.0,6.13,275.7,0
+sensor + error,MV / small (<20 km),imw-minima-loftr,1,0.0,6.17,277.8,0
+sensor + error,MV / small (<20 km),imw-omniglue,1,0.0,6.32,284.5,0
+sensor + error,MV / small (<20 km),dedode_L-C4_B-C4,1,0.0,6.44,289.7,0
+sensor + error,MV / small (<20 km),dog_sosnet,1,0.0,6.46,290.6,0
+sensor + error,MV / small (<20 km),dedode_L-C4-v2_B-C4,1,0.0,6.52,293.5,0
+sensor + error,MV / small (<20 km),imw-topicfm,1,0.0,6.55,294.7,0
+sensor + error,MV / small (<20 km),dedode_L-C4-v2_G-C4,1,0.0,6.73,302.8,0
+sensor + error,MV / small (<20 km),imw-xoftr,1,0.0,6.75,303.9,0
+sensor + error,MV / small (<20 km),imw-sp-sg-kt0p2,1,0.0,6.85,308.4,0
+sensor + error,MV / small (<20 km),dedode_L-upright_B-C4,1,0.0,7.02,316.0,0
+sensor + error,MV / small (<20 km),sift,1,0.0,7.08,318.7,0
+sensor + error,MV / small (<20 km),imw-d2net-nn-kt0p2,1,0.0,7.18,323.3,0
+sensor + error,MV / small (<20 km),imw-dad-roma,1,0.0,7.21,324.5,0
+sensor + error,MV / small (<20 km),dedode_L-C4_B-upright,1,0.0,7.51,338.1,0
+sensor + error,MV / small (<20 km),imw-liftfeat-nn-kt0p2,1,0.0,7.55,339.5,0
+sensor + error,MV / small (<20 km),imw-sp-nn-kt0p2,1,0.0,7.66,344.6,0
+sensor + error,MV / small (<20 km),imw-ripe-nn-kt0p2,1,0.0,8.03,361.5,0
+sensor + error,MV / small (<20 km),imw-aspanformer,1,0.0,8.09,364.3,0
+sensor + error,MV / small (<20 km),imw-r2d2-nn-kt0p2,1,0.0,8.19,368.7,0
+sensor + error,MV / small (<20 km),imw-alike-nn-kt0p2-fm1-fsp1,1,0.0,8.88,399.4,0
+sensor + error,MV / small (<20 km),imw-alike-nn-kt0p2-fsp1,1,0.0,8.88,399.4,0
+sensor + error,MV / small (<20 km),dedode_L-upright_G-C4,1,0.0,9.25,416.3,0
+sensor + error,MV / small (<20 km),imw-rord-nn-kt0p2-fm1,1,0.0,9.46,425.8,0
+sensor + error,MV / small (<20 km),imw-rord-nn-kt0p2,1,0.0,9.61,432.5,0
+sensor + error,MV / small (<20 km),imw-alike-nn-kt0p2,1,0.0,9.7,436.6,0
+sensor + error,MV / small (<20 km),imw-alike-nn-kt0p2-fm1,1,0.0,9.7,436.6,0
+sensor + error,MV / small (<20 km),dedode_L-C4_G-C4,1,0.0,9.78,439.9,0
+sensor + error,MV / small (<20 km),loftr,1,0.0,9.9,445.3,0
+sensor + error,MV / small (<20 km),imw-sp-lg-kt0p2,1,0.0,10.21,459.4,0
+sensor + error,MV / small (<20 km),imw-gim-dkm,1,0.0,18.85,848.3,0
+sensor + error,other / small (<20 km),imw-aliked-lg-kt0p2,1,1.0,0.48,152.7,1
+sensor + error,other / small (<20 km),disk_depth,1,1.0,0.62,195.2,0
+sensor + error,other / small (<20 km),imw-minima-roma,1,1.0,0.65,203.5,0
+sensor + error,other / small (<20 km),imw-dkm,1,1.0,0.67,212.0,0
+sensor + error,other / small (<20 km),imw-lanet-nn-kt0p2,1,1.0,0.74,233.3,0
+sensor + error,other / small (<20 km),keynet,1,1.0,0.75,235.9,0
+sensor + error,other / small (<20 km),imw-darkfeat-nn-kt0p2,1,1.0,0.81,256.1,0
+sensor + error,other / small (<20 km),imw-roma,1,1.0,0.82,258.7,0
+sensor + error,other / small (<20 km),imw-dad-roma,1,1.0,0.83,260.4,0
+sensor + error,other / small (<20 km),disk_epipolar,1,1.0,0.85,266.6,0
+sensor + error,other / small (<20 km),imw-ripe-nn-kt0p2,1,1.0,0.89,280.7,0
+sensor + error,other / small (<20 km),imw-xoftr,1,1.0,0.89,281.2,0
+sensor + error,other / small (<20 km),imw-gim-roma,1,1.0,0.91,285.6,0
+sensor + error,other / small (<20 km),imw-topicfm,1,1.0,0.91,288.1,0
+sensor + error,other / small (<20 km),imw-rdd-nn-kt0p2,1,1.0,0.92,290.8,0
+sensor + error,other / small (<20 km),dog_hynet,1,1.0,0.98,309.1,0
+sensor + error,other / small (<20 km),imw-aspanformer,1,1.0,0.99,310.9,0
+sensor + error,other / small (<20 km),imw-xfeat-lg,1,1.0,1.01,319.2,0
+sensor + error,other / small (<20 km),dog_sosnet,1,1.0,1.08,339.1,0
+sensor + error,other / small (<20 km),dedode_L-upright_B-upright,1,1.0,1.1,346.5,0
+sensor + error,other / small (<20 km),loftr,1,1.0,1.1,347.8,0
+sensor + error,other / small (<20 km),dog_hardnet,1,1.0,1.12,353.5,0
+sensor + error,other / small (<20 km),imw-eloftr,1,1.0,1.12,352.0,0
+sensor + error,other / small (<20 km),imw-minima-loftr,1,1.0,1.12,351.9,0
+sensor + error,other / small (<20 km),imw-d2net-nn-kt0p2,1,1.0,1.17,367.7,0
+sensor + error,other / small (<20 km),hessian,1,1.0,1.28,404.6,0
+sensor + error,other / small (<20 km),sift,1,1.0,1.42,446.9,0
+sensor + error,other / small (<20 km),dedode_L-C4_B-C4,1,1.0,1.68,528.3,0
+sensor + error,other / small (<20 km),dedode_L-upright_B-C4,1,1.0,2.21,695.5,0
+sensor + error,other / small (<20 km),dedode_L-C4_B-upright,1,1.0,2.31,728.7,0
+sensor + error,other / small (<20 km),dedode_L-C4_G-C4,1,1.0,2.66,839.2,0
+sensor + error,other / small (<20 km),dedode_L-C4-v2_B-C4,1,0.0,3.39,1068.2,0
+sensor + error,other / small (<20 km),dedode_L-C4-v2_B-upright,1,0.0,3.46,1088.9,0
+sensor + error,other / small (<20 km),dedode_L-C4-v2_G-C4,1,0.0,4.07,1283.0,0
+sensor + error,other / small (<20 km),dedode_L-upright_G-C4,1,0.0,6.54,2058.9,0
+sensor + error,other / small (<20 km),gftt,1,0.0,14.36,4524.9,0
+sensor + error,other / small (<20 km),imw-sp-nn-kt0p2,1,0.0,25.11,7910.5,0
+sensor + error,other / small (<20 km),imw-gim-dkm,1,0.0,35.66,11231.5,0
+sensor + error,other / small (<20 km),imw-alike-nn-kt0p2,1,0.0,,,0
+sensor + error,other / small (<20 km),imw-alike-nn-kt0p2-fm1,1,0.0,,,0
+sensor + error,other / small (<20 km),imw-alike-nn-kt0p2-fm1-fsp1,1,0.0,,,0
+sensor + error,other / small (<20 km),imw-alike-nn-kt0p2-fsp1,1,0.0,,,0
+sensor + error,other / small (<20 km),imw-d2net-nn-kt0p2-fm1,1,0.0,,,0
+sensor + error,other / small (<20 km),imw-liftfeat-nn-kt0p2,1,0.0,,,0
+sensor + error,other / small (<20 km),imw-omniglue,1,0.0,,,0
+sensor + error,other / small (<20 km),imw-r2d2-nn-kt0p2,1,0.0,,,0
+sensor + error,other / small (<20 km),imw-rdd-dense,1,0.0,,,0
+sensor + error,other / small (<20 km),imw-rord-nn-kt0p2,1,0.0,,,0
+sensor + error,other / small (<20 km),imw-rord-nn-kt0p2-fm1,1,0.0,,,0
+sensor + error,other / small (<20 km),imw-sfd2-nn-kt0p2,1,0.0,,,0
+sensor + error,other / small (<20 km),imw-sp-lg-kt0p2,1,0.0,,,0
+sensor + error,other / small (<20 km),imw-sp-sg-kt0p2,1,0.0,,,0
+sensor + error,other / small (<20 km),imw-xfeat-dense,1,0.0,,,0
