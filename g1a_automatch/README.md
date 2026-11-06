@@ -957,6 +957,26 @@ one window size:
   area's share of the count (at least `min_num_features`, but never more
   than the window's own count).
 
+## Two or more GPUs
+
+Every tool can run on one chosen GPU: *Device* on Output & run (a run),
+and the device list in *Cloud mask test…*, *Cloud sweep…* and the
+benchmark's OmniCloudMask cloud estimate. The lists name the GPUs as
+`nvidia-smi` numbers them, e.g. "GPU 1: NVIDIA RTX A4000 (16 GB)".
+- **One GPU means only that GPU:** the process hides the other GPUs before
+  torch loads (`CUDA_VISIBLE_DEVICES`, numbered as `nvidia-smi` lists them).
+  Every model, memory check and cache clear of the run then uses that GPU,
+  not only the parts that take a device. The log says
+  `[Device] GPU 1 only`.
+- **Two at once:** open the GUI twice. The second window says "window 2"
+  in its title and keeps its own run queue, and each window runs on the GPU
+  set on its own Output & run tab.
+- **Command line:** `--device cuda:1` (run: `"device": "cuda:1"` in the job
+  file; `cloud`, `cloudsweep`, `bench --cloud omnicloudmask`: `--device
+  cuda:1`).
+- **Resume:** the device is not a result setting, so a run started on one
+  GPU resumes on the other.
+
 ## GPU memory (16 GB workstation, GPU windows)
 
 Defaults: 1024 px windows, one model resident at a time (unloaded after its

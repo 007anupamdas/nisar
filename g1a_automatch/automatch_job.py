@@ -34,6 +34,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import sys
 import time
@@ -72,6 +73,28 @@ def code_fingerprint() -> str:
 
 def version_line() -> str:
     return f'automatch {AUTOMATCH_VERSION}, code {code_fingerprint()} ({HERE})'
+
+
+def use_gpu(device: str) -> str:
+    """Pin this process to one GPU for 'cuda:N': the other GPUs are hidden
+    (CUDA_VISIBLE_DEVICES, numbered as nvidia-smi lists them) before torch
+    loads, so every model, memory check and cache clear lands on GPU N --
+    not only those that take a device, as 'cuda:N' alone would. Returns the
+    device name to use from then on ('cuda'), or the name unchanged when it
+    names no single GPU or torch is already loaded (then 'cuda:N' as is)."""
+    m = re.fullmatch(r'cuda:(\d+)', str(device or '').strip().lower())
+    if not m:
+        return device
+    if os.environ.get('AUTOMATCH_GPU') == m.group(1):
+        return 'cuda'                                  # pinned already
+    if 'torch' in sys.modules:
+        return device
+    os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'     # the numbering nvidia-smi and the GUI's list use
+    os.environ['CUDA_VISIBLE_DEVICES'] = m.group(1)
+    os.environ['AUTOMATCH_GPU'] = m.group(1)
+    print(f'[Device] GPU {m.group(1)} only (CUDA_VISIBLE_DEVICES={m.group(1)}): every model of this run uses it',
+          flush=True)
+    return 'cuda'
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Job specification
@@ -699,6 +722,7 @@ def _config_for(job: Dict, win: int, nf: Optional[int], res: float, out_dir: str
 
 # Job keys that cannot change what the matcher computes for a sweep point.
 _RESULT_NEUTRAL_KEYS = {'output_dir', 'temp_dir', 'resume', 'debug', 'rival_max_points_per_chip',
+                        'device', 'cloud_device',        # the same results on either GPU: resume across them
                         'save_match_images', 'weights_cache_dir', 'truth_csv', 'truth_radius_m',
                         'cross_top_n', 'cross_min_agree', 'cross_cell_km', 'cross_keep_per_cell'}
 
@@ -993,6 +1017,9 @@ def prepare_cloud_mask(job: Dict, scene, out_root: str) -> Dict[str, List]:
 
 def run_job(job: Dict) -> Dict:
     job = expand_selection(normalize(job))
+    device = use_gpu(job['device'])            # before anything loads torch
+    if job.get('cloud_device'):
+        job['cloud_device'] = use_gpu(job['cloud_device'])
     pf = preflight(job, check_weights=False)   # warmup stops a detector whose weights are missing
     for w in pf['warnings']:
         print(f'[Preflight] WARNING: {w}')
@@ -1011,7 +1038,7 @@ def run_job(job: Dict) -> Dict:
     print(f'[Job] {version_line()}')
     with open(os.path.join(out_root, 'job_used.json'), 'w', encoding='utf-8') as f:
         json.dump(job, f, indent=2)
-    E.set_device(job['device'])
+    E.set_device(device)
     E.PROGRESS_HOOK = emit
 
     scene = E.InputScene(job['input_path'], E.PipelineConfig(nisar_band=job['nisar_band'],
@@ -1248,6 +1275,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
     job = load_job(a.job, a.set)
     if a.cmd == 'preflight':
+        use_gpu(job.get('device') or 'auto')
         res = preflight(job)
         print(json.dumps(res, indent=2, default=str))
         emit({'event': 'preflight', **res})

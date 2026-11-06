@@ -65,6 +65,7 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
 CLOUD_CLASSES = ((10.0, 'clear (<10 %)'), (30.0, 'partly (10-30 %)'), (101.0, 'cloudy (>30 %)'))
+DEVICE = None          # the GPU the OmniCloudMask cloud estimate runs on (main(): --device)
 ERROR_CLASSES = ((20.0, 'small (<20 km)'), (80.0, 'medium (20-80 km)'), (1e9, 'large (>80 km)'))
 
 
@@ -261,8 +262,8 @@ def _ocm_cloud(d: str, loc_in: str, scene: str, pixel_m, recompute: bool, model_
     class _S:
         raster_path = loc_in
     try:
-        _, info = C.prepare({'cloud_model_dir': model_dir}, _S(), [], os.path.join(d, 'cloud_mask'), '',
-                            sensor_of(scene, pixel_m))
+        _, info = C.prepare({'cloud_model_dir': model_dir, 'cloud_device': DEVICE or ''}, _S(), [],
+                            os.path.join(d, 'cloud_mask'), '', sensor_of(scene, pixel_m))
         return info
     except Exception as e:
         print(f'[Bench] {os.path.basename(d)}: OmniCloudMask failed ({type(e).__name__}: {e})')
@@ -593,6 +594,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument('--cloud', choices=('quick', 'omnicloudmask'), default='quick',
                     help='cloud estimate: quick (brightness heuristic) or omnicloudmask (the model, on each input)')
     ap.add_argument('--cloud-model-dir', default='', help="OmniCloudMask weights ('' = its own folder)")
+    ap.add_argument('--device', default='',
+                    help='GPU for the OmniCloudMask cloud estimate: cuda:N (that GPU only, numbered as nvidia-smi '
+                         'lists them), cuda or cpu; default: the first GPU')
     ap.add_argument('--all-jobs', action='store_true',
                     help='count every job; by default only the newest job of each scene counts')
     ap.add_argument('--share-local', default='', help="where the server's share is mounted here, e.g. V:\\")
@@ -605,6 +609,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                          'sizes made before stay in the results')
     ap.add_argument('--subcell-keep', type=int, default=10, help='matches kept per sub-cell')
     a = ap.parse_args(argv)
+    global DEVICE
+    if a.device:
+        import automatch_job as J
+        DEVICE = J.use_gpu(a.device)
     X.SHARE = (a.share_local, a.share_server)
     cross = None if a.no_cross else {'top_n': a.top, 'min_agree': a.min_agree, 'keep': a.keep,
                                      'cell_km': a.cell_km, 'tol_m': a.tolerance_m}

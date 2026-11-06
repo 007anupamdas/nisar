@@ -705,7 +705,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument('--from', dest='mask_from', default='', help='VNIR image of the same pass (for HS)')
     ap.add_argument('--margin', type=int, default=10, help='growth (px) of a mask laid on from --from')
     ap.add_argument('--model-dir', default='', help='OmniCloudMask weights folder')
-    ap.add_argument('--device', default=None, help='cpu / cuda; default: GPU when there is one')
+    ap.add_argument('--device', default=None,
+                    help='cpu / cuda / cuda:N (that GPU only, numbered as nvidia-smi lists them); default: the first GPU')
     ap.add_argument('--model-only', action='store_true', help="the model's clouds as they are (no bright-blob check)")
     ap.add_argument('--bright-pct', type=float, default=REFINE_DEFAULTS['bright_pct'],
                     help='a cloud is brighter than this percentile of the clear ground, in both visible bands')
@@ -716,13 +717,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     a = ap.parse_args(argv)
     out = a.out or os.path.join(os.path.dirname(os.path.abspath(a.image)),
                                 'cloud_test_' + os.path.splitext(os.path.basename(a.image))[0])
+    import automatch_job as J
+    device = J.use_gpu(a.device) if a.device else None      # before omnicloudmask loads torch
     problems = check({'cloud_model_dir': a.model_dir})
     if problems:
         print('\n'.join(problems))
         return 2
     ropts = None if a.model_only else {'bright_pct': a.bright_pct, 'min_blob_km2': a.min_blob_km2,
                                        'shadow_near_km': a.shadow_near_km}
-    standalone(a.image, out, a.sensor, a.bands, a.choice, a.conf, a.model_dir, a.device, a.mask_from, a.margin,
+    standalone(a.image, out, a.sensor, a.bands, a.choice, a.conf, a.model_dir, device, a.mask_from, a.margin,
                refine_opts=ropts)
     return 0
 

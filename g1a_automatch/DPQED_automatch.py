@@ -26,6 +26,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from typing import List, Tuple
 
 try:
     from PyQt5 import QtCore, QtGui, QtWidgets
@@ -280,6 +281,67 @@ class ChannelPicker(QtWidgets.QWidget):
                 if n not in out:
                     out.append(n)
         return out
+
+
+_GPUS = None
+
+
+def parse_nvidia_smi(text: str) -> List[Tuple[int, str, float]]:
+    """(index, name, memory GB) per line of nvidia-smi
+    --query-gpu=index,name,memory.total --format=csv,noheader,nounits."""
+    out = []
+    for line in (text or '').splitlines():
+        parts = [p.strip() for p in line.split(',')]
+        if len(parts) >= 3 and parts[0].isdigit():
+            try:
+                out.append((int(parts[0]), parts[1], round(float(parts[2]) / 1024.0, 1)))
+            except ValueError:
+                continue
+    return out
+
+
+def gpu_list() -> List[Tuple[int, str, float]]:
+    """This machine's GPUs as nvidia-smi numbers them (the numbering the
+    runs pin to, see automatch_job.use_gpu); asked once, no torch needed."""
+    global _GPUS
+    if _GPUS is None:
+        try:
+            r = subprocess.run(['nvidia-smi', '--query-gpu=index,name,memory.total',
+                                '--format=csv,noheader,nounits'], capture_output=True, text=True, timeout=5,
+                               creationflags=0x08000000 if os.name == 'nt' else 0)     # no console window
+            _GPUS = parse_nvidia_smi(r.stdout) if r.returncode == 0 else []
+        except Exception:
+            _GPUS = []
+    return _GPUS
+
+
+class DeviceCombo(QtWidgets.QComboBox):
+    """Where a tool runs: the first GPU, one GPU by name (that GPU only), or
+    the CPU. value() is the device name the tools take: auto, cuda:N, cpu."""
+
+    def __init__(self, parent=None, auto_label='first GPU (or CPU without one)'):
+        super().__init__(parent)
+        self.addItem(f'auto: {auto_label}', 'auto')
+        gpus = gpu_list()
+        for i, name, gb in gpus:
+            self.addItem(f'GPU {i}: {name} ({gb:g} GB)', f'cuda:{i}')
+        if not gpus:                                  # nvidia-smi not found: still offer two GPUs by number
+            for i in (0, 1):
+                self.addItem(f'GPU {i}', f'cuda:{i}')
+        self.addItem('CPU', 'cpu')
+        self.setToolTip('One GPU: the whole run uses that GPU only (the others are hidden from it), so two '
+                        'windows can run on two GPUs at once.')
+
+    def value(self) -> str:
+        return str(self.currentData() or self.currentText() or 'auto')
+
+    def setValue(self, v) -> None:
+        v = str(v or 'auto').strip().lower()
+        i = self.findData(v)
+        if i < 0:
+            self.addItem(v, v)
+            i = self.count() - 1
+        self.setCurrentIndex(i)
 
 
 class PathRow(QtWidgets.QWidget):
@@ -907,7 +969,15 @@ class BenchDialog(QtWidgets.QDialog):
         self.cloud.addItems(['quick estimate (brightness)', 'OmniCloudMask (the model, on each input)'])
         self.cloud.setToolTip('Jobs that ran with cloud masking always report the model\'s cloud %. For the '
                               'others: a quick brightness estimate, or the model run now on their input.')
-        f.addRow('Cloud estimate', self.cloud)
+        self.device = DeviceCombo()
+        self.device.setValue(defaults.get('device') or 'auto')
+        self.device.setEnabled(False)
+        self.cloud.currentIndexChanged.connect(lambda i: self.device.setEnabled(i == 1))
+        hc = QtWidgets.QHBoxLayout()
+        hc.addWidget(self.cloud, 1)
+        hc.addWidget(QtWidgets.QLabel('on'))
+        hc.addWidget(self.device)
+        f.addRow('Cloud estimate', hc)
         self.weights = defaults.get('weights_cache_dir') or ''
         self.accuracy = QtWidgets.QCheckBox('match accuracy: score every job\'s saved matches against its truth, by '
                                             'window size and keypoints (slower; nothing matched again)')
@@ -976,6 +1046,8 @@ class BenchDialog(QtWidgets.QDialog):
                 a += ['--subcell-px'] + [str(s) for s in sizes] + ['--subcell-keep', str(self.subcell_keep.value())]
         if self.cloud.currentIndex() == 1:
             a += ['--cloud', 'omnicloudmask']
+            if self.device.value() != 'auto':
+                a += ['--device', self.device.value()]
             if self.weights:
                 a += ['--cloud-model-dir', os.path.join(self.weights, 'omnicloudmask')]
         if self.cross_on.isChecked():
@@ -1115,8 +1187,8 @@ class CloudTestDialog(QtWidgets.QDialog):
         self.model_dir.setText(wdir)
         self.model_dir.edit.setPlaceholderText("OmniCloudMask's own folder")
         f.addRow('Model weights', self.model_dir)
-        self.device = QtWidgets.QComboBox()
-        self.device.addItems(['GPU when there is one', 'cpu'])
+        self.device = DeviceCombo()
+        self.device.setValue(job.get('device') or 'auto')
         f.addRow('Device', self.device)
         self.refine = QtWidgets.QCheckBox('bright blobs only: keep the model\'s clouds that are brighter than '
                                           'most clear ground and form a blob')
@@ -1193,8 +1265,8 @@ class CloudTestDialog(QtWidgets.QDialog):
             a += ['--from', self.mask_from.text()]
         if self.model_dir.text():
             a += ['--model-dir', self.model_dir.text()]
-        if self.device.currentIndex() == 1:
-            a += ['--device', 'cpu']
+        if self.device.value() != 'auto':
+            a += ['--device', self.device.value()]
         if self.refine.isChecked():
             a += ['--bright-pct', f'{self.bright.value():g}', '--min-blob-km2', f'{self.blob.value():g}',
                   '--shadow-near-km', f'{self.near.value():g}']
@@ -1272,8 +1344,8 @@ class CloudSweepDialog(QtWidgets.QDialog):
         self.model_dir.setText(wdir)
         self.model_dir.edit.setPlaceholderText("OmniCloudMask's own folder")
         f.addRow('Model weights', self.model_dir)
-        self.device = QtWidgets.QComboBox()
-        self.device.addItems(['GPU when there is one', 'cpu'])
+        self.device = DeviceCombo()
+        self.device.setValue(job.get('device') or 'auto')
         f.addRow('Device', self.device)
         self.pngs = QtWidgets.QComboBox()
         self.pngs.addItems(['one per threshold x brightness (at the middle blob and shadow)',
@@ -1358,8 +1430,8 @@ class CloudSweepDialog(QtWidgets.QDialog):
             a += ['--reference'] + refs
         if self.model_dir.text():
             a += ['--model-dir', self.model_dir.text()]
-        if self.device.currentIndex() == 1:
-            a += ['--device', 'cpu']
+        if self.device.value() != 'auto':
+            a += ['--device', self.device.value()]
         a += ['--images', ['grid', 'all', 'none'][self.pngs.currentIndex()]]
         if self.sheets.isChecked():
             a += ['--sheets']
@@ -1507,7 +1579,16 @@ class CloudResultDialog(QtWidgets.QDialog):
 class AutoMatchWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(f'DPQED AutoMatch {AUTOMATCH_VERSION} — geolocation vs reference')
+        # a window per GPU: the first window keeps the saved queue, others get their own
+        self._slot, self._slot_lock = 1, None
+        for i in range(1, 10):
+            lk = QtCore.QLockFile(os.path.join(QtCore.QDir.tempPath(), f'dpqed_automatch_window{i}.lock'))
+            if lk.tryLock(0):
+                self._slot, self._slot_lock = i, lk
+                break
+        self._queue_key = 'run_queue' if self._slot == 1 else f'run_queue_{self._slot}'
+        self.setWindowTitle(f'DPQED AutoMatch {AUTOMATCH_VERSION} — geolocation vs reference'
+                            + (f' — window {self._slot}' if self._slot > 1 else ''))
         self.resize(1250, 900)
         self.proc = None
         self.proc_kind = None
@@ -1943,9 +2024,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.rival_pts.setRange(0, 1000000)
         self.rival_pts.setSpecialValueText('all')
         f.addRow('RIVAL points per chip', self.rival_pts)
-        self.device = QtWidgets.QComboBox()
-        self.device.addItems(['auto', 'cuda', 'cuda:0', 'cuda:1', 'cpu'])
-        self.device.setEditable(True)
+        self.device = DeviceCombo()
         f.addRow('Device', self.device)
         self.min_gpu = QtWidgets.QDoubleSpinBox()
         self.min_gpu.setRange(0, 80)
@@ -2082,7 +2161,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.cons_model.setCurrentText(j['consensus_model'])
         self.cons_surface.setCurrentText(j['consensus_surface'])
         self.rival_pts.setValue(int(j['rival_max_points_per_chip']))
-        self.device.setCurrentText(j['device'])
+        self.device.setValue(j['device'])
         self.min_gpu.setValue(float(j['min_gpu_free_gb']))
         self.min_area.setValue(float(j['min_area_km2']))
         self.min_valid.setValue(float(j['min_valid_fraction']))
@@ -2175,7 +2254,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             'consensus_model': self.cons_model.currentText(),
             'consensus_surface': self.cons_surface.currentText(),
             'rival_max_points_per_chip': self.rival_pts.value(),
-            'device': self.device.currentText().strip() or 'auto',
+            'device': self.device.value(),
             'min_gpu_free_gb': self.min_gpu.value(),
             'min_area_km2': self.min_area.value(),
             'min_valid_fraction': self.min_valid.value(),
@@ -2669,6 +2748,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             job = self.get_job()
         except ValueError:
             job = dict(DEFAULT_JOB)
+        job['device'] = self.device.value()          # the window's GPU, even with the job unfinished
         dlg = BenchDialog(self.settings, job, self)
         dlg.accepted.connect(lambda: self._start_bench(dlg))
         if run:
@@ -2680,7 +2760,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         Its settings come straight from the controls, so an unfinished job
         elsewhere in the window does not matter."""
         job = dict(DEFAULT_JOB, input_path=self.in_path.text(), weights_cache_dir=self.weights_cache.text(),
-                   output_dir=self.out_path.text(),
+                   output_dir=self.out_path.text(), device=self.device.value(),
                    cloud_min_confidence=self.cloud_conf.value(), cloud_mask_from=self.cloud_from.text(),
                    cloud_refine=self.cloud_refine.isChecked(),
                    cloud_bands=[t for t in re.split(r'[,;\s]+', self.cloud_bands.text().strip()) if t],
@@ -2694,7 +2774,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
     def cloud_sweep_dialog(self, *_, run=True):
         """The cloud mask benchmark; run=False returns the dialog unshown (tests)."""
         job = dict(DEFAULT_JOB, input_path=self.in_path.text(), weights_cache_dir=self.weights_cache.text(),
-                   output_dir=self.out_path.text())
+                   output_dir=self.out_path.text(), device=self.device.value())
         dlg = CloudSweepDialog(self.settings, job, self)
         dlg.accepted.connect(lambda: self._start_sweep(dlg))
         if run:
@@ -2895,12 +2975,12 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         for i, e in enumerate(self._run_queue, 1):
             self.queue_list.addItem(f'{i}. {e["name"]} -> {e["output"]}'
                                     + (f'   (not before {e["not_before"]})' if e.get('not_before') else ''))
-        self.settings.setValue('run_queue', json.dumps(self._run_queue))
+        self.settings.setValue(getattr(self, '_queue_key', 'run_queue'), json.dumps(self._run_queue))
 
     def _restore_queue(self):
         """Runs still queued when the window was closed come back paused."""
         try:
-            saved = json.loads(self.settings.value('run_queue') or '[]')
+            saved = json.loads(self.settings.value(getattr(self, '_queue_key', 'run_queue')) or '[]')
         except (TypeError, ValueError):
             saved = []
         self._run_queue = [e for e in saved if isinstance(e, dict) and os.path.exists(e.get('path', ''))]
@@ -2968,6 +3048,9 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
                 ev.ignore()
                 return
             self.proc.kill()
+        if getattr(self, '_slot_lock', None) is not None:
+            self._slot_lock.unlock()                     # the window's number is free again
+            self._slot_lock = None
         ev.accept()
 
 

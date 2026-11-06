@@ -482,7 +482,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument('--classes', type=int, nargs='+', default=DEFAULTS['classes'],
                     help='classes compared with the reference: 1 thick, 2 thin, 3 shadow')
     ap.add_argument('--model-dir', default='')
-    ap.add_argument('--device', default=None)
+    ap.add_argument('--device', default=None,
+                    help='cpu / cuda / cuda:N (that GPU only, numbered as nvidia-smi lists them); default: the first GPU')
     ap.add_argument('--max-side', type=int, default=DEFAULTS['max_side'])
     ap.add_argument('--write-top', type=int, default=DEFAULTS['write_top'])
     ap.add_argument('--images', dest='pngs', choices=['grid', 'all', 'none'], default='grid',
@@ -490,6 +491,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                          "and shadow values (default); all = every combination (thousands); none")
     ap.add_argument('--sheets', action='store_true', help='also the stacked contact sheets SHEET_*.png')
     a = ap.parse_args(argv)
+    import automatch_job as J
+    a.device = J.use_gpu(a.device) if a.device else None   # before omnicloudmask loads torch
     problems = C.check({'cloud_model_dir': a.model_dir})
     if problems:
         print('\n'.join(problems))

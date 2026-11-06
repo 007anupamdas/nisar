@@ -877,7 +877,7 @@ def test_gui_cloud():
         w.cloud_bands.setText('band3, band2, band6')
         dlg = w.cloud_dialog(run=False)
         dlg.out.setText(os.path.join(tmp, 'ct'))
-        dlg.device.setCurrentIndex(1)
+        dlg.device.setValue('cpu')
         a = dlg.args()
         check('gui: the cloud test command takes the image, the thresholds (with the job\'s) and the job\'s bands',
               (a[:4], a[a.index('--conf') + 1:a.index('--conf') + 4], a[a.index('--bands') + 1:a.index('--bands') + 4],
@@ -902,6 +902,39 @@ def test_gui_cloud():
             C.standalone(img, os.path.join(tmp, 'ct'), '', ['band1', 'band2', 'band4'], 'spec', [0.8], predictor=fake)
         res = G.CloudResultDialog(os.path.join(tmp, 'ct'), w)
         tabs = res.findChild(G.QtWidgets.QTabWidget)
+        check('gui: nvidia-smi\'s list read (index, name, GB)',
+              G.parse_nvidia_smi('0, NVIDIA RTX A4500, 20470\n1, NVIDIA RTX A4000, 16376\n'),
+              [(0, 'NVIDIA RTX A4500', 20.0), (1, 'NVIDIA RTX A4000', 16.0)])
+        saved_gpus = G._GPUS
+        G._GPUS = [(0, 'NVIDIA RTX A4500', 20.0), (1, 'NVIDIA RTX A4000', 16.0)]
+        try:
+            dc = G.DeviceCombo()
+            items = [dc.itemData(i) for i in range(dc.count())]
+            w.device.setValue('cuda:1')
+            cd = w.cloud_dialog(run=False)
+            cd.image.setText(img)
+            sw = w.cloud_sweep_dialog(run=False)
+            sw.images.setPlainText(img)
+            bd = w.bench_dialog(run=False)
+            bd.folder.setText(tmp)
+            bd.cloud.setCurrentIndex(1)
+            ba = bd.args()
+            check('gui: every tool offers each GPU by name; the cloud test, sweep and benchmark start on the window\'s '
+                  'GPU', (items, dc.itemText(2), cd.args()[cd.args().index('--device') + 1],
+                          sw.args()[sw.args().index('--device') + 1], ba[ba.index('--device') + 1],
+                          w.device.value()),
+                  (['auto', 'cuda:0', 'cuda:1', 'cpu'], 'GPU 1: NVIDIA RTX A4000 (16 GB)', 'cuda:1', 'cuda:1', 'cuda:1',
+                   'cuda:1'))
+            w.device.setValue('auto')
+            w2 = G.AutoMatchWindow()
+            try:
+                check('gui: a second window gets its own number and its own queue (one window per GPU)',
+                      (w2._slot != w._slot, w2._queue_key == f'run_queue_{w2._slot}', f'window {w2._slot}' in
+                       w2.windowTitle()), (True, True, True))
+            finally:
+                w2.close()
+        finally:
+            G._GPUS = saved_gpus
         sd = w.cloud_sweep_dialog(run=False)
         sd.images.setPlainText(img)
         sd.conf.setText('0.6-0.9:0.1')
@@ -930,6 +963,35 @@ def test_gui_cloud():
                res.findChild(G.QtWidgets.QTableWidget).rowCount()), (3, True, True, 3))
     finally:
         w.close()
+
+
+def test_gpu_pinning(tmp):
+    """cuda:N pins a whole process to GPU N (numbered as nvidia-smi lists
+    them) before torch loads; with torch already loaded the name is left as
+    it is; other names pass through."""
+    import automatch_job as J
+    r = subprocess.run([sys.executable, '-c', 'import os, sys; sys.path.insert(0, %r); import automatch_job as J; '
+                        'd = J.use_gpu("cuda:1"); again = J.use_gpu("cuda:1"); '
+                        'print(d, again, os.environ["CUDA_VISIBLE_DEVICES"], os.environ["CUDA_DEVICE_ORDER"], '
+                        '"torch" in sys.modules)' % HERE], capture_output=True, text=True)
+    check('gpu: cuda:1 hides the other GPUs before torch loads (nvidia-smi numbering); asking again is harmless',
+          r.stdout.strip().splitlines()[-1] if r.stdout.strip() else r.stderr[-300:], 'cuda cuda 1 PCI_BUS_ID False')
+    import torch  # noqa: F401  (loaded: too late to hide GPUs)
+    saved = {k: os.environ.get(k) for k in ('CUDA_VISIBLE_DEVICES', 'AUTOMATCH_GPU')}
+    try:
+        os.environ.pop('AUTOMATCH_GPU', None)
+        check('gpu: with torch loaded, cuda:N is used as it is; auto / cuda / cpu pass through',
+              [J.use_gpu('cuda:1'), J.use_gpu('auto'), J.use_gpu('cuda'), J.use_gpu('cpu'), J.use_gpu('')],
+              ['cuda:1', 'auto', 'cuda', 'cpu', ''])
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    check('gpu: the device is not a result setting, so resume works on either GPU',
+          J._sweep_key(J.normalize({'device': 'cuda:0'}), 512, None) == J._sweep_key(J.normalize({'device': 'cuda:1'}),
+                                                                                    512, None), True)
 
 
 def test_gui_queue():
@@ -3872,6 +3934,7 @@ def main():
         test_bench(tmp)
         test_cloud_mask(tmp)
         test_cloud_sweep(tmp)
+        test_gpu_pinning(tmp)
         test_stretch()
         test_parallel_share(tmp)
         test_match_accuracy(tmp)
