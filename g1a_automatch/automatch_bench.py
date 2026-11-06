@@ -151,7 +151,7 @@ def scene_info(path: str, band: int, max_side: int = 1024, png: str = '') -> Dic
 # ─────────────────────────────────────────────────────────────────────────────
 # one job
 # ─────────────────────────────────────────────────────────────────────────────
-SENSOR_BY_PIXEL = ((60.0, 'MV'), (250.0, 'HS'), (1e9, 'HV'))     # 45 m, 180 m, 315 m
+SENSOR_BY_PIXEL = ((60.0, 'MV'), (250.0, 'HS'), (700.0, 'HV'), (1e9, 'ML'))     # 45 m, 180 m, 315 m, 1.2-1.5 km
 
 
 def scene_id(input_path: str) -> str:
@@ -169,7 +169,7 @@ def scene_id(input_path: str) -> str:
 
 
 def sensor_of(scene: str, pixel_m: Optional[float]) -> str:
-    """MV / HS / HV from the G1A name, else from the pixel size."""
+    """MV / HS / HV / ML from the G1A name, else from the pixel size."""
     m = re.search(r'G1A_([A-Z]{2})_', scene or '')
     if m:
         return m.group(1)
@@ -266,7 +266,7 @@ def _ocm_cloud(d: str, loc_in: str, scene: str, pixel_m, recompute: bool, model_
                             os.path.join(d, 'cloud_mask'), '', sensor_of(scene, pixel_m))
         return info
     except Exception as e:
-        print(f'[Bench] {os.path.basename(d)}: OmniCloudMask failed ({type(e).__name__}: {e})')
+        print(f'[Bench] {os.path.basename(d)}: cloud estimate failed ({type(e).__name__}: {e})')
         return None
 
 
@@ -316,8 +316,8 @@ def bench_job(d: str, recompute: bool = False, cloud_model_dir: Optional[str] = 
     if ocm:
         row['cloud_pct_estimate'] = row.get('cloud_pct')
         row.update({'cloud_pct': ocm.get('cloud_pct'), 'shadow_pct': ocm.get('shadow_pct'),
-                    'cloud_source': 'omnicloudmask' + (' (fallback bands)' if str(ocm.get('band_choice', '')
-                                                                                 ).startswith('fallback') else ''),
+                    'cloud_source': (ocm.get('model') or 'omnicloudmask').lower() + (
+                        ' (fallback bands)' if str(ocm.get('band_choice', '')).startswith('fallback') else ''),
                     'cloud_masked_in_run': os.path.exists(os.path.join(d, 'CLOUD_INFO.json'))})
     tcsv = X.job_truth_csv(d)
     if tcsv:
@@ -592,7 +592,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                                                                     'threshold)')
     ap.add_argument('--no-cross', action='store_true', help='skip the cross-check')
     ap.add_argument('--cloud', choices=('quick', 'omnicloudmask'), default='quick',
-                    help='cloud estimate: quick (brightness heuristic) or omnicloudmask (the model, on each input)')
+                    help='cloud estimate: quick (brightness heuristic) or omnicloudmask (the cloud mask of each '
+                         'input: the model; for ML / HS the infrared / SWIR tests)')
     ap.add_argument('--cloud-model-dir', default='', help="OmniCloudMask weights ('' = its own folder)")
     ap.add_argument('--device', default='',
                     help='GPU for the OmniCloudMask cloud estimate: cuda:N (that GPU only, numbered as nvidia-smi '

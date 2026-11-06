@@ -961,6 +961,47 @@ def test_gui_cloud():
               (tabs.count(), 'bands_1-2-4 @ 0.8' in tabs.tabText(0),
                'bands_3-2-6 @ 0.8' in tabs.tabText(2),
                res.findChild(G.QtWidgets.QTableWidget).rowCount()), (3, True, True, 3))
+        # ML / HS: the method (auto by sensor) and the infrared / SWIR test settings
+        mc = G.CloudMethodCombo()
+        mc.setValue('ocm')
+        v1 = mc.value()
+        mc.setValue('swir')
+        check('gui: the cloud method choice (auto, OmniCloudMask, infrared, SWIR)',
+              ([mc.itemData(i) for i in range(mc.count())], v1, mc.value()),
+              (['auto', 'omnicloudmask', 'ir', 'swir'], 'omnicloudmask', 'swir'))
+        w.cloud_method.setValue('ir')
+        cd = w.cloud_dialog(run=False)
+        cd.image.setText(img)
+        cd.ir_dt.setValue(6)
+        cd.ir_clear.setText(f'{img}; {img}')
+        ca = cd.args()
+        check('gui: the cloud test takes the window\'s method and the infrared settings',
+              (ca[ca.index('--method') + 1], ca[ca.index('--ir-dt') + 1], ca[ca.index('--radiance-scale') + 1],
+               ca[ca.index('--clear') + 1:], ca[ca.index('--swir-bright') + 1]),
+              ('ir', '6', '0.01', [img, img], '3'))
+        sw = w.cloud_sweep_dialog(run=False)
+        sw.images.setPlainText(img)
+        sw.ir_dt.setText('4-12:4')
+        sa2 = sw.args()
+        check('gui: the cloud sweep takes the method and the infrared / SWIR ranges, and counts their rows',
+              (sa2[sa2.index('--method') + 1], sa2[sa2.index('--ir-dt') + 1], sa2[sa2.index('--swir-k') + 1],
+               'ML: 27' in sw.lbl_n.text()), ('ir', '4-12:4', '2-6:1', True))
+        w.cloud_method.setValue('auto')
+        import automatch_cloudphys as P
+        ml = os.path.join(tmp, 'G1A_ML_G_GUI.tif')
+        bt = 300.0 + np.zeros((40, 40))
+        bt[10:25, 10:25] = 225.0
+        with rasterio.open(ml, 'w', driver='GTiff', height=40, width=40, count=6, dtype='float32', crs='EPSG:32644',
+                           transform=from_origin(500000, 2500000, 1200, 1200), nodata=0) as d:
+            for i, u in enumerate(P.ML_UM, 1):
+                L = P.C1 / (u ** 5 * (np.exp(P.C2 / (u * (bt - (30.0 if u in (7.35, 13.25) else 0.0)))) - 1))
+                d.write((L / 0.01).astype(np.float32), i)
+        with contextlib.redirect_stdout(io.StringIO()):
+            C.standalone(ml, os.path.join(tmp, 'ct_ml'), '', None, 'spec', [0.7])
+        mres = G.CloudResultDialog(os.path.join(tmp, 'ct_ml'), w)
+        mtabs = mres.findChild(G.QtWidgets.QTabWidget)
+        check('gui: an ML cloud test (infrared tests, one mask, no threshold) shows its quicklook',
+              (mtabs.count(), ' ir' in mtabs.tabText(0) and '@' not in mtabs.tabText(0)), (1, True))
     finally:
         w.close()
 
@@ -1246,8 +1287,8 @@ def test_gui_dialog():
         w.cloud_from.setText('/x/G1A_HV.tif')
         jj = w.get_job()
         check('gui: cloud masking options reach the job',
-              (jj['cloud_mask'], jj['cloud_bands'], jj['cloud_mask_from']),
-              ('omnicloudmask', ['band3', 'band2', 'band6'], '/x/G1A_HV.tif'))
+              (jj['cloud_mask'], jj['cloud_bands'], jj['cloud_mask_from'], jj['cloud_method']),
+              ('on', ['band3', 'band2', 'band6'], '/x/G1A_HV.tif', 'auto'))
         w.cloud_mask.setChecked(False)
         w.cloud_bands.setText('')
         w.cloud_from.setText('')
@@ -3016,9 +3057,19 @@ def test_cloud_mask(tmp):
                              margin_px=0, predictor=prob_fake, refine_opts=None)
     with rasterio.open(hrows[0]['mask']) as m:
         hcls = m.read(1)
-    check('cloud test: HS takes the mask of its VNIR pass, on its own grid',
-          (len(calls), hcls.shape, hrows[0]['cloud_pct'] > 0, 'from G1A_HV_G_PASS' in hrows[0]['band_choice']),
-          (1, (100, 140), True, True))
+    with rasterio.open(hrows[-1]['mask']) as m:
+        ucls = m.read(1)
+    check('cloud test: HS gets its own SWIR-test mask, plus the mask of its VNIR pass on its own grid',
+          (len(calls), len(hrows), hrows[0]['method'], hcls.shape, ucls.shape, hrows[-1]['cloud_pct'] > 0,
+           'G1A_HV_G_PASS' in hrows[-1]['band_choice']),
+          (1, 2, 'swir', (100, 140), (100, 140), True, True))
+    calls.clear()
+    with contextlib.redirect_stdout(io.StringIO()):
+        orows = C.standalone(hs2, os.path.join(tmp, 'cloud_test_hs'), '', None, 'spec', [0.7], mask_from=hv2,
+                             margin_px=0, predictor=prob_fake, refine_opts=None, method='omnicloudmask')
+    check('cloud test: method omnicloudmask on HS: the VNIR pass\'s mask alone, as before',
+          (len(calls), len(orows), orows[0]['cloud_pct'] > 0, 'from G1A_HV_G_PASS' in orows[0]['band_choice']),
+          (1, 1, True, True))
     import automatch_job as J
     import automatch_gpuaas as G
     real = C.predict
@@ -3148,6 +3199,211 @@ def test_cloud_sweep(tmp):
 def J_default_classes():
     import automatch_job as J
     return J.normalize({})['cloud_mask_classes']
+
+
+def test_cloud_phys(tmp):
+    """Cloud masks from physics for ML (infrared tests) and HS (SWIR tests):
+    Planck round trip, the radiance unit found from the values, thick cloud
+    and thin cirrus (split window) found and clear ground left clear, cold
+    terrain spared when earlier scenes give the clear sky, the 1.38 um cirrus
+    test, night, the method chosen by sensor, the VNIR mask added only where
+    it covers, the job's masked copies and cache, the cloud test tool and the
+    sweep over the test settings."""
+    import contextlib
+    import glob
+    import io
+    import numpy as np
+    import pandas as pd
+    import rasterio
+    from rasterio.transform import from_origin
+    import automatch_cloud as C
+    import automatch_cloudphys as P
+    import automatch_cloudsweep as CS
+    T = np.array([220.0, 250.0, 285.0, 310.0])
+    planck = (lambda T, u: P.C1 / (u ** 5 * (np.exp(P.C2 / (u * T)) - 1)))
+    check('phys: inverse Planck gives back the temperature', np.round(P.planck_bt(planck(T, 10.8), 10.8), 3).tolist(),
+          T.tolist())
+    H, W, px = 120, 120, 1200.0
+    yy, xx = np.mgrid[0:H, 0:W]
+    um = P.ML_UM
+    off = {7.35: -40.0, 8.5: -1.5, 9.6: -25.0, 10.8: 0.0, 12.0: -1.0, 13.25: -30.0}
+
+    def scene(t108, thick=None, cirrus=None):
+        bt = {u: t108 + off[u] for u in um}
+        if thick is not None:
+            for u in um:
+                bt[u] = np.where(thick, 228.0 + 0.3 * (u - 10.8), bt[u])
+        if cirrus is not None:
+            bt[10.8] = np.where(cirrus, t108 - 2.0, bt[10.8])
+            bt[12.0] = np.where(cirrus, t108 - 6.0, bt[12.0])
+        return bt
+
+    def ml(path, bt, unit='cm-1', x0=500000.0):
+        conv = {'cm-1': lambda L, u: L * u ** 2 / 10.0, 'um': lambda L, u: L}[unit]   # to the stored unit
+        v = np.stack([np.round(conv(planck(bt[u], u), u) / 0.01) for u in um]).astype(np.float32)
+        v[:, :3, :] = 0                                        # a no-data strip
+        with rasterio.open(path, 'w', driver='GTiff', width=W, height=H, count=6, dtype='float32', crs='EPSG:32644',
+                           transform=from_origin(x0, 2500000, px, px), nodata=0) as d:
+            d.write(v)
+        return path
+    ground = 300.0 + 3 * np.sin(xx / 15.0)
+    thick = (yy - 35) ** 2 + (xx - 35) ** 2 < 14 ** 2
+    cirrus = (yy > 75) & (yy < 105) & (xx > 70) & (xx < 110)
+    img = ml(os.path.join(tmp, 'G1A_ML_G_PHYS.tif'), scene(ground, thick, cirrus))
+    with contextlib.redirect_stdout(io.StringIO()):
+        d = C.load_phys(img, 'ir', 'ML', 0.01)
+        info = C.compute_phys(img, 'ir', os.path.join(tmp, 'phys_ir'), C.phys_options({}, 'ir'), 'ML', data=d)
+    with rasterio.open(info['mask']) as m:
+        cls = m.read(1)
+    rest = ~thick & ~cirrus & (yy >= 3)
+    check('phys: the radiance unit is found from the values (mW/m2/sr/cm-1, x 0.01): ground ~300 K',
+          (info['radiance_unit'], abs(info['bt108_median_k'] - 300) < 2), ('mW/m2/sr/cm-1', True))
+    check('phys: ML thick cloud found, thin cirrus by the split window, clear ground clear, no data kept',
+          ((cls[thick] == 1).mean() > 0.97, (cls[cirrus] == 2).mean() > 0.97, (cls[rest] == 0).mean() > 0.99,
+           bool((cls[:3] == 255).all()), info['test_split_pct'] > 5),
+          (True, True, True, True, True))
+    img_um = ml(os.path.join(tmp, 'G1A_ML_G_UM.tif'), scene(ground))
+    bt_um, unit, med = P.to_bt({10.8: C.load_phys(img_um, 'ir', 'ML')['bt'][10.8] * 0 + planck(290.0, 10.8)},
+                               np.ones((H, W), bool))
+    check('phys: radiance in W/m2/sr/um is read as such', (unit, round(med, 1)), ('W/m2/sr/um', 290.0))
+    # cold terrain (a mountain 15 K colder) is no cloud when earlier clear scenes give the clear sky
+    mountain = (yy - 60) ** 2 + (xx - 60) ** 2 < 15 ** 2
+    terrain = np.where(mountain, ground - 15.0, ground)
+    cold = ml(os.path.join(tmp, 'G1A_ML_G_MOUNT.tif'), scene(terrain))
+    e1 = ml(os.path.join(tmp, 'G1A_ML_G_EARLY1.tif'), scene(terrain, thick=(yy - 60) ** 2 + (xx - 90) ** 2 < 100))
+    e2 = ml(os.path.join(tmp, 'G1A_ML_G_EARLY2.tif'), scene(terrain - 1.0))
+    opts = C.phys_options({}, 'ir')
+    with contextlib.redirect_stdout(io.StringIO()):
+        alone = C.compute_phys(cold, 'ir', os.path.join(tmp, 'phys_m1'), opts, 'ML')
+        withc = C.compute_phys(cold, 'ir', os.path.join(tmp, 'phys_m2'), opts, 'ML', clear_paths=[e1, e2])
+    with rasterio.open(alone['mask']) as a, rasterio.open(withc['mask']) as b:
+        ca, cb = a.read(1), b.read(1)
+    check('phys: from the scene alone a cold mountain looks like cloud; with earlier clear scenes (each pixel\'s '
+          'warmest) it does not', ((ca[mountain] > 0).mean() > 0.5, (cb[mountain] > 0).mean() < 0.02,
+                                   'earlier scene' in withc['clear_sky']), (True, True, True))
+    # SWIR: 1.38 um cirrus, bright thick cloud, ground; night
+    n = 81
+    wl = list(np.linspace(900, 2500, n))
+    hsH, hsW = 150, 150
+    hy, hx = np.mgrid[0:hsH, 0:hsW]
+    rng = np.random.default_rng(5)
+    tex = rng.normal(0, 1, (hsH, hsW))
+    sthick = (hy - 40) ** 2 + (hx - 40) ** 2 < 15 ** 2
+    scir = (hy > 90) & (hy < 130) & (hx > 80) & (hx < 140)
+    level = {1250: 50.0, 1380: 2.0, 1650: 40.0, 2200: 20.0}
+
+    def hs_img(path, night=False):
+        with rasterio.open(path, 'w', driver='GTiff', width=hsW, height=hsH, count=n, dtype='float32',
+                           crs='EPSG:32644', transform=from_origin(500000, 2500000, 180, 180), nodata=0) as dd:
+            for b, w in enumerate(wl, 1):
+                key = min(level, key=lambda k: abs(k - w))
+                a = level[key] * (1 + 0.05 * tex)
+                if key == 1380:
+                    a = np.where(scir, 14.0, a)
+                a = np.where(sthick, {1250: 200.0, 1380: 60.0, 1650: 150.0, 2200: 80.0}[key], a)
+                a = a * (1e-4 if night else 1.0) + (0.001 if night else 0)
+                dd.write((a / 0.01).astype(np.float32), b)
+        return path
+    hs = hs_img(os.path.join(tmp, 'G1A_HS_G_PHYS.tif'))
+    with contextlib.redirect_stdout(io.StringIO()):
+        sinfo = C.compute_phys(hs, 'swir', os.path.join(tmp, 'phys_sw'), C.phys_options({}, 'swir'), 'HS')
+    with rasterio.open(sinfo['mask']) as m:
+        sc = m.read(1)
+    check('phys: HS thick cloud (bright at 1.25 / 1.65 / 2.2 um) and cirrus (1.38 um ratio) found, ground clear',
+          ((sc[sthick] == 1).mean() > 0.95, (sc[scir] == 2).mean() > 0.95, (sc[~sthick & ~scir] == 0).mean() > 0.99),
+          (True, True, True))
+    hsn = hs_img(os.path.join(tmp, 'G1A_HS_G_NIGHT.tif'), night=True)
+    L = {w: np.full((10, 10), 1e-3) + 1e-4 * np.random.default_rng(1).random((10, 10)) for w in (1250, 1380, 1650,
+                                                                                                    2200)}
+    ncls, ninfo = P.swir_mask(L, np.ones((10, 10), bool), 180.0)
+    check('phys: no sunlight in the SWIR (night): no SWIR mask', (ninfo.get('night'), int(ncls.max())), (True, 0))
+    del hsn
+    mv = os.path.join(tmp, 'G1A_MV_G_PHYS.tif')
+    with rasterio.open(mv, 'w', driver='GTiff', width=60, height=60, count=6, dtype='uint16', crs='EPSG:32644',
+                       transform=from_origin(500000, 2500000 - 72000, 1200, 1200), nodata=0) as dd:
+        for b in range(1, 7):
+            dd.write((500 + 100 * rng.random((60, 60))).astype('uint16'), b)
+    check('phys: the method by sensor (ML infrared, HS SWIR, MV OmniCloudMask), or as the job says',
+          (C.method_for({}, 'ML', img), C.method_for({}, 'HS', hs), C.method_for({}, 'MV', mv),
+           C.method_for({'cloud_method': 'omnicloudmask'}, 'ML', img), C.method_for({'cloud_method': 'swir'}, 'MV'),
+           C.sensor_for(os.path.join(tmp, 'G1A_ML_G_PHYS.tif'))), ('ir', 'swir', 'ocm', 'ocm', 'swir', 'ML'))
+
+    def fake(arr, nodata, model_dir, device):              # the VNIR model: thick cloud over its left half
+        cl = np.zeros(arr.shape[1:], np.uint8)
+        cl[5:25, 2:30] = 1
+        return cl
+    # the MV image covers the lower-left quarter of the ML image (rows and columns 60-120 / 0-60): its mask is
+    # added there only
+
+    class Sc:
+        raster_path = img
+    job = {'cloud_mask_from': mv, 'cloud_from_margin_px': 0, 'cloud_dilate_px': 0, 'cloud_refine': False,
+           'cloud_mask_classes': [1, 2]}
+    cache, out = os.path.join(tmp, 'phys_cache'), os.path.join(tmp, 'phys_out')
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        rasters, pinfo = C.prepare(job, Sc(), ['band4'], cache, out, 'ML', fake)
+    with rasterio.open(pinfo['mask']) as m:
+        cu = m.read(1)
+    laid = np.zeros((H, W), bool)
+    laid[65:85, 2:30] = True                               # MV rows 5-25 -> ML rows 65-85
+    check('phys: an ML image keeps its own mask and gets the VNIR mask added where that covers it',
+          ((cu[thick] == 1).mean() > 0.97, (cu[laid & ~cirrus] == 1).mean() > 0.95,
+           (cu[cirrus] >= 1).mean() > 0.97, abs(pinfo['covered_by_laid_pct'] - 25) < 2,
+           'the mask from G1A_MV_G_PHYS' in pinfo['band_choice'], 'radiance read as mW/m2/sr/cm-1' in buf.getvalue()),
+          (True, True, True, True, True, True))
+    with rasterio.open(rasters['band4'][0]) as m:
+        mb = m.read(1)
+    check('phys: the matched band copied with thick and thin cloud set to no data; CLOUD_PARAMS in the job folder',
+          (bool((mb[thick] == 0).all()), bool((mb[cirrus] == 0).all()), bool((mb[rest & ~laid] != 0).all()),
+           len(glob.glob(os.path.join(out, 'CLOUD_PARAMS_*.txt'))) == 1), (True, True, True, True))
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        C.prepare(job, Sc(), ['band4'], cache, out, 'ML', lambda *a: 1 / 0)
+    check('phys: the mask is reused from the cache', 'reused' in buf.getvalue(), True)
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        C.prepare(dict(job, cloud_ir_dt_k=12.0), Sc(), ['band4'], cache, out, 'ML', fake)
+    check('phys: a changed test setting makes the mask again', 'infrared tests on' in buf.getvalue(), True)
+    # the cloud test tool: one mask by the tests, and with the VNIR image one per its threshold
+    ct = os.path.join(tmp, 'phys_ct')
+    with contextlib.redirect_stdout(io.StringIO()):
+        rows = C.standalone(img, ct, '', None, 'spec', [0.5, 0.8], predictor=fake, refine_opts=None)
+        rows2 = C.standalone(img, ct, '', None, 'spec', [0.5, 0.8], mask_from=mv, margin_px=0, predictor=fake,
+                             refine_opts=None)
+    allr = pd.read_csv(os.path.join(ct, 'CLOUD_TEST_ALL.csv'))
+    check('phys: the cloud test makes the infrared-test mask (own), and with --from one more per VNIR threshold',
+          (len(rows), rows[0]['method'], rows[0]['confidence'], len(rows2), [r['confidence'] for r in rows2[1:]],
+           os.path.exists(rows[0]['quicklook']), os.path.exists(rows2[2]['quicklook']), len(allr),
+           rows2[1]['cloud_pct'] > rows2[0]['cloud_pct']),
+          (1, 'ir', None, 3, [0.5, 0.8], True, True, 6, True))
+    # the sweep over the infrared-test settings, against a reference
+    ref = os.path.join(tmp, 'phys_ref.tif')
+    with rasterio.open(ref, 'w', driver='GTiff', width=W, height=H, count=1, dtype='uint8', crs='EPSG:32644',
+                       transform=from_origin(500000, 2500000, px, px)) as dd:
+        dd.write(thick.astype(np.uint8), 1)
+    with contextlib.redirect_stdout(io.StringIO()):
+        res = CS.run([img], os.path.join(tmp, 'phys_sweep'), [ref], '', ir_dt='4-12:4', ir_split=[1, 2],
+                     blob_km2=[1], classes=[1], write_top=1)
+    df = res['rows']
+    best = df.sort_values('ref_f1', ascending=False).iloc[0]
+    check('phys: the sweep runs the infrared tests over dt x split x blob, with F1 against the reference, PNGs '
+          'and the best mask at full size',
+          (len(df), set(df['method']), sorted(df['ir_dt_k'].unique().tolist()), best['ref_f1'] > 0.95,
+           len(glob.glob(os.path.join(res['folder'], 'G1A_ML_G_PHYS', 'ir', '*.png'))),
+           len(glob.glob(os.path.join(res['folder'], 'top_1_*', 'CLOUD_MASK.tif'))),
+           'ir_dt_k' in res['summary'].columns),
+          (6, {'ir'}, [4.0, 8.0, 12.0], True, 6, 1, True))
+    text = CS.format_summary(res['summary'])
+    check('phys: the sweep summary names the test settings', 'dt 4' in text or 'dt 8' in text, True)
+    with contextlib.redirect_stdout(io.StringIO()):
+        res2 = CS.run([hs], os.path.join(tmp, 'phys_sweep_hs'), [], '', swir_k='3, 5', swir_bright='2-4:2',
+                      blob_km2=[1], write_top=0)
+    d2 = res2['rows']
+    check('phys: an HS image sweeps the SWIR tests (cirrus sd x thick spreads)',
+          (len(d2), set(d2['method']), sorted(d2['swir_bright_sd'].unique().tolist()),
+           bool((d2['thick_pct'] > 2).all())), (4, {'swir'}, [2.0, 4.0], True))
+    import automatch_job as J
+    check('phys: cloud masking is on for any cloud_mask but none / off (old jobs: omnicloudmask)',
+          [J.cloud_on({'cloud_mask': v}) for v in ('none', 'off', '', 'on', 'omnicloudmask')],
+          [False, False, False, True, True])
 
 
 def test_stretch():
@@ -3934,6 +4190,7 @@ def main():
         test_bench(tmp)
         test_cloud_mask(tmp)
         test_cloud_sweep(tmp)
+        test_cloud_phys(tmp)
         test_gpu_pinning(tmp)
         test_stretch()
         test_parallel_share(tmp)

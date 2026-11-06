@@ -9,10 +9,21 @@ Bands per G1A sensor (nearest centre wavelength to 650 / 560 / 860 nm):
   MV  MX-VNIR      B1 485, B2 555, B3 650, B4 815, B5 725, B6 860 nm -> B3, B2, B6
   HV  Hysis-VNIR   375-1000 nm, bands evenly spaced           -> nearest bands
   HS  Hysis-SWIR   900-2500 nm: no Red / Green / NIR          -> fallback below
-  ML  MX-LWIR      thermal                                    -> not applicable
+  ML  MX-LWIR      thermal                                    -> infrared tests
+  HS                                                          -> SWIR tests
 
 Band centres come from the raster's band descriptions when they state them
 ('650.3 nm'), else from this table. cloud_bands names three bands explicitly.
+
+cloud_method 'auto' (default) masks ML by the infrared tests and HS by the
+SWIR tests of automatch_cloudphys (physics, no model: brightness
+temperatures, split window, ice, CO2 / water-vapour bands; the 1.38 um
+cirrus band and bright SWIR blobs), the other sensors by OmniCloudMask;
+'omnicloudmask', 'ir' or 'swir' choose one for every image. Radiance =
+pixel value x radiance_scale (0.01: G1A stores scaled radiance). Each
+payload covers its own ground, so every image gets its own mask; with
+cloud_mask_from (the VNIR product of the same pass), that mask is added to
+an ML / HS image's own where it covers it.
 
 HS (SWIR only) cannot be masked from its own bands: on two cloudy Sentinel-2
 scenes over India, OmniCloudMask fed the bands inside 900-2500 nm (945, 1610,
@@ -46,6 +57,9 @@ confidence threshold gets its own mask and quicklook):
         [--sensor MV] [--bands 3 2 6 | --choice quality] [--from <VNIR image>]
         [--model-dir <weights>] [--device cpu] [--model-only]
         [--bright-pct 90 --min-blob-km2 1 --shadow-near-km 10]
+        [--method auto|omnicloudmask|ir|swir] [--radiance-scale 0.01]
+        [--ir-dt 8 --ir-split 1 --ir-cold 240 --clear <earlier ML scenes>]
+        [--swir-k 4 --swir-bright 3]
     (also: automatch_job.py cloud ..., and the GPU service's mode "cloud")
 
 Every run gets its own folder, named by when it ran and its bands, so runs
@@ -459,6 +473,167 @@ def transfer(mask_path: str, onto: str, out_path: str, grow_px: int = 0) -> str:
     return out_path
 
 
+PHYS_NAMES = {'ir': 'infrared tests', 'swir': 'SWIR tests'}
+
+
+def method_for(job: Dict, sensor: str, path: str = '') -> str:
+    """'ocm' (OmniCloudMask, red / green / NIR), 'ir' (MX-LWIR: infrared
+    tests) or 'swir' (HyS-SWIR: SWIR tests), from cloud_method; 'auto' by
+    sensor (and, for an unknown sensor, by its band wavelengths)."""
+    m = str(job.get('cloud_method') or 'auto').strip().lower()
+    if m in ('omnicloudmask', 'ocm'):
+        return 'ocm'
+    if m in ('ir', 'swir'):
+        return m
+    if sensor == 'ML':
+        return 'ir'
+    if sensor == 'HS':
+        return 'swir'
+    if path:
+        try:
+            wl = band_wavelengths(path, sensor)
+            if wl and all(w and w >= 3000 for w in wl):
+                return 'ir'
+        except Exception:
+            pass
+    return 'ocm'
+
+
+def phys_options(job: Dict, method: str) -> Dict:
+    """The settings of the infrared or SWIR tests from a job."""
+    import automatch_cloudphys as P
+    get = (lambda k, d: float(job[k]) if job.get(k) not in (None, '') else d)
+    blob = get('cloud_min_blob_km2', 1.0)
+    if method == 'ir':
+        return {'dt_k': get('cloud_ir_dt_k', P.IR_DEFAULTS['dt_k']),
+                'split_scale': get('cloud_ir_split_scale', P.IR_DEFAULTS['split_scale']),
+                'cold_k': get('cloud_ir_cold_k', P.IR_DEFAULTS['cold_k']), 'min_blob_km2': blob}
+    return {'k': get('cloud_swir_k', P.SWIR_DEFAULTS['k']),
+            'bright_sd': get('cloud_swir_bright_sd', P.SWIR_DEFAULTS['bright_sd']), 'min_blob_km2': blob}
+
+
+def _phys_text(method: str, opts: Dict) -> str:
+    if method == 'ir':
+        return (f"infrared tests: colder than clear sky by {opts['dt_k']:g} K (thick by twice that, or colder than "
+                f"{opts['cold_k']:g} K), split window x {opts['split_scale']:g}, ice (8.5-10.8 um), high cloud "
+                f"(13.25 / 7.35 um), edges; blobs of {opts['min_blob_km2']:g} km2 or more")
+    return (f"SWIR tests: 1.38 um cirrus ratio above clear by {opts['k']:g} robust sd, thick where brighter than the "
+            f"clear ground at 1.25 um by {opts['bright_sd']:g} spreads (and above it at 1.65 um); blobs of "
+            f"{opts['min_blob_km2']:g} km2 or more")
+
+
+def load_phys(path: str, method: str, sensor: str, scale: float = 0.01, clear_paths=()) -> Dict:
+    """What the infrared or SWIR tests read from an image: {'valid', 'px',
+    'prof', 'show' (3 bands for the quicklook), and 'bt', 'clear', 'unit',
+    'bt108_median_k' (ir) or 'L' (swir)}."""
+    import rasterio as rio
+    import automatch_cloudphys as P
+    with rio.open(path) as src:
+        prof = src.profile.copy()
+        nd = src.nodata if src.nodata is not None else 0
+        px = pixel_m(src.transform, src.crs, src.height)
+        if method == 'ir':
+            um = P.ml_band_centres(path)
+            raw = {u: src.read(i + 1).astype(np.float64) for i, u in enumerate(um)}
+        else:
+            wl = band_wavelengths(path, sensor) or band_wavelengths(path, 'HS')
+            idx = P.nearest_bands(wl or [], [1250.0, 1380.0, 1650.0, 2200.0], 40.0)
+            if 1250.0 not in idx or 1380.0 not in idx:
+                raise ValueError(f'{os.path.basename(path)}: SWIR tests need bands near 1250 and 1380 nm '
+                                 f'(found {sorted(idx)})')
+            raw = {int(w): src.read(b).astype(np.float64) for w, b in idx.items()}
+    valid = np.all(np.stack([np.isfinite(a) & (a != nd) for a in raw.values()]), axis=0)
+    out = {'valid': valid, 'px': px, 'prof': prof}
+    if method == 'ir':
+        bt, unit, med = P.to_bt({u: a * scale for u, a in raw.items()}, valid)
+        clear = P.clear_from_scenes(list(clear_paths), path, scale) if clear_paths else None
+        if clear is not None:
+            k108 = min(bt, key=lambda u: abs(u - 10.8))
+            gaps = ~np.isfinite(clear)
+            if gaps.any():
+                clear = np.where(gaps, P.clear_sky_spatial(bt[k108], valid, px), clear)
+        k108 = min(bt, key=lambda u: abs(u - 10.8))
+        inv = np.where(valid, -bt[k108], np.nan)                   # cold (cloud) shows bright
+        out.update({'bt': bt, 'clear': clear, 'unit': unit, 'bt108_median_k': round(med, 1),
+                    'show': np.stack([inv, inv, inv])})
+    else:
+        L = {w: a * scale for w, a in raw.items()}
+        out.update({'L': L, 'show': np.stack([L.get(1650, L[1250]), L[1250], L.get(2200, L[1250])])})
+    return out
+
+
+def compute_phys(path: str, method: str, out_dir: str, opts: Dict, sensor: str, scale: float = 0.01,
+                 clear_paths=(), stamp: Optional[str] = None, data: Optional[Dict] = None) -> Dict:
+    """CLOUD_MASK.tif, CLOUD_QUICKLOOK.png and CLOUD_PARAMS_<time>.txt of the
+    infrared (ML) or SWIR (HS) tests (automatch_cloudphys); info as compute()."""
+    import rasterio as rio
+    import automatch_cloudphys as P
+    d = data or load_phys(path, method, sensor, scale, clear_paths)
+    valid, px = d['valid'], d['px']
+    if method == 'ir':
+        cls, tests = P.ir_mask(d['bt'], valid, px, d['clear'], **opts)
+        extra = {'radiance_unit': d['unit'], 'bt108_median_k': d['bt108_median_k'],
+                 'clear_sky': (f'warmest of {len(clear_paths)} earlier scene(s)' if d['clear'] is not None
+                               else 'from the scene (90th percentile of ~100 km blocks)')}
+    else:
+        cls, tests = P.swir_mask(d['L'], valid, px, **opts)
+        extra = {}
+    os.makedirs(out_dir, exist_ok=True)
+    prof = d['prof']
+    prof.update(count=1, dtype='uint8', nodata=255, compress='deflate')
+    prof.pop('blockxsize', None)
+    prof.pop('blockysize', None)
+    mask_path = os.path.join(out_dir, 'CLOUD_MASK.tif')
+    with rio.open(mask_path, 'w', **prof) as dst:
+        dst.write(cls, 1)
+    nv = max(int(valid.sum()), 1)
+    pct = {k: round(100.0 * int((cls == k).sum()) / nv, 2) for k in (1, 2, 3)}
+    try:
+        quicklook(np.nan_to_num(d['show'], nan=0.0), cls, valid, os.path.join(out_dir, 'CLOUD_QUICKLOOK.png'))
+    except Exception as e:
+        print(f'[Cloud] quicklook not written: {type(e).__name__}: {e}')
+    res = {'mask': mask_path, 'thick_pct': pct[1], 'thin_pct': pct[2], 'shadow_pct': pct[3],
+           'cloud_pct': round(pct[1] + pct[2], 2), 'dark_cloud_pct': None, 'method': method,
+           'model': PHYS_NAMES[method], **tests, **extra}
+    stamp = stamp or run_stamp()
+    res['params'] = write_params(out_dir, {'image': os.path.abspath(path), 'model': PHYS_NAMES[method],
+                                           'check': _phys_text(method, opts), 'radiance_scale': scale,
+                                           'pixel_m': round(px, 1),
+                                           **{k: v for k, v in res.items() if k not in ('mask', 'model')}},
+                                 stamp=stamp)
+    res['stamp'] = stamp
+    return res
+
+
+def redraw_quicklook(data: Dict, mask_path: str) -> None:
+    """CLOUD_QUICKLOOK.png next to mask_path, of load_phys() data and that mask."""
+    import rasterio as rio
+    with rio.open(mask_path) as m:
+        cls = m.read(1)
+    try:
+        quicklook(np.nan_to_num(data['show'], nan=0.0), cls, data['valid'],
+                  os.path.join(os.path.dirname(mask_path), 'CLOUD_QUICKLOOK.png'))
+    except Exception as e:
+        print(f'[Cloud] quicklook not written: {type(e).__name__}: {e}')
+
+
+def union_masks(own: str, laid: str, out_path: str) -> Dict:
+    """own's classes, and where the laid-on mask covers (not 255) the more
+    severe of the two (thick over thin over shadow over clear); percentages."""
+    import rasterio as rio
+    with rio.open(own) as a, rio.open(laid) as b:
+        prof, ca, cb = a.profile.copy(), a.read(1), b.read(1)
+    rank = np.array([0, 3, 2, 1] + [0] * 252, np.uint8)            # severity of classes 0, 1, 2, 3
+    take = (cb != 255) & (ca != 255) & (rank[cb] > rank[ca])
+    out = np.where(take, cb, ca).astype(np.uint8)
+    with rio.open(out_path, 'w', **prof) as d:
+        d.write(out, 1)
+    nv = max(int((out != 255).sum()), 1)
+    pct = {k: round(100.0 * int((out == k).sum()) / nv, 2) for k in (1, 2, 3)}
+    return {'mask': out_path, 'thick_pct': pct[1], 'thin_pct': pct[2], 'shadow_pct': pct[3],
+            'cloud_pct': round(pct[1] + pct[2], 2), 'covered_by_laid_pct': round(100.0 * float((cb != 255).mean()), 1)}
+
+
 def prepare(job: Dict, scene, channels: List[str], cache_dir: str, out_dir: str, sensor: str,
             predictor=None) -> Tuple[Dict[str, List], Dict]:
     """({channel: [masked raster, 1]}, CLOUD_INFO) for a raster job with cloud
@@ -467,6 +642,9 @@ def prepare(job: Dict, scene, channels: List[str], cache_dir: str, out_dir: str,
     onto this image."""
     path = scene.raster_path
     src = job.get('cloud_mask_from') or ''
+    method = method_for(job, sensor, path)
+    if method in ('ir', 'swir'):
+        return _prepare_phys(job, path, method, channels, cache_dir, out_dir, sensor, src, predictor)
     if src:
         import automatch_bench as B
         import rasterio as rio
@@ -526,14 +704,76 @@ def prepare(job: Dict, scene, channels: List[str], cache_dir: str, out_dir: str,
     return _finish(job, path, info, channels, cache_dir, out_dir)
 
 
+def _prepare_phys(job: Dict, path: str, method: str, channels: List[str], cache_dir: str, out_dir: str, sensor: str,
+                  src: str, predictor=None) -> Tuple[Dict[str, List], Dict]:
+    """prepare() for ML (infrared tests) and HS (SWIR tests); with
+    cloud_mask_from, that product's mask is added where it covers this image
+    (the payloads cover different ground)."""
+    opts = phys_options(job, method)
+    scale = float(job.get('radiance_scale') or 0.01)
+    clear_paths = [p for p in (job.get('cloud_ir_clear') or []) if p] if method == 'ir' else []
+    st = os.stat(path)
+    stamps = {p: int(os.stat(p).st_mtime) for p in clear_paths + ([src] if src else []) if os.path.exists(p)}
+    key = hashlib.sha1(json.dumps({'v': MASK_VERSION, 'path': os.path.abspath(path), 'size': st.st_size,
+                                   'mtime': int(st.st_mtime), 'method': method, 'opts': opts, 'scale': scale,
+                                   'clear': clear_paths, 'from': src, 'stamps': stamps,
+                                   'grow': int(job.get('cloud_from_margin_px') or 0)}, sort_keys=True).encode()
+                       ).hexdigest()
+    info_path = os.path.join(cache_dir, 'CLOUD_INFO.json')
+    try:
+        with open(info_path, encoding='utf-8') as f:
+            info = json.load(f)
+        if info.get('key') != key or not os.path.exists(info.get('mask', '')):
+            info = None
+    except (OSError, ValueError):
+        info = None
+    if info is not None:
+        print(f'[Cloud] mask reused from {cache_dir}')
+        return _finish(job, path, info, channels, cache_dir, out_dir)
+    print(f'[Cloud] {PHYS_NAMES[method]} on {os.path.basename(path)} ({sensor}) ...', flush=True)
+    data = load_phys(path, method, sensor, scale, clear_paths)
+    info = compute_phys(path, method, cache_dir, opts, sensor, scale, clear_paths, data=data)
+    how = _phys_text(method, opts)
+    if method == 'ir':
+        print(f"[Cloud] radiance read as {info['radiance_unit']} (x {scale:g}): median BT10.8 "
+              f"{info['bt108_median_k']} K; clear sky {info['clear_sky']}", flush=True)
+    if info.get('night'):
+        print('[Cloud] no sunlight in the SWIR bands (night): no SWIR mask', flush=True)
+    if src:
+        import automatch_bench as B
+        import rasterio as rio
+        with rio.open(src) as s:
+            sres = abs(s.transform.a) if s.crs is not None and s.crs.is_projected else None
+        ssensor = B.sensor_of(os.path.splitext(os.path.basename(src))[0], sres)
+
+        class _S:
+            raster_path = src
+        _, sinfo = prepare(dict(job, cloud_mask_from='', cloud_method='auto'), _S(), [],
+                           os.path.join(cache_dir, 'from_' + hashlib.sha1(os.path.abspath(src).encode()).hexdigest()[:8]),
+                           '', ssensor, predictor)
+        grow = int(job.get('cloud_from_margin_px') or 0)
+        laid = transfer(sinfo['mask'], path, os.path.join(cache_dir, 'CLOUD_MASK_LAID_ON.tif'), grow)
+        u = union_masks(info['mask'], laid, info['mask'])
+        info.update(u)
+        redraw_quicklook(data, info['mask'])
+        how += (f" + the mask from {os.path.basename(src)} ({sinfo.get('model', 'mask')}, laid on by map "
+                f"coordinates, grown {grow} px) where it covers this image ({u['covered_by_laid_pct']} %)")
+    info.update({'key': key, 'band_choice': how, 'sensor': sensor, 'bands': [], 'wavelengths_nm': []})
+    os.makedirs(cache_dir, exist_ok=True)
+    with open(info_path, 'w', encoding='utf-8') as f:
+        json.dump(info, f, indent=1, default=str)
+    return _finish(job, path, info, channels, cache_dir, out_dir)
+
+
 def _finish(job: Dict, path: str, info: Dict, channels: List[str], cache_dir: str, out_dir: str
             ) -> Tuple[Dict[str, List], Dict]:
     classes = [int(c) for c in (job.get('cloud_mask_classes') or [1])]
     dilate = int(job.get('cloud_dilate_px') or 0)
     key = info['key']
+    sure = (f"; confidence >= {info.get('min_confidence')}" if info.get('min_confidence') is not None else '')
     print(f"[Cloud] {info['cloud_pct']:.1f} % cloud (thick {info['thick_pct']:.1f}, thin {info['thin_pct']:.1f}), "
-          f"{info['shadow_pct']:.1f} % shadow ({info.get('band_choice')}; confidence >= "
-          f"{info.get('min_confidence', '?')}); masking classes {classes}, grown by {dilate} px", flush=True)
+          f"{info['shadow_pct']:.1f} % shadow ({info.get('band_choice')}{sure}); masking classes {classes}, "
+          f"grown by {dilate} px", flush=True)
     if info.get('model_cloud_pct') is not None:
         print(f"[Cloud] the model said {info['model_cloud_pct']:.1f} % cloud, {info['model_shadow_pct']:.1f} % shadow; "
               f"kept only bright blobs: {info.get('removed_dark_cloud_pct')} % not bright, "
@@ -582,13 +822,19 @@ def _finish(job: Dict, path: str, info: Dict, channels: List[str], cache_dir: st
 def standalone(path: str, out_dir: str, sensor: str = '', bands: Optional[List[str]] = None, choice: str = 'spec',
                confidences=(0.5, 0.7, 0.85), model_dir: str = '', device: Optional[str] = None,
                mask_from: str = '', margin_px: int = 10, predictor=None,
-               refine_opts: Optional[Dict] = 'default', stamp: Optional[str] = None) -> List[Dict]:
+               refine_opts: Optional[Dict] = 'default', stamp: Optional[str] = None, method: str = 'auto',
+               phys_opts: Optional[Dict] = None, scale: float = 0.01, clear_paths=()) -> List[Dict]:
     """The cloud mask of one image at each confidence threshold, without a
     matching run (module docstring). refine_opts: refine()'s settings
     ('default': REFINE_DEFAULTS; None: the model alone). Every run goes into
     its own folder <out_dir>/<YYYYmmdd_HHMMSS>_bands_<b>-<b>-<b>/ (the time it
     ran, then the bands), so no run overwrites another; every run made in
-    out_dir is listed in CLOUD_TEST_ALL.csv. Rows of CLOUD_TEST.csv."""
+    out_dir is listed in CLOUD_TEST_ALL.csv. Rows of CLOUD_TEST.csv.
+    method (method_for: 'auto' by sensor): 'ir' / 'swir' make one mask by
+    the infrared or SWIR tests (phys_opts: phys_options()'s; scale: the
+    radiance scale factor; clear_paths: earlier thermal scenes) in
+    <stamp>_<method>/, and with mask_from, also that mask with the VNIR
+    image's at each confidence added where it covers this image."""
     if refine_opts == 'default':
         refine_opts = dict(REFINE_DEFAULTS)
     stamp = stamp or run_stamp()
@@ -601,14 +847,24 @@ def standalone(path: str, out_dir: str, sensor: str = '', bands: Optional[List[s
         return name
     import rasterio as rio
     import pandas as pd
-    import automatch_bench as B
-    stem = os.path.splitext(os.path.basename(path))[0]
-    if not sensor:
-        with rio.open(path) as s:
-            px = abs(s.transform.a) if s.crs is not None and s.crs.is_projected else None
-        sensor = B.sensor_of(stem, px)
+    sensor = sensor or sensor_for(path)
     os.makedirs(out_dir, exist_ok=True)
     confs = sorted({round(float(c), 3) for c in confidences}) or [0.7]
+    meth = method_for({'cloud_method': method}, sensor, path)
+    if meth in ('ir', 'swir'):
+        rows, folder = _standalone_phys(path, out_dir, sensor, meth, phys_opts, scale, clear_paths, mask_from,
+                                        margin_px, stamp, run_folder,
+                                        lambda: standalone(mask_from, out_dir, '', bands, choice, confs, model_dir,
+                                                           device, '', 0, predictor, refine_opts, stamp))
+        _save_rows(out_dir, folder, rows)
+        print(f"[Cloud] {folder}:")
+        print(f"[Cloud] {'mask':<34} {'cloud %':>8} {'thick':>6} {'thin':>6}")
+        for r in rows:
+            what = 'own' if r.get('confidence') in (None, '') else f"+ VNIR mask @ {r['confidence']:g}"
+            print(f"[Cloud] {what:<34} {r['cloud_pct']:>8.1f} {r['thick_pct']:>6.1f} {r['thin_pct']:>6.1f}")
+        print(f"[Cloud] mask, quicklook and CLOUD_PARAMS_{stamp}.txt: {os.path.join(out_dir, folder)} ; "
+              f"every run in this folder: CLOUD_TEST_ALL.csv", flush=True)
+        return rows
     if mask_from:              # HS: the mask is made on the VNIR product of the same pass and laid on
         src_rows = standalone(mask_from, out_dir, '', bands, choice, confs, model_dir, device, '', 0, predictor,
                               refine_opts, stamp)
@@ -672,13 +928,7 @@ def standalone(path: str, out_dir: str, sensor: str = '', bands: Optional[List[s
                          'quicklook': os.path.join(sub, 'CLOUD_QUICKLOOK.png'),
                          'quicklook_model': (os.path.join(sub, 'CLOUD_QUICKLOOK_MODEL.png')
                                              if refine_opts is not None else '')})
-    pd.DataFrame(rows).to_csv(os.path.join(out_dir, folder, 'CLOUD_TEST.csv'), index=False)
-    allp = os.path.join(out_dir, 'CLOUD_TEST_ALL.csv')          # every run made in this folder
-    try:
-        old = pd.read_csv(allp)
-    except Exception:
-        old = pd.DataFrame()
-    pd.concat([old, pd.DataFrame(rows)], ignore_index=True).to_csv(allp, index=False)
+    _save_rows(out_dir, folder, rows)
     print(f"[Cloud] {folder}:")
     print(f"[Cloud] {'confidence':>10} {'cloud %':>8} {'thick':>6} {'thin':>6} {'shadow':>7} {'dark cloud %':>13}"
           f"{'   model said cloud %':>21}")
@@ -691,6 +941,79 @@ def standalone(path: str, out_dir: str, sensor: str = '', bands: Optional[List[s
     print(f"[Cloud] masks, quicklooks and CLOUD_PARAMS_{stamp}.txt: {os.path.join(out_dir, folder)}/conf_<c>/ ; "
           f"every run in this folder: CLOUD_TEST_ALL.csv", flush=True)
     return rows
+
+
+def sensor_for(path: str) -> str:
+    """MV / HS / HV / ML of an image, from its G1A name or pixel size."""
+    import rasterio as rio
+    import automatch_bench as B
+    with rio.open(path) as s:
+        px = abs(s.transform.a) if s.crs is not None and s.crs.is_projected else None
+    return B.sensor_of(os.path.splitext(os.path.basename(path))[0], px)
+
+
+def _save_rows(out_dir: str, folder: str, rows: List[Dict]) -> None:
+    """CLOUD_TEST.csv of a run, and the run added to CLOUD_TEST_ALL.csv."""
+    import pandas as pd
+    pd.DataFrame(rows).to_csv(os.path.join(out_dir, folder, 'CLOUD_TEST.csv'), index=False)
+    allp = os.path.join(out_dir, 'CLOUD_TEST_ALL.csv')          # every run made in this folder
+    try:
+        old = pd.read_csv(allp)
+    except Exception:
+        old = pd.DataFrame()
+    pd.concat([old, pd.DataFrame(rows)], ignore_index=True).to_csv(allp, index=False)
+
+
+def _standalone_phys(path: str, out_dir: str, sensor: str, method: str, opts: Optional[Dict], scale: float,
+                     clear_paths, mask_from: str, margin_px: int, stamp: str, run_folder, vnir_rows
+                     ) -> Tuple[List[Dict], str]:
+    """standalone() for the infrared / SWIR tests: (rows, run folder)."""
+    opts = dict(opts) if opts else phys_options({}, method)
+    clear_paths = [p for p in (clear_paths or []) if p] if method == 'ir' else []
+    stem = (lambda p: os.path.splitext(os.path.basename(p))[0])
+    variant = method + (f'_plus_{stem(mask_from)}' if mask_from else '')
+    folder = run_folder(variant)
+    base = os.path.join(out_dir, folder)
+    print(f'[Cloud] {os.path.basename(path)} ({sensor}): {PHYS_NAMES[method]}', flush=True)
+    data = load_phys(path, method, sensor, scale, clear_paths)
+    own = compute_phys(path, method, os.path.join(base, 'own'), opts, sensor, scale, clear_paths, stamp, data)
+    if method == 'ir':
+        print(f"[Cloud] radiance read as {own['radiance_unit']} (x {scale:g}): median BT10.8 "
+              f"{own['bt108_median_k']} K; clear sky {own['clear_sky']}", flush=True)
+    if own.get('night'):
+        print('[Cloud] no sunlight in the SWIR bands (night): no SWIR mask', flush=True)
+    how = _phys_text(method, opts)
+    tests = {k: v for k, v in own.items() if k.startswith('test_') or k in ('radiance_unit', 'bt108_median_k',
+                                                                             'clear_sky', 'night')}
+    common = {'run': stamp, 'image': path, 'sensor': sensor, 'variant': variant, 'folder': folder, 'method': method,
+              'band_choice': how, **{f'opt_{k}': v for k, v in opts.items()}, **tests}
+    rows = [dict(common, confidence=None, cloud_pct=own['cloud_pct'], thick_pct=own['thick_pct'],
+                 thin_pct=own['thin_pct'], shadow_pct=own['shadow_pct'], dark_cloud_pct=None, mask=own['mask'],
+                 quicklook=os.path.join(base, 'own', 'CLOUD_QUICKLOOK.png'), quicklook_model='')]
+    if mask_from:              # the VNIR image's mask, at each threshold, added where it covers this one
+        for r in vnir_rows():
+            sub = os.path.join(base, f"plus_vnir_conf_{r['confidence']:g}")
+            os.makedirs(sub, exist_ok=True)
+            laid = transfer(r['mask'], path, os.path.join(sub, 'CLOUD_MASK_LAID_ON.tif'), int(margin_px))
+            u = union_masks(own['mask'], laid, os.path.join(sub, 'CLOUD_MASK.tif'))
+            redraw_quicklook(data, u['mask'])
+            write_params(sub, {'image': os.path.abspath(path), 'sensor': sensor, 'variant': variant,
+                               'own_mask': own['mask'], 'own_made_as': own['params'],
+                               'mask_from': os.path.abspath(mask_from),
+                               'mask_from_made_as': os.path.join(os.path.dirname(r['mask']),
+                                                                 f'CLOUD_PARAMS_{stamp}.txt'),
+                               'laid_on': f'by map coordinates, grown {int(margin_px)} px, where it covers '
+                                          f"({u['covered_by_laid_pct']} % of this image)",
+                               'confidence': r['confidence'], **{k: u[k] for k in ('thick_pct', 'thin_pct',
+                                                                                   'shadow_pct', 'cloud_pct')}},
+                         stamp=stamp)
+            rows.append(dict(common, confidence=r['confidence'], cloud_pct=u['cloud_pct'], thick_pct=u['thick_pct'],
+                             thin_pct=u['thin_pct'], shadow_pct=u['shadow_pct'], dark_cloud_pct=None,
+                             mask=u['mask'], quicklook=os.path.join(sub, 'CLOUD_QUICKLOOK.png'),
+                             quicklook_model=r.get('quicklook') or '', covered_by_vnir_pct=u['covered_by_laid_pct'],
+                             band_choice=f"{how} + {os.path.basename(mask_from)}'s mask ({r['band_choice']}) "
+                                         f"at confidence {r['confidence']:g}, grown {int(margin_px)} px"))
+    return rows, folder
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -714,19 +1037,40 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help='smallest cloud blob kept')
     ap.add_argument('--shadow-near-km', type=float, default=REFINE_DEFAULTS['shadow_near_km'],
                     help='shadows kept within this of a cloud blob')
+    import automatch_cloudphys as P
+    ap.add_argument('--method', default='auto', choices=['auto', 'omnicloudmask', 'ir', 'swir'],
+                    help='auto: infrared tests for ML, SWIR tests for HS, OmniCloudMask for the rest')
+    ap.add_argument('--radiance-scale', type=float, default=0.01, help='radiance = pixel value x this (G1A: 0.01)')
+    ap.add_argument('--ir-dt', type=float, default=P.IR_DEFAULTS['dt_k'], help='ML: cloud is this much (K) '
+                    'colder than clear sky at 10.8 um (thick: twice)')
+    ap.add_argument('--ir-split', type=float, default=P.IR_DEFAULTS['split_scale'],
+                    help='ML: split-window (10.8 - 12 um) thresholds x this (higher: less thin cirrus)')
+    ap.add_argument('--ir-cold', type=float, default=P.IR_DEFAULTS['cold_k'],
+                    help='ML: colder than this (K) at 10.8 um is thick cloud')
+    ap.add_argument('--clear', nargs='+', default=[], help='ML: earlier thermal scenes of the same ground, for '
+                    'the clear sky (the warmest of each pixel)')
+    ap.add_argument('--swir-k', type=float, default=P.SWIR_DEFAULTS['k'],
+                    help='HS: cirrus where L1380/L1250 is this many robust sd above clear')
+    ap.add_argument('--swir-bright', type=float, default=P.SWIR_DEFAULTS['bright_sd'],
+                    help='HS: thick cloud brighter than the clear ground at 1250 nm by this many spreads')
     a = ap.parse_args(argv)
     out = a.out or os.path.join(os.path.dirname(os.path.abspath(a.image)),
                                 'cloud_test_' + os.path.splitext(os.path.basename(a.image))[0])
     import automatch_job as J
     device = J.use_gpu(a.device) if a.device else None      # before omnicloudmask loads torch
-    problems = check({'cloud_model_dir': a.model_dir})
-    if problems:
-        print('\n'.join(problems))
-        return 2
+    sensor = a.sensor or sensor_for(a.image)
+    meth = method_for({'cloud_method': a.method}, sensor, a.image)
+    if meth == 'ocm' or a.mask_from:
+        problems = check({'cloud_model_dir': a.model_dir})
+        if problems:
+            print('\n'.join(problems))
+            return 2
     ropts = None if a.model_only else {'bright_pct': a.bright_pct, 'min_blob_km2': a.min_blob_km2,
                                        'shadow_near_km': a.shadow_near_km}
-    standalone(a.image, out, a.sensor, a.bands, a.choice, a.conf, a.model_dir, device, a.mask_from, a.margin,
-               refine_opts=ropts)
+    popts = ({'dt_k': a.ir_dt, 'split_scale': a.ir_split, 'cold_k': a.ir_cold, 'min_blob_km2': a.min_blob_km2}
+             if meth == 'ir' else {'k': a.swir_k, 'bright_sd': a.swir_bright, 'min_blob_km2': a.min_blob_km2})
+    standalone(a.image, out, sensor, a.bands, a.choice, a.conf, a.model_dir, device, a.mask_from, a.margin,
+               refine_opts=ropts, method=a.method, phys_opts=popts, scale=a.radiance_scale, clear_paths=a.clear)
     return 0
 
 

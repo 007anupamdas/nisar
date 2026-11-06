@@ -8,6 +8,17 @@ images, without a matching run.
         [--reference <cloud mask raster | polygons .geojson / .shp> ...]
         [--model-dir <weights>/omnicloudmask] [--device cpu] [--max-side 2048]
         [--images grid|all|none] [--sheets]
+        [--method auto|omnicloudmask|ir|swir] [--radiance-scale 0.01]
+        [--ir-dt 4-12:2] [--ir-split 0.75 1 1.5] [--clear <earlier ML scenes>]
+        [--swir-k 2-6:1] [--swir-bright 2-5:1]
+
+Each image by its cloud method (automatch_cloud.method_for; 'auto' by
+sensor): ML images sweep the infrared tests (colder than clear sky by
+--ir-dt K x split-window scale --ir-split x blob size), HS images the SWIR
+tests (cirrus ratio --swir-k robust sd x thick cloud --swir-bright
+spreads above the clear ground x blob size); their rows carry method ir / swir and those
+settings, the PNGs go into <image>/ir/ or <image>/swir/. The rest below is
+OmniCloudMask's sweep.
 
 Ranges are lo-hi:step (the end is kept when the steps miss it: 0.6-0.99:0.1
 is 0.6, 0.7, 0.8, 0.9, 0.99) or a list of values.
@@ -362,12 +373,100 @@ def sweep_image(path: str, out_dir: str, sensor: str = '', sets: Optional[List] 
     return rows
 
 
+PHYS_KEYS = {'ir': ('ir_dt_k', 'ir_split_scale'), 'swir': ('swir_k', 'swir_bright_sd')}
+
+
+def sweep_phys(path: str, out_dir: str, sensor: str, method: str, first: Sequence[float], second: Sequence[float],
+               blobs: Sequence[float] = (1.0,), classes: Sequence[int] = (1,), reference: str = '',
+               scale: float = 0.01, clear_paths=(), cold_k: float = 240.0, max_side: int = 2048,
+               images: str = 'grid', image_side: int = 1600) -> List[Dict]:
+    """Every combination of the infrared tests (method 'ir': first = colder
+    than clear by K, second = split-window scale) or of the SWIR tests
+    ('swir': first = cirrus robust sd, second = thick-cloud percentile) and
+    blob size, on one image's overview; rows of CLOUD_SWEEP.csv and one PNG
+    each (images 'grid': at the middle blob size; 'all'; 'none')."""
+    import cv2
+    import automatch_cloudphys as P
+    stem = os.path.splitext(os.path.basename(path))[0]
+    t0 = time.time()
+    d = C.load_phys(path, method, sensor, scale, clear_paths)
+    H, W = d['valid'].shape
+    step = max(1, int(np.ceil(max(H, W) / float(max_side))))
+    px = d['px'] * step
+    v = d['valid'][::step, ::step]
+    show = d['show'][:, ::step, ::step]
+    ref = known = None
+    if reference:
+        ref, known = load_reference(reference, path)
+        ref, known = ref[::step, ::step], known[::step, ::step]
+    if method == 'ir':
+        bt = {u: b[::step, ::step] for u, b in d['bt'].items()}
+        k108 = min(bt, key=lambda u: abs(u - 10.8))
+        clear = d['clear'][::step, ::step] if d['clear'] is not None else P.clear_sky_spatial(bt[k108], v, px)
+        extra = {'radiance_unit': d['unit'], 'bt108_median_k': d['bt108_median_k'],
+                 'clear_sky': 'earlier scenes' if d['clear'] is not None else 'the scene'}
+    else:
+        L = {w: b[::step, ::step] for w, b in d['L'].items()}
+        extra = {}
+    secs = round(time.time() - t0, 1)
+    del d
+    k1, k2 = PHYS_KEYS[method]
+    name = method
+    base = {'image': path, 'sensor': sensor, 'band_set': name, 'method': method, 'bands': '', 'wavelengths_nm': '',
+            'band_choice': C.PHYS_NAMES[method], 'model_seconds': secs, 'pixel_m': round(px, 1),
+            'confidence': None, 'check': C.PHYS_NAMES[method], **extra}
+    print(f"[Sweep] {stem} {C.PHYS_NAMES[method]}: read in {secs} s", flush=True)
+    nv = max(int(v.sum()), 1)
+    mid_blob = sorted(blobs)[len(blobs) // 2]
+    classes = [int(c) for c in classes]
+    img_dir = os.path.join(out_dir, stem, name)
+    rows = []
+    for x in first:
+        for y in second:
+            for bk in blobs:
+                if method == 'ir':
+                    cls, tests = P.ir_mask(bt, v, px, clear, dt_k=x, split_scale=y, cold_k=cold_k, min_blob_km2=bk)
+                    label = f'colder than clear by {x:g} K, split window x {y:g}, blob >= {bk:g} km2'
+                    fname = f'dt{x:g}_split{y:g}_blob{bk:g}.png'
+                else:
+                    cls, tests = P.swir_mask(L, v, px, k=x, bright_sd=y, min_blob_km2=bk)
+                    label = f'cirrus {x:g} sd, thick {y:g} spreads above ground, blob >= {bk:g} km2'
+                    fname = f'k{x:g}_bright{y:g}_blob{bk:g}.png'
+                masked = np.isin(cls, classes) & v
+                pct = {k: round(100.0 * int((cls == k).sum()) / nv, 3) for k in (1, 2, 3)}
+                r = {**base, k1: x, k2: y, 'min_blob_km2': bk, 'thick_pct': pct[1], 'thin_pct': pct[2],
+                     'shadow_pct': pct[3], 'cloud_pct': round(pct[1] + pct[2], 3),
+                     'masked_pct': round(100.0 * masked.sum() / nv, 3), **tests, **_metrics(masked, ref, known)}
+                if images == 'all' or (images == 'grid' and bk == mid_blob):
+                    os.makedirs(img_dir, exist_ok=True)
+                    cv2.imwrite(os.path.join(img_dir, fname),
+                                _render(np.nan_to_num(show, nan=0.0), cls, v, image_side, f'{stem}  {name}  {label}'))
+                    r['png'] = os.path.relpath(os.path.join(img_dir, fname), out_dir)
+                rows.append(r)
+    return rows
+
+
+def setting_text(r) -> str:
+    """A combination's settings in a few words (a CLOUD_SWEEP row)."""
+    g = (lambda k: r.get(k) if isinstance(r, dict) else getattr(r, k, None))
+    m = str(g('method') or '')
+    if m == 'ir':
+        return f"dt {g('ir_dt_k')} split {g('ir_split_scale')} blob {g('min_blob_km2')}"
+    if m == 'swir':
+        return f"k {g('swir_k')} bright {g('swir_bright_sd')} blob {g('min_blob_km2')}"
+    if str(g('check')) == 'none':
+        return f"conf {g('confidence')} model alone"
+    return (f"conf {g('confidence')} bright {g('bright_pct')} blob {g('min_blob_km2')} "
+            f"shadow {g('shadow_near_km')}")
+
+
 def summarize(df: pd.DataFrame) -> pd.DataFrame:
     """Per combination over the images: medians, how many images; ranked by
     the median F1 when references were given."""
     if df.empty:
         return df
-    keys = ['sensor', 'band_set', 'confidence', 'check', 'bright_pct', 'min_blob_km2', 'shadow_near_km']
+    keys = [k for k in ('sensor', 'method', 'band_set', 'confidence', 'check', 'bright_pct', 'min_blob_km2',
+                        'shadow_near_km', 'ir_dt_k', 'ir_split_scale', 'swir_k', 'swir_bright_sd') if k in df.columns]
     metrics = [c for c in ('ref_f1', 'ref_iou', 'ref_precision', 'ref_recall', 'cloud_pct', 'masked_pct',
                            'shadow_pct', 'dark_cloud_pct', 'brightness_gap', 'blobs') if c in df.columns]
     g = df.assign(**{k: df[k].astype(str) for k in keys}).groupby(keys, dropna=False)
@@ -381,9 +480,15 @@ def summarize(df: pd.DataFrame) -> pd.DataFrame:
 def run(images: List[str], out_dir: str, references: Optional[List[str]] = None, sensor: str = '',
         conf='0.6-0.99:0.1', bright='60-90:5', blob_km2=(0.25, 1.0, 4.0), shadow_km=(5.0, 10.0, 20.0),
         crisp: int = 6, spec: bool = True, classes=(1,), model_dir: str = '', device: Optional[str] = None,
-        max_side: int = 2048, write_top: int = 3, predictor=None, pngs: str = 'grid', sheets: bool = False) -> Dict:
+        max_side: int = 2048, write_top: int = 3, predictor=None, pngs: str = 'grid', sheets: bool = False,
+        method: str = 'auto', ir_dt='4-12:2', ir_split=(0.75, 1.0, 1.5), swir_k='2-6:1', swir_bright='2-5:1',
+        scale: float = 0.01, clear_paths=(), ir_cold: float = 240.0) -> Dict:
     """The sweep over the images into <out_dir>/<time>_sweep/; returns
-    {'folder', 'rows', 'summary'}."""
+    {'folder', 'rows', 'summary'}. Each image by its cloud method
+    (automatch_cloud.method_for: 'auto' by sensor): OmniCloudMask images over
+    conf x bright x blob x shadow and the band sets, ML images over ir_dt x
+    ir_split x blob (infrared tests), HS images over swir_k x swir_bright x
+    blob (SWIR tests)."""
     stamp = C.run_stamp()
     folder = os.path.join(out_dir, f'{stamp}_sweep')
     k = 1
@@ -393,6 +498,9 @@ def run(images: List[str], out_dir: str, references: Optional[List[str]] = None,
     os.makedirs(folder)
     confs, brights = parse_range(conf), parse_range(bright)
     blobs, shadows = parse_range(blob_km2), parse_range(shadow_km)
+    dts, splits = parse_range(ir_dt), parse_range(ir_split)
+    ks, sbright = parse_range(swir_k), parse_range(swir_bright)
+    meths = [C.method_for({'cloud_method': method}, sensor or _sensor(i), i) for i in images]
     if any(not 0 < c < 1 for c in confs):
         raise ValueError(f'confidence thresholds must lie between 0 and 1, got {confs}')
     refs = list(references or [])
@@ -406,10 +514,26 @@ def run(images: List[str], out_dir: str, references: Optional[List[str]] = None,
                             'shadow_near_km': ', '.join(f'{s:g}' for s in shadows),
                             'masked_classes': ', '.join(str(c) for c in classes), 'max_side_px': max_side,
                             'model_weights': model_dir or "OmniCloudMask's own folder",
-                            'device': device or 'GPU when there is one'}, stamp=stamp)
+                            'device': device or 'GPU when there is one',
+                            'methods': ', '.join(f'{os.path.basename(i)}: {m}' for i, m in zip(images, meths)),
+                            'ir_dt_k': ', '.join(f'{x:g}' for x in dts),
+                            'ir_split_scale': ', '.join(f'{x:g}' for x in splits), 'ir_cold_k': ir_cold,
+                            'ir_clear_scenes': '; '.join(clear_paths or []),
+                            'swir_k': ', '.join(f'{x:g}' for x in ks),
+                            'swir_bright_sd': ', '.join(f'{x:g}' for x in sbright), 'radiance_scale': scale},
+                   stamp=stamp)
     os.rename(os.path.join(folder, f'CLOUD_PARAMS_{stamp}.txt'), os.path.join(folder, f'CLOUD_SWEEP_PARAMS_{stamp}.txt'))
     rows = []
     for i, img in enumerate(images):
+        if meths[i] in ('ir', 'swir'):
+            first, second = (dts, splits) if meths[i] == 'ir' else (ks, sbright)
+            print(f'[Sweep] {os.path.basename(img)}: {C.PHYS_NAMES[meths[i]]}, '
+                  f'{len(first) * len(second) * len(blobs)} combination(s)', flush=True)
+            rows += sweep_phys(img, folder, sensor or _sensor(img), meths[i], first, second, blobs, classes,
+                               refs[i] if refs else '', scale, clear_paths if meths[i] == 'ir' else (), ir_cold,
+                               max_side, pngs)
+            pd.DataFrame(rows).to_csv(os.path.join(folder, 'CLOUD_SWEEP.csv'), index=False)
+            continue
         sets = band_sets(img, sensor or _sensor(img), spec, crisp)
         n = len(confs) * (1 + len(brights) * len(blobs) * len(shadows))
         print(f'[Sweep] {os.path.basename(img)}: {len(sets)} band set(s) x {n} combination(s)', flush=True)
@@ -423,6 +547,17 @@ def run(images: List[str], out_dir: str, references: Optional[List[str]] = None,
     if refs and write_top and 'ref_f1' in df.columns and df['ref_f1'].notna().any():
         top = df.sort_values(['ref_f1', 'ref_iou'], ascending=False).head(int(write_top))
         for k, r in enumerate(top.to_dict('records'), 1):
+            m = str(r.get('method') or '')
+            if m in ('ir', 'swir'):
+                sub = os.path.join(folder, f"top_{k}_{os.path.splitext(os.path.basename(r['image']))[0]}_{m}")
+                k1, k2 = PHYS_KEYS[m]
+                opts = ({'dt_k': r[k1], 'split_scale': r[k2], 'cold_k': ir_cold, 'min_blob_km2': r['min_blob_km2']}
+                        if m == 'ir' else {'k': r[k1], 'bright_sd': r[k2], 'min_blob_km2': r['min_blob_km2']})
+                C.compute_phys(r['image'], m, sub, opts, r['sensor'], scale,
+                               clear_paths if m == 'ir' else (), stamp)
+                C.write_params(sub, {'rank': k, 'ref_f1': r.get('ref_f1'), 'ref_iou': r.get('ref_iou')},
+                               merge=True, stamp=stamp)
+                continue
             sub = os.path.join(folder, f"top_{k}_{os.path.splitext(os.path.basename(r['image']))[0]}_{r['band_set']}"
                                        f"_{r['confidence']:g}")
             ropts = None if r['check'] == 'none' else {'bright_pct': r['bright_pct'], 'min_blob_km2': r['min_blob_km2'],
@@ -452,12 +587,12 @@ def format_summary(s: pd.DataFrame, top: int = 15) -> str:
         return '[Sweep] nothing to summarise'
     if 'ref_f1' in s.columns and s['ref_f1'].notna().any():
         lines = ['[Sweep] best combinations against the reference masks (median over the images):',
-                 f"  {'band set':<10} {'conf':>5} {'check':<13} {'bright':>6} {'blob':>5} {'shadow':>6} "
-                 f"{'F1':>6} {'IoU':>6} {'prec':>6} {'recall':>6} {'cloud %':>8}"]
-        for r in s.head(top).itertuples():
-            lines.append(f"  {r.band_set:<10} {r.confidence:>5} {r.check:<13} {r.bright_pct:>6} {r.min_blob_km2:>5} "
-                         f"{r.shadow_near_km:>6} {r.ref_f1:>6} {r.ref_iou:>6} {r.ref_precision:>6} {r.ref_recall:>6} "
-                         f"{r.cloud_pct:>8}")
+                 f"  {'sensor':<6} {'band set':<10} {'settings':<44} {'F1':>6} {'IoU':>6} {'prec':>6} "
+                 f"{'recall':>6} {'cloud %':>8}"]
+        for r in s.head(top).to_dict('records'):
+            lines.append(f"  {str(r.get('sensor')):<6} {str(r.get('band_set')):<10} {setting_text(r):<44} "
+                         f"{r.get('ref_f1')!s:>6} {r.get('ref_iou')!s:>6} {r.get('ref_precision')!s:>6} "
+                         f"{r.get('ref_recall')!s:>6} {r.get('cloud_pct')!s:>8}")
         return '\n'.join(lines)
     return ('[Sweep] no reference masks: CLOUD_SWEEP_SUMMARY.csv describes every combination (cloud %, '
             'dark_cloud_pct, brightness_gap) but cannot say which is right -- look at the PNGs in <image>/<band '
@@ -490,17 +625,29 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="one PNG per combination: grid = the model alone and each brightness at the middle blob "
                          "and shadow values (default); all = every combination (thousands); none")
     ap.add_argument('--sheets', action='store_true', help='also the stacked contact sheets SHEET_*.png')
+    ap.add_argument('--method', default='auto', choices=['auto', 'omnicloudmask', 'ir', 'swir'],
+                    help='auto: infrared tests for ML, SWIR tests for HS, OmniCloudMask for the rest')
+    ap.add_argument('--ir-dt', default='4-12:2', help='ML: colder than clear sky by (K): lo-hi:step or values')
+    ap.add_argument('--ir-split', default='0.75 1 1.5', help='ML: split-window threshold scales')
+    ap.add_argument('--ir-cold', type=float, default=240.0, help='ML: colder than this (K) is thick cloud')
+    ap.add_argument('--clear', nargs='+', default=[], help='ML: earlier thermal scenes of the same ground')
+    ap.add_argument('--swir-k', default='2-6:1', help='HS: cirrus ratio robust sd: lo-hi:step or values')
+    ap.add_argument('--swir-bright', default='2-5:1', help='HS: thick cloud brighter than the clear ground at '
+                    '1250 nm by (spreads)')
+    ap.add_argument('--radiance-scale', type=float, default=0.01, help='radiance = pixel value x this (G1A: 0.01)')
     a = ap.parse_args(argv)
     import automatch_job as J
     a.device = J.use_gpu(a.device) if a.device else None   # before omnicloudmask loads torch
-    problems = C.check({'cloud_model_dir': a.model_dir})
-    if problems:
-        print('\n'.join(problems))
-        return 2
+    if any(C.method_for({'cloud_method': a.method}, a.sensor or _sensor(i), i) == 'ocm' for i in a.images):
+        problems = C.check({'cloud_model_dir': a.model_dir})
+        if problems:
+            print('\n'.join(problems))
+            return 2
     out = a.out or os.path.join(os.path.dirname(os.path.abspath(a.images[0])), 'cloud_sweep')
     run(a.images, out, a.reference, a.sensor, a.conf, a.bright, ' '.join(a.blob_km2), ' '.join(a.shadow_km),
         a.crisp, not a.no_spec, a.classes, a.model_dir, a.device, a.max_side, a.write_top, pngs=a.pngs,
-        sheets=a.sheets)
+        sheets=a.sheets, method=a.method, ir_dt=a.ir_dt, ir_split=a.ir_split, swir_k=a.swir_k,
+        swir_bright=a.swir_bright, scale=a.radiance_scale, clear_paths=a.clear, ir_cold=a.ir_cold)
     return 0
 
 

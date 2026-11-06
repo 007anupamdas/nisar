@@ -50,11 +50,11 @@ PROGRESS_PREFIX = '@@AUTOMATCH '
 # Printed at the start of every run log and in PACK_REPORT.txt, so a log says
 # which code made it. Not a job key: settings files stay readable by other
 # versions.
-AUTOMATCH_VERSION = '2026.10.28'
+AUTOMATCH_VERSION = '2026.11.06'
 CODE_FILES = ('automatch_engine.py', 'automatch_job.py', 'automatch_imcui.py', 'automatch_refs.py',
               'automatch_rival.py', 'automatch_truth.py', 'automatch_weights.py', 'automatch_gpuaas.py',
               'automatch_native.py', 'imw_configs.py', 'automatch_cross.py', 'automatch_bench.py',
-              'automatch_cloud.py', 'automatch_accuracy.py', 'automatch_cloudsweep.py')
+              'automatch_cloud.py', 'automatch_accuracy.py', 'automatch_cloudsweep.py', 'automatch_cloudphys.py')
 
 
 def code_fingerprint() -> str:
@@ -109,7 +109,15 @@ DEFAULT_JOB: Dict = {
     # Clouds: OmniCloudMask (thick / thin cloud, shadow) masked out before matching
     'stretch_percentiles': [1, 99],   # contrast stretch of each window: low / high percentile (e.g. [1, 90])
     'stretch_mode': 'percentile',     # percentile | clahe: local contrast too (dark ground beside bright cloud)
-    'cloud_mask': 'none',        # none | omnicloudmask
+    'cloud_mask': 'none',        # none | on (or 'omnicloudmask', as before): mask clouds, by cloud_method
+    'cloud_method': 'auto',      # auto: ML infrared tests, HS SWIR tests, others OmniCloudMask | omnicloudmask | ir | swir
+    'radiance_scale': 0.01,      # radiance = pixel value x this (G1A: scaled radiance, scaling factor 0.01)
+    'cloud_ir_dt_k': 8.0,        # ML: cloud is this much colder than clear sky at 10.8 um (thick: twice that)
+    'cloud_ir_split_scale': 1.0,  # ML: x the split-window (10.8 - 12 um) thresholds; higher, less thin cirrus
+    'cloud_ir_cold_k': 240.0,    # ML: colder than this at 10.8 um is thick cloud whatever
+    'cloud_ir_clear': [],        # ML: earlier thermal scenes of the same ground (clear sky: each pixel's warmest)
+    'cloud_swir_k': 4.0,         # HS: cirrus where L1380 / L1250 is this many robust sd above clear
+    'cloud_swir_bright_sd': 3.0,  # HS: thick cloud brighter than the clear ground at 1250 nm by this many spreads
     'cloud_band_choice': 'spec', # spec: red / green / nir by the band specs; quality: the 3 crispest bands
     'cloud_bands': [],           # three bands named explicitly (wins over cloud_band_choice)
     'cloud_mask_classes': [1],   # masked: 1 thick cloud, 2 thin cloud, 3 shadow
@@ -119,7 +127,7 @@ DEFAULT_JOB: Dict = {
     'cloud_shadow_near_km': 10.0,  # a shadow lies within this of a cloud blob
     'cloud_min_confidence': 0.7, # a pixel is cloud / shadow only when the model is this sure
     'cloud_dilate_px': 2,        # grow the mask by this much (cloud edges)
-    'cloud_mask_from': '',       # HS (SWIR): the VNIR product of the same pass, whose mask is laid on
+    'cloud_mask_from': '',       # HS / ML: the VNIR product of the same pass; its mask added where it covers
     'cloud_from_margin_px': 10,  # extra growth for the mask laid on (their geolocation differs by km)
     'cloud_model_dir': '',       # OmniCloudMask weights; '' = <weights folder>/omnicloudmask
     'cloud_device': '',          # '' = GPU when there is one      # [first, last] band searched by auto_bands, e.g. [1, 70]; [] = all
@@ -133,6 +141,10 @@ DEFAULT_JOB: Dict = {
     'cloud_sweep_reference': [],  # reference cloud masks, one per image (raster or .geojson / .shp outlines)
     'cloud_sweep_images': [],     # more images than input_path, e.g. other MV scenes
     'cloud_sweep_pngs': 'grid',   # one PNG per combination: grid (model alone + each brightness), all, none
+    'cloud_sweep_ir_dt': '4-12:2',       # ML images: infrared tests, colder than clear by (K)
+    'cloud_sweep_ir_split': [0.75, 1.0, 1.5],  # ML: split-window threshold scales
+    'cloud_sweep_swir_k': '2-6:1',       # HS images: cirrus ratio robust sd
+    'cloud_sweep_swir_bright': '2-5:1',  # HS: thick cloud, spreads above the clear ground at 1250 nm
     'reference_dir': '',         # L8_ref / C1 / any RIVAL-readable collection
     'reference_label': '',       # tag in file names; default from folder name
     'reference_mode': 'auto',    # auto | index-shp | sidecar | degree-tile
@@ -504,13 +516,31 @@ def preflight(job: Dict, check_weights: bool = True) -> Dict:
         cfg = E.PipelineConfig(nisar_band=job['nisar_band'], nisar_frequency=job['nisar_frequency'])
         scene = E.InputScene(job['input_path'], cfg)
         info['input'] = scene.describe()
-        if str(job.get('cloud_mask') or 'none').lower() == 'omnicloudmask' and scene.kind == 'raster':
+        if cloud_on(job) and scene.kind == 'raster':
             import automatch_bench as B
             import automatch_cloud as C
-            errors += C.check(job)
             try:
                 sensor = B.sensor_of(scene.name, scene.native_res)
-                if job.get('cloud_mask_from'):
+                method = C.method_for(job, sensor, scene.raster_path)
+                if method == 'ocm' or job.get('cloud_mask_from'):
+                    errors += C.check(job)
+                if job.get('cloud_mask_from') and not os.path.exists(job['cloud_mask_from']):
+                    errors.append(f"cloud_mask_from not found: {job['cloud_mask_from']}")
+                if method in ('ir', 'swir'):
+                    info['cloud_mask'] = {'sensor': sensor, 'method': C.PHYS_NAMES[method],
+                                          'how': C._phys_text(method, C.phys_options(job, method)),
+                                          'from': job.get('cloud_mask_from') or ''}
+                    for p in (job.get('cloud_ir_clear') or []) if method == 'ir' else []:
+                        if p and not os.path.exists(p):
+                            errors.append(f'cloud_ir_clear: not found: {p}')
+                    if method == 'swir':
+                        import automatch_cloudphys as P
+                        wl = C.band_wavelengths(scene.raster_path, sensor) or \
+                            C.band_wavelengths(scene.raster_path, 'HS') or []
+                        got = P.nearest_bands(wl, [1250.0, 1380.0], 40.0)
+                        if len(got) < 2:
+                            errors.append('cloud_method swir: no bands near 1250 and 1380 nm in this image')
+                elif job.get('cloud_mask_from'):
                     if not os.path.exists(job['cloud_mask_from']):
                         errors.append(f"cloud_mask_from not found: {job['cloud_mask_from']}")
                     info['cloud_mask'] = {'sensor': sensor, 'from': job['cloud_mask_from']}
@@ -521,7 +551,7 @@ def preflight(job: Dict, check_weights: bool = True) -> Dict:
                         warnings.append(f'cloud_mask: {how}; on Sentinel-2 SWIR-only bands the model found almost '
                                         f'no cloud (IoU 0.00-0.04): prefer cloud_mask_from')
                     info['cloud_mask'] = {'sensor': sensor, 'bands': bands, 'how': how, 'wavelengths_nm': wl}
-                if (scene.native_res or 0) > 50:
+                if method == 'ocm' and (scene.native_res or 0) > 50:
                     warnings.append(f'cloud_mask: OmniCloudMask is validated at 10-50 m; this image is '
                                     f'{scene.native_res:g} m (run as it is, not upsampled)')
             except Exception as e:
@@ -996,20 +1026,27 @@ def resolve_auto_bands(job: Dict, scene, E, out_dir: str = '') -> Tuple[List[str
     return picked, ''
 
 
+def cloud_on(job: Dict) -> bool:
+    """Whether the job masks clouds (cloud_mask other than none / off / '')."""
+    return str(job.get('cloud_mask') or 'none').strip().lower() not in ('none', 'off', 'no', 'false', '0', '')
+
+
 def prepare_cloud_mask(job: Dict, scene, out_root: str) -> Dict[str, List]:
-    """OmniCloudMask on the input (automatch_cloud): {channel: [cloud-masked
-    copy, 1]} for the channels the job matches. Stops the job when it cannot
-    be done (rather than matching clouds without saying so)."""
+    """The cloud mask of the input (automatch_cloud: OmniCloudMask, or the
+    infrared / SWIR tests for ML / HS): {channel: [cloud-masked copy, 1]} for
+    the channels the job matches. Stops the job when it cannot be done
+    (rather than matching clouds without saying so)."""
     import automatch_bench as B
     import automatch_cloud as C
     if scene.kind != 'raster':
         print('[Cloud] cloud masking is for raster inputs; NISAR channels are matched as they are')
         return {}
-    probs = C.check(job)
-    if probs:
-        raise RuntimeError('; '.join(probs))
-    chans = list(job['channels'] or scene.channels)
     sensor = B.sensor_of(scene.name, scene.native_res)
+    if C.method_for(job, sensor, scene.raster_path) == 'ocm' or job.get('cloud_mask_from'):
+        probs = C.check(job)
+        if probs:
+            raise RuntimeError('; '.join(probs))
+    chans = list(job['channels'] or scene.channels)
     cache = os.path.join(scene.cache_dir(job['temp_dir']), 'cloud')
     rasters, _ = C.prepare(job, scene, chans, cache, out_root, sensor)
     return rasters
@@ -1052,7 +1089,7 @@ def run_job(job: Dict) -> Dict:
             print(f'[Job] auto_bands {job["auto_bands"]}: matching {picked}')
             with open(os.path.join(out_root, 'job_used.json'), 'w', encoding='utf-8') as f:
                 json.dump(job, f, indent=2)
-    if str(job.get('cloud_mask') or 'none').lower() == 'omnicloudmask':
+    if cloud_on(job):
         job = dict(job, _channel_rasters=prepare_cloud_mask(job, scene, out_root))
     res = job['target_resolution'] or scene.native_res or 10.0
     detectors = job['detectors']

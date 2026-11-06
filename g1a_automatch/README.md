@@ -22,6 +22,10 @@ NISAR↔S1 production scripts in the repo root are separate and untouched.
 | `imw_configs.py` | imcui catalogue: the full matrix (22 sparse + 16 dense rows), resolved from the installed imcui's registry. |
 | `automatch_weights.py` | Which weight files each detector needs and whether they are on this machine (nothing is downloaded). |
 | `automatch_truth.py` | Ranks every detector + matcher of a run against manually measured ground truth. |
+| `automatch_accuracy.py` | Match accuracy of finished jobs (good / bad matches against the truth field; sub-cells). |
+| `automatch_cloud.py` | Cloud masks before matching, and the stand-alone cloud test: OmniCloudMask (MV / HV), or the physical tests (ML / HS). |
+| `automatch_cloudphys.py` | Physical cloud tests: infrared (ML: brightness temperature, split window, ice, CO₂ / water vapour) and SWIR (HS: 1.38 µm cirrus, bright blobs). |
+| `automatch_cloudsweep.py` | Cloud benchmark: every combination of the cloud settings, against reference outlines. |
 | `automatch_gpuaas.py` | Entry point for the GPU service (`submit_job` `code_path`). |
 | `automatch_server.py` | HTTP front end for a GPU server: submit and follow jobs with curl. |
 | `prefetch_weights.py` | Collect all kornia + imcui weights into one folder for an offline workstation. |
@@ -489,8 +493,12 @@ matches are parallel; random matches give about 0 %.
 
 ## Clouds (OmniCloudMask)
 
-`cloud_mask: omnicloudmask` (GUI: *Clouds*, Data tab) finds thick cloud,
-thin cloud and cloud shadow with OmniCloudMask (Wright et al., *Remote
+`cloud_mask: on` (`omnicloudmask`, as older jobs say, means the same; GUI:
+*Clouds*, Data tab) masks clouds before matching. `cloud_method` says how:
+`auto` (the default) uses the infrared tests for ML, the SWIR tests for HS
+(both in the next section) and OmniCloudMask for MV / HV; `omnicloudmask`,
+`ir` or `swir` choose one for every image. OmniCloudMask finds thick cloud,
+thin cloud and cloud shadow (Wright et al., *Remote
 Sensing of Environment* 2025; sensor-agnostic, MIT licence). Those pixels
 are left out of matching: each band the job matches is copied with them set
 to no data, and the job matches that copy.
@@ -502,10 +510,11 @@ to no data, and the job matches that copy.
   - **MV** (MX-VNIR: B1 485, B2 555, B3 650, B4 815, B5 725, B6 860 nm):
     B3, B2, B6.
   - **HV** (Hysis-VNIR, 375–1000 nm): the bands nearest 650, 560 and 860 nm.
-  - **HS** (Hysis-SWIR, 900–2500 nm): none. Set `cloud_mask_from` to the HV
-    (or MV) product of the same pass. Its mask is computed there and laid
-    onto the HS image by map coordinates, grown by `cloud_from_margin_px`
-    (10) for the few km their geolocation differs.
+  - **HS** (Hysis-SWIR, 900–2500 nm): none, so HS gets the SWIR tests
+    (next section). `cloud_mask_from` adds the mask of the HV (or MV)
+    product of the same pass, laid on by map coordinates (grown by
+    `cloud_from_margin_px`, 10, for the few km their geolocation differs),
+    where that product covers the HS image.
 - **Contrast normalisation:** OmniCloudMask standardises each band per
   patch, so raw DN works. Before matching, each window is stretched (log,
   then `stretch_percentiles`, default the 1st–99th percentile) over its valid
@@ -650,7 +659,85 @@ Checked here on two cloudy Sentinel-2 scenes over India (tile 43QGU,
 | Red / Green / NIR | IoU 0.71 | IoU 0.68–0.81 | IoU 0.82 |
 | SWIR only (945, 1610, 2190 nm, as HS has) | | IoU 0.00–0.04 | |
 
-With SWIR only, the model found 0–3 % cloud. Hence `cloud_mask_from` for HS.
+With SWIR only, the model found 0–3 % cloud. Hence the SWIR tests and
+`cloud_mask_from` for HS.
+
+## Clouds on ML and HS (infrared and SWIR tests)
+
+OmniCloudMask needs red, green and NIR, which ML (MX-LWIR: six thermal
+bands at 1.2–1.5 km) and HS (SWIR) do not have. These two get physical
+tests instead (`automatch_cloudphys.py`). No model is involved, so nothing
+needs installing and nothing runs on the GPU.
+
+- **Radiance:** pixel value × `radiance_scale` (0.01, as the G1A metadata
+  says: scaled radiance, scaling factor 0.01). The unit is not stated, so
+  for ML the unit that gives Earth-like temperatures at 10.8 µm is taken
+  (W/m²/sr/µm, mW/cm²/sr/µm, mW/m²/sr/µm, or per cm⁻¹). The log and
+  `CLOUD_PARAMS` name the unit and the median temperature found; check
+  that they look right (about 280–310 K over warm clear ground).
+- **ML, the infrared tests** (as the GOES ABI, Himawari AHI and SEVIRI
+  cloud masks use on the same channels; day and night). Brightness
+  temperatures come from inverse Planck at 7.35, 8.5, 9.6, 10.8, 12.0 and
+  13.25 µm (B1–B6), unless the band descriptions state other centres.
+  - **cold:** BT10.8 is colder than the clear sky by `cloud_ir_dt_k` (8 K).
+    Thick cloud is twice that, or colder than `cloud_ir_cold_k` (240 K).
+  - **clear sky:** taken from earlier scenes of the same ground when
+    `cloud_ir_clear` lists them (each pixel's warmest; the same hour is
+    best). Otherwise it comes from the scene itself: the 90th percentile of
+    ~100 km blocks. From the scene alone, a cold mountain looks like cloud;
+    with earlier scenes it does not (tested).
+  - **split window:** BT10.8 − BT12.0 above the Saunders & Kriebel
+    threshold for its temperature, × `cloud_ir_split_scale` (1). This
+    finds thin cirrus.
+  - **ice:** BT8.5 − BT10.8 > 0.5 K.
+  - **high:** the CO₂ (13.25 µm) or water-vapour (7.35 µm) band is within
+    8 K of the window band, while the window band is colder than clear sky.
+  - **edges:** a ragged 10.8 µm field next to cold pixels.
+  - **Classes:** thick = cold by twice the threshold, very cold, or high;
+    thin = the other tests. Blobs smaller than `cloud_min_blob_km2` are
+    dropped.
+- **HS, the SWIR tests** (daylight; at night they say so and mask nothing):
+  - **cirrus:** L1380 / L1250 is above its clear level by `cloud_swir_k`
+    (4) robust standard deviations. Water vapour hides the ground at
+    1.38 µm, so high and thin cloud shows; this is Landsat 8 band 9 and
+    Sentinel-2 B10. High terrain shows through a little too.
+  - **thick:** L1250 is brighter than the clear ground by
+    `cloud_swir_bright_sd` (3) spreads, and L1650 is above the ground too
+    (snow is dark at 1.65 µm). A spread is the median's distance down to
+    the 16th percentile, and the dark half of the scene is ground even when
+    much of it is cloud.
+  - Low cloud over bright ground stays hard from SWIR alone.
+- **Each sensor its own mask:** the payloads cover different ground, so ML
+  and HS always make their own. With `cloud_mask_from` (the MV / HV
+  product of the same pass), that product's mask is added where it covers
+  the image: thick over thin over shadow over clear.
+  `covered_by_laid_pct` says how much it covered.
+- **Cloud test:**
+
+      python automatch_job.py cloud <ML or HS image> --out <folder>
+          [--method auto|omnicloudmask|ir|swir] [--radiance-scale 0.01]
+          [--ir-dt 8 --ir-split 1 --ir-cold 240 --clear <earlier ML scenes>]
+          [--swir-k 4 --swir-bright 3] [--min-blob-km2 1] [--from <MV/HV image>]
+
+  It writes `<time>_ir/own/` (or `_swir`): the mask, the quicklook and
+  `CLOUD_PARAMS`. ML quicklooks show 10.8 µm inverted, so cold cloud looks
+  bright. With `--from`, it also writes `plus_vnir_conf_<c>/`, one for each
+  threshold of the VNIR mask. The GUI's *Cloud mask test…* has the method
+  and these settings.
+- **Sweep:** `cloudsweep` sweeps ML images over `--ir-dt` (4-12:2) ×
+  `--ir-split` (0.75 1 1.5) × blob size. It sweeps HS images over
+  `--swir-k` (2-6:1) × `--swir-bright` (2-5:1) × blob size. Rows carry
+  `method` ir / swir and those settings. PNGs go into `<image>/ir/` or
+  `<image>/swir/`. With reference outlines, the rows have F1 / IoU as for
+  OmniCloudMask, and the best one is written at full size. GPU-service
+  keys: `cloud_sweep_ir_dt`, `cloud_sweep_ir_split`, `cloud_sweep_swir_k`
+  and `cloud_sweep_swir_bright`.
+- **Thresholds:** these are starting points from the literature, not tuned
+  on G1A. Draw cloud outlines on a few ML and HS scenes and let the sweep
+  pick.
+- **Learned models, for comparison:** TIRAuxCloud (2026) releases code
+  (Apache-2.0) and weights for thermal-band cloud masks. It is trained on
+  Landsat and VIIRS, not G1A, and is not wired in here.
 
 The benchmark reports the model's cloud % for jobs that ran with masking.
 `--cloud omnicloudmask` (GUI: *Cloud estimate*) runs the model on the other
