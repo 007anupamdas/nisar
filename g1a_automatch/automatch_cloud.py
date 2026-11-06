@@ -481,7 +481,9 @@ def transfer(mask_path: str, onto: str, out_path: str, grow_px: int = 0) -> str:
 
 
 PHYS_NAMES = {'ir': 'infrared tests', 'swir': 'SWIR tests', 'vnir': 'VNIR tests',
-              'tiraux': 'TIRAuxCloud (experimental)'}
+              'tiraux': 'TIRAuxCloud (experimental)', 'csmask': 'ukis-csmask', 'spectf': 'SpecTf'}
+MODEL_METHODS = ('tiraux', 'csmask', 'spectf')     # learned: run on cloud_device
+SUN_KEYS = ('cloud_sun_zenith_deg', 'cloud_acq_time_utc')
 CLEAR_KEY = {'ir': 'cloud_ir_clear', 'vnir': 'cloud_vis_clear'}     # earlier scenes giving the clear sky
 
 
@@ -498,6 +500,10 @@ def method_for(job: Dict, sensor: str, path: str = '') -> str:
         return m
     if m in ('tirauxcloud', 'tiraux'):
         return 'tiraux'
+    if m in ('csmask', 'ukis-csmask', 'ukis'):
+        return 'csmask'
+    if m == 'spectf':
+        return 'spectf'
     if sensor == 'ML':
         return 'ir'
     if sensor == 'HS':
@@ -524,6 +530,8 @@ def needs_model(job: Dict, sensor: str, path: str) -> bool:
     if method_for(job, sensor, path) == 'ocm':
         return True
     src = job.get('cloud_mask_from') or ''
+    if method_for(job, sensor, path) == 'spectf':
+        return False
     if src and os.path.exists(src):
         return method_for({'cloud_method': job.get('cloud_from_method') or 'auto'}, sensor_for(src), src) == 'ocm'
     return False
@@ -541,6 +549,13 @@ def phys_options(job: Dict, method: str) -> Dict:
     if method == 'tiraux':
         import automatch_tirauxcloud as T
         return T.options(job)
+    if method in ('csmask', 'spectf'):
+        import automatch_cloudmodels as M
+        o = M.csmask_options(job) if method == 'csmask' else M.spectf_options(job)
+        if method == 'spectf' and not o.get('vnir'):
+            o['vnir'] = job.get('cloud_mask_from') or ''        # the HV product of the same pass
+        o['sun'] = {k: job.get(k) for k in SUN_KEYS if job.get(k) not in (None, '')}
+        return o
     if method == 'vnir':
         return {'bright_sd': get('cloud_vis_bright_sd', P.VIS_DEFAULTS['bright_sd']),
                 'white': get('cloud_vis_white', P.VIS_DEFAULTS['white']),
@@ -556,6 +571,13 @@ def _phys_text(method: str, opts: Dict) -> str:
         return (f"infrared tests: colder than clear sky by {opts['dt_k']:g} K (thick by twice that, or colder than "
                 f"{opts['cold_k']:g} K), split window x {opts['split_scale']:g}, ice (8.5-10.8 um), high cloud "
                 f"(13.25 / 7.35 um), edges; {blob_text(opts['min_blob_km2'])}")
+    if method == 'csmask':
+        return (f"ukis-csmask 4-band model ({opts.get('product_level', 'l1c')}) on TOA reflectance of blue, green, "
+                "red, NIR: cloud and cloud shadow")
+    if method == 'spectf':
+        return ("SpecTf on the TOA reflectance spectrum (405-2455 nm"
+                + (f", HV bands from {os.path.basename(opts['vnir'])}" if opts.get('vnir') else '')
+                + f"): cloud where its probability is at least {opts['threshold']:g}")
     if method == 'tiraux':
         return (f"TIRAuxCloud {opts['arch']} ({opts['mode']} input, {opts['classes']} classes, "
                 f"{os.path.basename(opts['checkpoint'] or '?')}): cloud where its probability is at least "
@@ -571,13 +593,80 @@ def _phys_text(method: str, opts: Dict) -> str:
             f"{blob_text(opts['min_blob_km2'])}")
 
 
+def load_reflectance(path: str, method: str, sensor: str, scale: float, unit: str, opts: Dict) -> Dict:
+    """What ukis-csmask (blue, green, red, NIR) or SpecTf (the spectrum;
+    HS with the HV image of the same pass laid on its grid) read: TOA
+    reflectance (automatch_reflect) and the usual {'valid', 'px', 'prof', 'show'}."""
+    import rasterio as rio
+    import automatch_cloudphys as P
+    import automatch_reflect as R
+    with rio.open(path) as src:
+        prof = src.profile.copy()
+        px = pixel_m(src.transform, src.crs, src.height)
+        H, W, tr, crs = src.height, src.width, src.transform, src.crs
+    wl = band_wavelengths(path, sensor)
+    if not wl:
+        raise ValueError(f'{os.path.basename(path)}: the band wavelengths are needed (band descriptions in nm, '
+                         'or a known sensor)')
+    sun = opts.get('sun') or {}
+    if method == 'csmask':
+        sel = P.vnir_bands(wl)
+        if 'blue' not in sel:
+            raise ValueError('ukis-csmask needs a blue band (within 40 nm of 485 nm)')
+        bands = [sel[k] for k in ('blue', 'green', 'red', 'nir')]
+        refl, valid, rinfo = R.read_reflectance(path, bands, scale, unit, sun)
+        return {'valid': valid, 'px': px, 'prof': prof, 'refl': refl, 'reflect': rinfo,
+                'bands_used': ', '.join(f'B{b} ({nm:.0f} nm)' for b, nm in bands),
+                'show': np.nan_to_num(np.stack([refl[2], refl[1], refl[3]]))}
+    import automatch_cloudmodels as M
+    own = M.spectf_bands(wl, 0)
+    refl, valid, rinfo = R.read_reflectance(path, own, scale, unit, sun)
+    nms = [nm for _, nm in own]
+    used_from = os.path.basename(path)
+    hv = opts.get('vnir') or ''
+    if hv:                         # the HV bands below this image's shortest, laid on its grid
+        from rasterio.warp import reproject, Resampling
+        hwl = band_wavelengths(hv, sensor_for(hv)) or band_wavelengths(hv, 'HV')
+        lo = min(nms) if nms else 1e9
+        hb = [(b, nm) for b, nm in M.spectf_bands(hwl or [], 0) if nm < lo - 1.0]
+        if hb:
+            href, hvalid, _ = R.read_reflectance(hv, hb, scale, unit, sun)
+            with rio.open(hv) as s:
+                stack = np.full((len(hb), H, W), np.nan, np.float32)
+                for i in range(len(hb)):
+                    reproject(np.where(hvalid, href[i], np.nan).astype(np.float32), stack[i],
+                              src_transform=s.transform, src_crs=s.crs, src_nodata=np.nan, dst_transform=tr,
+                              dst_crs=crs, dst_nodata=np.nan, resampling=Resampling.bilinear)
+            refl = np.concatenate([stack, refl])
+            nms = [nm for _, nm in hb] + nms
+            valid = valid & np.all(np.isfinite(stack), axis=0)
+            used_from += f' + {os.path.basename(hv)} ({len(hb)} bands below {lo:.0f} nm)'
+    if not nms or min(nms) > 700 or max(nms) < 1600:
+        raise ValueError(f'SpecTf needs the spectrum from the visible to the SWIR (it gives nonsense on a part '
+                         f'of it); this has {min(nms or [0]):.0f}-{max(nms or [0]):.0f} nm. For HS, set '
+                         f'cloud_spectf_vnir (or cloud_mask_from) to the HV image of the same pass')
+    mb = int(opts.get('max_bands') or 0)
+    if mb and len(nms) > mb:
+        keep = np.unique(np.round(np.linspace(0, len(nms) - 1, mb)).astype(int))
+        refl, nms = refl[keep], [nms[i] for i in keep]
+    order = np.argsort(nms)
+    refl, nms = refl[order], [nms[i] for i in order]
+    pick = (lambda t: int(np.argmin([abs(x - t) for x in nms])))
+    show = np.stack([refl[pick(1650)], refl[pick(860)], refl[pick(650)]])
+    return {'valid': valid, 'px': px, 'prof': prof, 'refl': refl, 'nm': nms, 'reflect': rinfo,
+            'bands_used': f'{len(nms)} bands {min(nms):.0f}-{max(nms):.0f} nm from {used_from}',
+            'show': np.nan_to_num(show)}
+
+
 def load_phys(path: str, method: str, sensor: str, scale: float = 0.01, clear_paths=(),
-              unit: str = 'W/cm2/sr/um') -> Dict:
+              unit: str = 'W/cm2/sr/um', opts: Optional[Dict] = None) -> Dict:
     """What the infrared, SWIR or VNIR tests read from an image: {'valid',
     'px', 'prof', 'show' (3 bands for the quicklook), and 'bt', 'clear',
     'unit', 'bt108_median_k' (ir), 'L' (swir) or 'R', 'clear', 'bands' (vnir)}."""
     import rasterio as rio
     import automatch_cloudphys as P
+    if method in ('csmask', 'spectf'):
+        return load_reflectance(path, method, sensor, scale, unit, opts or {})
     if method == 'vnir':
         with rio.open(path) as src:
             prof = src.profile.copy()
@@ -641,7 +730,7 @@ def compute_phys(path: str, method: str, out_dir: str, opts: Dict, sensor: str, 
     infrared (ML) or SWIR (HS) tests (automatch_cloudphys); info as compute()."""
     import rasterio as rio
     import automatch_cloudphys as P
-    d = data or load_phys(path, method, sensor, scale, clear_paths, unit)
+    d = data or load_phys(path, method, sensor, scale, clear_paths, unit, opts)
     valid, px = d['valid'], d['px']
     if method == 'ir':
         cls, tests = P.ir_mask(d['bt'], valid, px, d['clear'], **opts)
@@ -654,6 +743,19 @@ def compute_phys(path: str, method: str, out_dir: str, opts: Dict, sensor: str, 
         extra = {'vnir_bands': ', '.join(f'{k} B{b} ({nm:.0f} nm)' for k, (b, nm) in d['bands'].items()),
                  'clear_sky': (f'darkest of {len(clear_paths)} earlier scene(s)' if d['clear'] is not None
                                else 'from the scene (the darker half is ground)')}
+    elif method in ('csmask', 'spectf'):
+        import automatch_cloudmodels as M
+        dev = opts.get('device') or None
+        if method == 'csmask':
+            cls = M.csmask_classes(d['refl'], valid, opts, dev)
+            tests = {}
+        else:
+            prob = M.spectf_probability(d['refl'], d['nm'], valid, opts, dev)
+            cls = np.where(valid, (prob >= opts['threshold']).astype(np.uint8), 255).astype(np.uint8)
+            tests = {'spectf_prob_median': round(float(np.median(prob[valid])), 3) if valid.any() else None}
+        extra = {'bands_used': d['bands_used'], 'sun_zenith': d['reflect']['zenith_how'],
+                 'sun_zenith_median_deg': d['reflect']['sun_zenith_median_deg'], 'earth_sun_au': d['reflect']['d_au'],
+                 'night_pct': d['reflect']['night_pct']}
     elif method == 'tiraux':
         import automatch_tirauxcloud as T
         cls, tests = T.mask(d['bt'], d['rad_si'], valid, px, opts, opts.get('device') or None)
@@ -806,8 +908,10 @@ def _prepare_phys(job: Dict, path: str, method: str, channels: List[str], cache_
                                    'from_method': str(job.get('cloud_from_method') or 'auto'),
                                    'grow': int(job.get('cloud_from_margin_px') or 0)}, sort_keys=True).encode()
                        ).hexdigest()
-    if method == 'tiraux':           # the device does not change the mask: not in the key
+    if method in MODEL_METHODS:      # the device does not change the mask: not in the key
         opts = dict(opts, device=job.get('cloud_device') or '')
+    if method == 'spectf':           # the VNIR product is part of SpecTf's input, not laid on
+        src = ''
     info_path = os.path.join(cache_dir, 'CLOUD_INFO.json')
     try:
         with open(info_path, encoding='utf-8') as f:
@@ -820,8 +924,11 @@ def _prepare_phys(job: Dict, path: str, method: str, channels: List[str], cache_
         print(f'[Cloud] mask reused from {cache_dir}')
         return _finish(job, path, info, channels, cache_dir, out_dir)
     print(f'[Cloud] {PHYS_NAMES[method]} on {os.path.basename(path)} ({sensor}) ...', flush=True)
-    data = load_phys(path, method, sensor, scale, clear_paths, unit)
+    data = load_phys(path, method, sensor, scale, clear_paths, unit, opts)
     info = compute_phys(path, method, cache_dir, opts, sensor, scale, clear_paths, data=data, unit=unit)
+    if method in ('csmask', 'spectf'):
+        print(f"[Cloud] {info['bands_used']}; TOA reflectance with the sun zenith {info['sun_zenith']}, "
+              f"Earth-Sun {info['earth_sun_au']} AU", flush=True)
     how = _phys_text(method, opts)
     if method in ('ir', 'tiraux'):
         print(f"[Cloud] radiance read as {info['radiance_unit']} (x {scale:g}): median BT10.8 "
@@ -944,9 +1051,13 @@ def standalone(path: str, out_dir: str, sensor: str = '', bands: Optional[List[s
     os.makedirs(out_dir, exist_ok=True)
     confs = sorted({round(float(c), 3) for c in confidences}) or [0.7]
     meth = method_for({'cloud_method': method}, sensor, path)
-    if meth == 'tiraux':
-        phys_opts = dict(phys_opts or phys_options({}, 'tiraux'))
+    if meth in MODEL_METHODS:
+        phys_opts = dict(phys_opts or phys_options({}, meth))
         phys_opts['device'] = phys_opts.get('device') or device or ''
+    if meth == 'spectf':
+        if mask_from and not phys_opts.get('vnir'):
+            phys_opts['vnir'] = mask_from
+        mask_from = ''
     if meth in PHYS_NAMES:
         rows, folder = _standalone_phys(path, out_dir, sensor, meth, phys_opts, scale, clear_paths, mask_from,
                                         margin_px, stamp, run_folder, unit,
@@ -1073,8 +1184,11 @@ def _standalone_phys(path: str, out_dir: str, sensor: str, method: str, opts: Op
     folder = run_folder(variant)
     base = os.path.join(out_dir, folder)
     print(f'[Cloud] {os.path.basename(path)} ({sensor}): {PHYS_NAMES[method]}', flush=True)
-    data = load_phys(path, method, sensor, scale, clear_paths, unit)
+    data = load_phys(path, method, sensor, scale, clear_paths, unit, opts)
     own = compute_phys(path, method, os.path.join(base, 'own'), opts, sensor, scale, clear_paths, stamp, data, unit)
+    if method in ('csmask', 'spectf'):
+        print(f"[Cloud] {own['bands_used']}; TOA reflectance with the sun zenith {own['sun_zenith']}, "
+              f"Earth-Sun {own['earth_sun_au']} AU", flush=True)
     if method in ('ir', 'tiraux'):
         print(f"[Cloud] radiance read as {own['radiance_unit']} (x {scale:g}): median BT10.8 "
               f"{own['bt108_median_k']} K; clear sky {own.get('clear_sky', '-')}", flush=True)
@@ -1086,7 +1200,9 @@ def _standalone_phys(path: str, out_dir: str, sensor: str, method: str, opts: Op
     tests = {k: v for k, v in own.items() if k.startswith('test_') or k in ('radiance_unit', 'unit_warning',
                                                                              'bt108_median_k',
                                                                              'clear_sky', 'night', 'vnir_bands',
-                                                                             'whiteness_cloud_median')}
+                                                                             'whiteness_cloud_median', 'bands_used',
+                                                                             'sun_zenith', 'sun_zenith_median_deg',
+                                                                             'spectf_prob_median')}
     common = {'run': stamp, 'image': path, 'sensor': sensor, 'variant': variant, 'folder': folder, 'method': method,
               'band_choice': how, **{f'opt_{k}': v for k, v in opts.items()}, **tests}
     rows = [dict(common, confidence=None, cloud_pct=own['cloud_pct'], thick_pct=own['thick_pct'],
@@ -1140,13 +1256,21 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument('--shadow-near-km', type=float, default=REFINE_DEFAULTS['shadow_near_km'],
                     help='shadows kept within this of a cloud blob')
     import automatch_cloudphys as P
-    ap.add_argument('--method', default='auto', choices=['auto', 'omnicloudmask', 'ir', 'swir', 'vnir', 'tirauxcloud'],
+    ap.add_argument('--method', default='auto',
+                    choices=['auto', 'omnicloudmask', 'ir', 'swir', 'vnir', 'tirauxcloud', 'csmask', 'spectf'],
                     help='auto: infrared tests for ML, SWIR tests for HS, VNIR tests for MV / HV')
     ap.add_argument('--from-method', default='auto', choices=['auto', 'omnicloudmask', 'vnir'],
                     help='how the --from (VNIR) image is masked')
     ap.add_argument('--radiance-scale', type=float, default=0.01, help='radiance = pixel value x this (G1A: 0.01)')
     ap.add_argument('--radiance-unit', default='W/cm2/sr/um',
                     help='unit of the scaled radiance (G1A: W/cm2/sr/um); auto: whatever gives Earth temperatures')
+    ap.add_argument('--spectf-weights', default='', help='SpecTf: its current.pt')
+    ap.add_argument('--spectf-vnir', default='', help='SpecTf on HS: the HV image of the same pass (default: --from)')
+    ap.add_argument('--spectf-threshold', type=float, default=0.51, help='SpecTf: cloud where its probability >= this')
+    ap.add_argument('--sun-zenith', type=float, default=0.0,
+                    help='reflectance (csmask / spectf): the sun zenith (deg), when the metadata has none')
+    ap.add_argument('--acq-time', default='', help='reflectance: the acquisition time (UTC, 2026-03-01T05:30:00), '
+                    'when the metadata has none (gives the sun zenith per pixel)')
     ap.add_argument('--tiraux-checkpoint', default='', help='TIRAuxCloud: a model_hash_<...>.pth')
     ap.add_argument('--tiraux-arch', default='SegFormer', choices=['SegFormer', 'Unet'])
     ap.add_argument('--tiraux-mode', default='ols', choices=['ols', 'landsat'],
@@ -1181,7 +1305,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     device = J.use_gpu(a.device) if a.device else None      # before omnicloudmask loads torch
     sensor = a.sensor or sensor_for(a.image)
     meth = method_for({'cloud_method': a.method}, sensor, a.image)
-    if meth == 'ocm' or (a.mask_from and a.from_method == 'omnicloudmask'):
+    if meth == 'ocm' or (a.mask_from and a.from_method == 'omnicloudmask' and meth != 'spectf'):
         problems = check({'cloud_model_dir': a.model_dir})
         if problems:
             print('\n'.join(problems))
@@ -1192,6 +1316,16 @@ def main(argv: Optional[List[str]] = None) -> int:
              'swir': {'k': a.swir_k, 'bright_sd': a.swir_bright, 'min_blob_km2': a.min_blob_km2},
              'vnir': {'bright_sd': a.vis_bright, 'white': a.vis_white, 'clear_factor': a.vis_clear_factor,
                       'min_blob_km2': a.min_blob_km2, 'shadow_near_km': a.shadow_near_km}}.get(meth)
+    if meth in ('csmask', 'spectf'):
+        import automatch_cloudmodels as M
+        popts = phys_options({'cloud_spectf_weights': a.spectf_weights, 'cloud_spectf_vnir': a.spectf_vnir,
+                              'cloud_spectf_threshold': a.spectf_threshold, 'cloud_mask_from': a.mask_from,
+                              'cloud_sun_zenith_deg': a.sun_zenith or None, 'cloud_acq_time_utc': a.acq_time}, meth)
+        popts['device'] = device or ''
+        problems = M.csmask_check(popts) if meth == 'csmask' else M.spectf_check(popts)
+        if problems:
+            print('\n'.join(problems))
+            return 2
     if meth == 'tiraux':
         import automatch_tirauxcloud as T
         popts = T.options({'cloud_tiraux_checkpoint': a.tiraux_checkpoint, 'cloud_tiraux_arch': a.tiraux_arch,

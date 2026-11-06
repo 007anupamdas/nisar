@@ -55,7 +55,7 @@ CODE_FILES = ('automatch_engine.py', 'automatch_job.py', 'automatch_imcui.py', '
               'automatch_rival.py', 'automatch_truth.py', 'automatch_weights.py', 'automatch_gpuaas.py',
               'automatch_native.py', 'imw_configs.py', 'automatch_cross.py', 'automatch_bench.py',
               'automatch_cloud.py', 'automatch_accuracy.py', 'automatch_cloudsweep.py', 'automatch_cloudphys.py',
-              'automatch_tirauxcloud.py')
+              'automatch_tirauxcloud.py', 'automatch_reflect.py', 'automatch_cloudmodels.py')
 
 
 def code_fingerprint() -> str:
@@ -127,6 +127,13 @@ DEFAULT_JOB: Dict = {
     'cloud_tiraux_px_m': 0.0,     # its pixel size; 0: 200 m ols, 100 m landsat
     'cloud_tiraux_norm': [0.0, 72.0],  # landsat input: W/m2/sr/um mapped to 0-1 (unpublished: a guess)
     'cloud_tiraux_threshold': 0.5,  # cloud where its probability is at least this
+    # learned masks on TOA reflectance (automatch_reflect, automatch_cloudmodels): csmask (MV / HV), spectf (HV + HS)
+    'cloud_spectf_weights': '',   # SpecTf's current.pt (109 KB)
+    'cloud_spectf_vnir': '',      # HS: the HV image of the same pass (default: cloud_mask_from)
+    'cloud_spectf_threshold': 0.51,  # cloud where its probability is at least this (its own value)
+    'cloud_spectf_max_bands': 300,  # thin longer spectra evenly to this many bands
+    'cloud_sun_zenith_deg': 0.0,  # reflectance: the sun zenith (deg) when the metadata has none; 0 = metadata
+    'cloud_acq_time_utc': '',     # reflectance: acquisition time (UTC) when the metadata has none; '' = metadata
     'cloud_ir_dt_k': 8.0,        # ML: cloud is this much colder than clear sky at 10.8 um (thick: twice that)
     'cloud_ir_split_scale': 1.0,  # ML: x the split-window (10.8 - 12 um) thresholds; higher, less thin cirrus
     'cloud_ir_cold_k': 240.0,    # ML: colder than this at 10.8 um is thick cloud whatever
@@ -164,6 +171,9 @@ DEFAULT_JOB: Dict = {
     'cloud_sweep_vis_white': [0.15, 0.25, 0.35],  # MV / HV: whiteness limits
     'cloud_sweep_method': 'auto',        # auto | compare (MV / HV: VNIR tests + OmniCloudMask; ML: + TIRAuxCloud)
     'cloud_sweep_tiraux_threshold': '0.3-0.7:0.2',  # ML with cloud_tiraux_checkpoint: its probability thresholds
+    'cloud_sweep_csmask': False,         # compare: MV / HV also by ukis-csmask
+    'cloud_sweep_spectf_threshold': '0.3-0.7:0.1',  # HS with cloud_spectf_weights: SpecTf thresholds
+    'cloud_sweep_spectf_vnir': [],       # the HV image of the same pass for each sweep image ('' where none)
     'reference_dir': '',         # L8_ref / C1 / any RIVAL-readable collection
     'reference_label': '',       # tag in file names; default from folder name
     'reference_mode': 'auto',    # auto | index-shp | sidecar | degree-tile
@@ -550,6 +560,21 @@ def preflight(job: Dict, check_weights: bool = True) -> Dict:
                     errors.append(f'radiance_unit: {e}')
                 if job.get('cloud_mask_from') and not os.path.exists(job['cloud_mask_from']):
                     errors.append(f"cloud_mask_from not found: {job['cloud_mask_from']}")
+                if method in ('csmask', 'spectf'):
+                    import automatch_cloudmodels as M
+                    import automatch_reflect as R
+                    po = C.phys_options(job, method)
+                    errors += M.csmask_check(po) if method == 'csmask' else M.spectf_check(po)
+                    if method == 'spectf' and sensor == 'HS' and not po.get('vnir'):
+                        errors.append('cloud_method spectf on HS needs the HV image of the same pass '
+                                      '(cloud_spectf_vnir or cloud_mask_from): on SWIR alone it gives nonsense')
+                    si = R.sun_info(scene.raster_path, job)
+                    if si['zenith_deg'] is None and si['time'] is None:
+                        errors.append('reflectance: no sun angle or acquisition time in the metadata; set '
+                                      'cloud_sun_zenith_deg or cloud_acq_time_utc (keys seen: '
+                                      + ('; '.join(si['seen'][:6]) or 'none') + ')')
+                    else:
+                        info['reflectance'] = {'sun_zenith_from': si['zenith_from'], 'time_from': si['time_from']}
                 if method == 'tiraux':
                     import automatch_tirauxcloud as T
                     errors += T.check(T.options(job))

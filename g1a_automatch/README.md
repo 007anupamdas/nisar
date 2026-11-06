@@ -27,6 +27,8 @@ NISAR↔S1 production scripts in the repo root are separate and untouched.
 | `automatch_cloudphys.py` | Physical cloud tests: VNIR (MV / HV: bright, white, blue), infrared (ML: brightness temperature, split window, ice, CO₂ / water vapour) and SWIR (HS: 1.38 µm cirrus, bright SWIR). |
 | `automatch_cloudsweep.py` | Cloud benchmark: every combination of the cloud settings, against reference outlines. |
 | `automatch_tirauxcloud.py` | TIRAuxCloud's released thermal checkpoints as an experimental ML cloud method. |
+| `automatch_reflect.py` | TOA reflectance: sun angle / time from the metadata, per-pixel sun zenith, Earth-Sun distance, solar irradiance. |
+| `automatch_cloudmodels.py` | Learned cloud masks on reflectance: ukis-csmask (MV / HV) and SpecTf (HS + HV). |
 | `automatch_gpuaas.py` | Entry point for the GPU service (`submit_job` `code_path`). |
 | `automatch_server.py` | HTTP front end for a GPU server: submit and follow jobs with curl. |
 | `prefetch_weights.py` | Collect all kornia + imcui weights into one folder for an offline workstation. |
@@ -772,6 +774,44 @@ unless `cloud_min_blob_km2` sets one (0 by default).
 - **Thresholds:** these are starting points from the literature, not tuned
   on G1A. Draw cloud outlines on a few ML and HS scenes and let the sweep
   pick.
+- **Learned masks on TOA reflectance** (`automatch_reflect.py`,
+  `automatch_cloudmodels.py`): options to compare with the tests, not the
+  default.
+  - **Reflectance:** ρ = π·L·d² / (E0·cos θs). L is the radiance as above;
+    E0 is the solar irradiance at the band centre; d is the Earth–Sun
+    distance on the day. The sun zenith θs is computed per pixel from the
+    acquisition time and each pixel's latitude / longitude, else taken from
+    the scene's sun elevation or zenith.
+  - **Where the sun and time come from:** the raster's tags, or the
+    metadata files beside the image (`<name>.xml / .json / .txt / .met`,
+    `*META*.txt`), with keys like `SunElevation`, `SolarZenith`,
+    `SceneCenterTime`, `AcquisitionTime`, or `DateOfPass` plus a time.
+    Processing and creation dates are skipped. The log names the key it
+    used. `cloud_sun_zenith_deg` or `cloud_acq_time_utc` overrides it (GUI:
+    the cloud test's *Reflectance* row). Preflight lists the sun and time
+    keys it saw when none fits.
+  - **ukis-csmask** (`cloud_method: csmask`, MV / HV; DLR, Apache-2.0):
+    its 4-band model (blue, green, red, NIR), trained on Sentinel-2 /
+    Landsat at about 30 m. It gives cloud and cloud shadow.
+    `pip install ukis-csmask[gpu]` (or `[cpu]`); the weights come with it.
+  - **SpecTf** (`cloud_method: spectf`, HS with its HV pass; NASA JPL,
+    Apache-2.0): the EMIT cloud mask (F1 0.95 on EMIT), a per-pixel
+    transformer over the spectrum (405–2455 nm).
+    - Its small model is rebuilt here; only its weights `current.pt`
+      (109 KB) are needed, from
+      https://github.com/emit-sds/SpecTf/raw/main/spectf_cloud/weights/current.pt
+      (`cloud_spectf_weights`; GUI: Data tab).
+    - It needs the whole spectrum. Checked with its published weights: on
+      the SWIR part alone, or the VNIR part alone, it calls vegetation and
+      soil cloud. So on HS it is refused unless `cloud_spectf_vnir` (or
+      `cloud_mask_from`) names the HV image of the same pass. That image's
+      bands below 900 nm are added on the HS grid.
+    - On full spectra it gave thick and high cloud 0.99, cirrus over
+      vegetation 1.0, vegetation 0.0 and bright sand 0.16. Snow came out as
+      cloud (1.0).
+  - **Compare:** `cloudsweep --method compare --csmask` adds ukis-csmask
+    on MV / HV. `--spectf-weights current.pt --spectf-vnir <HV per image>`
+    adds SpecTf on HS, with thresholds `--spectf-threshold 0.3-0.7:0.1`.
 - **TIRAuxCloud (ML, experimental;** `cloud_method: tirauxcloud`,
   `automatch_tirauxcloud.py`**):** a learned thermal cloud mask (Orion-AI-
   Lab, arXiv 2602.21905; code Apache-2.0, data and weights CC BY 4.0).

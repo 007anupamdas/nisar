@@ -331,7 +331,12 @@ def main(argv: List[str] = None) -> int:
                vis_clear_factor=float(job.get('cloud_vis_clear_factor') or 1.3),
                unit=job.get('radiance_unit') or 'W/cm2/sr/um', vis_clear_paths=job.get('cloud_vis_clear') or [],
                tiraux_opts=(T.options(job) if job.get('cloud_tiraux_checkpoint') else None),
-               tiraux_thresholds=job.get('cloud_sweep_tiraux_threshold') or '0.3-0.7:0.2')
+               tiraux_thresholds=job.get('cloud_sweep_tiraux_threshold') or '0.3-0.7:0.2',
+               csmask_opts=(C.phys_options(job, 'csmask') if job.get('cloud_sweep_csmask') else None),
+               spectf_opts=(C.phys_options(job, 'spectf') if job.get('cloud_spectf_weights') else None),
+               spectf_thresholds=job.get('cloud_sweep_spectf_threshold') or '0.3-0.7:0.1',
+               spectf_vnir=list(job.get('cloud_sweep_spectf_vnir') or [job.get('cloud_spectf_vnir')
+                                                                      or job.get('cloud_mask_from') or '']))
         return 0
     if mode == 'preflight':
         res = J.preflight(job)

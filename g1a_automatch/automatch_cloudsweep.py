@@ -378,7 +378,8 @@ def sweep_image(path: str, out_dir: str, sensor: str = '', sets: Optional[List] 
 
 
 PHYS_KEYS = {'ir': ('ir_dt_k', 'ir_split_scale'), 'swir': ('swir_k', 'swir_bright_sd'),
-             'vnir': ('vis_bright_sd', 'vis_white'), 'tiraux': ('tiraux_threshold', 'tiraux_norm_hi')}
+             'vnir': ('vis_bright_sd', 'vis_white'), 'tiraux': ('tiraux_threshold', 'tiraux_norm_hi'),
+             'csmask': (None, None), 'spectf': ('spectf_threshold', None)}
 
 
 def sweep_phys(path: str, out_dir: str, sensor: str, method: str, first: Sequence[float], second: Sequence[float],
@@ -386,7 +387,7 @@ def sweep_phys(path: str, out_dir: str, sensor: str, method: str, first: Sequenc
                scale: float = 0.01, clear_paths=(), cold_k: float = 240.0, max_side: int = 2048,
                images: str = 'grid', image_side: int = 1600, unit: str = 'W/cm2/sr/um',
                clear_factor: float = 1.3, shadow_km: float = 10.0, tiraux_opts: Optional[Dict] = None,
-               device: Optional[str] = None) -> List[Dict]:
+               device: Optional[str] = None, model_opts: Optional[Dict] = None) -> List[Dict]:
     """Every combination of the infrared tests (method 'ir': first = colder
     than clear by K, second = split-window scale), the SWIR tests ('swir':
     first = cirrus robust sd, second = thick cloud, spreads above the ground)
@@ -398,7 +399,8 @@ def sweep_phys(path: str, out_dir: str, sensor: str, method: str, first: Sequenc
     import automatch_cloudphys as P
     stem = os.path.splitext(os.path.basename(path))[0]
     t0 = time.time()
-    d = C.load_phys(path, method, sensor, scale, clear_paths, unit)
+    mo = dict(model_opts or {}, device=device or '') if method in ('csmask', 'spectf') else None
+    d = C.load_phys(path, method, sensor, scale, clear_paths, unit, mo)
     H, W = d['valid'].shape
     probs: Dict[float, np.ndarray] = {}
     step = max(1, int(np.ceil(max(H, W) / float(max_side))))
@@ -409,7 +411,10 @@ def sweep_phys(path: str, out_dir: str, sensor: str, method: str, first: Sequenc
     if reference:
         ref, known = load_reference(reference, path)
         ref, known = ref[::step, ::step], known[::step, ::step]
-    if method == 'tiraux':
+    if method in ('csmask', 'spectf'):
+        refl, nms = d['refl'][:, ::step, ::step], d.get('nm')
+        extra = {'bands': d['bands_used'], 'sun_zenith_median_deg': d['reflect']['sun_zenith_median_deg']}
+    elif method == 'tiraux':
         bt = {u: b[::step, ::step] for u, b in d['bt'].items()}
         rsi = {u: b[::step, ::step] for u, b in d['rad_si'].items()}
         extra = {'radiance_unit': d['unit'], 'bt108_median_k': d['bt108_median_k'],
@@ -444,7 +449,20 @@ def sweep_phys(path: str, out_dir: str, sensor: str, method: str, first: Sequenc
     for x in first:
         for y in second:
             for bk in blobs:
-                if method == 'tiraux':
+                if method == 'csmask':
+                    import automatch_cloudmodels as M
+                    if 'cs' not in probs:
+                        probs['cs'] = M.csmask_classes(refl, v, mo, device)
+                    cls, tests = probs['cs'], {}
+                    label, fname = 'ukis-csmask', 'csmask.png'
+                elif method == 'spectf':
+                    import automatch_cloudmodels as M
+                    if 'p' not in probs:
+                        probs['p'] = M.spectf_probability(refl, nms, v, mo, device)
+                    cls = np.where(v, (probs['p'] >= x).astype(np.uint8), 255).astype(np.uint8)
+                    tests = {}
+                    label, fname = f'SpecTf probability >= {x:g}', f'p{x:g}.png'
+                elif method == 'tiraux':
                     import automatch_tirauxcloud as T
                     o = dict(tiraux_opts or {}, threshold=x)
                     if o.get('mode') == 'landsat' and y:
@@ -471,7 +489,8 @@ def sweep_phys(path: str, out_dir: str, sensor: str, method: str, first: Sequenc
                     fname = f'k{x:g}_bright{y:g}_blob{bk:g}.png'
                 masked = np.isin(cls, classes) & v
                 pct = {k: round(100.0 * int((cls == k).sum()) / nv, 3) for k in (1, 2, 3)}
-                r = {**base, k1: x, k2: y, 'min_blob_km2': bk, 'thick_pct': pct[1], 'thin_pct': pct[2],
+                r = {**base, **({k1: x} if k1 else {}), **({k2: y} if k2 else {}), 'min_blob_km2': bk,
+                     'thick_pct': pct[1], 'thin_pct': pct[2],
                      'shadow_pct': pct[3], 'cloud_pct': round(pct[1] + pct[2], 3),
                      'masked_pct': round(100.0 * masked.sum() / nv, 3), **tests, **_metrics(masked, ref, known)}
                 if images == 'all' or (images == 'grid' and bk == mid_blob):
@@ -487,6 +506,10 @@ def setting_text(r) -> str:
     """A combination's settings in a few words (a CLOUD_SWEEP row)."""
     g = (lambda k: r.get(k) if isinstance(r, dict) else getattr(r, k, None))
     m = str(g('method') or '')
+    if m == 'csmask':
+        return 'ukis-csmask'
+    if m == 'spectf':
+        return f"SpecTf p >= {g('spectf_threshold')}"
     if m == 'tiraux':
         return f"TIRAuxCloud p >= {g('tiraux_threshold')}"
     if m == 'ir':
@@ -508,7 +531,7 @@ def summarize(df: pd.DataFrame) -> pd.DataFrame:
         return df
     keys = [k for k in ('sensor', 'method', 'band_set', 'confidence', 'check', 'bright_pct', 'min_blob_km2',
                         'shadow_near_km', 'ir_dt_k', 'ir_split_scale', 'swir_k', 'swir_bright_sd', 'vis_bright_sd',
-                        'vis_white', 'tiraux_threshold', 'tiraux_norm_hi') if k in df.columns]
+                        'vis_white', 'tiraux_threshold', 'tiraux_norm_hi', 'spectf_threshold') if k in df.columns]
     metrics = [c for c in ('ref_f1', 'ref_iou', 'ref_precision', 'ref_recall', 'cloud_pct', 'masked_pct',
                            'shadow_pct', 'dark_cloud_pct', 'brightness_gap', 'blobs') if c in df.columns]
     g = df.assign(**{k: df[k].astype(str) for k in keys}).groupby(keys, dropna=False)
@@ -526,7 +549,9 @@ def run(images: List[str], out_dir: str, references: Optional[List[str]] = None,
         method: str = 'auto', ir_dt='4-12:2', ir_split=(0.75, 1.0, 1.5), swir_k='2-6:1', swir_bright='2-5:1',
         scale: float = 0.01, clear_paths=(), ir_cold: float = 240.0, vis_bright='2-5:1', vis_white=(0.15, 0.25, 0.35),
         vis_clear_factor: float = 1.3, unit: str = 'W/cm2/sr/um', vis_clear_paths=(),
-        tiraux_opts: Optional[Dict] = None, tiraux_thresholds='0.3-0.7:0.2', tiraux_norm_hi=None) -> Dict:
+        tiraux_opts: Optional[Dict] = None, tiraux_thresholds='0.3-0.7:0.2', tiraux_norm_hi=None,
+        csmask_opts: Optional[Dict] = None, spectf_opts: Optional[Dict] = None, spectf_thresholds='0.3-0.7:0.1',
+        spectf_vnir=None) -> Dict:
     """The sweep over the images into <out_dir>/<time>_sweep/; returns
     {'folder', 'rows', 'summary'}. Each image by its cloud method
     (automatch_cloud.method_for: 'auto' by sensor): OmniCloudMask images over
@@ -537,7 +562,10 @@ def run(images: List[str], out_dir: str, references: Optional[List[str]] = None,
     by OmniCloudMask, side by side, and with tiraux_opts (a TIRAuxCloud
     checkpoint) ML images by the infrared tests and TIRAuxCloud
     (tiraux_thresholds x tiraux_norm_hi). clear_paths: earlier ML scenes;
-    vis_clear_paths: earlier MV / HV scenes."""
+    vis_clear_paths: earlier MV / HV scenes. csmask_opts / spectf_opts (with
+    its weights; spectf_vnir: one HV image per image, '' where none) add
+    ukis-csmask (MV / HV) and SpecTf (HS + HV, spectf_thresholds) to
+    'compare'."""
     stamp = C.run_stamp()
     folder = os.path.join(out_dir, f'{stamp}_sweep')
     k = 1
@@ -553,7 +581,11 @@ def run(images: List[str], out_dir: str, references: Optional[List[str]] = None,
     tps = parse_range(tiraux_thresholds)
     ths = parse_range(tiraux_norm_hi) if tiraux_norm_hi not in (None, '', []) else [0.0]
     has_tiraux = bool((tiraux_opts or {}).get('checkpoint'))
-    meths = image_methods(images, method, sensor, has_tiraux)
+    sps = parse_range(spectf_thresholds)
+    vn = list(spectf_vnir or [])
+    vn = vn + [''] * (len(images) - len(vn))
+    meths = image_methods(images, method, sensor, has_tiraux, csmask_opts is not None,
+                          [bool((spectf_opts or {}).get('weights')) and bool(v) for v in vn])
     if any(not 0 < c < 1 for c in confs):
         raise ValueError(f'confidence thresholds must lie between 0 and 1, got {confs}')
     refs = list(references or [])
@@ -586,14 +618,15 @@ def run(images: List[str], out_dir: str, references: Optional[List[str]] = None,
             if m == 'ocm':
                 continue
             first, second = {'ir': (dts, splits), 'swir': (ks, sbright), 'vnir': (vbs, vws),
-                             'tiraux': (tps, ths)}[m]
+                             'tiraux': (tps, ths), 'csmask': ([0.0], [0.0]), 'spectf': (sps, [0.0])}[m]
+            mopts = {'csmask': csmask_opts, 'spectf': dict(spectf_opts or {}, vnir=vn[i])}.get(m)
             print(f'[Sweep] {os.path.basename(img)}: {C.PHYS_NAMES[m]}, '
                   f'{len(first) * len(second) * len(blobs)} combination(s)', flush=True)
             cp = {'ir': clear_paths, 'vnir': vis_clear_paths}.get(m) or ()
             rows += sweep_phys(img, folder, sensor or _sensor(img), m, first, second, blobs, classes,
                                refs[i] if refs else '', scale, cp, ir_cold, max_side, pngs, unit=unit,
                                clear_factor=vis_clear_factor, shadow_km=sorted(shadows)[len(shadows) // 2],
-                               tiraux_opts=tiraux_opts, device=device)
+                               tiraux_opts=tiraux_opts, device=device, model_opts=mopts)
             pd.DataFrame(rows).to_csv(os.path.join(folder, 'CLOUD_SWEEP.csv'), index=False)
         if 'ocm' not in meths[i]:
             continue
@@ -611,6 +644,16 @@ def run(images: List[str], out_dir: str, references: Optional[List[str]] = None,
         top = df.sort_values(['ref_f1', 'ref_iou'], ascending=False).head(int(write_top))
         for k, r in enumerate(top.to_dict('records'), 1):
             m = str(r.get('method') or '')
+            if m in ('csmask', 'spectf'):
+                sub = os.path.join(folder, f"top_{k}_{os.path.splitext(os.path.basename(r['image']))[0]}_{m}")
+                ii = images.index(r['image']) if r['image'] in images else 0
+                o = (dict(csmask_opts or {}) if m == 'csmask' else
+                     dict(spectf_opts or {}, vnir=vn[ii], threshold=r['spectf_threshold']))
+                o['device'] = device or ''
+                C.compute_phys(r['image'], m, sub, o, r['sensor'], scale, (), stamp, unit=unit)
+                C.write_params(sub, {'rank': k, 'ref_f1': r.get('ref_f1'), 'ref_iou': r.get('ref_iou')},
+                               merge=True, stamp=stamp)
+                continue
             if m == 'tiraux':
                 sub = os.path.join(folder, f"top_{k}_{os.path.splitext(os.path.basename(r['image']))[0]}_{m}")
                 o = dict(tiraux_opts or {}, threshold=r['tiraux_threshold'], device=device or '')
@@ -650,18 +693,26 @@ def run(images: List[str], out_dir: str, references: Optional[List[str]] = None,
     return {'folder': folder, 'rows': df, 'summary': s}
 
 
-def image_methods(images: List[str], method: str = 'auto', sensor: str = '', tiraux: bool = False
-                  ) -> List[List[str]]:
+def image_methods(images: List[str], method: str = 'auto', sensor: str = '', tiraux: bool = False,
+                  csmask: bool = False, spectf=None) -> List[List[str]]:
     """The cloud method(s) of each image: one by method_for, or with
     'compare' an MV / HV image (VNIR tests) also by OmniCloudMask, and an
     ML image (infrared tests) also by TIRAuxCloud when tiraux (a
-    checkpoint is given)."""
+    checkpoint is given), with csmask an MV / HV image also by ukis-csmask,
+    and with spectf[i] (SpecTf weights and an HV image for image i) an HS
+    image also by SpecTf."""
     out = []
-    for i in images:
+    sp = list(spectf or [])
+    for n, i in enumerate(images):
         s = sensor or _sensor(i)
         if str(method).lower() == 'compare':
             m = C.method_for({'cloud_method': 'auto'}, s, i)
-            out.append([m, 'ocm'] if m == 'vnir' else ([m, 'tiraux'] if m == 'ir' and tiraux else [m]))
+            ms = [m, 'ocm'] if m == 'vnir' else ([m, 'tiraux'] if m == 'ir' and tiraux else [m])
+            if m == 'vnir' and csmask:
+                ms.append('csmask')
+            if m == 'swir' and n < len(sp) and sp[n]:
+                ms.append('spectf')
+            out.append(ms)
         else:
             out.append([C.method_for({'cloud_method': method}, s, i)])
     return out
@@ -719,9 +770,17 @@ def main(argv: Optional[List[str]] = None) -> int:
                          "and shadow values (default); all = every combination (thousands); none")
     ap.add_argument('--sheets', action='store_true', help='also the stacked contact sheets SHEET_*.png')
     ap.add_argument('--method', default='auto',
-                    choices=['auto', 'compare', 'omnicloudmask', 'ir', 'swir', 'vnir', 'tirauxcloud'],
+                    choices=['auto', 'compare', 'omnicloudmask', 'ir', 'swir', 'vnir', 'tirauxcloud', 'csmask',
+                             'spectf'],
                     help='auto: infrared tests for ML, SWIR tests for HS, VNIR tests for MV / HV; compare: MV / HV '
                          'both by the VNIR tests and by OmniCloudMask')
+    ap.add_argument('--csmask', action='store_true', help='compare: MV / HV also by ukis-csmask')
+    ap.add_argument('--spectf-weights', default='', help='SpecTf current.pt (compare: HS images also by SpecTf)')
+    ap.add_argument('--spectf-vnir', nargs='*', default=[], help='SpecTf: the HV image of the same pass, one per '
+                    'image in order (- where none)')
+    ap.add_argument('--spectf-threshold', default='0.3-0.7:0.1', help='SpecTf probability thresholds')
+    ap.add_argument('--sun-zenith', type=float, default=0.0, help='reflectance: sun zenith (deg) if not in the metadata')
+    ap.add_argument('--acq-time', default='', help='reflectance: acquisition time (UTC) if not in the metadata')
     ap.add_argument('--tiraux-checkpoint', default='', help='ML: a TIRAuxCloud model_hash_<...>.pth (compare / '
                     'tirauxcloud)')
     ap.add_argument('--tiraux-arch', default='SegFormer', choices=['SegFormer', 'Unet'])
@@ -746,6 +805,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     a = ap.parse_args(argv)
     import automatch_job as J
     a.device = J.use_gpu(a.device) if a.device else None   # before omnicloudmask loads torch
+    sun = {'cloud_sun_zenith_deg': a.sun_zenith or None, 'cloud_acq_time_utc': a.acq_time}
     topts = None
     if a.tiraux_checkpoint:
         import automatch_tirauxcloud as T
@@ -767,7 +827,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         swir_bright=a.swir_bright, scale=a.radiance_scale, clear_paths=a.clear, ir_cold=a.ir_cold,
         vis_bright=a.vis_bright, vis_white=a.vis_white, vis_clear_factor=a.vis_clear_factor, unit=a.radiance_unit,
         vis_clear_paths=a.vis_clear, tiraux_opts=topts, tiraux_thresholds=a.tiraux_threshold,
-        tiraux_norm_hi=a.tiraux_norm_hi or None)
+        tiraux_norm_hi=a.tiraux_norm_hi or None,
+        csmask_opts=(C.phys_options(sun, 'csmask') if a.csmask or a.method == 'csmask' else None),
+        spectf_opts=(dict(C.phys_options(sun, 'spectf'), weights=a.spectf_weights) if a.spectf_weights else None),
+        spectf_thresholds=a.spectf_threshold,
+        spectf_vnir=['' if v in ('-', "''", '""') else v for v in a.spectf_vnir])
     return 0
 
 

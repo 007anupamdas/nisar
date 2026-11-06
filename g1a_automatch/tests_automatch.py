@@ -971,8 +971,9 @@ def test_gui_cloud():
         mc.setValue('swir')
         check('gui: the cloud method choice (auto, VNIR, OmniCloudMask, infrared, SWIR; the sweep also compare)',
               ([mc.itemData(i) for i in range(mc.count())], v1, mc.value(),
-               G.CloudMethodCombo(compare=True).itemData(6)),
-              (['auto', 'vnir', 'omnicloudmask', 'ir', 'swir', 'tirauxcloud'], 'omnicloudmask', 'swir', 'compare'))
+               G.CloudMethodCombo(compare=True).itemData(8)),
+              (['auto', 'vnir', 'omnicloudmask', 'ir', 'swir', 'tirauxcloud', 'csmask', 'spectf'], 'omnicloudmask',
+               'swir', 'compare'))
         w.cloud_method.setValue('ir')
         w.cloud_tiraux.setText('/x/model_hash_78713d1f6de22d2.pth')
         cd = w.cloud_dialog(run=False)
@@ -988,6 +989,21 @@ def test_gui_cloud():
               (ca[ca.index('--tiraux-checkpoint') + 1], ca[ca.index('--tiraux-arch') + 1],
                ca[ca.index('--tiraux-mode') + 1]), ('/x/model_hash_78713d1f6de22d2.pth', 'SegFormer', 'ols'))
         w.cloud_tiraux.setText('')
+        w.cloud_spectf.setText('/x/current.pt')
+        cd2 = w.cloud_dialog(run=False)
+        cd2.image.setText(img)
+        cd2.sun_zen.setValue(30)
+        a2 = cd2.args()
+        sw2 = w.cloud_sweep_dialog(run=False)
+        sw2.images.setPlainText(img)
+        sw2.csmask.setChecked(True)
+        sw2.spectf_hv.setPlainText('/x/G1A_HV.tif')
+        s2 = sw2.args()
+        check('gui: the SpecTf weights and the sun zenith reach the cloud test; ukis-csmask and SpecTf (with its HV '
+              'image) reach the sweep',
+              (a2[a2.index('--spectf-weights') + 1], a2[a2.index('--sun-zenith') + 1], '--csmask' in s2,
+               s2[s2.index('--spectf-vnir') + 1]), ('/x/current.pt', '30', True, '/x/G1A_HV.tif'))
+        w.cloud_spectf.setText('')
         sw = w.cloud_sweep_dialog(run=False)
         sw.images.setPlainText(img)
         sw.ir_dt.setText('4-12:4')
@@ -3601,6 +3617,148 @@ def test_tiraux(tmp):
           (['ir', 'tiraux'], 2, [0.3, 0.7]))
 
 
+def test_reflect_models(tmp):
+    """TOA reflectance (sun angle / time from the metadata beside an image,
+    per-pixel zenith, Earth-Sun distance, solar irradiance) and the learned
+    masks on it: ukis-csmask (MV; a stand-in package here) and SpecTf (its
+    architecture with test weights; HS + HV of the same pass, refused on HS
+    alone)."""
+    import contextlib
+    import datetime as dt
+    import io
+    import sys
+    import types
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_origin
+    import automatch_cloud as C
+    import automatch_reflect as R
+    check('reflect: solar irradiance at the Sentinel-2 band centres, Earth-Sun distance in January / July',
+          (R.e0(560), R.e0(1610), round(R.earth_sun_au(dt.datetime(2026, 1, 4)), 3),
+           round(R.earth_sun_au(dt.datetime(2026, 7, 4)), 3)), (1823.0, 246.0, 0.983, 1.017))
+    z1 = float(R.sun_zenith(np.array(23.5), np.array(78.0), dt.datetime(2026, 6, 21, 6, 46)))
+    z2 = float(R.sun_zenith(np.array(23.5), np.array(78.0), dt.datetime(2026, 6, 21, 12, 46)))
+    check('reflect: the sun near the zenith at local noon on the tropic in June, ~81 deg six hours later',
+          (z1 < 2.0, 79 < z2 < 83), (True, True))
+    folder = os.path.join(tmp, 'refl')
+    os.makedirs(folder)
+    H = W = 300
+    yy, xx = np.mgrid[0:H, 0:W]
+    cloud = (yy - 100) ** 2 + (xx - 120) ** 2 < 40 ** 2
+    nm = [485, 555, 650, 725, 815, 860]
+    rho = {n: np.where(cloud, 0.6, {485: 0.06, 555: 0.09, 650: 0.07, 725: 0.2, 815: 0.3, 860: 0.32}[n]) for n in nm}
+    t = dt.datetime(2026, 3, 1, 5, 30)
+    d = R.earth_sun_au(t)
+    cz = np.cos(np.radians(30.0))
+    mv = os.path.join(folder, 'G1A_MV_G_REFL.tif')
+    with rasterio.open(mv, 'w', driver='GTiff', width=W, height=H, count=6, dtype='float32', crs='EPSG:32644',
+                       transform=from_origin(500000, 2500000, 45, 45), nodata=0) as dd:
+        for i, n in enumerate(nm, 1):
+            L = rho[n] * R.e0(n) * cz / (np.pi * d ** 2)                 # W/m2/sr/um
+            dd.write((L / 1e4 / 0.01).astype(np.float32), i)             # W/cm2/sr/um, x 0.01
+    with open(os.path.join(folder, 'G1A_MV_G_REFL.xml'), 'w') as f:
+        f.write('<meta><ProcessingTime>2026-03-02T10:00:00Z</ProcessingTime><SunElevation>60.0</SunElevation>'
+                '<SceneCenterTime>2026-03-01T05:30:00Z</SceneCenterTime></meta>')
+    si = R.sun_info(mv)
+    check('reflect: sun elevation and acquisition time read from the metadata beside the image (not the '
+          'processing time)', (si['zenith_deg'], si['time'], 'SceneCenterTime' in si['time_from']),
+          (30.0, t, True))
+    txt = os.path.join(folder, 'other.tif')
+    with rasterio.open(txt, 'w', driver='GTiff', width=4, height=4, count=1, dtype='uint8', crs='EPSG:32644',
+                       transform=from_origin(500000, 2500000, 45, 45)) as dd:
+        dd.update_tags(SUN_ZENITH_ANGLE='41.5')
+    with open(os.path.join(folder, 'other_META.txt'), 'w') as f:
+        f.write('DateOfPass = 01-MAR-2026\nSceneCenterTime = 05:30:00\n')
+    s2 = R.sun_info(txt)
+    check('reflect: zenith from the raster tags; date and time from separate metadata lines',
+          (s2['zenith_deg'], s2['time'], R.sun_info(txt, {'cloud_sun_zenith_deg': 20})['zenith_deg']),
+          (41.5, t, 20.0))
+    refl, valid, rinfo = R.read_reflectance(mv, [(1, 485.0), (6, 860.0)], 0.01, 'W/cm2/sr/um',
+                                            {'cloud_sun_zenith_deg': 30})
+    check('reflect: TOA reflectance back from W/cm2/sr/um x 0.01 (sun 30 deg, Earth-Sun distance on the day)',
+          (round(float(np.median(refl[0][cloud])), 3), round(float(np.median(refl[1][~cloud])), 3), rinfo['d_au']),
+          (0.6, 0.32, round(d, 4)))
+    # ukis-csmask, through a stand-in for its package: cloud where blue reflectance > 0.4
+    seen = {}
+
+    class FakeCS:
+        def __init__(self, img, band_order, product_level='l1c', nodata_value=None, invalid_buffer=4, providers=None,
+                     **kw):
+            seen.update(order=band_order, level=product_level, vmax=float(img.max()), shape=img.shape)
+            self.csm = np.where(img[..., 0] > 0.4, 1, 0).astype(np.uint8)[..., None]
+    pkg, mod = types.ModuleType('ukis_csmask'), types.ModuleType('ukis_csmask.mask')
+    mod.CSmask = FakeCS
+    pkg.mask = mod
+    saved = {k: sys.modules.get(k) for k in ('ukis_csmask', 'ukis_csmask.mask')}
+    sys.modules.update({'ukis_csmask': pkg, 'ukis_csmask.mask': mod})
+    try:
+        class Sc:
+            raster_path = mv
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            r, info = C.prepare({'cloud_method': 'csmask', 'cloud_dilate_px': 0}, Sc(), ['band3'],
+                                os.path.join(tmp, 'cs_cache'), os.path.join(tmp, 'cs_out'), 'MV')
+        with rasterio.open(info['mask']) as m:
+            cm = m.read(1)
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+    check('csmask: ukis-csmask gets blue, green, red, NIR TOA reflectance (0-1) and its cloud is the mask',
+          (seen.get('order'), seen.get('vmax', 9) < 1.0, (cm[cloud] == 1).mean() > 0.99, (cm[~cloud] == 0).mean() > 0.99,
+           'B6 (860 nm)' in info['bands_used'], 'SceneCenterTime' in buf.getvalue()),
+          (['blue', 'green', 'red', 'nir'], True, True, True, True, True))
+    # SpecTf: HS + the HV image of the same pass; its architecture with test weights
+    try:
+        import torch
+    except Exception:
+        print('SKIP  SpecTf (torch missing)')
+        return
+    import automatch_cloudmodels as M
+
+    def cube(path, n, lo, hi, px, h, w):
+        wl = np.linspace(lo, hi, n)
+        with rasterio.open(path, 'w', driver='GTiff', width=w, height=h, count=n, dtype='float32', crs='EPSG:32644',
+                           transform=from_origin(500000, 2500000, px, px), nodata=0) as dd:
+            for i, x in enumerate(wl, 1):
+                base = 0.25 if x < 1300 else 0.15
+                rr = np.where(((np.mgrid[0:h, 0:w][0] * px) < 3000), 0.7, base)     # cloud: the top 3 km
+                L = rr * R.e0(x) * cz / (np.pi * d ** 2)
+                dd.write((L / 1e4 / 0.01).astype(np.float32), i)
+            dd.update_tags(SUN_ZENITH='30')
+        return path
+    hs = cube(os.path.join(tmp, 'G1A_HS_G_SPEC.tif'), 60, 900, 2500, 180.0, 50, 50)
+    hv = cube(os.path.join(tmp, 'G1A_HV_G_SPEC.tif'), 40, 375, 1000, 315.0, 30, 30)
+    torch.manual_seed(0)
+    wpath = os.path.join(tmp, 'spectf_test.pt')
+    torch.save(M.spectf_model([500.0, 1000.0]).state_dict(), wpath)
+    sd = torch.load(wpath, weights_only=True)
+    check('spectf: its weights do not depend on the band set (one model, any wavelengths)',
+          sorted(M.spectf_model([400.0, 800.0, 1600.0], sd).state_dict()) == sorted(sd), True)
+
+    class Hs:
+        raster_path = hs
+    job = {'cloud_method': 'spectf', 'cloud_spectf_weights': wpath, 'cloud_dilate_px': 0, 'cloud_device': 'cpu'}
+    try:
+        C.prepare(job, Hs(), [], os.path.join(tmp, 'sp0'), '', 'HS')
+        refused = ''
+    except ValueError as e:
+        refused = str(e)
+    with contextlib.redirect_stdout(io.StringIO()):
+        r2, i2 = C.prepare(dict(job, cloud_mask_from=hv), Hs(), ['band30'], os.path.join(tmp, 'sp_cache'),
+                           os.path.join(tmp, 'sp_out'), 'HS')
+    with rasterio.open(i2['mask']) as m:
+        sm = m.read(1)
+    check('spectf: refused on HS alone (it needs the visible too); with the HV image of the same pass the fused '
+          'spectrum runs through the job path',
+          ('HV image of the same pass' in refused, i2['method'], set(np.unique(sm)) <= {0, 1, 255},
+           'G1A_HV_G_SPEC' in i2['bands_used'], int((sm != 255).sum()) > 0), (True, 'spectf', True, True, True))
+    bright = M.spectf_probability(np.array([[[0.7]], [[0.7]]], np.float32), [500.0, 1600.0], np.ones((1, 1), bool),
+                                  {'batch': 16}, 'cpu', model=lambda x: torch.cat([-x.mean(1) * 10, x.mean(1) * 10], 1))
+    check('spectf: the probability of the cloud class per pixel', round(float(bright[0, 0]), 3), 1.0)
+
+
 def test_stretch():
     """The contrast stretch before matching follows stretch_percentiles: at 90
     the brightest tenth saturates and the rest spreads over more grey levels."""
@@ -4387,6 +4545,7 @@ def main():
         test_cloud_sweep(tmp)
         test_cloud_phys(tmp)
         test_tiraux(tmp)
+        test_reflect_models(tmp)
         test_gpu_pinning(tmp)
         test_stretch()
         test_parallel_share(tmp)

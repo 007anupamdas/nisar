@@ -319,7 +319,9 @@ CLOUD_METHODS = [('auto', 'by sensor: ML infrared, HS SWIR, MV / HV VNIR tests')
                  ('vnir', 'VNIR tests (bright + white + blue: MV / HV)'),
                  ('omnicloudmask', 'OmniCloudMask (red / green / NIR model)'),
                  ('ir', 'infrared tests (thermal: ML)'), ('swir', 'SWIR tests (1.38 µm cirrus + bright: HS)'),
-                 ('tirauxcloud', 'TIRAuxCloud model (ML, experimental: needs its checkpoint)')]
+                 ('tirauxcloud', 'TIRAuxCloud model (ML, experimental: needs its checkpoint)'),
+                 ('csmask', 'ukis-csmask model (MV / HV, reflectance; pip install ukis-csmask)'),
+                 ('spectf', 'SpecTf model (HS + its HV pass, reflectance spectrum; needs current.pt)')]
 
 
 class CloudMethodCombo(QtWidgets.QComboBox):
@@ -1322,6 +1324,23 @@ class CloudTestDialog(QtWidgets.QDialog):
         ht.addWidget(self.tiraux_arch)
         ht.addWidget(self.tiraux_mode)
         f.addRow('TIRAuxCloud (ML, experimental)', ht)
+        self.spectf = PathRow('file', 'SpecTf weights (*.pt);;All (*)')
+        self.spectf.edit.setPlaceholderText('HS with method SpecTf: its current.pt (the HV image: Mask from)')
+        self.spectf.setText(job.get('cloud_spectf_weights') or '')
+        f.addRow('SpecTf weights', self.spectf)
+        self.sun_zen = QtWidgets.QDoubleSpinBox()
+        self.sun_zen.setRange(0, 89)
+        self.sun_zen.setSuffix(' deg')
+        self.sun_zen.setSpecialValueText('from the metadata')
+        self.sun_zen.setValue(float(job.get('cloud_sun_zenith_deg') or 0))
+        self.acq_time = QtWidgets.QLineEdit(str(job.get('cloud_acq_time_utc') or ''))
+        self.acq_time.setPlaceholderText('from the metadata, or e.g. 2026-03-01T05:30:00 (UTC)')
+        hz = QtWidgets.QHBoxLayout()
+        hz.addWidget(QtWidgets.QLabel('sun zenith'))
+        hz.addWidget(self.sun_zen)
+        hz.addWidget(QtWidgets.QLabel('or time'))
+        hz.addWidget(self.acq_time, 1)
+        f.addRow('Reflectance (csmask / SpecTf)', hz)
 
         wdir = job.get('cloud_model_dir') or (os.path.join(job['weights_cache_dir'], 'omnicloudmask')
                                               if job.get('weights_cache_dir') else '')
@@ -1412,6 +1431,12 @@ class CloudTestDialog(QtWidgets.QDialog):
         if self.tiraux.text():
             a += ['--tiraux-checkpoint', self.tiraux.text(), '--tiraux-arch', self.tiraux_arch.currentText(),
                   '--tiraux-mode', self.tiraux_mode.currentData()]
+        if self.spectf.text():
+            a += ['--spectf-weights', self.spectf.text()]
+        if self.sun_zen.value() > 0:
+            a += ['--sun-zenith', f'{self.sun_zen.value():g}']
+        if self.acq_time.text().strip():
+            a += ['--acq-time', self.acq_time.text().strip()]
         if self.model_dir.text():
             a += ['--model-dir', self.model_dir.text()]
         if self.device.value() != 'auto':
@@ -1487,6 +1512,16 @@ class CloudSweepDialog(QtWidgets.QDialog):
         ht.addWidget(self.tiraux_arch)
         ht.addWidget(self.tiraux_mode)
         f.addRow('TIRAuxCloud (ML, experimental)', ht)
+        self.csmask = QtWidgets.QCheckBox('compare: MV / HV also by ukis-csmask (needs pip install ukis-csmask)')
+        f.addRow('', self.csmask)
+        self.spectf = PathRow('file', 'SpecTf weights (*.pt);;All (*)')
+        self.spectf.edit.setPlaceholderText('compare: HS also by SpecTf (its current.pt)')
+        self.spectf.setText(job.get('cloud_spectf_weights') or '')
+        f.addRow('SpecTf weights', self.spectf)
+        self.spectf_hv, wsh = paths_box('cloud_sweep/spectf_hv')
+        self.spectf_hv.setPlaceholderText('SpecTf: the HV image of the same pass, one line per image in order '
+                                          '(an empty line where none)')
+        f.addRow('HV images (SpecTf)', wsh)
 
         self.job_out = job.get('output_dir') or ''
         self.out = PathRow('dir')
@@ -1633,7 +1668,7 @@ class CloudSweepDialog(QtWidgets.QDialog):
         except ValueError as e:
             QtWidgets.QMessageBox.warning(self, 'Cloud sweep', str(e))
             return
-        for k, w in (('images', self.images), ('refs', self.refs)):
+        for k, w in (('images', self.images), ('refs', self.refs), ('spectf_hv', self.spectf_hv)):
             self.settings.setValue(f'cloud_sweep/{k}', w.toPlainText())
         for k, w in (('out', self.out), ('conf', self.conf), ('bright', self.bright), ('blob', self.blob),
                      ('shadow', self.shadow), ('ir_dt', self.ir_dt), ('ir_split', self.ir_split),
@@ -1669,6 +1704,13 @@ class CloudSweepDialog(QtWidgets.QDialog):
         if self.tiraux.text():
             a += ['--tiraux-checkpoint', self.tiraux.text(), '--tiraux-arch', self.tiraux_arch.currentText(),
                   '--tiraux-mode', self.tiraux_mode.currentData()]
+        if self.csmask.isChecked():
+            a += ['--csmask']
+        if self.spectf.text():
+            a += ['--spectf-weights', self.spectf.text()]
+            hv = [ln.strip() for ln in self.spectf_hv.toPlainText().splitlines()]
+            if any(hv):
+                a += ['--spectf-vnir'] + [h or '-' for h in hv]
         return a
 
 
@@ -2012,6 +2054,10 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.cloud_tiraux.edit.setPlaceholderText('ML with method TIRAuxCloud (experimental): its checkpoint '
                                                   'model_hash_<...>.pth (SegFormer, OLS input)')
         f.addRow('TIRAuxCloud checkpoint', self.cloud_tiraux)
+        self.cloud_spectf = PathRow('file', 'SpecTf weights (*.pt);;All (*)')
+        self.cloud_spectf.edit.setPlaceholderText('HS with method SpecTf: its current.pt (the HV image of the same '
+                                                  'pass: Cloud mask from)')
+        f.addRow('SpecTf weights', self.cloud_spectf)
 
         self.ref_path = PathRow('dir')
         f.addRow('Reference folder (L8_ref / C1 / …)', self.ref_path)
@@ -2385,6 +2431,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.cloud_refine.setChecked(bool(j.get('cloud_refine', True)))
         self.cloud_from.setText(j.get('cloud_mask_from') or '')
         self.cloud_tiraux.setText(j.get('cloud_tiraux_checkpoint') or '')
+        self.cloud_spectf.setText(j.get('cloud_spectf_weights') or '')
         self.auto_range.setText(f'{r[0]}-{r[1]}' if len(r) == 2 else '')
         self._update_kp_label()
         self.target_res.setText('' if j['target_resolution'] is None else f"{j['target_resolution']:g}")
@@ -2481,6 +2528,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             'cloud_bands': [t for t in re.split(r'[,;\s]+', self.cloud_bands.text().strip()) if t],
             'cloud_mask_from': self.cloud_from.text(),
             'cloud_tiraux_checkpoint': self.cloud_tiraux.text(),
+            'cloud_spectf_weights': self.cloud_spectf.text(),
             'cloud_band_choice': 'quality' if self.cloud_choice.currentIndex() == 1 else 'spec',
             'cloud_min_confidence': round(self.cloud_conf.value(), 2),
             'cloud_mask_classes': [[1], [1, 3], [1, 2, 3]][self.cloud_what.currentIndex()],
@@ -3014,7 +3062,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         job = dict(DEFAULT_JOB, input_path=self.in_path.text(), weights_cache_dir=self.weights_cache.text(),
                    output_dir=self.out_path.text(), device=self.device.value(),
                    cloud_min_confidence=self.cloud_conf.value(), cloud_mask_from=self.cloud_from.text(),
-                   cloud_tiraux_checkpoint=self.cloud_tiraux.text(),
+                   cloud_tiraux_checkpoint=self.cloud_tiraux.text(), cloud_spectf_weights=self.cloud_spectf.text(),
                    cloud_refine=self.cloud_refine.isChecked(), cloud_method=self.cloud_method.value(),
                    cloud_bands=[t for t in re.split(r'[,;\s]+', self.cloud_bands.text().strip()) if t],
                    cloud_band_choice='quality' if self.cloud_choice.currentIndex() == 1 else 'spec')
@@ -3028,7 +3076,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         """The cloud mask benchmark; run=False returns the dialog unshown (tests)."""
         job = dict(DEFAULT_JOB, input_path=self.in_path.text(), weights_cache_dir=self.weights_cache.text(),
                    output_dir=self.out_path.text(), device=self.device.value(), cloud_method=self.cloud_method.value(),
-                   cloud_tiraux_checkpoint=self.cloud_tiraux.text())
+                   cloud_tiraux_checkpoint=self.cloud_tiraux.text(), cloud_spectf_weights=self.cloud_spectf.text())
         dlg = CloudSweepDialog(self.settings, job, self)
         dlg.accepted.connect(lambda: self._start_sweep(dlg))
         if run:
