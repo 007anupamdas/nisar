@@ -318,7 +318,8 @@ def gpu_list() -> List[Tuple[int, str, float]]:
 CLOUD_METHODS = [('auto', 'by sensor: ML infrared, HS SWIR, MV / HV VNIR tests'),
                  ('vnir', 'VNIR tests (bright + white + blue: MV / HV)'),
                  ('omnicloudmask', 'OmniCloudMask (red / green / NIR model)'),
-                 ('ir', 'infrared tests (thermal: ML)'), ('swir', 'SWIR tests (1.38 µm cirrus + bright: HS)')]
+                 ('ir', 'infrared tests (thermal: ML)'), ('swir', 'SWIR tests (1.38 µm cirrus + bright: HS)'),
+                 ('tirauxcloud', 'TIRAuxCloud model (ML, experimental: needs its checkpoint)')]
 
 
 class CloudMethodCombo(QtWidgets.QComboBox):
@@ -330,7 +331,8 @@ class CloudMethodCombo(QtWidgets.QComboBox):
         for k, t in CLOUD_METHODS:
             self.addItem(t, k)
         if compare:
-            self.addItem('compare: MV / HV by the VNIR tests and by OmniCloudMask, side by side', 'compare')
+            self.addItem('compare: MV / HV by the VNIR tests and OmniCloudMask; ML by the infrared tests and '
+                         'TIRAuxCloud (with its checkpoint)', 'compare')
         self.setToolTip('auto: each image by its sensor, no model. ML (MX-LWIR, thermal) by the infrared tests of '
                         'the operational geostationary cloud masks (colder than clear sky, split window 10.8-12 µm, '
                         'ice 8.5-10.8 µm, CO2 / water-vapour bands, edges; day and night). HS (SWIR) by the 1.38 µm '
@@ -1305,6 +1307,22 @@ class CloudTestDialog(QtWidgets.QDialog):
                                                'it covers)')
         self.mask_from.setText(job.get('cloud_mask_from') or '')
         f.addRow('Mask from', self.mask_from)
+        self.tiraux = PathRow('file', 'TIRAuxCloud checkpoints (*.pth);;All (*)')
+        self.tiraux.edit.setPlaceholderText('ML, method TIRAuxCloud: a model_hash_<...>.pth from its model_files.tar.gz')
+        self.tiraux.setText(job.get('cloud_tiraux_checkpoint') or '')
+        self.tiraux_arch = QtWidgets.QComboBox()
+        self.tiraux_arch.addItems(['SegFormer', 'Unet'])
+        self.tiraux_arch.setCurrentText(str(job.get('cloud_tiraux_arch') or 'SegFormer'))
+        self.tiraux_mode = QtWidgets.QComboBox()
+        self.tiraux_mode.addItem('OLS input (its "VIIRS" models, 200 m)', 'ols')
+        self.tiraux_mode.addItem('Landsat input (100 m; scaling unpublished)', 'landsat')
+        self.tiraux_mode.setCurrentIndex(1 if str(job.get('cloud_tiraux_mode') or 'ols') == 'landsat' else 0)
+        ht = QtWidgets.QHBoxLayout()
+        ht.addWidget(self.tiraux, 1)
+        ht.addWidget(self.tiraux_arch)
+        ht.addWidget(self.tiraux_mode)
+        f.addRow('TIRAuxCloud (ML, experimental)', ht)
+
         wdir = job.get('cloud_model_dir') or (os.path.join(job['weights_cache_dir'], 'omnicloudmask')
                                               if job.get('weights_cache_dir') else '')
         self.model_dir = PathRow('dir')
@@ -1391,6 +1409,9 @@ class CloudTestDialog(QtWidgets.QDialog):
             a += ['--choice', 'quality']
         if self.mask_from.text():
             a += ['--from', self.mask_from.text()]
+        if self.tiraux.text():
+            a += ['--tiraux-checkpoint', self.tiraux.text(), '--tiraux-arch', self.tiraux_arch.currentText(),
+                  '--tiraux-mode', self.tiraux_mode.currentData()]
         if self.model_dir.text():
             a += ['--model-dir', self.model_dir.text()]
         if self.device.value() != 'auto':
@@ -1451,6 +1472,22 @@ class CloudSweepDialog(QtWidgets.QDialog):
         f.addRow('Images', wi)
         self.refs, wr = paths_box('cloud_sweep/refs')
         f.addRow('Reference masks (optional)', wr)
+        self.tiraux = PathRow('file', 'TIRAuxCloud checkpoints (*.pth);;All (*)')
+        self.tiraux.edit.setPlaceholderText('ML, method TIRAuxCloud: a model_hash_<...>.pth from its model_files.tar.gz')
+        self.tiraux.setText(job.get('cloud_tiraux_checkpoint') or '')
+        self.tiraux_arch = QtWidgets.QComboBox()
+        self.tiraux_arch.addItems(['SegFormer', 'Unet'])
+        self.tiraux_arch.setCurrentText(str(job.get('cloud_tiraux_arch') or 'SegFormer'))
+        self.tiraux_mode = QtWidgets.QComboBox()
+        self.tiraux_mode.addItem('OLS input (its "VIIRS" models, 200 m)', 'ols')
+        self.tiraux_mode.addItem('Landsat input (100 m; scaling unpublished)', 'landsat')
+        self.tiraux_mode.setCurrentIndex(1 if str(job.get('cloud_tiraux_mode') or 'ols') == 'landsat' else 0)
+        ht = QtWidgets.QHBoxLayout()
+        ht.addWidget(self.tiraux, 1)
+        ht.addWidget(self.tiraux_arch)
+        ht.addWidget(self.tiraux_mode)
+        f.addRow('TIRAuxCloud (ML, experimental)', ht)
+
         self.job_out = job.get('output_dir') or ''
         self.out = PathRow('dir')
         self.out.edit.setPlaceholderText('<job output folder>/cloud_sweep' if self.job_out
@@ -1629,6 +1666,9 @@ class CloudSweepDialog(QtWidgets.QDialog):
               '--swir-k', self.swir_k.text().strip(), '--swir-bright', self.swir_bright.text().strip(),
               '--radiance-scale', f'{float(self.scale.text()):g}',
               '--vis-bright', self.vis_bright.text().strip(), '--vis-white', self.vis_white.text().strip()]
+        if self.tiraux.text():
+            a += ['--tiraux-checkpoint', self.tiraux.text(), '--tiraux-arch', self.tiraux_arch.currentText(),
+                  '--tiraux-mode', self.tiraux_mode.currentData()]
         return a
 
 
@@ -1968,6 +2008,10 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
                                         'its own ground, so an HS / ML image keeps its own mask (SWIR / infrared '
                                         'tests) and the VNIR mask is added only where it covers the image.')
         f.addRow('Cloud mask from', self.cloud_from)
+        self.cloud_tiraux = PathRow('file', 'TIRAuxCloud checkpoints (*.pth);;All (*)')
+        self.cloud_tiraux.edit.setPlaceholderText('ML with method TIRAuxCloud (experimental): its checkpoint '
+                                                  'model_hash_<...>.pth (SegFormer, OLS input)')
+        f.addRow('TIRAuxCloud checkpoint', self.cloud_tiraux)
 
         self.ref_path = PathRow('dir')
         f.addRow('Reference folder (L8_ref / C1 / …)', self.ref_path)
@@ -2340,6 +2384,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.cloud_what.setCurrentIndex(2 if 2 in cl else (1 if 3 in cl else 0))
         self.cloud_refine.setChecked(bool(j.get('cloud_refine', True)))
         self.cloud_from.setText(j.get('cloud_mask_from') or '')
+        self.cloud_tiraux.setText(j.get('cloud_tiraux_checkpoint') or '')
         self.auto_range.setText(f'{r[0]}-{r[1]}' if len(r) == 2 else '')
         self._update_kp_label()
         self.target_res.setText('' if j['target_resolution'] is None else f"{j['target_resolution']:g}")
@@ -2435,6 +2480,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             'cloud_method': self.cloud_method.value(),
             'cloud_bands': [t for t in re.split(r'[,;\s]+', self.cloud_bands.text().strip()) if t],
             'cloud_mask_from': self.cloud_from.text(),
+            'cloud_tiraux_checkpoint': self.cloud_tiraux.text(),
             'cloud_band_choice': 'quality' if self.cloud_choice.currentIndex() == 1 else 'spec',
             'cloud_min_confidence': round(self.cloud_conf.value(), 2),
             'cloud_mask_classes': [[1], [1, 3], [1, 2, 3]][self.cloud_what.currentIndex()],
@@ -2968,6 +3014,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         job = dict(DEFAULT_JOB, input_path=self.in_path.text(), weights_cache_dir=self.weights_cache.text(),
                    output_dir=self.out_path.text(), device=self.device.value(),
                    cloud_min_confidence=self.cloud_conf.value(), cloud_mask_from=self.cloud_from.text(),
+                   cloud_tiraux_checkpoint=self.cloud_tiraux.text(),
                    cloud_refine=self.cloud_refine.isChecked(), cloud_method=self.cloud_method.value(),
                    cloud_bands=[t for t in re.split(r'[,;\s]+', self.cloud_bands.text().strip()) if t],
                    cloud_band_choice='quality' if self.cloud_choice.currentIndex() == 1 else 'spec')
@@ -2980,7 +3027,8 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
     def cloud_sweep_dialog(self, *_, run=True):
         """The cloud mask benchmark; run=False returns the dialog unshown (tests)."""
         job = dict(DEFAULT_JOB, input_path=self.in_path.text(), weights_cache_dir=self.weights_cache.text(),
-                   output_dir=self.out_path.text(), device=self.device.value(), cloud_method=self.cloud_method.value())
+                   output_dir=self.out_path.text(), device=self.device.value(), cloud_method=self.cloud_method.value(),
+                   cloud_tiraux_checkpoint=self.cloud_tiraux.text())
         dlg = CloudSweepDialog(self.settings, job, self)
         dlg.accepted.connect(lambda: self._start_sweep(dlg))
         if run:

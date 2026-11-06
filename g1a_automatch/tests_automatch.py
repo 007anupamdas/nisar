@@ -971,9 +971,10 @@ def test_gui_cloud():
         mc.setValue('swir')
         check('gui: the cloud method choice (auto, VNIR, OmniCloudMask, infrared, SWIR; the sweep also compare)',
               ([mc.itemData(i) for i in range(mc.count())], v1, mc.value(),
-               G.CloudMethodCombo(compare=True).itemData(5)),
-              (['auto', 'vnir', 'omnicloudmask', 'ir', 'swir'], 'omnicloudmask', 'swir', 'compare'))
+               G.CloudMethodCombo(compare=True).itemData(6)),
+              (['auto', 'vnir', 'omnicloudmask', 'ir', 'swir', 'tirauxcloud'], 'omnicloudmask', 'swir', 'compare'))
         w.cloud_method.setValue('ir')
+        w.cloud_tiraux.setText('/x/model_hash_78713d1f6de22d2.pth')
         cd = w.cloud_dialog(run=False)
         cd.image.setText(img)
         cd.ir_dt.setValue(6)
@@ -983,6 +984,10 @@ def test_gui_cloud():
               (ca[ca.index('--method') + 1], ca[ca.index('--ir-dt') + 1], ca[ca.index('--radiance-scale') + 1],
                ca[ca.index('--clear') + 1:], ca[ca.index('--swir-bright') + 1]),
               ('ir', '6', '0.01', [img, img], '3'))
+        check('gui: the TIRAuxCloud checkpoint reaches the cloud test command (SegFormer, OLS input)',
+              (ca[ca.index('--tiraux-checkpoint') + 1], ca[ca.index('--tiraux-arch') + 1],
+               ca[ca.index('--tiraux-mode') + 1]), ('/x/model_hash_78713d1f6de22d2.pth', 'SegFormer', 'ols'))
+        w.cloud_tiraux.setText('')
         sw = w.cloud_sweep_dialog(run=False)
         sw.images.setPlainText(img)
         sw.ir_dt.setText('4-12:4')
@@ -3484,6 +3489,20 @@ def test_cloud_phys(tmp):
     check('phys: a scene 70 % under cloud: the cloud is still found (the ground is what is not cloud-coloured)',
           ((vc3[big] == 1).mean() > 0.97, (vc3[~big & ~vdes] == 0).mean() > 0.99), (True, True))
 
+    class Mv:
+        raster_path = mvi
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        mr, minfo = C.prepare({'cloud_mask_classes': [1], 'cloud_dilate_px': 0}, Mv(), ['band2'],
+                              os.path.join(tmp, 'phys_mv_cache'), os.path.join(tmp, 'phys_mv_out'), 'MV',
+                              lambda *a: 1 / 0)
+        mrows = C.standalone(mvi, os.path.join(tmp, 'phys_mv_ct'), '', None, 'spec', [0.7], predictor=lambda *a: 1 / 0)
+    with rasterio.open(mr['band2'][0]) as m:
+        mb2 = m.read(1)
+    check('phys: an MV job and the MV cloud test use the VNIR tests by default (the model is not called)',
+          (minfo.get('method'), 'VNIR tests' in minfo.get('band_choice', ''), bool((mb2[vcl] == 0).all()),
+           bool((mb2[vrest] != 0).all()), len(mrows), mrows[0]['method']),
+          ('vnir', True, True, True, 1, 'vnir'))
+
     def vfake(arr, nodata, model_dir, device):
         cl = np.zeros(arr.shape[1:], np.uint8)
         cl[:50, :] = 1
@@ -3499,6 +3518,87 @@ def test_cloud_phys(tmp):
     check('phys: cloud masking is on for any cloud_mask but none / off (old jobs: omnicloudmask)',
           [J.cloud_on({'cloud_mask': v}) for v in ('none', 'off', '', 'on', 'omnicloudmask')],
           [False, False, False, True, True])
+
+
+def test_tiraux(tmp):
+    """TIRAuxCloud (experimental, ML): its settings, what is missing, the OLS
+    input scaling, the tiles mapped back onto the ML grid (a toy model that
+    calls cold pixels cloud), a checkpoint of its real architecture loaded
+    and run through the job path, and the sweep comparing it with the
+    infrared tests."""
+    import contextlib
+    import io
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_origin
+    try:
+        import torch
+        import segmentation_models_pytorch  # noqa: F401
+    except Exception as e:
+        print(f'SKIP  TIRAuxCloud (torch / segmentation-models-pytorch: {type(e).__name__})')
+        return
+    import automatch_cloud as C
+    import automatch_cloudphys as P
+    import automatch_cloudsweep as CS
+    import automatch_tirauxcloud as T
+    o = T.options({})
+    check('tiraux: defaults (OLS SegFormer, 2 classes, 200 m) and what is missing is named',
+          (o['arch'], o['mode'], o['classes'], o['px_m'], any('cloud_tiraux_checkpoint' in p for p in T.check(o)),
+           T.options({'cloud_tiraux_mode': 'landsat'})['px_m'], C.method_for({'cloud_method': 'tirauxcloud'}, 'ML')),
+          ('SegFormer', 'ols', 2, 200.0, True, 100.0, 'tiraux'))
+    H = W = 120
+    yy, xx = np.mgrid[0:H, 0:W]
+    cold = (yy - 50) ** 2 + (xx - 70) ** 2 < 25 ** 2
+    bt = np.where(cold, 225.0, 300.0)
+    img = os.path.join(tmp, 'G1A_ML_G_TIRAUX.tif')
+    with rasterio.open(img, 'w', driver='GTiff', width=W, height=H, count=6, dtype='float32', crs='EPSG:32644',
+                       transform=from_origin(500000, 2500000, 1200, 1200), nodata=0) as d:
+        for i, u in enumerate(P.ML_UM, 1):
+            L = P.C1 / (u ** 5 * (np.exp(P.C2 / (u * bt)) - 1)) / 1e4          # W/cm2/sr/um, as G1A
+            a = (L / 0.01).astype(np.float32)
+            a[:2] = 0
+            d.write(a, i)
+    with contextlib.redirect_stdout(io.StringIO()):
+        dat = C.load_phys(img, 'tiraux', 'ML', 0.01, (), 'W/cm2/sr/um')
+    x = T.model_input(dat['bt'], dat['rad_si'], dat['valid'], o)
+    check('tiraux: OLS input (BT - 190) / 118.1 from the mean of BT10.8 and BT12.0, in the stated unit',
+          (round(float(np.nanmedian(x[~cold])), 2), round(float(np.nanmedian(x[cold])), 2), dat['unit']),
+          (round((300 - 190) / 118.1, 2), round((225 - 190) / 118.1, 2), 'W/cm2/sr/um'))
+
+    class Toy(torch.nn.Module):                        # cloud where the input is below 0.6 (cold)
+        def forward(self, t):
+            z = 20.0 * (t - 0.6)
+            return torch.cat([z, -z], dim=1)
+    prob = T.probabilities(x, dat['valid'], dat['px'], o, 'cpu', Toy())
+    cls, info = T.mask(dat['bt'], dat['rad_si'], dat['valid'], dat['px'], o, prob=prob)
+    edge = cold ^ (np.roll(cold, 1, 0) | np.roll(cold, -1, 0) | np.roll(cold, 1, 1) | np.roll(cold, -1, 1))
+    check('tiraux: tiles (43 ML pixels = 256 at 200 m) predicted and mapped back onto the ML grid; no data kept',
+          ((cls[cold & ~edge] == 1).mean() > 0.97, (cls[~cold & ~edge & (yy >= 2)] == 0).mean() > 0.99,
+           bool((cls[:2] == 255).all()), prob.shape), (True, True, True, (2, H, W)))
+    torch.manual_seed(0)
+    ck = os.path.join(tmp, 'model_hash_test.pth')
+    torch.save(T.build('Unet', 2).state_dict(), ck)
+    job = {'cloud_method': 'tirauxcloud', 'cloud_tiraux_checkpoint': ck, 'cloud_tiraux_arch': 'Unet',
+           'cloud_dilate_px': 0, 'cloud_device': 'cpu'}
+
+    class Sc:
+        raster_path = img
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        r, inf = C.prepare(job, Sc(), ['band4'], os.path.join(tmp, 'tx_cache'), os.path.join(tmp, 'tx_out'), 'ML')
+    with rasterio.open(inf['mask']) as m:
+        cm = m.read(1)
+    check('tiraux: a checkpoint of its Unet loads and runs through the job path (mask, masked band, params)',
+          (inf['method'], set(np.unique(cm)) <= {0, 1, 255}, bool((cm[:2] == 255).all()), os.path.exists(r['band4'][0]),
+           'TIRAuxCloud Unet' in inf['band_choice']), ('tiraux', True, True, True, True))
+    with contextlib.redirect_stdout(io.StringIO()):
+        res = CS.run([img], os.path.join(tmp, 'tx_sweep'), [], '', ir_dt='8', ir_split=[1], blob_km2=[0],
+                     write_top=0, method='compare', tiraux_opts=T.options(job), tiraux_thresholds='0.3, 0.7',
+                     device='cpu')
+    df = res['rows']
+    check('tiraux: the sweep (compare) ranks the infrared tests and TIRAuxCloud side by side on ML',
+          (sorted(df['method'].unique().tolist()), int((df['method'] == 'tiraux').sum()),
+           sorted(df.loc[df['method'] == 'tiraux', 'tiraux_threshold'].tolist())),
+          (['ir', 'tiraux'], 2, [0.3, 0.7]))
 
 
 def test_stretch():
@@ -4286,6 +4386,7 @@ def main():
         test_cloud_mask(tmp)
         test_cloud_sweep(tmp)
         test_cloud_phys(tmp)
+        test_tiraux(tmp)
         test_gpu_pinning(tmp)
         test_stretch()
         test_parallel_share(tmp)

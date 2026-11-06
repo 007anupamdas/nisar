@@ -23,9 +23,10 @@ NISAR↔S1 production scripts in the repo root are separate and untouched.
 | `automatch_weights.py` | Which weight files each detector needs and whether they are on this machine (nothing is downloaded). |
 | `automatch_truth.py` | Ranks every detector + matcher of a run against manually measured ground truth. |
 | `automatch_accuracy.py` | Match accuracy of finished jobs (good / bad matches against the truth field; sub-cells). |
-| `automatch_cloud.py` | Cloud masks before matching, and the stand-alone cloud test: OmniCloudMask (MV / HV), or the physical tests (ML / HS). |
-| `automatch_cloudphys.py` | Physical cloud tests: infrared (ML: brightness temperature, split window, ice, CO₂ / water vapour) and SWIR (HS: 1.38 µm cirrus, bright blobs). |
+| `automatch_cloud.py` | Cloud masks before matching, and the stand-alone cloud test: the physical tests (MV / HV, ML, HS), OmniCloudMask or TIRAuxCloud. |
+| `automatch_cloudphys.py` | Physical cloud tests: VNIR (MV / HV: bright, white, blue), infrared (ML: brightness temperature, split window, ice, CO₂ / water vapour) and SWIR (HS: 1.38 µm cirrus, bright SWIR). |
 | `automatch_cloudsweep.py` | Cloud benchmark: every combination of the cloud settings, against reference outlines. |
+| `automatch_tirauxcloud.py` | TIRAuxCloud's released thermal checkpoints as an experimental ML cloud method. |
 | `automatch_gpuaas.py` | Entry point for the GPU service (`submit_job` `code_path`). |
 | `automatch_server.py` | HTTP front end for a GPU server: submit and follow jobs with curl. |
 | `prefetch_weights.py` | Collect all kornia + imcui weights into one folder for an offline workstation. |
@@ -771,9 +772,45 @@ unless `cloud_min_blob_km2` sets one (0 by default).
 - **Thresholds:** these are starting points from the literature, not tuned
   on G1A. Draw cloud outlines on a few ML and HS scenes and let the sweep
   pick.
-- **Learned models, for comparison:** TIRAuxCloud (2026) releases code
-  (Apache-2.0) and weights for thermal-band cloud masks. It is trained on
-  Landsat and VIIRS, not G1A, and is not wired in here.
+- **TIRAuxCloud (ML, experimental;** `cloud_method: tirauxcloud`,
+  `automatch_tirauxcloud.py`**):** a learned thermal cloud mask (Orion-AI-
+  Lab, arXiv 2602.21905; code Apache-2.0, data and weights CC BY 4.0).
+  Only its architectures are rebuilt here, with segmentation-models-pytorch;
+  none of its code runs.
+  - **What its checkpoints take** (read from its code): one thermal
+    channel, normalised to about 0–1 when its training patches were made.
+    ML's split-window, CO₂ and water-vapour bands go unused.
+    - Its "VIIRS" models are, by their files, DMSP-OLS night thermal at
+      200 m. Their input works out as (BT − 190 K) / 118.1, from the mean
+      of BT10.8 and BT12.0 (`cloud_tiraux_mode: ols`, the default). This is
+      inferred from the data, not stated by the authors.
+    - Its Landsat models (100 m, radiance) need scaling constants that are
+      published nowhere. `cloud_tiraux_norm` [0, 72] W/m²/sr/µm is a guess
+      to tune.
+    - Moving its models to another sensor without retraining gave
+      mIoU 0.22–0.24 in its authors' own tests. So score it against
+      reference outlines before trusting it.
+  - **Install** on the workstation, in the job's environment:
+    `pip install segmentation-models-pytorch==0.5.0`. Then take
+    `model_files.tar.gz` (10.6 GB) from
+    https://huggingface.co/datasets/tirauxcloud/TIRAuxCloud and unpack it.
+    Point `cloud_tiraux_checkpoint` (GUI: Data tab, the cloud test, the
+    sweep) at one checkpoint:
+    - OLS: SegFormer `model_hash_78713d1f6de22d2.pth` (the default
+      architecture) or Unet `model_hash_8ce85fd78026576.pth` (set
+      `cloud_tiraux_arch: Unet`);
+    - Landsat: Unet `41be05a2c8237ec`, SegFormer `50d4e5a4775675d`.
+    Which file sits in which tarball is unverified; check with
+    `tar tzvf`.
+  - **How it runs:** each ML tile of about 256 model pixels is resampled
+    to the model's pixel size and predicted. The cloud probability is
+    averaged back onto the ML grid; cloud where it is ≥
+    `cloud_tiraux_threshold` (0.5). It uses the GPU when there is one
+    (`cloud_device`).
+  - **Compare:** `cloudsweep --method compare --tiraux-checkpoint <pth>`
+    runs the infrared tests and TIRAuxCloud (thresholds
+    `--tiraux-threshold 0.3-0.7:0.2`) on the same ML images, with F1
+    against reference outlines.
 
 The benchmark reports the model's cloud % for jobs that ran with masking.
 `--cloud omnicloudmask` (GUI: *Cloud estimate*) runs the model on the other

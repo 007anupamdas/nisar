@@ -54,7 +54,8 @@ AUTOMATCH_VERSION = '2026.11.06'
 CODE_FILES = ('automatch_engine.py', 'automatch_job.py', 'automatch_imcui.py', 'automatch_refs.py',
               'automatch_rival.py', 'automatch_truth.py', 'automatch_weights.py', 'automatch_gpuaas.py',
               'automatch_native.py', 'imw_configs.py', 'automatch_cross.py', 'automatch_bench.py',
-              'automatch_cloud.py', 'automatch_accuracy.py', 'automatch_cloudsweep.py', 'automatch_cloudphys.py')
+              'automatch_cloud.py', 'automatch_accuracy.py', 'automatch_cloudsweep.py', 'automatch_cloudphys.py',
+              'automatch_tirauxcloud.py')
 
 
 def code_fingerprint() -> str:
@@ -118,6 +119,14 @@ DEFAULT_JOB: Dict = {
     'cloud_vis_clear_factor': 1.3,  # MV / HV with cloud_vis_clear: brighter than the clear sky x this
     'cloud_vis_clear': [],       # MV / HV: earlier scenes of the same ground (clear sky: each pixel's darkest)
     'cloud_from_method': 'auto',  # how the cloud_mask_from image is masked: auto (VNIR tests) | omnicloudmask
+    # cloud_method tirauxcloud (ML, experimental; automatch_tirauxcloud): its released checkpoints
+    'cloud_tiraux_checkpoint': '',  # a model_hash_<...>.pth from its model_files.tar.gz
+    'cloud_tiraux_arch': 'SegFormer',  # SegFormer | Unet (the checkpoint's)
+    'cloud_tiraux_mode': 'ols',   # ols: its 'VIIRS' (DMSP-OLS) models, BT input, 200 m | landsat: radiance, 100 m
+    'cloud_tiraux_classes': 2,    # 2 (clear / cloud) or 3 (clear / thin / cloud), as the checkpoint
+    'cloud_tiraux_px_m': 0.0,     # its pixel size; 0: 200 m ols, 100 m landsat
+    'cloud_tiraux_norm': [0.0, 72.0],  # landsat input: W/m2/sr/um mapped to 0-1 (unpublished: a guess)
+    'cloud_tiraux_threshold': 0.5,  # cloud where its probability is at least this
     'cloud_ir_dt_k': 8.0,        # ML: cloud is this much colder than clear sky at 10.8 um (thick: twice that)
     'cloud_ir_split_scale': 1.0,  # ML: x the split-window (10.8 - 12 um) thresholds; higher, less thin cirrus
     'cloud_ir_cold_k': 240.0,    # ML: colder than this at 10.8 um is thick cloud whatever
@@ -153,7 +162,8 @@ DEFAULT_JOB: Dict = {
     'cloud_sweep_swir_bright': '2-5:1',  # HS: thick cloud, spreads above the clear ground at 1250 nm
     'cloud_sweep_vis_bright': '2-5:1',   # MV / HV: thick cloud, spreads above the clear ground
     'cloud_sweep_vis_white': [0.15, 0.25, 0.35],  # MV / HV: whiteness limits
-    'cloud_sweep_method': 'auto',        # auto | compare (MV / HV by the VNIR tests and OmniCloudMask)
+    'cloud_sweep_method': 'auto',        # auto | compare (MV / HV: VNIR tests + OmniCloudMask; ML: + TIRAuxCloud)
+    'cloud_sweep_tiraux_threshold': '0.3-0.7:0.2',  # ML with cloud_tiraux_checkpoint: its probability thresholds
     'reference_dir': '',         # L8_ref / C1 / any RIVAL-readable collection
     'reference_label': '',       # tag in file names; default from folder name
     'reference_mode': 'auto',    # auto | index-shp | sidecar | degree-tile
@@ -540,6 +550,11 @@ def preflight(job: Dict, check_weights: bool = True) -> Dict:
                     errors.append(f'radiance_unit: {e}')
                 if job.get('cloud_mask_from') and not os.path.exists(job['cloud_mask_from']):
                     errors.append(f"cloud_mask_from not found: {job['cloud_mask_from']}")
+                if method == 'tiraux':
+                    import automatch_tirauxcloud as T
+                    errors += T.check(T.options(job))
+                    warnings.append('cloud_method tirauxcloud is experimental: one thermal channel, a model '
+                                    'trained on other sensors; compare it with the infrared tests (cloud sweep)')
                 if method in C.PHYS_NAMES:
                     info['cloud_mask'] = {'sensor': sensor, 'method': C.PHYS_NAMES[method],
                                           'how': C._phys_text(method, C.phys_options(job, method)),

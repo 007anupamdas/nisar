@@ -480,7 +480,8 @@ def transfer(mask_path: str, onto: str, out_path: str, grow_px: int = 0) -> str:
     return out_path
 
 
-PHYS_NAMES = {'ir': 'infrared tests', 'swir': 'SWIR tests', 'vnir': 'VNIR tests'}
+PHYS_NAMES = {'ir': 'infrared tests', 'swir': 'SWIR tests', 'vnir': 'VNIR tests',
+              'tiraux': 'TIRAuxCloud (experimental)'}
 CLEAR_KEY = {'ir': 'cloud_ir_clear', 'vnir': 'cloud_vis_clear'}     # earlier scenes giving the clear sky
 
 
@@ -495,6 +496,8 @@ def method_for(job: Dict, sensor: str, path: str = '') -> str:
         return 'ocm'
     if m in ('ir', 'swir', 'vnir'):
         return m
+    if m in ('tirauxcloud', 'tiraux'):
+        return 'tiraux'
     if sensor == 'ML':
         return 'ir'
     if sensor == 'HS':
@@ -535,6 +538,9 @@ def phys_options(job: Dict, method: str) -> Dict:
         return {'dt_k': get('cloud_ir_dt_k', P.IR_DEFAULTS['dt_k']),
                 'split_scale': get('cloud_ir_split_scale', P.IR_DEFAULTS['split_scale']),
                 'cold_k': get('cloud_ir_cold_k', P.IR_DEFAULTS['cold_k']), 'min_blob_km2': blob}
+    if method == 'tiraux':
+        import automatch_tirauxcloud as T
+        return T.options(job)
     if method == 'vnir':
         return {'bright_sd': get('cloud_vis_bright_sd', P.VIS_DEFAULTS['bright_sd']),
                 'white': get('cloud_vis_white', P.VIS_DEFAULTS['white']),
@@ -550,6 +556,10 @@ def _phys_text(method: str, opts: Dict) -> str:
         return (f"infrared tests: colder than clear sky by {opts['dt_k']:g} K (thick by twice that, or colder than "
                 f"{opts['cold_k']:g} K), split window x {opts['split_scale']:g}, ice (8.5-10.8 um), high cloud "
                 f"(13.25 / 7.35 um), edges; {blob_text(opts['min_blob_km2'])}")
+    if method == 'tiraux':
+        return (f"TIRAuxCloud {opts['arch']} ({opts['mode']} input, {opts['classes']} classes, "
+                f"{os.path.basename(opts['checkpoint'] or '?')}): cloud where its probability is at least "
+                f"{opts['threshold']:g}; one thermal channel (mean of 10.8 and 12.0 um), experimental")
     if method == 'vnir':
         return (f"VNIR tests: thick where brighter than the clear ground by {opts['bright_sd']:g} spreads (or than "
                 f"the clear sky of earlier scenes x {opts['clear_factor']:g}) and white (spectral spread below "
@@ -588,7 +598,7 @@ def load_phys(path: str, method: str, sensor: str, scale: float = 0.01, clear_pa
         prof = src.profile.copy()
         nd = src.nodata if src.nodata is not None else 0
         px = pixel_m(src.transform, src.crs, src.height)
-        if method == 'ir':
+        if method in ('ir', 'tiraux'):
             um = P.ml_band_centres(path)
             raw = {u: src.read(i + 1).astype(np.float64) for i, u in enumerate(um)}
         else:
@@ -600,7 +610,7 @@ def load_phys(path: str, method: str, sensor: str, scale: float = 0.01, clear_pa
             raw = {int(w): src.read(b).astype(np.float64) for w, b in idx.items()}
     valid = np.all(np.stack([np.isfinite(a) & (a != nd) for a in raw.values()]), axis=0)
     out = {'valid': valid, 'px': px, 'prof': prof}
-    if method == 'ir':
+    if method in ('ir', 'tiraux'):
         rad = {u: a * scale for u, a in raw.items()}
         used, _, note = P.pick_unit(rad, valid, unit)
         bt, used, med = P.to_bt(rad, valid, used)
@@ -615,7 +625,8 @@ def load_phys(path: str, method: str, sensor: str, scale: float = 0.01, clear_pa
         k108 = min(bt, key=lambda u: abs(u - 10.8))
         inv = np.where(valid, -bt[k108], np.nan)                   # cold (cloud) shows bright
         out.update({'bt': bt, 'clear': clear, 'unit': used, 'unit_note': note, 'bt108_median_k': round(med, 1),
-                    'show': np.stack([inv, inv, inv])})
+                    'show': np.stack([inv, inv, inv]),
+                    'rad_si': {u: P.to_si(r, u, used) for u, r in rad.items()}})
     else:
         L = {w: P.to_si(a * scale, w / 1000.0, unit if P.unit_name(unit) != 'auto' else 'W/m2/sr/um')
              for w, a in raw.items()}
@@ -643,6 +654,11 @@ def compute_phys(path: str, method: str, out_dir: str, opts: Dict, sensor: str, 
         extra = {'vnir_bands': ', '.join(f'{k} B{b} ({nm:.0f} nm)' for k, (b, nm) in d['bands'].items()),
                  'clear_sky': (f'darkest of {len(clear_paths)} earlier scene(s)' if d['clear'] is not None
                                else 'from the scene (the darker half is ground)')}
+    elif method == 'tiraux':
+        import automatch_tirauxcloud as T
+        cls, tests = T.mask(d['bt'], d['rad_si'], valid, px, opts, opts.get('device') or None)
+        extra = {'radiance_unit': d['unit'], 'unit_warning': d.get('unit_note') or '',
+                 'bt108_median_k': d['bt108_median_k']}
     else:
         cls, tests = P.swir_mask(d['L'], valid, px, **opts)
         extra = {}
@@ -711,7 +727,7 @@ def prepare(job: Dict, scene, channels: List[str], cache_dir: str, out_dir: str,
     path = scene.raster_path
     src = job.get('cloud_mask_from') or ''
     method = method_for(job, sensor, path)
-    if method in ('ir', 'swir'):
+    if method in PHYS_NAMES:
         return _prepare_phys(job, path, method, channels, cache_dir, out_dir, sensor, src, predictor)
     if src:
         import automatch_bench as B
@@ -774,9 +790,9 @@ def prepare(job: Dict, scene, channels: List[str], cache_dir: str, out_dir: str,
 
 def _prepare_phys(job: Dict, path: str, method: str, channels: List[str], cache_dir: str, out_dir: str, sensor: str,
                   src: str, predictor=None) -> Tuple[Dict[str, List], Dict]:
-    """prepare() for ML (infrared tests) and HS (SWIR tests); with
-    cloud_mask_from, that product's mask is added where it covers this image
-    (the payloads cover different ground)."""
+    """prepare() for the physical tests (MV / HV VNIR, ML infrared, HS SWIR)
+    and TIRAuxCloud; with cloud_mask_from, that product's mask is added where
+    it covers this image (the payloads cover different ground)."""
     opts = phys_options(job, method)
     scale = float(job.get('radiance_scale') or 0.01)
     unit = str(job.get('radiance_unit') or 'W/cm2/sr/um')
@@ -790,6 +806,8 @@ def _prepare_phys(job: Dict, path: str, method: str, channels: List[str], cache_
                                    'from_method': str(job.get('cloud_from_method') or 'auto'),
                                    'grow': int(job.get('cloud_from_margin_px') or 0)}, sort_keys=True).encode()
                        ).hexdigest()
+    if method == 'tiraux':           # the device does not change the mask: not in the key
+        opts = dict(opts, device=job.get('cloud_device') or '')
     info_path = os.path.join(cache_dir, 'CLOUD_INFO.json')
     try:
         with open(info_path, encoding='utf-8') as f:
@@ -805,9 +823,9 @@ def _prepare_phys(job: Dict, path: str, method: str, channels: List[str], cache_
     data = load_phys(path, method, sensor, scale, clear_paths, unit)
     info = compute_phys(path, method, cache_dir, opts, sensor, scale, clear_paths, data=data, unit=unit)
     how = _phys_text(method, opts)
-    if method == 'ir':
+    if method in ('ir', 'tiraux'):
         print(f"[Cloud] radiance read as {info['radiance_unit']} (x {scale:g}): median BT10.8 "
-              f"{info['bt108_median_k']} K; clear sky {info['clear_sky']}", flush=True)
+              f"{info['bt108_median_k']} K; clear sky {info.get('clear_sky', '-')}", flush=True)
     if method == 'vnir':
         print(f"[Cloud] bands {info['vnir_bands']}; clear sky {info['clear_sky']}", flush=True)
     if info.get('night'):
@@ -926,7 +944,10 @@ def standalone(path: str, out_dir: str, sensor: str = '', bands: Optional[List[s
     os.makedirs(out_dir, exist_ok=True)
     confs = sorted({round(float(c), 3) for c in confidences}) or [0.7]
     meth = method_for({'cloud_method': method}, sensor, path)
-    if meth in ('ir', 'swir'):
+    if meth == 'tiraux':
+        phys_opts = dict(phys_opts or phys_options({}, 'tiraux'))
+        phys_opts['device'] = phys_opts.get('device') or device or ''
+    if meth in PHYS_NAMES:
         rows, folder = _standalone_phys(path, out_dir, sensor, meth, phys_opts, scale, clear_paths, mask_from,
                                         margin_px, stamp, run_folder, unit,
                                         lambda: standalone(mask_from, out_dir, '', bands, choice, confs, model_dir,
@@ -1054,9 +1075,9 @@ def _standalone_phys(path: str, out_dir: str, sensor: str, method: str, opts: Op
     print(f'[Cloud] {os.path.basename(path)} ({sensor}): {PHYS_NAMES[method]}', flush=True)
     data = load_phys(path, method, sensor, scale, clear_paths, unit)
     own = compute_phys(path, method, os.path.join(base, 'own'), opts, sensor, scale, clear_paths, stamp, data, unit)
-    if method == 'ir':
+    if method in ('ir', 'tiraux'):
         print(f"[Cloud] radiance read as {own['radiance_unit']} (x {scale:g}): median BT10.8 "
-              f"{own['bt108_median_k']} K; clear sky {own['clear_sky']}", flush=True)
+              f"{own['bt108_median_k']} K; clear sky {own.get('clear_sky', '-')}", flush=True)
     if method == 'vnir':
         print(f"[Cloud] bands {own['vnir_bands']}; clear sky {own['clear_sky']}", flush=True)
     if own.get('night'):
@@ -1119,13 +1140,22 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument('--shadow-near-km', type=float, default=REFINE_DEFAULTS['shadow_near_km'],
                     help='shadows kept within this of a cloud blob')
     import automatch_cloudphys as P
-    ap.add_argument('--method', default='auto', choices=['auto', 'omnicloudmask', 'ir', 'swir', 'vnir'],
+    ap.add_argument('--method', default='auto', choices=['auto', 'omnicloudmask', 'ir', 'swir', 'vnir', 'tirauxcloud'],
                     help='auto: infrared tests for ML, SWIR tests for HS, VNIR tests for MV / HV')
     ap.add_argument('--from-method', default='auto', choices=['auto', 'omnicloudmask', 'vnir'],
                     help='how the --from (VNIR) image is masked')
     ap.add_argument('--radiance-scale', type=float, default=0.01, help='radiance = pixel value x this (G1A: 0.01)')
     ap.add_argument('--radiance-unit', default='W/cm2/sr/um',
                     help='unit of the scaled radiance (G1A: W/cm2/sr/um); auto: whatever gives Earth temperatures')
+    ap.add_argument('--tiraux-checkpoint', default='', help='TIRAuxCloud: a model_hash_<...>.pth')
+    ap.add_argument('--tiraux-arch', default='SegFormer', choices=['SegFormer', 'Unet'])
+    ap.add_argument('--tiraux-mode', default='ols', choices=['ols', 'landsat'],
+                    help='TIRAuxCloud input: ols (its "VIIRS" / DMSP-OLS models, 200 m) or landsat (100 m)')
+    ap.add_argument('--tiraux-classes', type=int, default=2, choices=[2, 3])
+    ap.add_argument('--tiraux-px', type=float, default=0.0, help='its pixel size (m); 0: 200 ols, 100 landsat')
+    ap.add_argument('--tiraux-norm', type=float, nargs=2, default=[0.0, 72.0],
+                    help='landsat input: [lo hi] W/m2/sr/um mapped to 0-1 (unpublished: a guess)')
+    ap.add_argument('--tiraux-threshold', type=float, default=0.5, help='cloud where its probability >= this')
     ap.add_argument('--vis-bright', type=float, default=P.VIS_DEFAULTS['bright_sd'],
                     help='MV / HV: thick cloud brighter than the clear ground by this many spreads')
     ap.add_argument('--vis-white', type=float, default=P.VIS_DEFAULTS['white'],
@@ -1162,6 +1192,17 @@ def main(argv: Optional[List[str]] = None) -> int:
              'swir': {'k': a.swir_k, 'bright_sd': a.swir_bright, 'min_blob_km2': a.min_blob_km2},
              'vnir': {'bright_sd': a.vis_bright, 'white': a.vis_white, 'clear_factor': a.vis_clear_factor,
                       'min_blob_km2': a.min_blob_km2, 'shadow_near_km': a.shadow_near_km}}.get(meth)
+    if meth == 'tiraux':
+        import automatch_tirauxcloud as T
+        popts = T.options({'cloud_tiraux_checkpoint': a.tiraux_checkpoint, 'cloud_tiraux_arch': a.tiraux_arch,
+                           'cloud_tiraux_mode': a.tiraux_mode, 'cloud_tiraux_classes': a.tiraux_classes,
+                           'cloud_tiraux_px_m': a.tiraux_px, 'cloud_tiraux_norm': a.tiraux_norm,
+                           'cloud_tiraux_threshold': a.tiraux_threshold})
+        popts['device'] = device or ''
+        problems = T.check(popts)
+        if problems:
+            print('\n'.join(problems))
+            return 2
     try:
         P.unit_name(a.radiance_unit)
     except ValueError as e:

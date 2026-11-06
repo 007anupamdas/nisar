@@ -300,12 +300,13 @@ def main(argv: List[str] = None) -> int:
                      phys_opts=(C.phys_options(job, method) if method in C.PHYS_NAMES else None),
                      scale=float(job.get('radiance_scale') or 0.01),
                      clear_paths=job.get(C.CLEAR_KEY.get(method, '')) or [] if method in C.CLEAR_KEY else [],
-                     from_method=job.get('cloud_from_method') or 'auto',
+                     from_method=job.get('cloud_from_method') or 'auto',  # tirauxcloud: device from cloud_device
                      unit=job.get('radiance_unit') or 'W/cm2/sr/um')
         return 0
     if mode == 'cloudsweep':               # the cloud mask benchmark: every combination of the settings
         import automatch_cloud as C
         import automatch_cloudsweep as CS
+        import automatch_tirauxcloud as T
         imgs = [job['input_path']] + list(job.get('cloud_sweep_images') or [])
         smeth = job.get('cloud_sweep_method') if job.get('cloud_sweep_method') not in (None, '', 'auto') \
             else (job.get('cloud_method') or 'auto')
@@ -328,7 +329,9 @@ def main(argv: List[str] = None) -> int:
                vis_bright=job.get('cloud_sweep_vis_bright') or '2-5:1',
                vis_white=job.get('cloud_sweep_vis_white') or [0.25],
                vis_clear_factor=float(job.get('cloud_vis_clear_factor') or 1.3),
-               unit=job.get('radiance_unit') or 'W/cm2/sr/um', vis_clear_paths=job.get('cloud_vis_clear') or [])
+               unit=job.get('radiance_unit') or 'W/cm2/sr/um', vis_clear_paths=job.get('cloud_vis_clear') or [],
+               tiraux_opts=(T.options(job) if job.get('cloud_tiraux_checkpoint') else None),
+               tiraux_thresholds=job.get('cloud_sweep_tiraux_threshold') or '0.3-0.7:0.2')
         return 0
     if mode == 'preflight':
         res = J.preflight(job)
