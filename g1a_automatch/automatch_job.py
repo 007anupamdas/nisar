@@ -110,8 +110,14 @@ DEFAULT_JOB: Dict = {
     'stretch_percentiles': [1, 99],   # contrast stretch of each window: low / high percentile (e.g. [1, 90])
     'stretch_mode': 'percentile',     # percentile | clahe: local contrast too (dark ground beside bright cloud)
     'cloud_mask': 'none',        # none | on (or 'omnicloudmask', as before): mask clouds, by cloud_method
-    'cloud_method': 'auto',      # auto: ML infrared tests, HS SWIR tests, others OmniCloudMask | omnicloudmask | ir | swir
+    'cloud_method': 'auto',      # auto: ML infrared, HS SWIR, MV / HV VNIR tests | omnicloudmask | ir | swir | vnir
     'radiance_scale': 0.01,      # radiance = pixel value x this (G1A: scaled radiance, scaling factor 0.01)
+    'radiance_unit': 'W/cm2/sr/um',  # of the scaled radiance (G1A, all sensors); auto: what gives Earth temperatures
+    'cloud_vis_bright_sd': 3.0,  # MV / HV: thick cloud brighter than the clear ground by this many spreads
+    'cloud_vis_white': 0.25,     # MV / HV: cloud is white: spectral spread over blue..NIR below this
+    'cloud_vis_clear_factor': 1.3,  # MV / HV with cloud_vis_clear: brighter than the clear sky x this
+    'cloud_vis_clear': [],       # MV / HV: earlier scenes of the same ground (clear sky: each pixel's darkest)
+    'cloud_from_method': 'auto',  # how the cloud_mask_from image is masked: auto (VNIR tests) | omnicloudmask
     'cloud_ir_dt_k': 8.0,        # ML: cloud is this much colder than clear sky at 10.8 um (thick: twice that)
     'cloud_ir_split_scale': 1.0,  # ML: x the split-window (10.8 - 12 um) thresholds; higher, less thin cirrus
     'cloud_ir_cold_k': 240.0,    # ML: colder than this at 10.8 um is thick cloud whatever
@@ -123,7 +129,7 @@ DEFAULT_JOB: Dict = {
     'cloud_mask_classes': [1],   # masked: 1 thick cloud, 2 thin cloud, 3 shadow
     'cloud_refine': True,        # keep only the model's clouds that are bright blobs (below)
     'cloud_bright_pct': 90.0,    # bright: above this percentile of the clear ground, both visible bands
-    'cloud_min_blob_km2': 1.0,   # a cloud blob is at least this big
+    'cloud_min_blob_km2': 0.0,   # 0: every cloud pixel counts (clouds come in every size); > 0: drop smaller patches
     'cloud_shadow_near_km': 10.0,  # a shadow lies within this of a cloud blob
     'cloud_min_confidence': 0.7, # a pixel is cloud / shadow only when the model is this sure
     'cloud_dilate_px': 2,        # grow the mask by this much (cloud edges)
@@ -135,7 +141,7 @@ DEFAULT_JOB: Dict = {
     # mode "cloudsweep" only (automatch_cloudsweep): every combination; ranges lo-hi:step or lists
     'cloud_sweep_conf': '0.6-0.99:0.1',
     'cloud_sweep_bright': '60-90:5',
-    'cloud_sweep_blob_km2': [0.25, 1.0, 4.0],
+    'cloud_sweep_blob_km2': [0.0, 0.25, 1.0],
     'cloud_sweep_shadow_km': [5.0, 10.0, 20.0],
     'cloud_sweep_crisp': 6,       # every 3 of the N crispest bands (0: none); the spec bands always
     'cloud_sweep_reference': [],  # reference cloud masks, one per image (raster or .geojson / .shp outlines)
@@ -145,6 +151,9 @@ DEFAULT_JOB: Dict = {
     'cloud_sweep_ir_split': [0.75, 1.0, 1.5],  # ML: split-window threshold scales
     'cloud_sweep_swir_k': '2-6:1',       # HS images: cirrus ratio robust sd
     'cloud_sweep_swir_bright': '2-5:1',  # HS: thick cloud, spreads above the clear ground at 1250 nm
+    'cloud_sweep_vis_bright': '2-5:1',   # MV / HV: thick cloud, spreads above the clear ground
+    'cloud_sweep_vis_white': [0.15, 0.25, 0.35],  # MV / HV: whiteness limits
+    'cloud_sweep_method': 'auto',        # auto | compare (MV / HV by the VNIR tests and OmniCloudMask)
     'reference_dir': '',         # L8_ref / C1 / any RIVAL-readable collection
     'reference_label': '',       # tag in file names; default from folder name
     'reference_mode': 'auto',    # auto | index-shp | sidecar | degree-tile
@@ -522,17 +531,29 @@ def preflight(job: Dict, check_weights: bool = True) -> Dict:
             try:
                 sensor = B.sensor_of(scene.name, scene.native_res)
                 method = C.method_for(job, sensor, scene.raster_path)
-                if method == 'ocm' or job.get('cloud_mask_from'):
+                if C.needs_model(job, sensor, scene.raster_path):
                     errors += C.check(job)
+                try:
+                    import automatch_cloudphys as P
+                    P.unit_name(job.get('radiance_unit') or 'W/cm2/sr/um')
+                except ValueError as e:
+                    errors.append(f'radiance_unit: {e}')
                 if job.get('cloud_mask_from') and not os.path.exists(job['cloud_mask_from']):
                     errors.append(f"cloud_mask_from not found: {job['cloud_mask_from']}")
-                if method in ('ir', 'swir'):
+                if method in C.PHYS_NAMES:
                     info['cloud_mask'] = {'sensor': sensor, 'method': C.PHYS_NAMES[method],
                                           'how': C._phys_text(method, C.phys_options(job, method)),
                                           'from': job.get('cloud_mask_from') or ''}
-                    for p in (job.get('cloud_ir_clear') or []) if method == 'ir' else []:
+                    ck = C.CLEAR_KEY.get(method)
+                    for p in (job.get(ck) or []) if ck else []:
                         if p and not os.path.exists(p):
-                            errors.append(f'cloud_ir_clear: not found: {p}')
+                            errors.append(f'{ck}: not found: {p}')
+                    if method == 'vnir':
+                        import automatch_cloudphys as P
+                        try:
+                            P.vnir_bands(C.band_wavelengths(scene.raster_path, sensor) or [])
+                        except ValueError as e:
+                            errors.append(f'cloud_method vnir: {e}')
                     if method == 'swir':
                         import automatch_cloudphys as P
                         wl = C.band_wavelengths(scene.raster_path, sensor) or \
@@ -1042,7 +1063,7 @@ def prepare_cloud_mask(job: Dict, scene, out_root: str) -> Dict[str, List]:
         print('[Cloud] cloud masking is for raster inputs; NISAR channels are matched as they are')
         return {}
     sensor = B.sensor_of(scene.name, scene.native_res)
-    if C.method_for(job, sensor, scene.raster_path) == 'ocm' or job.get('cloud_mask_from'):
+    if C.needs_model(job, sensor, scene.raster_path):
         probs = C.check(job)
         if probs:
             raise RuntimeError('; '.join(probs))

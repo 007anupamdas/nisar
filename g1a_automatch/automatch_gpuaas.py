@@ -286,7 +286,7 @@ def main(argv: List[str] = None) -> int:
         import automatch_cloud as C
         sensor = C.sensor_for(job['input_path'])
         method = C.method_for(job, sensor, job['input_path'])
-        if method == 'ocm' or job.get('cloud_mask_from'):
+        if C.needs_model(job, sensor, job['input_path']):
             problems = C.check(job)
             if problems:
                 print('\n'.join(problems))
@@ -297,14 +297,19 @@ def main(argv: List[str] = None) -> int:
                      C.model_dir_for(job), job.get('cloud_device') or None, job.get('cloud_mask_from') or '',
                      int(job.get('cloud_from_margin_px') or 0) + int(job.get('cloud_dilate_px') or 0),
                      refine_opts=C.refine_options(job), method=job.get('cloud_method') or 'auto',
-                     phys_opts=(C.phys_options(job, method) if method in ('ir', 'swir') else None),
-                     scale=float(job.get('radiance_scale') or 0.01), clear_paths=job.get('cloud_ir_clear') or [])
+                     phys_opts=(C.phys_options(job, method) if method in C.PHYS_NAMES else None),
+                     scale=float(job.get('radiance_scale') or 0.01),
+                     clear_paths=job.get(C.CLEAR_KEY.get(method, '')) or [] if method in C.CLEAR_KEY else [],
+                     from_method=job.get('cloud_from_method') or 'auto',
+                     unit=job.get('radiance_unit') or 'W/cm2/sr/um')
         return 0
     if mode == 'cloudsweep':               # the cloud mask benchmark: every combination of the settings
         import automatch_cloud as C
         import automatch_cloudsweep as CS
         imgs = [job['input_path']] + list(job.get('cloud_sweep_images') or [])
-        if any(C.method_for(job, C.sensor_for(i), i) == 'ocm' for i in imgs):
+        smeth = job.get('cloud_sweep_method') if job.get('cloud_sweep_method') not in (None, '', 'auto') \
+            else (job.get('cloud_method') or 'auto')
+        if any('ocm' in m for m in CS.image_methods(imgs, smeth)):
             problems = C.check(job)
             if problems:
                 print('\n'.join(problems))
@@ -314,12 +319,16 @@ def main(argv: List[str] = None) -> int:
                job['cloud_sweep_conf'], job['cloud_sweep_bright'], job['cloud_sweep_blob_km2'],
                job['cloud_sweep_shadow_km'], int(job['cloud_sweep_crisp']), True,
                job.get('cloud_mask_classes') or [1], C.model_dir_for(job), job.get('cloud_device') or None,
-               pngs=str(job.get('cloud_sweep_pngs') or 'grid'), method=job.get('cloud_method') or 'auto',
+               pngs=str(job.get('cloud_sweep_pngs') or 'grid'), method=smeth,
                ir_dt=job.get('cloud_sweep_ir_dt') or '4-12:2', ir_split=job.get('cloud_sweep_ir_split') or [1.0],
                swir_k=job.get('cloud_sweep_swir_k') or '2-6:1',
                swir_bright=job.get('cloud_sweep_swir_bright') or [3.0],
                scale=float(job.get('radiance_scale') or 0.01), clear_paths=job.get('cloud_ir_clear') or [],
-               ir_cold=float(job.get('cloud_ir_cold_k') or 240.0))
+               ir_cold=float(job.get('cloud_ir_cold_k') or 240.0),
+               vis_bright=job.get('cloud_sweep_vis_bright') or '2-5:1',
+               vis_white=job.get('cloud_sweep_vis_white') or [0.25],
+               vis_clear_factor=float(job.get('cloud_vis_clear_factor') or 1.3),
+               unit=job.get('radiance_unit') or 'W/cm2/sr/um', vis_clear_paths=job.get('cloud_vis_clear') or [])
         return 0
     if mode == 'preflight':
         res = J.preflight(job)

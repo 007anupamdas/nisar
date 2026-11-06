@@ -315,23 +315,29 @@ def gpu_list() -> List[Tuple[int, str, float]]:
     return _GPUS
 
 
-CLOUD_METHODS = [('auto', 'by sensor: ML infrared tests, HS SWIR tests, others OmniCloudMask'),
-                 ('omnicloudmask', 'OmniCloudMask (red / green / NIR)'),
+CLOUD_METHODS = [('auto', 'by sensor: ML infrared, HS SWIR, MV / HV VNIR tests'),
+                 ('vnir', 'VNIR tests (bright + white + blue: MV / HV)'),
+                 ('omnicloudmask', 'OmniCloudMask (red / green / NIR model)'),
                  ('ir', 'infrared tests (thermal: ML)'), ('swir', 'SWIR tests (1.38 µm cirrus + bright: HS)')]
 
 
 class CloudMethodCombo(QtWidgets.QComboBox):
-    """How clouds are found (automatch_cloud.method_for): value() / setValue()."""
+    """How clouds are found (automatch_cloud.method_for): value() / setValue();
+    compare=True adds the sweep's 'compare' (MV / HV both ways)."""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, compare=False):
         super().__init__(parent)
         for k, t in CLOUD_METHODS:
             self.addItem(t, k)
-        self.setToolTip('auto: each image by its sensor. ML (MX-LWIR, thermal) by the infrared tests of the '
-                        'operational geostationary cloud masks (colder than clear sky, split window 10.8-12 µm, ice '
-                        '8.5-10.8 µm, CO2 / water-vapour bands, edges; day and night). HS (SWIR) by the 1.38 µm '
-                        'cirrus band and bright SWIR blobs (daylight). MV / HV by OmniCloudMask. Radiance = pixel '
-                        'value x the radiance scale (G1A: 0.01).')
+        if compare:
+            self.addItem('compare: MV / HV by the VNIR tests and by OmniCloudMask, side by side', 'compare')
+        self.setToolTip('auto: each image by its sensor, no model. ML (MX-LWIR, thermal) by the infrared tests of '
+                        'the operational geostationary cloud masks (colder than clear sky, split window 10.8-12 µm, '
+                        'ice 8.5-10.8 µm, CO2 / water-vapour bands, edges; day and night). HS (SWIR) by the 1.38 µm '
+                        'cirrus band and bright SWIR blobs. MV / HV by the VNIR tests: brighter than the ground, '
+                        'white across blue..NIR and as bright in blue as in red (and 940 nm water vapour on HV). '
+                        'OmniCloudMask: the model, as before. Radiance = pixel value x the radiance scale (G1A: 0.01) '
+                        'in W/cm²/sr/µm.')
 
     def value(self):
         return self.currentData() or 'auto'
@@ -1206,9 +1212,18 @@ class CloudTestDialog(QtWidgets.QDialog):
         self.scale.setDecimals(6)
         self.scale.setRange(1e-6, 1e6)
         self.scale.setValue(g('radiance_scale', 0.01))
-        self.scale.setToolTip('radiance = pixel value x this (G1A metadata: scaled radiance, scaling factor 0.01). '
-                              'The unit is found from the values (the one giving Earth-like temperatures) and logged.')
-        f.addRow('Radiance scale (ML / HS)', self.scale)
+        self.scale.setToolTip('radiance = pixel value x this (G1A metadata: scaled radiance, scaling factor 0.01)')
+        self.unit = QtWidgets.QComboBox()
+        self.unit.setEditable(True)
+        self.unit.addItems(['W/cm2/sr/um', 'mW/cm2/sr/um', 'W/m2/sr/um', 'mW/m2/sr/cm-1', 'auto'])
+        self.unit.setCurrentText(str(job.get('radiance_unit') or 'W/cm2/sr/um'))
+        self.unit.setToolTip('unit of the scaled radiance (G1A: W/cm²/sr/µm). ML: if it gives no Earth temperatures '
+                             'the unit that does is used, with a warning in the log; auto: always the one that fits.')
+        hu = QtWidgets.QHBoxLayout()
+        hu.addWidget(self.scale)
+        hu.addWidget(QtWidgets.QLabel('unit'))
+        hu.addWidget(self.unit, 1)
+        f.addRow('Radiance scale', hu)
         self.ir_dt = QtWidgets.QDoubleSpinBox()
         self.ir_dt.setRange(1, 40)
         self.ir_dt.setSuffix(' K')
@@ -1235,7 +1250,7 @@ class CloudTestDialog(QtWidgets.QDialog):
         self.ir_clear = QtWidgets.QLineEdit('; '.join(job.get('cloud_ir_clear') or []))
         self.ir_clear.setPlaceholderText('optional: earlier ML scenes of the same ground, separated by ; '
                                          '(clear sky = each pixel\'s warmest)')
-        f.addRow('Clear-sky scenes (ML)', self.ir_clear)
+        f.addRow('Clear-sky scenes (ML / MV / HV)', self.ir_clear)
         self.swir_k = QtWidgets.QDoubleSpinBox()
         self.swir_k.setRange(0.5, 20)
         self.swir_k.setSuffix(' sd')
@@ -1253,6 +1268,31 @@ class CloudTestDialog(QtWidgets.QDialog):
             hs.addWidget(QtWidgets.QLabel(lab))
             hs.addWidget(w)
         f.addRow('SWIR tests (HS)', hs)
+        self.vis_bright = QtWidgets.QDoubleSpinBox()
+        self.vis_bright.setRange(0.5, 20)
+        self.vis_bright.setSuffix(' spreads')
+        self.vis_bright.setValue(g('cloud_vis_bright_sd', 3.0))
+        self.vis_bright.setToolTip('thick cloud: brighter than the ground (vegetation, soil, water) by this many '
+                                   'spreads; thin at half')
+        self.vis_white = QtWidgets.QDoubleSpinBox()
+        self.vis_white.setRange(0.02, 1)
+        self.vis_white.setSingleStep(0.05)
+        self.vis_white.setValue(g('cloud_vis_white', 0.25))
+        self.vis_white.setToolTip('cloud is white: mean |R - mean| / mean over blue, green, red, NIR below this '
+                                  '(vegetation, water, coloured soil are not)')
+        self.vis_factor = QtWidgets.QDoubleSpinBox()
+        self.vis_factor.setRange(1.01, 5)
+        self.vis_factor.setSingleStep(0.1)
+        self.vis_factor.setPrefix('x ')
+        self.vis_factor.setValue(g('cloud_vis_clear_factor', 1.3))
+        self.vis_factor.setToolTip('with clear-sky scenes: cloud is brighter than the clear sky by this factor '
+                                   '(snow and bright desert then stay clear)')
+        hv = QtWidgets.QHBoxLayout()
+        for lab, w in (('brighter than ground by', self.vis_bright), ('white below', self.vis_white),
+                       ('or than clear sky', self.vis_factor)):
+            hv.addWidget(QtWidgets.QLabel(lab))
+            hv.addWidget(w)
+        f.addRow('VNIR tests (MV / HV)', hv)
         self.choice = QtWidgets.QComboBox()
         self.choice.addItems(['red / green / NIR by the band specs', 'the 3 crispest bands'])
         self.choice.setCurrentIndex(1 if job.get('cloud_band_choice') == 'quality' else 0)
@@ -1274,12 +1314,13 @@ class CloudTestDialog(QtWidgets.QDialog):
         self.device = DeviceCombo()
         self.device.setValue(job.get('device') or 'auto')
         f.addRow('Device', self.device)
-        self.refine = QtWidgets.QCheckBox('bright blobs only: keep the model\'s clouds that are brighter than '
-                                          'most clear ground and form a blob')
+        self.refine = QtWidgets.QCheckBox('bright clouds only: keep the model\'s clouds that are brighter than '
+                                          'most clear ground')
         self.refine.setChecked(bool(job.get('cloud_refine', True)))
         self.refine.setToolTip('The model takes water and vegetation for cloud on G1A MV. A cloud must be above '
-                               'this percentile of the clear ground in both visible bands, in a blob of at least '
-                               'this area; shadows only near such a blob. The model\'s own result is shown beside.')
+                               'this percentile of the clear ground in both visible bands (and, if a size is set, '
+                               'in a patch at least that big); shadows only near cloud. The model\'s own result is '
+                               'shown beside.')
         self.bright = QtWidgets.QDoubleSpinBox()
         self.bright.setRange(50, 99.9)
         self.bright.setSuffix(' percentile')
@@ -1288,7 +1329,10 @@ class CloudTestDialog(QtWidgets.QDialog):
         self.blob.setRange(0, 1000)
         self.blob.setDecimals(2)
         self.blob.setSuffix(' km²')
-        self.blob.setValue(float(job.get('cloud_min_blob_km2') if job.get('cloud_min_blob_km2') is not None else 1))
+        self.blob.setValue(float(job.get('cloud_min_blob_km2') if job.get('cloud_min_blob_km2') is not None else 0))
+        self.blob.setSpecialValueText('any size')
+        self.blob.setToolTip('0 (any size): every cloud pixel counts -- clouds come in every shape and size. Above 0: '
+                             'cloud patches smaller than this are dropped (specks of noise).')
         self.near = QtWidgets.QDoubleSpinBox()
         self.near.setRange(0, 200)
         self.near.setSuffix(' km')
@@ -1358,6 +1402,9 @@ class CloudTestDialog(QtWidgets.QDialog):
         a += ['--min-blob-km2', f'{self.blob.value():g}']
         if self.method.value() != 'auto':
             a += ['--method', self.method.value()]
+        a += ['--radiance-unit', self.unit.currentText().strip() or 'W/cm2/sr/um',
+              '--vis-bright', f'{self.vis_bright.value():g}', '--vis-white', f'{self.vis_white.value():g}',
+              '--vis-clear-factor', f'{self.vis_factor.value():g}']
         a += ['--radiance-scale', f'{self.scale.value():g}', '--ir-dt', f'{self.ir_dt.value():g}',
               '--ir-split', f'{self.ir_split.value():g}', '--ir-cold', f'{self.ir_cold.value():g}',
               '--swir-k', f'{self.swir_k.value():g}', '--swir-bright', f'{self.swir_bright.value():g}']
@@ -1426,13 +1473,22 @@ class CloudSweepDialog(QtWidgets.QDialog):
         f.addRow('Band sets', hb)
         self.bright = QtWidgets.QLineEdit(settings.value('cloud_sweep/bright', '') or '60-90:5')
         f.addRow('Brighter than (percentile)', self.bright)
-        self.blob = QtWidgets.QLineEdit(settings.value('cloud_sweep/blob', '') or '0.25, 1, 4')
+        self.blob = QtWidgets.QLineEdit(settings.value('cloud_sweep/blob', '') or '0, 0.25, 1')
         f.addRow('Blob at least (km²)', self.blob)
         self.shadow = QtWidgets.QLineEdit(settings.value('cloud_sweep/shadow', '') or '5, 10, 20')
         f.addRow('Shadow within (km)', self.shadow)
-        self.method = CloudMethodCombo()
+        self.method = CloudMethodCombo(compare=True)
         self.method.setValue(job.get('cloud_method') or 'auto')
         f.addRow('Method', self.method)
+        self.vis_bright = QtWidgets.QLineEdit(settings.value('cloud_sweep/vis_bright', '') or '2-5:1')
+        self.vis_bright.setToolTip('thick cloud brighter than the ground by (spreads)')
+        self.vis_white = QtWidgets.QLineEdit(settings.value('cloud_sweep/vis_white', '') or '0.15, 0.25, 0.35')
+        self.vis_white.setToolTip('whiteness limits (spectral spread over blue..NIR)')
+        hv = QtWidgets.QHBoxLayout()
+        for lab, w in (('brighter by (spreads)', self.vis_bright), ('white below', self.vis_white)):
+            hv.addWidget(QtWidgets.QLabel(lab))
+            hv.addWidget(w)
+        f.addRow('MV / HV: VNIR tests', hv)
         self.ir_dt = QtWidgets.QLineEdit(settings.value('cloud_sweep/ir_dt', '') or '4-12:2')
         self.ir_dt.setToolTip('colder than clear sky at 10.8 µm by (K)')
         self.ir_split = QtWidgets.QLineEdit(settings.value('cloud_sweep/ir_split', '') or '0.75, 1, 1.5')
@@ -1475,7 +1531,7 @@ class CloudSweepDialog(QtWidgets.QDialog):
         self.lbl_n = QtWidgets.QLabel('')
         f.addRow('', self.lbl_n)
         for w in (self.conf, self.bright, self.blob, self.shadow, self.ir_dt, self.ir_split, self.swir_k,
-                  self.swir_bright):
+                  self.swir_bright, self.vis_bright, self.vis_white):
             w.textChanged.connect(self._count)
         self.crisp.valueChanged.connect(self._count)
         self.spec.toggled.connect(self._count)
@@ -1501,21 +1557,22 @@ class CloudSweepDialog(QtWidgets.QDialog):
     def _phys_ranges(self):
         import automatch_cloudsweep as CS
         return (CS.parse_range(self.ir_dt.text()), CS.parse_range(self.ir_split.text()),
-                CS.parse_range(self.swir_k.text()), CS.parse_range(self.swir_bright.text()))
+                CS.parse_range(self.swir_k.text()), CS.parse_range(self.swir_bright.text()),
+                CS.parse_range(self.vis_bright.text()), CS.parse_range(self.vis_white.text()))
 
     def _count(self, *_):
         try:
             c, b, k, s = self._ranges()
-            dt, sp, sk, sb = self._phys_ranges()
+            dt, sp, sk, sb, vb, vw = self._phys_ranges()
         except ValueError as e:
             self.lbl_n.setText(str(e))
             return
         import math
         sets = int(self.spec.isChecked()) + (math.comb(self.crisp.value(), 3) if self.crisp.value() >= 3 else 0)
         n = len(c) * (1 + len(b) * len(k) * len(s))
-        self.lbl_n.setText(f'OmniCloudMask images: {sets} band set(s) (model runs per image) x {n} combinations = '
-                           f'{sets * n} rows per image; ML: {len(dt) * len(sp) * len(k)}, HS: '
-                           f'{len(sk) * len(sb) * len(k)} rows per image')
+        self.lbl_n.setText(f'MV / HV: {len(vb) * len(vw) * len(k)}, ML: {len(dt) * len(sp) * len(k)}, HS: '
+                           f'{len(sk) * len(sb) * len(k)} rows per image; with OmniCloudMask (method omnicloudmask '
+                           f'or compare): {sets} band set(s) (model runs per image) x {n} combinations = {sets * n}')
 
     def out_dir(self):
         imgs = self._lines(self.images)
@@ -1543,7 +1600,8 @@ class CloudSweepDialog(QtWidgets.QDialog):
             self.settings.setValue(f'cloud_sweep/{k}', w.toPlainText())
         for k, w in (('out', self.out), ('conf', self.conf), ('bright', self.bright), ('blob', self.blob),
                      ('shadow', self.shadow), ('ir_dt', self.ir_dt), ('ir_split', self.ir_split),
-                     ('swir_k', self.swir_k), ('swir_bright', self.swir_bright), ('scale', self.scale)):
+                     ('swir_k', self.swir_k), ('swir_bright', self.swir_bright), ('scale', self.scale),
+                     ('vis_bright', self.vis_bright), ('vis_white', self.vis_white)):
             self.settings.setValue(f'cloud_sweep/{k}', w.text())
         self.accept()
 
@@ -1569,7 +1627,8 @@ class CloudSweepDialog(QtWidgets.QDialog):
             a += ['--method', self.method.value()]
         a += ['--ir-dt', self.ir_dt.text().strip(), '--ir-split', self.ir_split.text().strip(),
               '--swir-k', self.swir_k.text().strip(), '--swir-bright', self.swir_bright.text().strip(),
-              '--radiance-scale', f'{float(self.scale.text()):g}']
+              '--radiance-scale', f'{float(self.scale.text()):g}',
+              '--vis-bright', self.vis_bright.text().strip(), '--vis-white', self.vis_white.text().strip()]
         return a
 
 
@@ -1579,7 +1638,8 @@ class CloudSweepResultDialog(QtWidgets.QDialog):
     COLS = [('sensor', 'sensor'), ('band_set', 'band set / method'), ('confidence', 'confidence'), ('check', 'check'),
             ('bright_pct', 'bright'), ('min_blob_km2', 'blob km²'), ('shadow_near_km', 'shadow km'),
             ('ir_dt_k', 'IR colder by K'), ('ir_split_scale', 'IR split x'), ('swir_k', 'SWIR cirrus sd'),
-            ('swir_bright_sd', 'SWIR thick spreads'), ('images', 'images'), ('ref_f1', 'F1'),
+            ('swir_bright_sd', 'SWIR thick spreads'), ('vis_bright_sd', 'VNIR bright spreads'),
+            ('vis_white', 'VNIR white'), ('images', 'images'), ('ref_f1', 'F1'),
             ('ref_iou', 'IoU'), ('ref_precision', 'precision'), ('ref_recall', 'recall'), ('cloud_pct', 'cloud %'),
             ('masked_pct', 'masked %'), ('dark_cloud_pct', 'dark cloud %'), ('brightness_gap', 'brightness gap'),
             ('blobs', 'blobs')]
@@ -1863,11 +1923,12 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         hl.addWidget(self.auto_range)
         f.addRow('Auto bands (N crispest)', hl)
         self.cloud_mask = QtWidgets.QCheckBox('mask clouds before matching')
-        self.cloud_mask.setToolTip('Clouds (and, if chosen, shadow) are left out of matching. MV / HV: OmniCloudMask '
-                                   '(sensor-agnostic, 2025) from red, green and NIR bands chosen by wavelength (MV: '
-                                   'B3, B2, B6; HV: nearest to 650 / 560 / 860 nm); needs the omnicloudmask package '
-                                   'and its weights in <weights folder>/omnicloudmask. ML: infrared tests; HS: SWIR '
-                                   'tests (no model; see the method beside).')
+        self.cloud_mask.setToolTip('Clouds (and, if chosen, shadow) are left out of matching. By sensor (the method '
+                                   'beside, no model): MV / HV VNIR tests, ML infrared tests, HS SWIR tests. '
+                                   'OmniCloudMask (sensor-agnostic model, red / green / NIR: MV B3, B2, B6) can be '
+                                   'chosen instead; it needs the omnicloudmask package and its weights in <weights '
+                                   'folder>/omnicloudmask. The band, sure ≥ and bright-blob settings beside are '
+                                   'OmniCloudMask\'s.')
         self.cloud_method = CloudMethodCombo()
         self.cloud_bands = QtWidgets.QLineEdit()
         self.cloud_bands.setPlaceholderText('red, green, nir bands: automatic (or e.g. band3, band2, band6)')
@@ -1892,11 +1953,10 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.cloud_what.addItems(['mask thick cloud', 'thick cloud + shadow', 'thick + thin cloud + shadow'])
         self.cloud_what.setToolTip('What is left out of matching')
         hl2.addWidget(self.cloud_what)
-        self.cloud_refine = QtWidgets.QCheckBox('bright blobs only')
+        self.cloud_refine = QtWidgets.QCheckBox('bright clouds only')
         self.cloud_refine.setToolTip('Keep only the model\'s clouds that are bright (above the 90th percentile of '
-                                     'the clear ground in both visible bands) and form a blob of 1 km² or more; '
-                                     'shadows only within 10 km of one. The model alone took water and vegetation '
-                                     'for cloud on G1A MV.')
+                                     'the clear ground in both visible bands); shadows only within 10 km of cloud. '
+                                     'The model alone took water and vegetation for cloud on G1A MV.')
         hl2.addWidget(self.cloud_refine)
         f.addRow('Clouds', hl2)
         self.cloud_from = PathRow('file', 'Rasters (*.tif *.tiff *.vrt);;All (*)')

@@ -179,7 +179,8 @@ def test_e2e_cloud(tmp):
         job = J.normalize({'input_path': inp, 'reference_dir': os.path.join(data, 'C1'), 'output_dir': out,
                            'channels': ['band1'], 'detectors': ['sift'], 'window_sizes': [1024],
                            'max_expected_error_m': 10000, 'smnn_thresholds': [0.95], 'use_amp': False,
-                           'cloud_mask': 'omnicloudmask', 'cloud_bands': ['band1', 'band2', 'band3'],
+                           'cloud_mask': 'on', 'cloud_method': 'omnicloudmask',
+                           'cloud_bands': ['band1', 'band2', 'band3'],
                            'cloud_dilate_px': 0, 'cross_top_n': 0, 'cloud_refine': False})
         os.makedirs(out, exist_ok=True)
         with contextlib.redirect_stdout(io.StringIO()) as buf:
@@ -898,8 +899,10 @@ def test_gui_cloud():
             p[:, 10:40, 10:50] = np.array([0.1, 0.85, 0.05, 0.0])[:, None, None]
             return p
         with contextlib.redirect_stdout(io.StringIO()):
-            C.standalone(img, os.path.join(tmp, 'ct'), '', None, 'spec', [0.5, 0.8], predictor=fake)
-            C.standalone(img, os.path.join(tmp, 'ct'), '', ['band1', 'band2', 'band4'], 'spec', [0.8], predictor=fake)
+            C.standalone(img, os.path.join(tmp, 'ct'), '', None, 'spec', [0.5, 0.8], predictor=fake,
+                         method='omnicloudmask')
+            C.standalone(img, os.path.join(tmp, 'ct'), '', ['band1', 'band2', 'band4'], 'spec', [0.8], predictor=fake,
+                         method='omnicloudmask')
         res = G.CloudResultDialog(os.path.join(tmp, 'ct'), w)
         tabs = res.findChild(G.QtWidgets.QTabWidget)
         check('gui: nvidia-smi\'s list read (index, name, GB)',
@@ -945,12 +948,12 @@ def test_gui_cloud():
               (w.btn_cloud.text(), w.btn_cloud_sweep.text(), sa[:2], sa[sa.index('--conf') + 1],
                sa[sa.index('--bright') + 1], sa[sa.index('--blob-km2') + 1:sa.index('--blob-km2') + 4],
                '21 band set' in sd.lbl_n.text(), sa[sa.index('--images') + 1], '--sheets' in sa),
-              ('Cloud mask test…', 'Cloud sweep…', ['cloudsweep', img], '0.6-0.9:0.1', '60-90:15', ['0.25', '1', '4'],
+              ('Cloud mask test…', 'Cloud sweep…', ['cloudsweep', img], '0.6-0.9:0.1', '60-90:15', ['0', '0.25', '1'],
                True, 'grid', False))
         import automatch_cloudsweep as CS
         with contextlib.redirect_stdout(io.StringIO()):
             sres = CS.run([img], os.path.join(tmp, 'sw'), [], '', '0.7, 0.9', '90', [1], [10], 0, True, [1], '',
-                          None, 2048, 0, predictor=fake)
+                          None, 2048, 0, predictor=fake, method='omnicloudmask')
         swd = G.CloudSweepResultDialog(sres['folder'], w)
         stabs = swd.findChild(G.QtWidgets.QTabWidget)
         check('gui: the sweep result shows the summary and an image browser (one quicklook per combination)',
@@ -966,9 +969,10 @@ def test_gui_cloud():
         mc.setValue('ocm')
         v1 = mc.value()
         mc.setValue('swir')
-        check('gui: the cloud method choice (auto, OmniCloudMask, infrared, SWIR)',
-              ([mc.itemData(i) for i in range(mc.count())], v1, mc.value()),
-              (['auto', 'omnicloudmask', 'ir', 'swir'], 'omnicloudmask', 'swir'))
+        check('gui: the cloud method choice (auto, VNIR, OmniCloudMask, infrared, SWIR; the sweep also compare)',
+              ([mc.itemData(i) for i in range(mc.count())], v1, mc.value(),
+               G.CloudMethodCombo(compare=True).itemData(5)),
+              (['auto', 'vnir', 'omnicloudmask', 'ir', 'swir'], 'omnicloudmask', 'swir', 'compare'))
         w.cloud_method.setValue('ir')
         cd = w.cloud_dialog(run=False)
         cd.image.setText(img)
@@ -2914,7 +2918,8 @@ def test_cloud_mask(tmp):
 
     class Sc:
         raster_path = mv
-    MECH = {'cloud_dilate_px': 1, 'cloud_refine': False, 'cloud_mask_classes': [1, 2, 3]}  # the model alone
+    MECH = {'cloud_dilate_px': 1, 'cloud_refine': False, 'cloud_mask_classes': [1, 2, 3],   # the model alone
+            'cloud_method': 'omnicloudmask'}
     cache, out = os.path.join(tmp, 'cache_cloud'), os.path.join(tmp, 'out_cloud')
     with contextlib.redirect_stdout(io.StringIO()):
         rasters, info = C.prepare(MECH, Sc(), ['band3', 'band5'], cache, out, 'MV', fake)
@@ -2947,7 +2952,8 @@ def test_cloud_mask(tmp):
     def dark_fake(arr, nodata, model_dir, device):       # 'cloud' on the darkest pixels: ground taken for cloud
         return (arr[0] < np.percentile(arr[0], 30)).astype(np.uint8)
     with contextlib.redirect_stdout(io.StringIO()) as buf:
-        _, dinfo = C.prepare({'cloud_refine': False}, Sc(), [], os.path.join(tmp, 'cache_dark'),
+        _, dinfo = C.prepare({'cloud_refine': False, 'cloud_method': 'omnicloudmask'}, Sc(), [],
+                             os.path.join(tmp, 'cache_dark'),
                               os.path.join(tmp, 'out_dark'), 'MV', dark_fake)
     check('cloud: dark "clouds" are flagged (brightness check), with a quicklook to look at',
           (dinfo['dark_cloud_pct'] > 90, 'CHECK' in buf.getvalue(),
@@ -2960,7 +2966,7 @@ def test_cloud_mask(tmp):
         raster_path = hs2
     with contextlib.redirect_stdout(io.StringIO()):
         rasters, info = C.prepare({'cloud_mask_from': hv2, 'cloud_from_margin_px': 0, 'cloud_dilate_px': 0,
-                                   'cloud_refine': False}, Hs(),
+                                   'cloud_refine': False, 'cloud_from_method': 'omnicloudmask'}, Hs(),
                                   ['band40'], os.path.join(tmp, 'cache_hs'), '', 'HS', fake)
     with rasterio.open(info['mask']) as m:
         cls = m.read(1)
@@ -3030,7 +3036,8 @@ def test_cloud_mask(tmp):
         return p
     tdir = os.path.join(tmp, 'cloud_test')
     with contextlib.redirect_stdout(io.StringIO()) as buf:
-        rows = C.standalone(mv, tdir, '', None, 'spec', [0.5, 0.7, 0.85], predictor=prob_fake, refine_opts=None)
+        rows = C.standalone(mv, tdir, '', None, 'spec', [0.5, 0.7, 0.85], predictor=prob_fake, refine_opts=None,
+                            method='omnicloudmask')
     pct = [r['cloud_pct'] for r in rows]
     check('cloud test: the model runs once; each threshold has its mask, quicklook and row in CLOUD_TEST.csv',
           (len(calls), [r['confidence'] for r in rows], all(os.path.exists(r['mask']) and os.path.exists(r['quicklook'])
@@ -3046,7 +3053,8 @@ def test_cloud_mask(tmp):
            params.get('variant'), 'automatch' in params, params.get('cloud_pct') == str(rows[1]['cloud_pct'])),
           ('band3, band2, band6', '0.7', True, 'bands_3-2-6_model_only', True, True))
     with contextlib.redirect_stdout(io.StringIO()):
-        rows2 = C.standalone(mv, tdir, '', None, 'spec', [0.7], predictor=prob_fake, refine_opts=None)
+        rows2 = C.standalone(mv, tdir, '', None, 'spec', [0.7], predictor=prob_fake, refine_opts=None,
+                             method='omnicloudmask')
     check('cloud test: a second run with the same bands gets its own folder; CLOUD_TEST_ALL.csv keeps both',
           (rows2[0]['folder'] != rows[0]['folder'], rows2[0]['folder'].endswith('bands_3-2-6_model_only')
            or rows2[0]['folder'].endswith('bands_3-2-6_model_only_2'),
@@ -3054,7 +3062,7 @@ def test_cloud_mask(tmp):
     calls.clear()
     with contextlib.redirect_stdout(io.StringIO()):
         hrows = C.standalone(hs2, os.path.join(tmp, 'cloud_test_hs'), '', None, 'spec', [0.7], mask_from=hv2,
-                             margin_px=0, predictor=prob_fake, refine_opts=None)
+                             margin_px=0, predictor=prob_fake, refine_opts=None, from_method='omnicloudmask')
     with rasterio.open(hrows[0]['mask']) as m:
         hcls = m.read(1)
     with rasterio.open(hrows[-1]['mask']) as m:
@@ -3076,11 +3084,12 @@ def test_cloud_mask(tmp):
     C.predict = prob_fake
     try:
         with contextlib.redirect_stdout(io.StringIO()) as buf:
-            rc = J.main(['cloud', mv, '--out', os.path.join(tmp, 'cloud_cli'), '--conf', '0.7', '--model-dir', ''])
+            rc = J.main(['cloud', mv, '--out', os.path.join(tmp, 'cloud_cli'), '--conf', '0.7', '--model-dir', '',
+                         '--method', 'omnicloudmask'])
         cli_ok = bool(glob.glob(os.path.join(tmp, 'cloud_cli', '*_bands_3-2-6', 'conf_0.7', 'CLOUD_MASK.tif')))
         mf = os.path.join(tmp, 'mode_cloud.json')
         with open(mf, 'w') as f:
-            json.dump({'mode': 'cloud', 'cloud_test_confidences': [0.6, 0.9]}, f)
+            json.dump({'mode': 'cloud', 'cloud_test_confidences': [0.6, 0.9], 'cloud_method': 'omnicloudmask'}, f)
         with contextlib.redirect_stdout(io.StringIO()) as buf2:
             rc2 = G.main(['gpuaas', '.', os.path.join(tmp, 'svc_cloud'), f'{mv},{tmp},{mf}'])
     finally:
@@ -3142,7 +3151,7 @@ def test_cloud_sweep(tmp):
     out = os.path.join(tmp, 'sweep_out')
     with contextlib.redirect_stdout(io.StringIO()) as buf:
         res = S.run([img], out, [ref], '', '0.6-0.9:0.1', '60-90:15', [0.25, 1], [10], 6, True, [1], '', None,
-                    2048, 1, predictor=fake)
+                    2048, 1, predictor=fake, method='omnicloudmask')
     df = res['rows']
     sets = df['band_set'].unique().tolist()
     check('sweep: one model run per band set (spec + every 3 of the 6 crispest; + 1 for the best at full size), '
@@ -3323,10 +3332,10 @@ def test_cloud_phys(tmp):
                        transform=from_origin(500000, 2500000 - 72000, 1200, 1200), nodata=0) as dd:
         for b in range(1, 7):
             dd.write((500 + 100 * rng.random((60, 60))).astype('uint16'), b)
-    check('phys: the method by sensor (ML infrared, HS SWIR, MV OmniCloudMask), or as the job says',
+    check('phys: the method by sensor (ML infrared, HS SWIR, MV VNIR tests), or as the job says',
           (C.method_for({}, 'ML', img), C.method_for({}, 'HS', hs), C.method_for({}, 'MV', mv),
            C.method_for({'cloud_method': 'omnicloudmask'}, 'ML', img), C.method_for({'cloud_method': 'swir'}, 'MV'),
-           C.sensor_for(os.path.join(tmp, 'G1A_ML_G_PHYS.tif'))), ('ir', 'swir', 'ocm', 'ocm', 'swir', 'ML'))
+           C.sensor_for(os.path.join(tmp, 'G1A_ML_G_PHYS.tif'))), ('ir', 'swir', 'vnir', 'ocm', 'swir', 'ML'))
 
     def fake(arr, nodata, model_dir, device):              # the VNIR model: thick cloud over its left half
         cl = np.zeros(arr.shape[1:], np.uint8)
@@ -3338,7 +3347,7 @@ def test_cloud_phys(tmp):
     class Sc:
         raster_path = img
     job = {'cloud_mask_from': mv, 'cloud_from_margin_px': 0, 'cloud_dilate_px': 0, 'cloud_refine': False,
-           'cloud_mask_classes': [1, 2]}
+           'cloud_mask_classes': [1, 2], 'cloud_from_method': 'omnicloudmask'}
     cache, out = os.path.join(tmp, 'phys_cache'), os.path.join(tmp, 'phys_out')
     with contextlib.redirect_stdout(io.StringIO()) as buf:
         rasters, pinfo = C.prepare(job, Sc(), ['band4'], cache, out, 'ML', fake)
@@ -3367,6 +3376,7 @@ def test_cloud_phys(tmp):
     with contextlib.redirect_stdout(io.StringIO()):
         rows = C.standalone(img, ct, '', None, 'spec', [0.5, 0.8], predictor=fake, refine_opts=None)
         rows2 = C.standalone(img, ct, '', None, 'spec', [0.5, 0.8], mask_from=mv, margin_px=0, predictor=fake,
+                             from_method='omnicloudmask',
                              refine_opts=None)
     allr = pd.read_csv(os.path.join(ct, 'CLOUD_TEST_ALL.csv'))
     check('phys: the cloud test makes the infrared-test mask (own), and with --from one more per VNIR threshold',
@@ -3400,6 +3410,91 @@ def test_cloud_phys(tmp):
     check('phys: an HS image sweeps the SWIR tests (cirrus sd x thick spreads)',
           (len(d2), set(d2['method']), sorted(d2['swir_bright_sd'].unique().tolist()),
            bool((d2['thick_pct'] > 2).all())), (4, {'swir'}, [2.0, 4.0], True))
+    # the stated radiance unit (G1A: W/cm2/sr/um) is used when it gives Earth temperatures, else overruled
+    rad = {10.8: planck(np.full((20, 20), 295.0), 10.8) / 1e4}           # W/m2/sr/um -> W/cm2/sr/um
+    ok = np.ones((20, 20), bool)
+    u1 = P.pick_unit(rad, ok, 'W/cm2/sr/um')
+    u2 = P.pick_unit({10.8: planck(np.full((20, 20), 295.0), 10.8)}, ok, 'W/cm2/sr/um')
+    check('phys: the stated unit W/cm2/sr/um is taken when it fits; when it does not, the fitting one, with a warning',
+          (u1[0], round(u1[1]), u1[2], u2[0], 'WARNING' in u2[2]), ('W/cm2/sr/um', 295, '', 'W/m2/sr/um', True))
+    # MV / HV: VNIR tests -- bright, white and as bright in blue as in red; earlier scenes for snow
+    VH = VW = 200
+    vy, vx = np.mgrid[0:VH, 0:VW]
+    nm = [485, 555, 650, 725, 815, 860]
+    cover = {'veg': [0.04, 0.08, 0.05, 0.2, 0.35, 0.38], 'soil': [0.10, 0.14, 0.20, 0.24, 0.27, 0.28],
+             'water': [0.06, 0.05, 0.03, 0.02, 0.01, 0.01], 'desert': [0.25, 0.32, 0.40, 0.43, 0.45, 0.46],
+             'cloud': [0.70, 0.69, 0.68, 0.67, 0.66, 0.66], 'snow': [0.85, 0.85, 0.83, 0.80, 0.75, 0.74]}
+    land = np.where(vx < 115, 'veg', 'soil').astype(object)
+    land[(vy > 150) & (vx < 40)] = 'water'
+    vdes = (vy - 40) ** 2 + (vx - 160) ** 2 < 24 ** 2
+    vsnow = (vy - 160) ** 2 + (vx - 160) ** 2 < 14 ** 2
+    vcl = (vy - 55) ** 2 + (vx - 55) ** 2 < 19 ** 2
+    vcu = ((vy % 12 < 3) & (vx % 12 < 3) & (vy > 100) & (vy < 140) & (vx > 60) & (vx < 110))   # tiny cumulus
+    vsh = (vy > 76) & (vy < 86) & (vx > 35) & (vx < 75) & ~vcl
+    land[vdes] = 'desert'
+    vrng = np.random.default_rng(3)
+
+    def mv_scene(path, cloud=True, snow=True, extra=None):
+        R = np.zeros((6, VH, VW))
+        for k, refl in cover.items():
+            for i in range(6):
+                R[i][land == k] = refl[i]
+        for i in range(6):
+            if snow:
+                R[i][vsnow] = cover['snow'][i]
+            if cloud:
+                R[i][vsh] *= 0.3
+                R[i][vcl | vcu] = cover['cloud'][i]
+            if extra is not None:
+                R[i][extra] = cover['cloud'][i]
+        R *= 1 + 0.04 * vrng.normal(size=(VH, VW))
+        E0 = np.array([P.solar_e0(n) for n in nm])[:, None, None]
+        with rasterio.open(path, 'w', driver='GTiff', width=VW, height=VH, count=6, dtype='uint16', crs='EPSG:32644',
+                           transform=from_origin(500000, 2500000, 45, 45), nodata=0) as dd:
+            dd.write(np.clip(R * E0 * 15, 1, 65000).astype('uint16'))
+        return path
+    mvi = mv_scene(os.path.join(tmp, 'G1A_MV_G_VNIR.tif'))
+    with contextlib.redirect_stdout(io.StringIO()):
+        vi = C.compute_phys(mvi, 'vnir', os.path.join(tmp, 'phys_vn'), C.phys_options({}, 'vnir'), 'MV')
+    with rasterio.open(vi['mask']) as m:
+        vc = m.read(1)
+    vrest = ~vcl & ~vcu & ~vsh & ~vdes & ~vsnow
+    check('phys: MV VNIR tests: thick cloud and tiny cumulus (no blob limit) found, its shadow, bright desert, '
+          'vegetation, soil and water clear',
+          ((vc[vcl] == 1).mean() > 0.97, (vc[vcu] >= 1).mean() > 0.9, (vc[vsh] == 3).mean() > 0.9,
+           (vc[vdes] == 0).mean() > 0.99, (vc[vrest] == 0).mean() > 0.99, 'B6 (860 nm)' in vi['vnir_bands']),
+          (True, True, True, True, True, True))
+    early = [mv_scene(os.path.join(tmp, f'G1A_MV_G_EARLY{i}.tif'), cloud=False,
+                      extra=((vy - 170) ** 2 + (vx - 40 - 50 * i) ** 2 < 100) if i == 1 else None) for i in range(3)]
+    with contextlib.redirect_stdout(io.StringIO()):
+        vj = C.compute_phys(mvi, 'vnir', os.path.join(tmp, 'phys_vn2'), C.phys_options({}, 'vnir'), 'MV',
+                            clear_paths=early)
+    with rasterio.open(vj['mask']) as m:
+        vc2 = m.read(1)
+    check('phys: from one scene snow is taken for cloud; with earlier scenes (each pixel\'s darkest) it is not, '
+          'and the cloud still is', ((vc[vsnow] >= 1).mean() > 0.9, (vc2[vsnow] == 0).mean() > 0.95,
+                                     (vc2[vcl] == 1).mean() > 0.97, 'earlier scene' in vj['clear_sky']),
+          (True, True, True, True))
+    big = vy < 140
+    cloudy = mv_scene(os.path.join(tmp, 'G1A_MV_G_CLOUDY.tif'), cloud=False, snow=False, extra=big)
+    with contextlib.redirect_stdout(io.StringIO()):
+        vk = C.compute_phys(cloudy, 'vnir', os.path.join(tmp, 'phys_vn3'), C.phys_options({}, 'vnir'), 'MV')
+    with rasterio.open(vk['mask']) as m:
+        vc3 = m.read(1)
+    check('phys: a scene 70 % under cloud: the cloud is still found (the ground is what is not cloud-coloured)',
+          ((vc3[big] == 1).mean() > 0.97, (vc3[~big & ~vdes] == 0).mean() > 0.99), (True, True))
+
+    def vfake(arr, nodata, model_dir, device):
+        cl = np.zeros(arr.shape[1:], np.uint8)
+        cl[:50, :] = 1
+        return cl
+    with contextlib.redirect_stdout(io.StringIO()):
+        cres = CS.run([mvi], os.path.join(tmp, 'phys_sweep_mv'), [], '', '0.7', '90', [0, 1], [10], 0, True, [1],
+                      '', None, 2048, 0, predictor=vfake, method='compare', vis_bright='2, 3', vis_white='0.25')
+    cdf = cres['rows']
+    check('phys: the sweep compares the VNIR tests with OmniCloudMask on MV (method compare), blob size 0 kept',
+          (sorted(cdf['method'].fillna('ocm').unique().tolist()), int((cdf['method'] == 'vnir').sum()),
+           0.0 in cdf['min_blob_km2'].dropna().tolist()), (['ocm', 'vnir'], 4, True))
     import automatch_job as J
     check('phys: cloud masking is on for any cloud_mask but none / off (old jobs: omnicloudmask)',
           [J.cloud_on({'cloud_mask': v}) for v in ('none', 'off', '', 'on', 'omnicloudmask')],

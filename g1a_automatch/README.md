@@ -495,9 +495,11 @@ matches are parallel; random matches give about 0 %.
 
 `cloud_mask: on` (`omnicloudmask`, as older jobs say, means the same; GUI:
 *Clouds*, Data tab) masks clouds before matching. `cloud_method` says how:
-`auto` (the default) uses the infrared tests for ML, the SWIR tests for HS
-(both in the next section) and OmniCloudMask for MV / HV; `omnicloudmask`,
-`ir` or `swir` choose one for every image. OmniCloudMask finds thick cloud,
+`auto` (the default) uses the physical tests of the next section, with no
+model: VNIR tests for MV / HV, infrared tests for ML, SWIR tests for HS.
+`vnir`, `ir`, `swir` or `omnicloudmask` choose one for every image.
+OmniCloudMask did poorly on G1A MV, even with the brightness check below,
+and is kept as an option. OmniCloudMask finds thick cloud,
 thin cloud and cloud shadow (Wright et al., *Remote
 Sensing of Environment* 2025; sensor-agnostic, MIT licence). Those pixels
 are left out of matching: each band the job matches is copied with them set
@@ -534,16 +536,18 @@ to no data, and the job matches that copy.
 - **Masked classes:** `cloud_mask_classes`, default `[1]`: thick cloud
   only (2 thin cloud, 3 shadow; GUI: *mask thick cloud* / *+ shadow* /
   *+ thin + shadow*). The mask is grown by `cloud_dilate_px` (2).
-- **Bright blobs only** (`cloud_refine`, on by default):
+- **Bright clouds only** (`cloud_refine`, on by default):
   - **Why:** the model standardises each band per 1000 px tile. In a
     cloud-free tile the brightest ground then looks like cloud, and on G1A
     MV it took water and vegetation for cloud at every confidence from 0.2
     to 0.9.
   - **The check:** its clouds are kept only where they are bright, above
     the `cloud_bright_pct` (90th) percentile of the clear ground in both
-    visible bands, and form a blob of at least `cloud_min_blob_km2` (1 km²).
-  - **Shadows:** kept only within `cloud_shadow_near_km` (10 km) of such a
-    blob.
+    visible bands. `cloud_min_blob_km2` can also drop patches smaller than
+    a size. It is 0 by default: clouds come in every shape and size, so
+    every pixel is judged on its own.
+  - **Shadows:** kept only within `cloud_shadow_near_km` (10 km) of
+    cloud.
   - **What is reported:** the log says what the model said and what the
     check removed. `CLOUD_QUICKLOOK_MODEL.png` beside the quicklook is the
     model's own result.
@@ -662,19 +666,43 @@ Checked here on two cloudy Sentinel-2 scenes over India (tile 43QGU,
 With SWIR only, the model found 0–3 % cloud. Hence the SWIR tests and
 `cloud_mask_from` for HS.
 
-## Clouds on ML and HS (infrared and SWIR tests)
+## Clouds from physical tests (MV / HV, ML, HS)
 
 OmniCloudMask needs red, green and NIR, which ML (MX-LWIR: six thermal
-bands at 1.2–1.5 km) and HS (SWIR) do not have. These two get physical
-tests instead (`automatch_cloudphys.py`). No model is involved, so nothing
-needs installing and nothing runs on the GPU.
+bands at 1.2–1.5 km) and HS (SWIR) do not have, and it did poorly on MV.
+So every payload gets physical tests (`automatch_cloudphys.py`). No model
+is involved, so nothing needs installing and nothing runs on the GPU.
+Every pixel is judged on its own. Clouds come in every shape and size
+(broken cumulus, cirrus streaks, haze), so there is no blob-size limit
+unless `cloud_min_blob_km2` sets one (0 by default).
 
-- **Radiance:** pixel value × `radiance_scale` (0.01, as the G1A metadata
-  says: scaled radiance, scaling factor 0.01). The unit is not stated, so
-  for ML the unit that gives Earth-like temperatures at 10.8 µm is taken
-  (W/m²/sr/µm, mW/cm²/sr/µm, mW/m²/sr/µm, or per cm⁻¹). The log and
-  `CLOUD_PARAMS` name the unit and the median temperature found; check
-  that they look right (about 280–310 K over warm clear ground).
+- **Radiance:** pixel value × `radiance_scale` (0.01), in `radiance_unit`
+  (W/cm²/sr/µm for every G1A sensor). For ML, if that unit does not give
+  Earth temperatures at 10.8 µm (median 200–330 K), the unit that does is
+  used instead, with a WARNING in the log (`auto`: always the one nearest
+  285 K). The log and `CLOUD_PARAMS` name the unit and the median
+  temperature found; check that they look right (about 280–310 K over
+  warm clear ground).
+- **MV / HV, the VNIR tests** (Fmask-like, without SWIR or thermal;
+  daylight). Reflectance is relative: radiance / solar irradiance at the
+  band centre. The unknown sun elevation scales every band alike, so the
+  ratios between bands are true.
+  - **bright:** the visible mean is brighter than the ground by
+    `cloud_vis_bright_sd` (3) spreads. The ground is the pixels that are
+    not cloud-coloured (vegetation, soil, water), so a scene mostly under
+    cloud still has a ground to compare with (tested at 70 % cloud).
+  - **white:** the spectral spread over blue, green, red and NIR is below
+    `cloud_vis_white` (0.25). Vegetation, water and coloured soil fail it.
+  - **blue:** blue is at least 0.8 × red, the colour side of the
+    haze-optimised transform. Bright desert, sand and roofs fail it.
+  - **classes:** thick = bright + white + blue; thin = half as bright
+    (and on HV, high cloud by the 940 nm water-vapour band). Shadow = dark
+    in NIR, not water, within `cloud_shadow_near_km` of cloud.
+  - **snow** is white and bright, so from one scene it is taken for
+    cloud. `cloud_vis_clear` lists earlier MV / HV scenes of the same
+    ground; each pixel's darkest (second darkest from three scenes) is the
+    clear sky, and cloud must be `cloud_vis_clear_factor` (1.3) × brighter.
+    Snow and bright desert then stay clear (tested).
 - **ML, the infrared tests** (as the GOES ABI, Himawari AHI and SEVIRI
   cloud masks use on the same channels; day and night). Brightness
   temperatures come from inverse Planck at 7.35, 8.5, 9.6, 10.8, 12.0 and
@@ -711,27 +739,35 @@ needs installing and nothing runs on the GPU.
   and HS always make their own. With `cloud_mask_from` (the MV / HV
   product of the same pass), that product's mask is added where it covers
   the image: thick over thin over shadow over clear.
-  `covered_by_laid_pct` says how much it covered.
+  `covered_by_laid_pct` says how much it covered. `cloud_from_method`
+  says how that product is masked (`auto`: VNIR tests; `omnicloudmask`).
 - **Cloud test:**
 
       python automatch_job.py cloud <ML or HS image> --out <folder>
           [--method auto|omnicloudmask|ir|swir] [--radiance-scale 0.01]
           [--ir-dt 8 --ir-split 1 --ir-cold 240 --clear <earlier ML scenes>]
-          [--swir-k 4 --swir-bright 3] [--min-blob-km2 1] [--from <MV/HV image>]
+          [--swir-k 4 --swir-bright 3] [--vis-bright 3 --vis-white 0.25 --vis-clear-factor 1.3]
+          [--radiance-unit W/cm2/sr/um] [--min-blob-km2 0] [--from <MV/HV image>]
+          [--clear <earlier scenes of the same sensor>]
 
-  It writes `<time>_ir/own/` (or `_swir`): the mask, the quicklook and
+  It writes `<time>_ir/own/` (or `_swir`, `_vnir`): the mask, the quicklook and
   `CLOUD_PARAMS`. ML quicklooks show 10.8 µm inverted, so cold cloud looks
   bright. With `--from`, it also writes `plus_vnir_conf_<c>/`, one for each
   threshold of the VNIR mask. The GUI's *Cloud mask test…* has the method
   and these settings.
 - **Sweep:** `cloudsweep` sweeps ML images over `--ir-dt` (4-12:2) ×
   `--ir-split` (0.75 1 1.5) × blob size. It sweeps HS images over
-  `--swir-k` (2-6:1) × `--swir-bright` (2-5:1) × blob size. Rows carry
-  `method` ir / swir and those settings. PNGs go into `<image>/ir/` or
-  `<image>/swir/`. With reference outlines, the rows have F1 / IoU as for
+  `--swir-k` (2-6:1) × `--swir-bright` (2-5:1) × blob size. It sweeps
+  MV / HV images over `--vis-bright` (2-5:1) × `--vis-white` (0.15 0.25
+  0.35) × blob size. `--method compare` also runs OmniCloudMask's sweep
+  on the MV / HV images, so the two can be ranked side by side against
+  reference outlines. Rows carry `method` ir / swir / vnir and those
+  settings. PNGs go into `<image>/ir/`, `swir/` or `vnir/`. The blob sizes
+  default to 0, 0.25 and 1 km². With reference outlines, the rows have F1 / IoU as for
   OmniCloudMask, and the best one is written at full size. GPU-service
-  keys: `cloud_sweep_ir_dt`, `cloud_sweep_ir_split`, `cloud_sweep_swir_k`
-  and `cloud_sweep_swir_bright`.
+  keys: `cloud_sweep_ir_dt`, `cloud_sweep_ir_split`, `cloud_sweep_swir_k`,
+  `cloud_sweep_swir_bright`, `cloud_sweep_vis_bright`,
+  `cloud_sweep_vis_white` and `cloud_sweep_method` (auto / compare).
 - **Thresholds:** these are starting points from the literature, not tuned
   on G1A. Draw cloud outlines on a few ML and HS scenes and let the sweep
   pick.
