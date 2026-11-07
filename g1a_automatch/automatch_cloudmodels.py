@@ -14,7 +14,7 @@ SpecTf (NASA JPL, Apache-2.0; cloud_method 'spectf', HV / HS)
   works. Its small model (below, as in its spectf/model.py: SpecTfEncoder,
   1 layer, 64 dims, 8 heads, max pooling) is rebuilt here and its weights
   loaded -- none of its package is needed. Weights (109 KB):
-      https://github.com/emit-sds/SpecTf/raw/main/spectf_cloud/weights/current.pt
+      https://raw.githubusercontent.com/emit-sds/SpecTf/main/spectf_cloud/weights/current.pt
   -> cloud_spectf_weights. Bands at 405-1275 and 1321-2455 nm are used (as
   EMIT). HS alone covers only 900-2500 nm; cloud_spectf_vnir names the HV
   image of the same pass, whose 405-900 nm bands are added on the HS grid,
@@ -135,7 +135,7 @@ def spectf_check(opts: Dict) -> List[str]:
     w = opts.get('weights') or ''
     if not w:
         out.append('SpecTf: set cloud_spectf_weights to its current.pt (109 KB, '
-                   'github.com/emit-sds/SpecTf/raw/main/spectf_cloud/weights/current.pt)')
+                   'raw.githubusercontent.com/emit-sds/SpecTf/main/spectf_cloud/weights/current.pt)')
     elif not os.path.isfile(w):
         out.append(f'SpecTf weights not found: {w}')
     if opts.get('vnir') and not os.path.isfile(opts['vnir']):

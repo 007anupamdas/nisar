@@ -799,7 +799,7 @@ unless `cloud_min_blob_km2` sets one (0 by default).
     transformer over the spectrum (405–2455 nm).
     - Its small model is rebuilt here; only its weights `current.pt`
       (109 KB) are needed, from
-      https://github.com/emit-sds/SpecTf/raw/main/spectf_cloud/weights/current.pt
+      https://raw.githubusercontent.com/emit-sds/SpecTf/main/spectf_cloud/weights/current.pt
       (`cloud_spectf_weights`; GUI: Data tab).
     - It needs the whole spectrum. Checked with its published weights: on
       the SWIR part alone, or the VNIR part alone, it calls vegetation and
