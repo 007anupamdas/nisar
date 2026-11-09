@@ -774,6 +774,12 @@ unless `cloud_min_blob_km2` sets one (0 by default).
 - **Thresholds:** these are starting points from the literature, not tuned
   on G1A. Draw cloud outlines on a few ML and HS scenes and let the sweep
   pick.
+- **Where model files go** (found there when no path is set): the
+  weights folder (GUI: Output & run, the one holding `omnicloudmask/`):
+  `<weights folder>/spectf/current.pt` and
+  `<weights folder>/tirauxcloud/model_hash_<...>.pth` (the OLS SegFormer
+  `78713d1f6de22d2` is taken first). For the GPU server, the same layout
+  under its weights folder.
 - **Learned masks on TOA reflectance** (`automatch_reflect.py`,
   `automatch_cloudmodels.py`): options to compare with the tests, not the
   default.

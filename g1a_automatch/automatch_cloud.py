@@ -537,6 +537,23 @@ def needs_model(job: Dict, sensor: str, path: str) -> bool:
     return False
 
 
+def default_model_file(job: Dict, method: str) -> str:
+    """A model file in the weights folder when the job names none:
+    <weights folder>/spectf/current.pt, or for TIRAuxCloud the first
+    <weights folder>/tirauxcloud/**/model_hash_<...>.pth (the OLS SegFormer
+    78713d1f6de22d2 first)."""
+    import glob as _g
+    w = job.get('weights_cache_dir') or ''
+    if not w:
+        return ''
+    if method == 'spectf':
+        p = os.path.join(w, 'spectf', 'current.pt')
+        return p if os.path.isfile(p) else ''
+    hits = sorted(_g.glob(os.path.join(w, 'tirauxcloud', '**', 'model_hash_*.pth'), recursive=True))
+    pref = [h for h in hits if '78713d1f6de22d2' in h]
+    return (pref or hits or [''])[0]
+
+
 def phys_options(job: Dict, method: str) -> Dict:
     """The settings of the infrared or SWIR tests from a job."""
     import automatch_cloudphys as P
@@ -548,7 +565,11 @@ def phys_options(job: Dict, method: str) -> Dict:
                 'cold_k': get('cloud_ir_cold_k', P.IR_DEFAULTS['cold_k']), 'min_blob_km2': blob}
     if method == 'tiraux':
         import automatch_tirauxcloud as T
+        if not job.get('cloud_tiraux_checkpoint'):
+            job = dict(job, cloud_tiraux_checkpoint=default_model_file(job, 'tiraux'))
         return T.options(job)
+    if method == 'spectf' and not job.get('cloud_spectf_weights'):
+        job = dict(job, cloud_spectf_weights=default_model_file(job, 'spectf'))
     if method in ('csmask', 'spectf'):
         import automatch_cloudmodels as M
         o = M.csmask_options(job) if method == 'csmask' else M.spectf_options(job)
