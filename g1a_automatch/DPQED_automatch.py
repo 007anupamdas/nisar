@@ -1311,7 +1311,8 @@ class CloudTestDialog(QtWidgets.QDialog):
         f.addRow('Mask from', self.mask_from)
         self.tiraux = PathRow('file', 'TIRAuxCloud checkpoints (*.pth);;All (*)')
         self.tiraux.edit.setPlaceholderText('ML, method TIRAuxCloud: a model_hash_<...>.pth from its model_files.tar.gz')
-        self.tiraux.setText(job.get('cloud_tiraux_checkpoint') or '')
+        import automatch_cloud as _C
+        self.tiraux.setText(job.get('cloud_tiraux_checkpoint') or _C.default_model_file(job, 'tiraux'))
         self.tiraux_arch = QtWidgets.QComboBox()
         self.tiraux_arch.addItems(['SegFormer', 'Unet'])
         self.tiraux_arch.setCurrentText(str(job.get('cloud_tiraux_arch') or 'SegFormer'))
@@ -1326,7 +1327,8 @@ class CloudTestDialog(QtWidgets.QDialog):
         f.addRow('TIRAuxCloud (ML, experimental)', ht)
         self.spectf = PathRow('file', 'SpecTf weights (*.pt);;All (*)')
         self.spectf.edit.setPlaceholderText('HS with method SpecTf: its current.pt (the HV image: Mask from)')
-        self.spectf.setText(job.get('cloud_spectf_weights') or '')
+        import automatch_cloud as _C
+        self.spectf.setText(job.get('cloud_spectf_weights') or _C.default_model_file(job, 'spectf'))
         f.addRow('SpecTf weights', self.spectf)
         self.sun_zen = QtWidgets.QDoubleSpinBox()
         self.sun_zen.setRange(0, 89)
@@ -1499,7 +1501,8 @@ class CloudSweepDialog(QtWidgets.QDialog):
         f.addRow('Reference masks (optional)', wr)
         self.tiraux = PathRow('file', 'TIRAuxCloud checkpoints (*.pth);;All (*)')
         self.tiraux.edit.setPlaceholderText('ML, method TIRAuxCloud: a model_hash_<...>.pth from its model_files.tar.gz')
-        self.tiraux.setText(job.get('cloud_tiraux_checkpoint') or '')
+        import automatch_cloud as _C
+        self.tiraux.setText(job.get('cloud_tiraux_checkpoint') or _C.default_model_file(job, 'tiraux'))
         self.tiraux_arch = QtWidgets.QComboBox()
         self.tiraux_arch.addItems(['SegFormer', 'Unet'])
         self.tiraux_arch.setCurrentText(str(job.get('cloud_tiraux_arch') or 'SegFormer'))
@@ -1516,7 +1519,8 @@ class CloudSweepDialog(QtWidgets.QDialog):
         f.addRow('', self.csmask)
         self.spectf = PathRow('file', 'SpecTf weights (*.pt);;All (*)')
         self.spectf.edit.setPlaceholderText('compare: HS also by SpecTf (its current.pt)')
-        self.spectf.setText(job.get('cloud_spectf_weights') or '')
+        import automatch_cloud as _C
+        self.spectf.setText(job.get('cloud_spectf_weights') or _C.default_model_file(job, 'spectf'))
         f.addRow('SpecTf weights', self.spectf)
         self.spectf_hv, wsh = paths_box('cloud_sweep/spectf_hv')
         self.spectf_hv.setPlaceholderText('SpecTf: the HV image of the same pass, one line per image in order '
