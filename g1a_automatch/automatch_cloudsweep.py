@@ -774,6 +774,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                              'spectf'],
                     help='auto: infrared tests for ML, SWIR tests for HS, VNIR tests for MV / HV; compare: MV / HV '
                          'both by the VNIR tests and by OmniCloudMask')
+    ap.add_argument('--destripe', default='rows', choices=['rows', 'cols', 'both', 'off'],
+                    help='remove banding (full-width lines) before the reflective tests / models')
     ap.add_argument('--sensor-methods', default='', help='with --method auto: the method per sensor, e.g. '
                     'MV=csmask,HS=spectf (default: each sensor\'s physical tests)')
     ap.add_argument('--csmask', action='store_true', help='compare: MV / HV also by ukis-csmask')
@@ -817,6 +819,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if problems:
             print('\n'.join(problems))
             return 2
+    C.set_destripe({'cloud_destripe': a.destripe})
     if any('ocm' in m for m in image_methods(a.images, a.method, a.sensor, sensor_methods=a.sensor_methods)):
         problems = C.check({'cloud_model_dir': a.model_dir})
         if problems:

@@ -297,6 +297,34 @@ def swir_mask(L: Dict[int, np.ndarray], valid: np.ndarray, px_m: float, k: float
                  'cirrus_ratio_clear': round(r_clear, 4)}
 
 
+DESTRIPE = {'mode': 'rows', 'window': 31}     # set from the job (cloud_destripe, cloud_destripe_window)
+
+
+def destripe(a: np.ndarray, valid: np.ndarray, mode: Optional[str] = None, window: Optional[int] = None) -> np.ndarray:
+    """Banding removed: each image row (mode 'rows'; 'cols': each column;
+    'both'; 'off') scaled to the running median, over `window` rows, of the
+    row medians. Full-width bright lines (detector / line calibration) go;
+    clouds taller than about half the window stay."""
+    import pandas as pd
+    mode = (mode or DESTRIPE['mode'] or 'off').lower()
+    window = int(window or DESTRIPE['window'] or 31)
+    if mode == 'off' or not valid.any():
+        return a
+    out = a.astype(np.float64, copy=True)
+    for ax in ((1,) if mode == 'rows' else (0,) if mode == 'cols' else (1, 0)):
+        x = np.where(valid, out, np.nan)
+        with np.errstate(all='ignore'):
+            med = np.nanmedian(x, axis=ax)
+            share = valid.mean(axis=ax)
+        med = np.where(share >= 0.2, med, np.nan)
+        ref = pd.Series(med).rolling(window, center=True, min_periods=max(3, window // 4)).median().to_numpy()
+        with np.errstate(all='ignore'):
+            g = np.clip(ref / med, 0.1, 10.0)
+        g = np.where(np.isfinite(g), g, 1.0)
+        out = out * (g[:, None] if ax == 1 else g[None, :])
+    return np.where(valid, out, a).astype(a.dtype if a.dtype.kind == 'f' else np.float64)
+
+
 def solar_e0(nm: float) -> float:
     """Extraterrestrial solar irradiance (W m-2 um-1) at nm (350-1000 nm)."""
     return float(np.interp(nm, SOLAR_NM, SOLAR_E0))
@@ -422,7 +450,7 @@ def read_vnir(path: str, wl: Sequence[Optional[float]]) -> Tuple[Dict[str, np.nd
         nd = src.nodata if src.nodata is not None else 0
         raw = {k: src.read(b).astype(np.float64) for k, (b, _) in sel.items()}
     valid = np.all(np.stack([np.isfinite(a) & (a != nd) for a in raw.values()]), axis=0)
-    return {k: raw[k] / solar_e0(sel[k][1]) for k in raw}, valid, sel
+    return {k: destripe(raw[k], valid) / solar_e0(sel[k][1]) for k in raw}, valid, sel
 
 
 def vis_clear_from_scenes(scenes: Sequence[Tuple[str, Sequence[Optional[float]]]], onto: str

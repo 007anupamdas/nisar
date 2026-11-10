@@ -285,6 +285,7 @@ def read_reflectance(path: str, bands: List[Tuple[int, float]], scale: float = 0
         raw = np.stack([src.read(b).astype(np.float64) for b, _ in bands])
         shape = (src.height, src.width)
     valid = np.all(np.isfinite(raw) & (raw != nd), axis=0)
+    raw = np.stack([P.destripe(r, valid) for r in raw])          # banding is not cloud
     si = sun_info(path, job)
     z, how = zenith_grid(path, shape, si)
     cz = np.cos(np.radians(z))

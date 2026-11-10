@@ -3776,6 +3776,46 @@ def test_reflect_models(tmp):
     check('spectf: the probability of the cloud class per pixel', round(float(bright[0, 0]), 3), 1.0)
 
 
+def test_destripe(tmp):
+    """Banding (full-width bright lines, from the detector / line
+    calibration) is not cloud: removed before the SWIR and VNIR tests, while
+    a real cloud stays."""
+    import contextlib
+    import io
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_origin
+    import automatch_cloud as C
+    import automatch_cloudphys as P
+    H, W, n = 200, 160, 60
+    yy, xx = np.mgrid[0:H, 0:W]
+    rng = np.random.default_rng(4)
+    bands = np.zeros((H, W), bool)
+    bands[[40, 41, 120, 150, 151, 152], :] = True
+    cloud = (yy - 80) ** 2 + (xx - 90) ** 2 < 25 ** 2
+    hs = os.path.join(tmp, 'G1A_HS_G_BAND.tif')
+    with rasterio.open(hs, 'w', driver='GTiff', width=W, height=H, count=n, dtype='float32', crs='EPSG:32644',
+                       transform=from_origin(500000, 2500000, 180, 180), nodata=0) as d:
+        for i, w in enumerate(np.linspace(900, 2500, n), 1):
+            a = (40.0 if w < 1300 else 20.0) * (1 + 0.05 * rng.normal(size=(H, W)))
+            a = np.where(cloud, 150.0 if abs(w - 1380) > 30 else 60.0, a)
+            a = np.where(bands, a * 3.0, a)
+            d.write(a.astype(np.float32), i)
+    out = {}
+    for mode in ('off', 'rows'):
+        with contextlib.redirect_stdout(io.StringIO()):
+            C.set_destripe({'cloud_destripe': mode})
+            out[mode] = C.compute_phys(hs, 'swir', os.path.join(tmp, f'band_{mode}'), C.phys_options({}, 'swir'), 'HS')
+        with rasterio.open(out[mode]['mask']) as m:
+            out[mode] = m.read(1)
+    C.set_destripe({})
+    lines = bands & ~cloud
+    check('destripe: full-width bright lines are cloud without it, clear with it (rows, the default); the real '
+          'cloud stays', ((out['off'][lines] > 0).mean() > 0.5, (out['rows'][lines] > 0).mean() < 0.02,
+                          (out['rows'][cloud & ~bands] == 1).mean() > 0.95, P.DESTRIPE['mode']),
+          (True, True, True, 'rows'))
+
+
 def test_stretch():
     """The contrast stretch before matching follows stretch_percentiles: at 90
     the brightest tenth saturates and the rest spreads over more grey levels."""
@@ -4563,6 +4603,7 @@ def main():
         test_cloud_phys(tmp)
         test_tiraux(tmp)
         test_reflect_models(tmp)
+        test_destripe(tmp)
         test_gpu_pinning(tmp)
         test_stretch()
         test_parallel_share(tmp)

@@ -115,6 +115,8 @@ DEFAULT_JOB: Dict = {
     'cloud_method_HV': 'auto',   # auto (= VNIR tests) | omnicloudmask | csmask
     'cloud_method_HS': 'auto',   # auto (= SWIR tests) | spectf
     'cloud_method_ML': 'auto',   # auto (= infrared tests) | tirauxcloud
+    'cloud_destripe': 'rows',    # banding (full-width lines) removed before the reflective tests / models: rows | cols | both | off
+    'cloud_destripe_window': 31,  # running median over this many rows (clouds taller than ~half of it stay)
     'cloud_method': 'auto',      # auto: ML infrared, HS SWIR, MV / HV VNIR tests | omnicloudmask | ir | swir | vnir
     'radiance_scale': 0.01,      # radiance = pixel value x this (G1A: scaled radiance, scaling factor 0.01)
     'radiance_unit': 'W/cm2/sr/um',  # of the scaled radiance (G1A, all sensors); auto: what gives Earth temperatures

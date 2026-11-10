@@ -738,6 +738,17 @@ unless `cloud_min_blob_km2` sets one (0 by default).
     the 16th percentile, and the dark half of the scene is ground even when
     much of it is cloud.
   - Low cloud over bright ground stays hard from SWIR alone.
+- **Banding** (full-width bright lines from the detector or line
+  calibration) is removed before the VNIR / SWIR tests and the
+  reflectance models, so it is not taken for cloud. Each image row is
+  scaled to the running median of the row medians over
+  `cloud_destripe_window` (31) rows. Clouds taller than about half of that
+  stay. `cloud_destripe`: `rows` (default), `cols`, `both` or `off`
+  (`--destripe` in the cloud test and sweep). ML is left as it is.
+- **Method per sensor** (GUI: Data tab, *Cloud method per sensor*; jobs:
+  `cloud_method_MV`, `_HV`, `_HS`, `_ML`; `--sensor-methods MV=csmask,HS=spectf`):
+  each sensor uses its physical tests unless a model is chosen for it
+  (MV / HV: `omnicloudmask`, `csmask`; HS: `spectf`; ML: `tirauxcloud`).
 - **Each sensor its own mask:** the payloads cover different ground, so ML
   and HS always make their own. With `cloud_mask_from` (the MV / HV
   product of the same pass), that product's mask is added where it covers

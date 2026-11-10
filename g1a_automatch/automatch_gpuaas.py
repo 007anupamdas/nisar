@@ -284,6 +284,7 @@ def main(argv: List[str] = None) -> int:
         return 1 if rep['summary']['missing'] else 0
     if mode == 'cloud':                    # the cloud mask alone, at several confidence thresholds
         import automatch_cloud as C
+        C.set_destripe(job)
         sensor = C.sensor_for(job['input_path'])
         method = C.method_for(job, sensor, job['input_path'])
         if C.needs_model(job, sensor, job['input_path']):
@@ -310,6 +311,7 @@ def main(argv: List[str] = None) -> int:
         imgs = [job['input_path']] + list(job.get('cloud_sweep_images') or [])
         smeth = job.get('cloud_sweep_method') if job.get('cloud_sweep_method') not in (None, '', 'auto') \
             else (job.get('cloud_method') or 'auto')
+        C.set_destripe(job)
         smt = {k: v for k, v in job.items() if k.startswith('cloud_method_')}
         if any('ocm' in m for m in CS.image_methods(imgs, smeth, sensor_methods=smt)):
             problems = C.check(job)

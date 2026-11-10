@@ -490,6 +490,14 @@ SENSOR_METHODS = {'MV': ['vnir', 'omnicloudmask', 'csmask'], 'HV': ['vnir', 'omn
                   'HS': ['swir', 'spectf'], 'ML': ['ir', 'tirauxcloud']}
 
 
+def set_destripe(job: Dict) -> None:
+    """Banding removal for the reflective tests and models, from the job
+    (cloud_destripe: rows (default) | cols | both | off; cloud_destripe_window)."""
+    import automatch_cloudphys as P
+    P.DESTRIPE.update(mode=str(job.get('cloud_destripe') or 'rows').lower(),
+                      window=int(job.get('cloud_destripe_window') or 31))
+
+
 def parse_sensor_methods(text) -> Dict[str, str]:
     """{'cloud_method_MV': 'vnir', ...} from 'MV=vnir,HS=spectf' (or a dict)."""
     if isinstance(text, dict):
@@ -738,6 +746,8 @@ def load_phys(path: str, method: str, sensor: str, scale: float = 0.01, clear_pa
                                  f'(found {sorted(idx)})')
             raw = {int(w): src.read(b).astype(np.float64) for w, b in idx.items()}
     valid = np.all(np.stack([np.isfinite(a) & (a != nd) for a in raw.values()]), axis=0)
+    if method == 'swir':                       # banding is not cloud (thermal ML is left as it is)
+        raw = {k: P.destripe(a, valid) for k, a in raw.items()}
     out = {'valid': valid, 'px': px, 'prof': prof}
     if method in ('ir', 'tiraux'):
         rad = {u: a * scale for u, a in raw.items()}
@@ -868,6 +878,7 @@ def prepare(job: Dict, scene, channels: List[str], cache_dir: str, out_dir: str,
     onto this image."""
     path = scene.raster_path
     src = job.get('cloud_mask_from') or ''
+    set_destripe(job)
     method = method_for(job, sensor, path)
     if method in PHYS_NAMES:
         return _prepare_phys(job, path, method, channels, cache_dir, out_dir, sensor, src, predictor)
@@ -1302,6 +1313,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument('--sensor-methods', default='',
                     help='the method per sensor with --method auto, e.g. MV=csmask,HS=spectf (default: each '
                          'sensor\'s physical tests)')
+    ap.add_argument('--destripe', default='rows', choices=['rows', 'cols', 'both', 'off'],
+                    help='remove banding (full-width lines) before the reflective tests / models')
+    ap.add_argument('--destripe-window', type=int, default=31, help='running median over this many rows')
     ap.add_argument('--from-method', default='auto', choices=['auto', 'omnicloudmask', 'vnir'],
                     help='how the --from (VNIR) image is masked')
     ap.add_argument('--radiance-scale', type=float, default=0.01, help='radiance = pixel value x this (G1A: 0.01)')
@@ -1347,6 +1361,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     import automatch_job as J
     device = J.use_gpu(a.device) if a.device else None      # before omnicloudmask loads torch
     sensor = a.sensor or sensor_for(a.image)
+    set_destripe({'cloud_destripe': a.destripe, 'cloud_destripe_window': a.destripe_window})
     meth = method_for(dict(parse_sensor_methods(a.sensor_methods), cloud_method=a.method), sensor, a.image)
     if meth == 'ocm' or (a.mask_from and a.from_method == 'omnicloudmask' and meth != 'spectf'):
         problems = check({'cloud_model_dir': a.model_dir})
