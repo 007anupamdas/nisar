@@ -551,7 +551,7 @@ def run(images: List[str], out_dir: str, references: Optional[List[str]] = None,
         vis_clear_factor: float = 1.3, unit: str = 'W/cm2/sr/um', vis_clear_paths=(),
         tiraux_opts: Optional[Dict] = None, tiraux_thresholds='0.3-0.7:0.2', tiraux_norm_hi=None,
         csmask_opts: Optional[Dict] = None, spectf_opts: Optional[Dict] = None, spectf_thresholds='0.3-0.7:0.1',
-        spectf_vnir=None) -> Dict:
+        spectf_vnir=None, sensor_methods=None) -> Dict:
     """The sweep over the images into <out_dir>/<time>_sweep/; returns
     {'folder', 'rows', 'summary'}. Each image by its cloud method
     (automatch_cloud.method_for: 'auto' by sensor): OmniCloudMask images over
@@ -585,7 +585,7 @@ def run(images: List[str], out_dir: str, references: Optional[List[str]] = None,
     vn = list(spectf_vnir or [])
     vn = vn + [''] * (len(images) - len(vn))
     meths = image_methods(images, method, sensor, has_tiraux, csmask_opts is not None,
-                          [bool((spectf_opts or {}).get('weights')) and bool(v) for v in vn])
+                          [bool((spectf_opts or {}).get('weights')) and bool(v) for v in vn], sensor_methods)
     if any(not 0 < c < 1 for c in confs):
         raise ValueError(f'confidence thresholds must lie between 0 and 1, got {confs}')
     refs = list(references or [])
@@ -694,7 +694,7 @@ def run(images: List[str], out_dir: str, references: Optional[List[str]] = None,
 
 
 def image_methods(images: List[str], method: str = 'auto', sensor: str = '', tiraux: bool = False,
-                  csmask: bool = False, spectf=None) -> List[List[str]]:
+                  csmask: bool = False, spectf=None, sensor_methods=None) -> List[List[str]]:
     """The cloud method(s) of each image: one by method_for, or with
     'compare' an MV / HV image (VNIR tests) also by OmniCloudMask, and an
     ML image (infrared tests) also by TIRAuxCloud when tiraux (a
@@ -714,7 +714,7 @@ def image_methods(images: List[str], method: str = 'auto', sensor: str = '', tir
                 ms.append('spectf')
             out.append(ms)
         else:
-            out.append([C.method_for({'cloud_method': method}, s, i)])
+            out.append([C.method_for(dict(C.parse_sensor_methods(sensor_methods or {}), cloud_method=method), s, i)])
     return out
 
 
@@ -774,6 +774,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                              'spectf'],
                     help='auto: infrared tests for ML, SWIR tests for HS, VNIR tests for MV / HV; compare: MV / HV '
                          'both by the VNIR tests and by OmniCloudMask')
+    ap.add_argument('--sensor-methods', default='', help='with --method auto: the method per sensor, e.g. '
+                    'MV=csmask,HS=spectf (default: each sensor\'s physical tests)')
     ap.add_argument('--csmask', action='store_true', help='compare: MV / HV also by ukis-csmask')
     ap.add_argument('--spectf-weights', default='', help='SpecTf current.pt (compare: HS images also by SpecTf)')
     ap.add_argument('--spectf-vnir', nargs='*', default=[], help='SpecTf: the HV image of the same pass, one per '
@@ -815,7 +817,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if problems:
             print('\n'.join(problems))
             return 2
-    if any('ocm' in m for m in image_methods(a.images, a.method, a.sensor)):
+    if any('ocm' in m for m in image_methods(a.images, a.method, a.sensor, sensor_methods=a.sensor_methods)):
         problems = C.check({'cloud_model_dir': a.model_dir})
         if problems:
             print('\n'.join(problems))
@@ -828,10 +830,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         vis_bright=a.vis_bright, vis_white=a.vis_white, vis_clear_factor=a.vis_clear_factor, unit=a.radiance_unit,
         vis_clear_paths=a.vis_clear, tiraux_opts=topts, tiraux_thresholds=a.tiraux_threshold,
         tiraux_norm_hi=a.tiraux_norm_hi or None,
-        csmask_opts=(C.phys_options(sun, 'csmask') if a.csmask or a.method == 'csmask' else None),
-        spectf_opts=(dict(C.phys_options(sun, 'spectf'), weights=a.spectf_weights) if a.spectf_weights else None),
+        csmask_opts=(C.phys_options(sun, 'csmask') if a.csmask or a.method == 'csmask'
+                     or 'csmask' in a.sensor_methods else None),
+        spectf_opts=(dict(C.phys_options(sun, 'spectf'), weights=a.spectf_weights)
+                     if a.spectf_weights or 'spectf' in a.sensor_methods else None),
         spectf_thresholds=a.spectf_threshold,
-        spectf_vnir=['' if v in ('-', "''", '""') else v for v in a.spectf_vnir])
+        spectf_vnir=['' if v in ('-', "''", '""') else v for v in a.spectf_vnir], sensor_methods=a.sensor_methods)
     return 0
 
 

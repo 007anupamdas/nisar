@@ -315,7 +315,7 @@ def gpu_list() -> List[Tuple[int, str, float]]:
     return _GPUS
 
 
-CLOUD_METHODS = [('auto', 'by sensor: ML infrared, HS SWIR, MV / HV VNIR tests'),
+CLOUD_METHODS = [('auto', 'per sensor (the choices below; default: each sensor\'s physical tests)'),
                  ('vnir', 'VNIR tests (bright + white + blue: MV / HV)'),
                  ('omnicloudmask', 'OmniCloudMask (red / green / NIR model)'),
                  ('ir', 'infrared tests (thermal: ML)'), ('swir', 'SWIR tests (1.38 µm cirrus + bright: HS)'),
@@ -324,14 +324,19 @@ CLOUD_METHODS = [('auto', 'by sensor: ML infrared, HS SWIR, MV / HV VNIR tests')
                  ('spectf', 'SpecTf model (HS + its HV pass, reflectance spectrum; needs current.pt)')]
 
 
+SENSOR_CLOUD_METHODS = {'MV': ['vnir', 'omnicloudmask', 'csmask'], 'HV': ['vnir', 'omnicloudmask', 'csmask'],
+                        'HS': ['swir', 'spectf'], 'ML': ['ir', 'tirauxcloud']}
+
+
 class CloudMethodCombo(QtWidgets.QComboBox):
     """How clouds are found (automatch_cloud.method_for): value() / setValue();
     compare=True adds the sweep's 'compare' (MV / HV both ways)."""
 
-    def __init__(self, parent=None, compare=False):
+    def __init__(self, parent=None, compare=False, only=None, auto_text=''):
         super().__init__(parent)
         for k, t in CLOUD_METHODS:
-            self.addItem(t, k)
+            if only is None or k in only:
+                self.addItem(auto_text if (k == 'auto' and auto_text) else t, k)
         if compare:
             self.addItem('compare: MV / HV by the VNIR tests and OmniCloudMask; ML by the infrared tests and '
                          'TIRAuxCloud (with its checkpoint)', 'compare')
@@ -1208,6 +1213,7 @@ class CloudTestDialog(QtWidgets.QDialog):
         self.sensor = QtWidgets.QComboBox()
         self.sensor.addItems(['from the file name / pixel size', 'MV', 'HV', 'HS', 'ML', 'other'])
         f.addRow('Sensor', self.sensor)
+        self.sensor_methods = {k: v for k, v in job.items() if k.startswith('cloud_method_')}
         self.method = CloudMethodCombo()
         self.method.setValue(job.get('cloud_method') or 'auto')
         f.addRow('Method', self.method)
@@ -1450,6 +1456,10 @@ class CloudTestDialog(QtWidgets.QDialog):
         a += ['--min-blob-km2', f'{self.blob.value():g}']
         if self.method.value() != 'auto':
             a += ['--method', self.method.value()]
+        else:
+            sm = ','.join(f"{k[-2:]}={v}" for k, v in self.sensor_methods.items() if v != 'auto')
+            if sm:
+                a += ['--sensor-methods', sm]
         a += ['--radiance-unit', self.unit.currentText().strip() or 'W/cm2/sr/um',
               '--vis-bright', f'{self.vis_bright.value():g}', '--vis-white', f'{self.vis_white.value():g}',
               '--vis-clear-factor', f'{self.vis_factor.value():g}']
@@ -1553,6 +1563,7 @@ class CloudSweepDialog(QtWidgets.QDialog):
         f.addRow('Blob at least (km²)', self.blob)
         self.shadow = QtWidgets.QLineEdit(settings.value('cloud_sweep/shadow', '') or '5, 10, 20')
         f.addRow('Shadow within (km)', self.shadow)
+        self.sensor_methods = {k: v for k, v in job.items() if k.startswith('cloud_method_')}
         self.method = CloudMethodCombo(compare=True)
         self.method.setValue(job.get('cloud_method') or 'auto')
         f.addRow('Method', self.method)
@@ -1701,6 +1712,10 @@ class CloudSweepDialog(QtWidgets.QDialog):
             a += ['--sheets']
         if self.method.value() != 'auto':
             a += ['--method', self.method.value()]
+        else:
+            sm = ','.join(f"{k[-2:]}={v}" for k, v in self.sensor_methods.items() if v != 'auto')
+            if sm:
+                a += ['--sensor-methods', sm]
         a += ['--ir-dt', self.ir_dt.text().strip(), '--ir-split', self.ir_split.text().strip(),
               '--swir-k', self.swir_k.text().strip(), '--swir-bright', self.swir_bright.text().strip(),
               '--radiance-scale', f'{float(self.scale.text()):g}',
@@ -2016,6 +2031,16 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
                                    'folder>/omnicloudmask. The band, sure ≥ and bright-blob settings beside are '
                                    'OmniCloudMask\'s.')
         self.cloud_method = CloudMethodCombo()
+        self.cloud_method.setToolTip('One method for every image, or "per sensor": each sensor as chosen in the '
+                                     'row below')
+        self.cloud_sensor = {}
+        hps = QtWidgets.QHBoxLayout()
+        for sn, phys in (('MV', 'VNIR tests'), ('HV', 'VNIR tests'), ('HS', 'SWIR tests'), ('ML', 'infrared tests')):
+            cb = CloudMethodCombo(only=['auto'] + SENSOR_CLOUD_METHODS[sn][1:],
+                                  auto_text=f'{phys} (no model)')
+            self.cloud_sensor[sn] = cb
+            hps.addWidget(QtWidgets.QLabel(sn))
+            hps.addWidget(cb, 1)
         self.cloud_bands = QtWidgets.QLineEdit()
         self.cloud_bands.setPlaceholderText('red, green, nir bands: automatic (or e.g. band3, band2, band6)')
         self.cloud_choice = QtWidgets.QComboBox()
@@ -2045,6 +2070,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
                                      'The model alone took water and vegetation for cloud on G1A MV.')
         hl2.addWidget(self.cloud_refine)
         f.addRow('Clouds', hl2)
+        f.addRow('Cloud method per sensor', hps)
         self.cloud_from = PathRow('file', 'Rasters (*.tif *.tiff *.vrt);;All (*)')
         self.cloud_from.edit.setPlaceholderText('HS / ML: the HV / MV product of the same pass; its cloud mask is '
                                                 'added to this image\'s own where it covers it')
@@ -2427,6 +2453,8 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.cloud_mask.setChecked(str(j.get('cloud_mask') or 'none').strip().lower()
                                    not in ('none', 'off', 'no', 'false', '0', ''))
         self.cloud_method.setValue(j.get('cloud_method') or 'auto')
+        for sn, cb in self.cloud_sensor.items():
+            cb.setValue(j.get(f'cloud_method_{sn}') or 'auto')
         self.cloud_bands.setText(', '.join(j.get('cloud_bands') or []))
         self.cloud_choice.setCurrentIndex(1 if str(j.get('cloud_band_choice') or 'spec') == 'quality' else 0)
         self.cloud_conf.setValue(float(j.get('cloud_min_confidence') or 0.7))
@@ -2529,6 +2557,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             'auto_bands_range': self._auto_range(),
             'cloud_mask': 'on' if self.cloud_mask.isChecked() else 'none',
             'cloud_method': self.cloud_method.value(),
+            **self.sensor_methods(),
             'cloud_bands': [t for t in re.split(r'[,;\s]+', self.cloud_bands.text().strip()) if t],
             'cloud_mask_from': self.cloud_from.text(),
             'cloud_tiraux_checkpoint': self.cloud_tiraux.text(),
@@ -3059,6 +3088,10 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             dlg.exec() if hasattr(dlg, 'exec') else dlg.exec_()
         return dlg
 
+    def sensor_methods(self):
+        """{'cloud_method_MV': ..., ...}: the method chosen for each sensor."""
+        return {f'cloud_method_{sn}': cb.value() for sn, cb in self.cloud_sensor.items()}
+
     def cloud_dialog(self, *_, run=True):
         """Test the cloud mask of one image; run=False returns the dialog unshown (tests).
         Its settings come straight from the controls, so an unfinished job
@@ -3068,6 +3101,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
                    cloud_min_confidence=self.cloud_conf.value(), cloud_mask_from=self.cloud_from.text(),
                    cloud_tiraux_checkpoint=self.cloud_tiraux.text(), cloud_spectf_weights=self.cloud_spectf.text(),
                    cloud_refine=self.cloud_refine.isChecked(), cloud_method=self.cloud_method.value(),
+                   **self.sensor_methods(),
                    cloud_bands=[t for t in re.split(r'[,;\s]+', self.cloud_bands.text().strip()) if t],
                    cloud_band_choice='quality' if self.cloud_choice.currentIndex() == 1 else 'spec')
         dlg = CloudTestDialog(self.settings, job, self)
@@ -3080,6 +3114,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         """The cloud mask benchmark; run=False returns the dialog unshown (tests)."""
         job = dict(DEFAULT_JOB, input_path=self.in_path.text(), weights_cache_dir=self.weights_cache.text(),
                    output_dir=self.out_path.text(), device=self.device.value(), cloud_method=self.cloud_method.value(),
+                   **self.sensor_methods(),
                    cloud_tiraux_checkpoint=self.cloud_tiraux.text(), cloud_spectf_weights=self.cloud_spectf.text())
         dlg = CloudSweepDialog(self.settings, job, self)
         dlg.accepted.connect(lambda: self._start_sweep(dlg))

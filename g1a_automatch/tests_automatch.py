@@ -1004,6 +1004,23 @@ def test_gui_cloud():
               (a2[a2.index('--spectf-weights') + 1], a2[a2.index('--sun-zenith') + 1], '--csmask' in s2,
                s2[s2.index('--spectf-vnir') + 1]), ('/x/current.pt', '30', True, '/x/G1A_HV.tif'))
         w.cloud_spectf.setText('')
+        w.cloud_method.setValue('auto')
+        w.cloud_sensor['MV'].setValue('csmask')
+        w.cloud_sensor['HS'].setValue('spectf')
+        cd3 = w.cloud_dialog(run=False)
+        cd3.image.setText(img)
+        a3 = cd3.args()
+        check('gui: a cloud method per sensor (physical tests by default; models only where chosen) reaches the '
+              'job, the cloud test and the method choice',
+              ([w.cloud_sensor['MV'].itemData(i) for i in range(w.cloud_sensor['MV'].count())],
+               w.cloud_sensor['ML'].itemText(0), a3[a3.index('--sensor-methods') + 1],
+               C.method_for(w.sensor_methods(), 'MV'), C.method_for(w.sensor_methods(), 'HV'),
+               C.method_for(w.sensor_methods(), 'HS'), C.method_for(w.sensor_methods(), 'ML')),
+              (['auto', 'omnicloudmask', 'csmask'], 'infrared tests (no model)', 'MV=csmask,HS=spectf',
+               'csmask', 'vnir', 'spectf', 'ir'))
+        for cb in w.cloud_sensor.values():
+            cb.setValue('auto')
+        w.cloud_method.setValue('ir')
         sw = w.cloud_sweep_dialog(run=False)
         sw.images.setPlainText(img)
         sw.ir_dt.setText('4-12:4')

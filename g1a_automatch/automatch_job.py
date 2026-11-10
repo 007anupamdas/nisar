@@ -111,6 +111,10 @@ DEFAULT_JOB: Dict = {
     'stretch_percentiles': [1, 99],   # contrast stretch of each window: low / high percentile (e.g. [1, 90])
     'stretch_mode': 'percentile',     # percentile | clahe: local contrast too (dark ground beside bright cloud)
     'cloud_mask': 'none',        # none | on (or 'omnicloudmask', as before): mask clouds, by cloud_method
+    'cloud_method_MV': 'auto',   # per sensor, with cloud_method auto: auto (= VNIR tests) | omnicloudmask | csmask
+    'cloud_method_HV': 'auto',   # auto (= VNIR tests) | omnicloudmask | csmask
+    'cloud_method_HS': 'auto',   # auto (= SWIR tests) | spectf
+    'cloud_method_ML': 'auto',   # auto (= infrared tests) | tirauxcloud
     'cloud_method': 'auto',      # auto: ML infrared, HS SWIR, MV / HV VNIR tests | omnicloudmask | ir | swir | vnir
     'radiance_scale': 0.01,      # radiance = pixel value x this (G1A: scaled radiance, scaling factor 0.01)
     'radiance_unit': 'W/cm2/sr/um',  # of the scaled radiance (G1A, all sensors); auto: what gives Earth temperatures

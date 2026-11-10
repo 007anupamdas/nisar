@@ -296,7 +296,7 @@ def main(argv: List[str] = None) -> int:
                      job.get('cloud_bands') or None, job.get('cloud_band_choice') or 'spec', confs,
                      C.model_dir_for(job), job.get('cloud_device') or None, job.get('cloud_mask_from') or '',
                      int(job.get('cloud_from_margin_px') or 0) + int(job.get('cloud_dilate_px') or 0),
-                     refine_opts=C.refine_options(job), method=job.get('cloud_method') or 'auto',
+                     refine_opts=C.refine_options(job), method={'ocm': 'omnicloudmask'}.get(method, method),
                      phys_opts=(C.phys_options(job, method) if method in C.PHYS_NAMES else None),
                      scale=float(job.get('radiance_scale') or 0.01),
                      clear_paths=job.get(C.CLEAR_KEY.get(method, '')) or [] if method in C.CLEAR_KEY else [],
@@ -310,7 +310,8 @@ def main(argv: List[str] = None) -> int:
         imgs = [job['input_path']] + list(job.get('cloud_sweep_images') or [])
         smeth = job.get('cloud_sweep_method') if job.get('cloud_sweep_method') not in (None, '', 'auto') \
             else (job.get('cloud_method') or 'auto')
-        if any('ocm' in m for m in CS.image_methods(imgs, smeth)):
+        smt = {k: v for k, v in job.items() if k.startswith('cloud_method_')}
+        if any('ocm' in m for m in CS.image_methods(imgs, smeth, sensor_methods=smt)):
             problems = C.check(job)
             if problems:
                 print('\n'.join(problems))
@@ -320,7 +321,7 @@ def main(argv: List[str] = None) -> int:
                job['cloud_sweep_conf'], job['cloud_sweep_bright'], job['cloud_sweep_blob_km2'],
                job['cloud_sweep_shadow_km'], int(job['cloud_sweep_crisp']), True,
                job.get('cloud_mask_classes') or [1], C.model_dir_for(job), job.get('cloud_device') or None,
-               pngs=str(job.get('cloud_sweep_pngs') or 'grid'), method=smeth,
+               pngs=str(job.get('cloud_sweep_pngs') or 'grid'), method=smeth, sensor_methods=smt,
                ir_dt=job.get('cloud_sweep_ir_dt') or '4-12:2', ir_split=job.get('cloud_sweep_ir_split') or [1.0],
                swir_k=job.get('cloud_sweep_swir_k') or '2-6:1',
                swir_bright=job.get('cloud_sweep_swir_bright') or [3.0],

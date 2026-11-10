@@ -484,7 +484,24 @@ PHYS_NAMES = {'ir': 'infrared tests', 'swir': 'SWIR tests', 'vnir': 'VNIR tests'
               'tiraux': 'TIRAuxCloud (experimental)', 'csmask': 'ukis-csmask', 'spectf': 'SpecTf'}
 MODEL_METHODS = ('tiraux', 'csmask', 'spectf')     # learned: run on cloud_device
 SUN_KEYS = ('cloud_sun_zenith_deg', 'cloud_acq_time_utc')
-CLEAR_KEY = {'ir': 'cloud_ir_clear', 'vnir': 'cloud_vis_clear'}     # earlier scenes giving the clear sky
+CLEAR_KEY = {'ir': 'cloud_ir_clear', 'vnir': 'cloud_vis_clear'}
+# the methods each sensor may use (cloud_method_<sensor>); 'auto' is the first: its physical tests
+SENSOR_METHODS = {'MV': ['vnir', 'omnicloudmask', 'csmask'], 'HV': ['vnir', 'omnicloudmask', 'csmask'],
+                  'HS': ['swir', 'spectf'], 'ML': ['ir', 'tirauxcloud']}
+
+
+def parse_sensor_methods(text) -> Dict[str, str]:
+    """{'cloud_method_MV': 'vnir', ...} from 'MV=vnir,HS=spectf' (or a dict)."""
+    if isinstance(text, dict):
+        items = text.items()
+    else:
+        items = [p.split('=', 1) for p in re.split(r'[,;\s]+', str(text or '').strip()) if '=' in p]
+    out = {}
+    for k, v in items:
+        k = str(k).strip().upper().replace('CLOUD_METHOD_', '')
+        if k in SENSOR_METHODS and str(v).strip():
+            out[f'cloud_method_{k}'] = str(v).strip().lower()
+    return out     # earlier scenes giving the clear sky
 
 
 def method_for(job: Dict, sensor: str, path: str = '') -> str:
@@ -494,6 +511,8 @@ def method_for(job: Dict, sensor: str, path: str = '') -> str:
     by its band wavelengths: VNIR tests when it has green, red and NIR, else
     OmniCloudMask)."""
     m = str(job.get('cloud_method') or 'auto').strip().lower()
+    if m == 'auto':                  # the method chosen for this sensor, if any
+        m = str(job.get(f'cloud_method_{sensor}') or 'auto').strip().lower()
     if m in ('omnicloudmask', 'ocm'):
         return 'ocm'
     if m in ('ir', 'swir', 'vnir'):
@@ -1280,6 +1299,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument('--method', default='auto',
                     choices=['auto', 'omnicloudmask', 'ir', 'swir', 'vnir', 'tirauxcloud', 'csmask', 'spectf'],
                     help='auto: infrared tests for ML, SWIR tests for HS, VNIR tests for MV / HV')
+    ap.add_argument('--sensor-methods', default='',
+                    help='the method per sensor with --method auto, e.g. MV=csmask,HS=spectf (default: each '
+                         'sensor\'s physical tests)')
     ap.add_argument('--from-method', default='auto', choices=['auto', 'omnicloudmask', 'vnir'],
                     help='how the --from (VNIR) image is masked')
     ap.add_argument('--radiance-scale', type=float, default=0.01, help='radiance = pixel value x this (G1A: 0.01)')
@@ -1325,7 +1347,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     import automatch_job as J
     device = J.use_gpu(a.device) if a.device else None      # before omnicloudmask loads torch
     sensor = a.sensor or sensor_for(a.image)
-    meth = method_for({'cloud_method': a.method}, sensor, a.image)
+    meth = method_for(dict(parse_sensor_methods(a.sensor_methods), cloud_method=a.method), sensor, a.image)
     if meth == 'ocm' or (a.mask_from and a.from_method == 'omnicloudmask' and meth != 'spectf'):
         problems = check({'cloud_model_dir': a.model_dir})
         if problems:
@@ -1364,7 +1386,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(e)
         return 2
     standalone(a.image, out, sensor, a.bands, a.choice, a.conf, a.model_dir, device, a.mask_from, a.margin,
-               refine_opts=ropts, method=a.method, phys_opts=popts, scale=a.radiance_scale, clear_paths=a.clear,
+               refine_opts=ropts, method={'ocm': 'omnicloudmask'}.get(meth, meth), phys_opts=popts, scale=a.radiance_scale, clear_paths=a.clear,
                from_method=a.from_method, unit=a.radiance_unit)
     return 0
 
