@@ -391,6 +391,9 @@ CE90_SIGMA = 2.146
 # The provisional reference mark always uses grid offsets: it moves a view on
 # that grid. A row whose ends cannot be put in lon/lat falls back to grid.
 ERROR_FRAME = "ground"
+# Print each finished row's picks, step by step, to the QGIS Python console:
+# working-CRS, lon/lat, each raster's own CRS and pixel, grid and ground error.
+TRACE_PICKS = True
 
 # Every export also writes <name>_stats.csv beside it: the accuracy figures for
 # the fully marked rows, so a run's numbers travel with its picks.
@@ -4011,7 +4014,59 @@ class QCDashboard(QMainWindow):
             pass
         finally:
             self.table.blockSignals(False)
+        if TRACE_PICKS:
+            try:
+                self.trace_row(row)
+            except Exception as e:
+                print(f"[TRACE] row {row + 1}: {e}")
         self.update_stats()
+
+    def _native_pixel(self, lyr, x, y):
+        """A working-CRS point in a layer's own CRS and (col, row) pixel."""
+        try:
+            p = QgsCoordinateTransform(self.proj_crs, lyr.crs(),
+                                       QgsProject.instance()).transform(
+                QgsPointXY(x, y))
+            e = lyr.extent()
+            col = (p.x() - e.xMinimum()) / (e.width() / lyr.width())
+            line = (e.yMaximum() - p.y()) / (e.height() / lyr.height())
+            return p.x(), p.y(), col, line, lyr.crs().authid()
+        except Exception:
+            return None
+
+    def trace_row(self, row):
+        """Print every step from a row's picks to its error, for checking.
+
+        Each pick in the working CRS, in lon/lat, and in the CRS and pixel grid
+        of the raster it was picked on, plus the grid and ground errors. The
+        pixel positions can be checked outside QGIS (gdallocationinfo), so a
+        surprising error can be pinned on the data, on the drawing, or on the
+        arithmetic.
+        """
+        p, q = self._row_point(row, 0), self._row_point(row, 2)
+        if p is None or q is None:
+            return
+        a, b = self._to_lonlat(p.x(), p.y()), self._to_lonlat(q.x(), q.y())
+        print(f"[TRACE] row {row + 1}, working CRS {self.proj_crs.authid()}")
+        for name, pt, ll, lyr in (
+                ("in ", p, a, (self.canvas_left.layers() or [None])[0]),
+                ("ref", q, b, self.current_ref_layer)):
+            line = f"[TRACE]   {name} grid ({pt.x():.2f}, {pt.y():.2f})"
+            if ll:
+                line += f"  lon/lat ({ll[0]:.7f}, {ll[1]:.7f})"
+            nat = self._native_pixel(lyr, pt.x(), pt.y()) if lyr else None
+            if nat:
+                line += (f"  {nat[4]} ({nat[0]:.7f}, {nat[1]:.7f})"
+                         f"  pixel col {nat[2]:.1f} line {nat[3]:.1f}"
+                         f"  [{os.path.basename(lyr.source())}]")
+            print(line)
+        gx, gy = p.x() - q.x(), p.y() - q.y()
+        print(f"[TRACE]   grid error   dx {gx:.1f} dy {gy:.1f} "
+              f"|{math.hypot(gx, gy):.1f}| m")
+        g = ground_offset(a, b) if a and b else None
+        if g:
+            print(f"[TRACE]   ground error dE {g[0]:.1f} dN {g[1]:.1f} "
+                  f"|{math.hypot(*g):.1f}| m")
 
     def update_stats(self):
         # Fully marked rows only. Reading the error columns instead counted a
