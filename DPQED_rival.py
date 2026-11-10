@@ -379,6 +379,19 @@ SHP_FIELDS = [
 # than presented as if the error really were circular.
 CE90_SIGMA = 2.146
 
+# What the error columns measure.
+#   "ground" -- true east / north metres on the WGS84 ellipsoid, from the
+#               geodesic between the two picks' lon/lat. Independent of any
+#               map grid, so it holds across a 500 km swath that spans 2-3 UTM
+#               zones: one grid stretches distance by ~0.4% and turns its axes
+#               ~1.6 deg from north 580 km from its central meridian, which at
+#               a 70 km error is ~300 m of magnitude and ~2 km moved between
+#               X and Y. Bearing is then a true bearing.
+#   "grid"   -- In - Ref on the working CRS, as before.
+# The provisional reference mark always uses grid offsets: it moves a view on
+# that grid. A row whose ends cannot be put in lon/lat falls back to grid.
+ERROR_FRAME = "ground"
+
 # Every export also writes <name>_stats.csv beside it: the accuracy figures for
 # the fully marked rows, so a run's numbers travel with its picks.
 EXPORT_STATS = True
@@ -596,6 +609,56 @@ def export_crs_choice(mode, is_valid, authid):
     return True, ("the working CRS ({}) is not one another GIS can look up, so "
                   "a '.prj' naming it would not travel with the file".format(
                       authid or "no authority code"))
+
+
+_WGS84_A = 6378137.0
+_WGS84_F = 1 / 298.257223563
+
+
+def ground_offset(in_lonlat, ref_lonlat):
+    """(east, north) metres from the reference to the input pick, on WGS84.
+
+    Vincenty's inverse formula: the geodesic distance s and its azimuth a at
+    the reference, so east = s sin a, north = s cos a -- the error as a
+    surveyor on the ground at the reference would measure it, in no map grid.
+    Agrees with PROJ's geodesic (pyproj.Geod) to well under a millimetre at
+    these distances. None if the iteration does not converge (only for
+    near-antipodal points, never two picks of one feature).
+    """
+    lon1, lat1 = map(math.radians, ref_lonlat)
+    lon2, lat2 = map(math.radians, in_lonlat)
+    a, f = _WGS84_A, _WGS84_F
+    b = a * (1 - f)
+    L = lon2 - lon1
+    U1 = math.atan((1 - f) * math.tan(lat1))
+    U2 = math.atan((1 - f) * math.tan(lat2))
+    sU1, cU1, sU2, cU2 = math.sin(U1), math.cos(U1), math.sin(U2), math.cos(U2)
+    lam = L
+    for _ in range(200):
+        sl, cl = math.sin(lam), math.cos(lam)
+        ss = math.hypot(cU2 * sl, cU1 * sU2 - sU1 * cU2 * cl)
+        if ss == 0:
+            return (0.0, 0.0)
+        cs = sU1 * sU2 + cU1 * cU2 * cl
+        sigma = math.atan2(ss, cs)
+        sa = cU1 * cU2 * sl / ss
+        c2a = 1 - sa * sa
+        c2sm = cs - 2 * sU1 * sU2 / c2a if c2a else 0.0
+        C = f / 16 * c2a * (4 + f * (4 - 3 * c2a))
+        prev = lam
+        lam = L + (1 - C) * f * sa * (sigma + C * ss * (c2sm + C * cs * (-1 + 2 * c2sm * c2sm)))
+        if abs(lam - prev) < 1e-12:
+            break
+    else:
+        return None
+    u2 = c2a * (a * a - b * b) / (b * b)
+    A = 1 + u2 / 16384 * (4096 + u2 * (-768 + u2 * (320 - 175 * u2)))
+    B = u2 / 1024 * (256 + u2 * (-128 + u2 * (74 - 47 * u2)))
+    ds = B * ss * (c2sm + B / 4 * (cs * (-1 + 2 * c2sm * c2sm)
+                                   - B / 6 * c2sm * (-3 + 4 * ss * ss) * (-3 + 4 * c2sm * c2sm)))
+    dist = b * A * (sigma - ds)
+    az = math.atan2(cU2 * math.sin(lam), cU1 * sU2 - sU1 * cU2 * math.cos(lam))
+    return (dist * math.sin(az), dist * math.cos(az))
 
 
 def csv_record(index, cells, in_lonlat, ref_lonlat):
@@ -1143,7 +1206,7 @@ def is_meta_file(name):
     return None
 
 
-def quiver_row(index, ix, iy, rx, ry, in_lonlat=None, ref_lonlat=None):
+def quiver_row(index, ix, iy, rx, ry, in_lonlat=None, ref_lonlat=None, err=None):
     """One export record: the pick, its reference, and the error between them.
 
     dx/dy are In - Ref, matching the table's own Error columns, the CSV export
@@ -1152,9 +1215,10 @@ def quiver_row(index, ix, iy, rx, ry, in_lonlat=None, ref_lonlat=None):
     negate, or read the arrow as the offset of the image from the truth.
 
     bearing is the compass direction of (dx, dy): 0 north, 90 east, so it can
-    drive a rotated marker directly.
+    drive a rotated marker directly. err, when given, is the (dx, dy) to use --
+    ground east/north (see ERROR_FRAME) -- instead of the grid difference.
     """
-    dx, dy = ix - rx, iy - ry
+    dx, dy = err if err is not None else (ix - rx, iy - ry)
     row = {
         "row": int(index),
         "in_x": float(ix), "in_y": float(iy),
@@ -3898,13 +3962,38 @@ class QCDashboard(QMainWindow):
         self.canvas_right.refresh()
 
     # ── ERROR & STATS ─────────────────────────────────────────────────────────
-    def calculate_error(self, row):
-        """DX = In_X - Ref_X,  DY = In_Y - Ref_Y, in working-CRS metres.
+    def pick_error(self, ix, iy, rx, ry):
+        """(dx, dy) In - Ref for one pair of picks, in the ERROR_FRAME.
 
-        Whatever projected CRS the input raster carries is the working CRS --
-        UTM, Lambert Conformal Conic, anything -- so these are metres on that
-        grid. Both ends are read on the same grid, so the difference is sound
-        wherever the scene is.
+        "ground": true east/north metres on WGS84 from the two picks' lon/lat
+        (ground_offset), whatever UTM zone or grid the scene and the reference
+        are in. Falls back to the grid difference when either end cannot be
+        put in lon/lat.
+        """
+        if ERROR_FRAME == "ground":
+            a, b = self._to_lonlat(ix, iy), self._to_lonlat(rx, ry)
+            if a and b:
+                g = ground_offset(a, b)
+                if g is not None:
+                    return g
+        return (ix - rx, iy - ry)
+
+    def _ground_errors(self):
+        """pick_error for every fully marked row: what the statistics use."""
+        out = []
+        for r in range(self.table.rowCount()):
+            p, q = self._row_point(r, 0), self._row_point(r, 2)
+            if p is not None and q is not None:
+                out.append(self.pick_error(p.x(), p.y(), q.x(), q.y()))
+        return out
+
+    def calculate_error(self, row):
+        """The row's error columns: In - Ref, in the ERROR_FRAME.
+
+        Ground east/north metres by default (pick_error), so a scene whose
+        swath spans several UTM zones is measured the same everywhere in it.
+        A half-marked row keeps the plain grid difference; it is not a
+        measurement and the statistics skip it.
         """
         try:
             self.table.blockSignals(True)
@@ -3912,8 +4001,12 @@ class QCDashboard(QMainWindow):
             iy = float(self.table.item(row, 1).text())
             rx = float(self.table.item(row, 2).text())
             ry = float(self.table.item(row, 3).text())
-            self.table.setItem(row, 4, QTableWidgetItem(f"{ix - rx:.3f}"))
-            self.table.setItem(row, 5, QTableWidgetItem(f"{iy - ry:.3f}"))
+            if (ix or iy) and (rx or ry):
+                dx, dy = self.pick_error(ix, iy, rx, ry)
+            else:
+                dx, dy = ix - rx, iy - ry
+            self.table.setItem(row, 4, QTableWidgetItem(f"{dx:.3f}"))
+            self.table.setItem(row, 5, QTableWidgetItem(f"{dy:.3f}"))
         except Exception:
             pass
         finally:
@@ -3926,7 +4019,7 @@ class QCDashboard(QMainWindow):
         # coordinate, and an empty row added a perfect 0 -- and with rows now
         # started by marking, the row being measured is half-marked most of
         # the time.
-        errs = self._measured_errors()
+        errs = self._ground_errors()
         stats = accuracy_stats([e[0] for e in errs], [e[1] for e in errs])
         self.lbl_rmse_x.setText(f"RMSE X:  {stats['rmse_x']:.3f} m")
         self.lbl_rmse_y.setText(f"RMSE Y:  {stats['rmse_y']:.3f} m")
@@ -3995,7 +4088,8 @@ class QCDashboard(QMainWindow):
                 continue
             rows.append(quiver_row(r + 1, ix, iy, rx, ry,
                                    self._to_lonlat(ix, iy),
-                                   self._to_lonlat(rx, ry)))
+                                   self._to_lonlat(rx, ry),
+                                   err=self.pick_error(ix, iy, rx, ry)))
         return rows
 
     def _to_lonlat(self, x, y):
@@ -4296,7 +4390,7 @@ class QCDashboard(QMainWindow):
         if not EXPORT_STATS:
             return None
         out = stats_path_for(export_path)
-        summary = error_summary(self._measured_errors())
+        summary = error_summary(self._ground_errors())
         try:
             crs = self.proj_crs.authid() or self.proj_crs.description()
         except Exception:
@@ -4307,7 +4401,11 @@ class QCDashboard(QMainWindow):
                 w.writerow(["Statistic", "Value", "Unit", "Note"])
                 for row in stats_rows(summary):
                     w.writerow(row)
-                w.writerow(["working_crs", crs, "", "dx/dy are metres on this grid"])
+                w.writerow(["error_frame", ERROR_FRAME, "",
+                            "ground: dx east, dy north, metres on WGS84"
+                            if ERROR_FRAME == "ground" else
+                            "grid: metres on the working CRS"])
+                w.writerow(["working_crs", crs, "", "the grid the picks are stored in"])
                 w.writerow(["source", os.path.basename(export_path), "", ""])
         except OSError as e:
             QMessageBox.warning(self, "Statistics",

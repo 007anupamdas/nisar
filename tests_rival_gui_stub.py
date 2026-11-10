@@ -1007,7 +1007,11 @@ win.table = _Rows([
     ["325020.000", "1900000.000", "325000.000", "1900000.000"],   # complete
     [None, None, None, None],                                     # empty row
 ])
+# this block checks which rows export; it fakes one lon/lat for every point,
+# so it runs on the grid frame (ground errors are tested in section 35)
+R.ERROR_FRAME = "grid"
 rows = win.export_rows()
+R.ERROR_FRAME = "ground"
 assert [r["row"] for r in rows] == [1, 4], [r["row"] for r in rows]
 print("\nexport skips half-marked and empty rows, keeping table numbering:",
       [r["row"] for r in rows])
@@ -1872,6 +1876,7 @@ rows23 = [["1003.000", "1004.000", "1000.000", "1000.000", "3.000", "4.000"],
            "325010.000", "1900007.000"],
           ["0.000"] * 6]                                   # empty
 win.table = _SelTable(rows23, current=2)
+R.ERROR_FRAME = "grid"          # grid numbers; the ground frame is section 35
 win.update_stats()
 ce90 = R.accuracy_stats([3.0, 5.0], [4.0, 0.0])["ce90"]
 assert win.lbl_ce90.setText.call_args[0][0].startswith(f"CE90:    {ce90:.3f}"), \
@@ -1901,6 +1906,7 @@ assert os.path.exists(os.path.join(out_dir, "quiver_stats.csv"))
 src = R.QCDashboard.save_shapefile.__code__.co_names
 assert "write_stats" in src, "Export SHP does not write the statistics file"
 print("Export SHP writes quiver_stats.csv beside the shapefile")
+R.ERROR_FRAME = "ground"
 shutil.rmtree(out_dir, ignore_errors=True)
 
 # the reference folder is remembered and loaded without asking
@@ -2478,6 +2484,60 @@ assert win._export_targets(("csv",), "x")["csv"] == os.path.join(
     out34, "csv", os.path.basename(d34) + "_rival.csv")
 print("Load Input Folder still names exports after the folder")
 shutil.rmtree(d34, ignore_errors=True); shutil.rmtree(out34, ignore_errors=True)
+
+# ── 35. errors measured on the ground, not on one UTM grid ─────────────────
+# Reported from use: a 500 km swath spans 2-3 UTM zones, and a true 300 m
+# error read as 2-3 km at the scene edges. Not the zone hop -- reprojection is
+# exact -- but one grid's axes turned ~1.6 deg from north out there, which
+# moves part of a 70 km north-south error into the east-west column.
+import math
+from pyproj import Transformer as _T, Geod as _G
+_geod = _G(ellps="WGS84")
+_to_wgs = _T.from_crs("EPSG:32644", "EPSG:4326", always_xy=True)
+_to_utm = _T.from_crs("EPSG:4326", "EPSG:32644", always_xy=True)
+for name in ("pick_error", "_ground_errors", "calculate_error", "update_stats",
+             "_row_point", "export_rows"):
+    setattr(win, name, getattr(R.QCDashboard, name).__get__(win))
+win._to_lonlat = lambda x, y: _to_wgs.transform(x, y)
+win.refresh_gcp_overlay = MagicMock()
+for lbl in ("lbl_rmse_x", "lbl_rmse_y", "lbl_ce90"):
+    setattr(win, lbl, MagicMock())
+ref_ll = (86.5, 17.0)                                  # 580 km east of zone 44's CM
+in_ll = _geod.fwd(ref_ll[0], ref_ll[1], math.degrees(math.atan2(300, -70000)),
+                  math.hypot(300, -70000))[:2]
+(ix, iy), (rx, ry) = _to_utm.transform(*in_ll), _to_utm.transform(*ref_ll)
+assert abs((ix - rx) - 300) > 1500, "the fixture lost the grid's rotation"
+dx, dy = win.pick_error(ix, iy, rx, ry)
+assert abs(dx - 300) < 0.01 and abs(dy + 70000) < 0.01, (dx, dy)
+print(f"\na true 300 m E / 70 km S error at the swath edge reads {ix - rx:+.0f} m E "
+      f"on the zone-44 grid, and {dx:+.2f} m E / {dy:+.2f} m N on the ground")
+
+cells = [[f"{ix:.3f}", f"{iy:.3f}", f"{rx:.3f}", f"{ry:.3f}", "", ""]]
+class _T35:
+    def __init__(self): self.w = {}
+    def rowCount(self): return 1
+    def currentRow(self): return 0
+    def item(self, r, c):
+        v = self.w.get((r, c), cells[r][c]); return MagicMock(text=lambda v=v: v)
+    def setItem(self, r, c, it): self.w[(r, c)] = it.text()
+    def blockSignals(self, b): pass
+win.table = _T35()
+R.QTableWidgetItem = _Item
+win.calculate_error(0)
+assert abs(float(win.table.w[(0, 4)]) - 300) < 0.01, win.table.w
+assert abs(float(win.table.w[(0, 5)]) + 70000) < 0.01, win.table.w
+rec = win.export_rows()[0]
+assert abs(rec["dx"] - 300) < 0.01 and abs(rec["bearing"] - (math.degrees(
+    math.atan2(300, -70000)) % 360)) < 1e-6, rec
+assert abs(win._ground_errors()[0][0] - 300) < 0.01
+print("the table, the export (dx, dy, true bearing) and the statistics all use it")
+
+R.ERROR_FRAME = "grid"
+assert win.pick_error(ix, iy, rx, ry) == (ix - rx, iy - ry)
+R.ERROR_FRAME = "ground"
+win._to_lonlat = lambda x, y: None
+assert win.pick_error(ix, iy, rx, ry) == (ix - rx, iy - ry)
+print("ERROR_FRAME='grid' or no lon/lat falls back to the grid difference")
 
 for d in (d1, d2, d3, d4, d5, d6):
     shutil.rmtree(d, ignore_errors=True)

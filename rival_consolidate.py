@@ -59,6 +59,7 @@ PICK_COLUMNS = {
     "ix": ("In X", "In_X", "x1-map"), "iy": ("In Y", "In_Y", "y1-map"),
     "rx": ("Ref X", "Ref_X", "x2-map"), "ry": ("Ref Y", "Ref_Y", "y2-map"),
     "in_lon": ("In_Lon",), "in_lat": ("In_Lat",),
+    "ref_lon": ("Ref_Lon",), "ref_lat": ("Ref_Lat",),
 }
 
 OUT_COLUMNS = [
@@ -67,7 +68,7 @@ OUT_COLUMNS = [
     "centre_lat", "centre_lon", "n_points",
     "mean_dx", "mean_dy", "std_dx", "std_dy", "rmse_dx", "rmse_dy",
     "mean_radial", "rmse_radial", "max_radial", "ce90", "axis_ratio",
-    "ce90_circular", "gcp_mean_lat", "gcp_mean_lon", "results_csv", "band_meta",
+    "ce90_circular", "error_frame", "gcp_mean_lat", "gcp_mean_lon", "results_csv", "band_meta",
 ]
 
 
@@ -158,6 +159,92 @@ def _col(row, names):
     return None
 
 
+# Vincenty on WGS84, the same function as DPQED_rival.ground_offset (the tests
+# check they agree): errors as true east/north metres, in no map grid.
+_WGS84_A = 6378137.0
+_WGS84_F = 1 / 298.257223563
+
+
+def ground_offset(in_lonlat, ref_lonlat):
+    """(east, north) metres from the reference to the input pick, on WGS84.
+
+    Vincenty's inverse formula: the geodesic distance s and its azimuth a at
+    the reference, so east = s sin a, north = s cos a -- the error as a
+    surveyor on the ground at the reference would measure it, in no map grid.
+    Agrees with PROJ's geodesic (pyproj.Geod) to well under a millimetre at
+    these distances. None if the iteration does not converge (only for
+    near-antipodal points, never two picks of one feature).
+    """
+    lon1, lat1 = map(math.radians, ref_lonlat)
+    lon2, lat2 = map(math.radians, in_lonlat)
+    a, f = _WGS84_A, _WGS84_F
+    b = a * (1 - f)
+    L = lon2 - lon1
+    U1 = math.atan((1 - f) * math.tan(lat1))
+    U2 = math.atan((1 - f) * math.tan(lat2))
+    sU1, cU1, sU2, cU2 = math.sin(U1), math.cos(U1), math.sin(U2), math.cos(U2)
+    lam = L
+    for _ in range(200):
+        sl, cl = math.sin(lam), math.cos(lam)
+        ss = math.hypot(cU2 * sl, cU1 * sU2 - sU1 * cU2 * cl)
+        if ss == 0:
+            return (0.0, 0.0)
+        cs = sU1 * sU2 + cU1 * cU2 * cl
+        sigma = math.atan2(ss, cs)
+        sa = cU1 * cU2 * sl / ss
+        c2a = 1 - sa * sa
+        c2sm = cs - 2 * sU1 * sU2 / c2a if c2a else 0.0
+        C = f / 16 * c2a * (4 + f * (4 - 3 * c2a))
+        prev = lam
+        lam = L + (1 - C) * f * sa * (sigma + C * ss * (c2sm + C * cs * (-1 + 2 * c2sm * c2sm)))
+        if abs(lam - prev) < 1e-12:
+            break
+    else:
+        return None
+    u2 = c2a * (a * a - b * b) / (b * b)
+    A = 1 + u2 / 16384 * (4096 + u2 * (-768 + u2 * (320 - 175 * u2)))
+    B = u2 / 1024 * (256 + u2 * (-128 + u2 * (74 - 47 * u2)))
+    ds = B * ss * (c2sm + B / 4 * (cs * (-1 + 2 * c2sm * c2sm)
+                                   - B / 6 * c2sm * (-3 + 4 * ss * ss) * (-3 + 4 * c2sm * c2sm)))
+    dist = b * A * (sigma - ds)
+    az = math.atan2(cU2 * math.sin(lam), cU1 * sU2 - sU1 * cU2 * math.cos(lam))
+    return (dist * math.sin(az), dist * math.cos(az))
+
+
+
+def pick_errors(rows):
+    """(errors, input lon/lats, frame) for the fully marked picks.
+
+    A row with both ends in lon/lat (RIVAL wrote In_Lon..Ref_Lat from the CSV
+    lon/lat version on) is measured on the ground, as RIVAL now measures it:
+    true east/north metres, the same in every UTM zone a wide swath crosses.
+    A row without them -- older CSVs -- can only be differenced on its grid.
+    frame is "ground", "grid" or "mixed" for the file.
+    """
+    errs, lonlats, kinds = [], [], set()
+    for row in rows:
+        try:
+            ix, iy = float(_col(row, PICK_COLUMNS["ix"])), float(_col(row, PICK_COLUMNS["iy"]))
+            rx, ry = float(_col(row, PICK_COLUMNS["rx"])), float(_col(row, PICK_COLUMNS["ry"]))
+        except (TypeError, ValueError):
+            continue
+        if (ix == 0 and iy == 0) or (rx == 0 and ry == 0):
+            continue
+        lon, lat = _num(_col(row, PICK_COLUMNS["in_lon"])), _num(_col(row, PICK_COLUMNS["in_lat"]))
+        rlon, rlat = _num(_col(row, PICK_COLUMNS["ref_lon"])), _num(_col(row, PICK_COLUMNS["ref_lat"]))
+        g = None
+        if None not in (lon, lat, rlon, rlat):
+            g = ground_offset((lon, lat), (rlon, rlat))
+        if g is not None:
+            errs.append(g); kinds.add("ground")
+        else:
+            errs.append((ix - rx, iy - ry)); kinds.add("grid")
+        if lon is not None and lat is not None:
+            lonlats.append((lon, lat))
+    frame = "mixed" if len(kinds) > 1 else (kinds.pop() if kinds else "")
+    return errs, lonlats, frame
+
+
 def read_picks(rows):
     """Fully marked picks from CSV dict-rows: (errors [(dx,dy)], lonlats [(lon,lat)]).
 
@@ -244,7 +331,7 @@ def consolidate(results_folder, products_folder, out_csv, log=print):
     for pid in sorted(found):
         (pid, req, prodno), path = found[pid]
         with open(path, newline="", encoding="utf-8-sig") as f:
-            errs, lonlats = read_picks(csv.DictReader(f))
+            errs, lonlats, frame = pick_errors(csv.DictReader(f))
         st = error_summary(errs)
         meta_path = os.path.join(products_folder, pid, BAND_META_NAME)
         anc = {"sensor": None, "date": None, "session_id": None, "strip_id": None,
@@ -275,7 +362,7 @@ def consolidate(results_folder, products_folder, out_csv, log=print):
                 "rmse_dx": _fmt(st["rmse_x"]), "rmse_dy": _fmt(st["rmse_y"]),
                 "mean_radial": _fmt(st["mean_r"]), "rmse_radial": _fmt(st["rmse_r"]),
                 "max_radial": _fmt(st["max_r"]), "ce90": _fmt(st["ce90"]),
-                "axis_ratio": _fmt(st["axis_ratio"]),
+                "axis_ratio": _fmt(st["axis_ratio"]), "error_frame": frame,
                 "ce90_circular": "yes" if st["circular"] else "no",
             })
         if lonlats:

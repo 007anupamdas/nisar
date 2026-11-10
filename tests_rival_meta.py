@@ -774,6 +774,24 @@ check("Load Input Folder still names them after the folder",
       f("/out", "/data/scenes/G1A_ort.tif")["csv"], "/out/csv/scenes_rival.csv")
 check("no input, either way: 'rival'", f("/out", None, "file")["csv"], "/out/csv/rival.csv")
 
+# ── 26. errors as true east/north on the ground ──────────────────────────────
+print("\n-- ground east/north errors --")
+f = H["ground_offset"]
+# (in lon/lat, ref lon/lat, east, north), from PROJ's geodesic (pyproj.Geod)
+vectors = [
+    ((86.50285883468196, 16.367465862502733), (86.5, 17.0), 305.4342679178204, -69999.93364473985),
+    ((81.0021986141857, 30.00191362466756), (81.0, 30.0), 212.13203435596424, 212.13203435596427),
+    ((77.99224356694103, -8.02124151720587), (78.0, -8.0), -855.0503583141716, -2349.231551964771),
+]
+for i, (inn, ref, e, n) in enumerate(vectors, 1):
+    ge, gn = f(inn, ref)
+    check(f"case {i}: matches PROJ's geodesic to a millimetre",
+          abs(ge - e) < 1e-3 and abs(gn - n) < 1e-3, True)
+check("RIVAL ships measuring on the ground, not the grid", H.get("ERROR_FRAME"), "ground")
+check("a pick on its reference is zero", f((80.0, 17.0), (80.0, 17.0)), (0.0, 0.0))
+e, n = f((80.0, 17.001), (80.0, 17.0))
+check("due north is all north", (round(e, 6), n > 0), (0.0, True))
+
 print()
 if failures:
     print(f"{len(failures)} FAILURE(S)")

@@ -78,6 +78,19 @@ for k in ("mean_x", "mean_y", "std_x", "std_y", "rmse_x", "rmse_y", "ce90",
     check(f"{k} matches RIVAL's own statistics", abs(mine[k] - theirs[k]) < 1e-12
           if isinstance(mine[k], float) else mine[k] == theirs[k], True)
 
+print("\n-- errors on the ground when both ends have lon/lat --")
+both = [{"In_X": "1", "In_Y": "1", "Ref_X": "2", "Ref_Y": "2",
+         "In_Lon": "86.50285883468196", "In_Lat": "16.367465862502733",
+         "Ref_Lon": "86.5", "Ref_Lat": "17.0"}]
+e, _, frame = C.pick_errors(both)
+check("east/north from lon/lat, not the grid columns",
+      (round(e[0][0], 2), round(e[0][1], 2), frame), (305.43, -69999.93, "ground"))
+check("same function as RIVAL's", C.ground_offset((86.5029, 16.3675), (86.5, 17.0)),
+      H["ground_offset"]((86.5029, 16.3675), (86.5, 17.0)))
+check("an old CSV without lon/lat is differenced on its grid",
+      C.pick_errors(old)[2], "grid")
+check("a file with both kinds says so", C.pick_errors(old + both)[2], "mixed")
+
 print("\n-- end to end --")
 res, prod = tempfile.mkdtemp(), tempfile.mkdtemp()
 os.makedirs(os.path.join(res, "csv"))
