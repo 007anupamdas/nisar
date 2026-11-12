@@ -104,6 +104,8 @@ warned = []
 qw.QMessageBox.warning  = lambda *a, **k: warned.append(a[-1])
 qw.QMessageBox.critical = lambda *a, **k: warned.append("CRITICAL: " + a[-1])
 win = R.win
+# QCheckBox() is one shared mock -- cb_auto_mark would follow cb_sync; give it its own
+win.cb_auto_mark = MagicMock(isChecked=MagicMock(return_value=True))   # default: on
 win.input_tif_layer = None
 
 
@@ -2680,5 +2682,32 @@ for inside, data, want in ((True, True, True), (True, None, True),
     assert holds((0, 0)) is want, (inside, data)
 R.QgsGeometry, R.ring_wkt = saved36
 print("panning keeps the tile on screen while its own data is under the centre")
+
+# ── 37. Auto-mark off: marking one canvas leaves the other alone ───────────
+import types
+calls = []
+a = types.SimpleNamespace(_syncing=False,
+                          cb_auto_mark=MagicMock(isChecked=lambda: False))
+a._auto_mark_on = R.QCDashboard._auto_mark_on.__get__(a)
+a.predicted_reference_point = lambda pt: calls.append("ref") or (pt, None, 0)
+a.predicted_input_point = lambda pt: calls.append("in") or (pt, None, 0)
+a.table = MagicMock(currentRow=lambda: 0)
+a._row_point = lambda r, c: None
+a.show_reference_for = lambda p: calls.append("show") or True
+a.show_ref_at = lambda *x: calls.append("mark")
+a._centre_input_on = lambda p: calls.append("centre")
+a.draw_marker = lambda *x: calls.append("mark")
+R.QCDashboard.follow_input_point(a, (1, 2))
+R.QCDashboard.follow_reference_point(a, (1, 2))
+assert calls == [], calls
+a.cb_auto_mark = MagicMock(isChecked=lambda: True)
+R.QCDashboard.follow_input_point(a, (1, 2))
+R.QCDashboard.follow_reference_point(a, (1, 2))
+assert "mark" in calls and "centre" in calls, calls
+store = {}
+a._settings = lambda: types.SimpleNamespace(setValue=store.__setitem__)
+R.QCDashboard._save_auto_mark(a, False)
+assert store == {"auto_mark": "false"}
+print("Auto-mark off: no jump and no provisional cross on the other canvas; remembered")
 
 print("\nstubbed integration OK")

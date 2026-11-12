@@ -336,6 +336,7 @@ CANVAS_FOCUS_ON_HOVER = True
 # It also governs 'Sync Maps': panning the input shows the reference where the
 # feature should be, not at the same coordinates. Off, both are exact mirrors.
 PREDICT_REF_MARK = True
+AUTO_MARK_KEY = "auto_mark"      # Auto-mark checkbox, remembered
 PREDICT_FROM     = "mean"      # "mean" | "median" | "last"
 
 REF_PROBE_PIXEL = True
@@ -2178,6 +2179,21 @@ class QCDashboard(QMainWindow):
             "Asks first: it cannot be undone, so export before if needed.")
         self.cb_sync      = QCheckBox("Sync Maps")
         self.cb_sync.setChecked(True)
+        # Marking on one canvas jumps the other to the predicted spot and puts
+        # a provisional cross there. Good for a well-behaved scene; under heavy
+        # distortion the prediction misleads, so it can be switched off.
+        self.cb_auto_mark = QCheckBox("Auto-mark")
+        self.cb_auto_mark.setToolTip(
+            "On: marking a point on one canvas moves the other to where the\n"
+            "errors so far predict it, with a provisional cross.\n"
+            "Off: the other canvas stays put -- find and mark it yourself\n"
+            "(for highly distorted scenes). Remembered between sessions.")
+        try:
+            on = str(self._settings().value(AUTO_MARK_KEY, "true")).lower() != "false"
+        except Exception:
+            on = True
+        self.cb_auto_mark.setChecked(on)
+        self.cb_auto_mark.toggled.connect(self._save_auto_mark)
         # One exclusive row of map tools, applied to both canvases at once.
         self.tool_buttons = {}
         self.tool_group   = QButtonGroup(self)
@@ -2234,7 +2250,7 @@ class QCDashboard(QMainWindow):
                    self.btn_load, self.btn_add, self.btn_export,
                    self.btn_del, self.btn_clear, self.btn_out_folder]
                   + [self.tool_buttons[m] for m in MAP_TOOLS]
-                  + [self.cb_sync]):
+                  + [self.cb_sync, self.cb_auto_mark]):
             btn_layout.addWidget(w)
 
         main_layout = QVBoxLayout()
@@ -3618,6 +3634,20 @@ class QCDashboard(QMainWindow):
         self._load_ref_layer(best, set_extent=False)
         return True
 
+    def _save_auto_mark(self, on):
+        try:
+            self._settings().setValue(AUTO_MARK_KEY, "true" if on else "false")
+        except Exception:
+            pass
+        print(f"[AUTO-MARK] {'on' if on else 'off'}")
+
+    def _auto_mark_on(self):
+        cb = getattr(self, "cb_auto_mark", None)
+        try:
+            return cb is None or bool(cb.isChecked())
+        except Exception:
+            return True
+
     def follow_input_point(self, pt):
         """Point the reference canvas at a position marked on the input canvas.
 
@@ -3626,8 +3656,11 @@ class QCDashboard(QMainWindow):
         canvas on the same position and marks it. The marker is red -- it mirrors
         the input, and is not a reference pick until clicked on the right, which
         redraws it green.
+
+        With Auto-mark off nothing happens on the reference: the operator finds
+        and marks the feature there.
         """
-        if self._syncing:
+        if self._syncing or not self._auto_mark_on():
             return
         self._syncing = True
         try:
@@ -3665,13 +3698,14 @@ class QCDashboard(QMainWindow):
         In = Ref + (dx, dy), and a provisional cross is drawn there in the
         reference's colour, because it mirrors the reference pick; clicking the
         feature on the left records it and redraws it magenta. Nothing is
-        written to the table here.
+        written to the table here. With Auto-mark off nothing happens on the
+        input.
 
         The input moves under the _syncing guard. Without it, 'Sync Maps' would
         answer the move by re-centring the reference on the input's new centre
         -- pulling it off the pick that was just made by exactly the offset.
         """
-        if self._syncing:
+        if self._syncing or not self._auto_mark_on():
             return
         self._syncing = True
         try:
