@@ -2219,6 +2219,7 @@ print("\nClear Input unloads the raster, footprint and path, re-filters the "
 
 # ── 30. display bands: R/G/B drop-downs, remembered per product type ───────
 win._ask_bands = R.QCDashboard._ask_bands.__get__(win)
+win._ask_band_mode = lambda *a: "manual"
 store.clear()
 R.raster_band_names = lambda p: [str(i) for i in range(1, 156)]   # 155 bands
 R.QApplication.keyboardModifiers = MagicMock(return_value=0)
@@ -2450,11 +2451,40 @@ R.raster_band_names = lambda p: [str(i) for i in range(1, 31)]
 store.clear()
 R.QApplication.keyboardModifiers = MagicMock(return_value=0)
 asked_n.clear()
-_pre.clear()
-win._ask_bands(src33)
 hi = sorted(best, reverse=True)
-assert asked_n and _pre[-1] == [hi[0] - 1, hi[1], hi[2]], (_pre, hi)
-print("with ALWAYS_ASK_BANDS the dialog opens, preselected with the automatic pick")
+win._ask_band_mode = lambda *a: "auto"
+assert win._ask_bands(src33) == hi and not asked_n
+print("popup -> Automatic: the band-quality pick, no R/G/B dialog")
+win._ask_band_mode = lambda *a: None
+assert win._ask_bands(src33) is None
+print("popup -> Cancel: nothing is built")
+win._ask_band_mode = lambda *a: "manual"
+win._ask_bands(src33)
+assert asked_n, "Manual did not open the R/G/B dialog"
+print("popup -> Manual: the R/G/B dialog")
+# the popup itself
+class _Box:
+    AcceptRole = ActionRole = 0
+    click = "Automatic"
+    def __init__(self, *a): self.btns = {}
+    def setWindowTitle(self, t): pass
+    def setText(self, t): _Box.text = t
+    def addButton(self, b, role=None):
+        k = b if isinstance(b, str) else "Cancel"; self.btns[k] = object(); return self.btns[k]
+    def setDefaultButton(self, b): pass
+    def exec_(self): return 0
+    def clickedButton(self): return self.btns.get(_Box.click)
+_Box.Cancel = "Cancel"
+_mb = R.QMessageBox
+R.QMessageBox = _Box
+mode = R.QCDashboard._ask_band_mode.__get__(win)
+assert mode("/s/x_GTD_A_1.tif", 30, [2, 4, 5]) == "auto" and "2-4-5" in _Box.text
+_Box.click = "Manual..."
+assert mode("/s/x_GTD_A_1.tif", 30, None) == "manual"
+_Box.click = "Cancel"
+assert mode("/s/x_GTD_A_1.tif", 30, None) is None
+R.QMessageBox = _mb
+print("the popup offers Automatic / Manual... / Cancel and names the last manual choice")
 store.clear()
 asked_n.clear()
 R.ALWAYS_ASK_BANDS = False
@@ -2579,4 +2609,39 @@ print("ERROR_FRAME='grid' or no lon/lat falls back to the grid difference")
 
 for d in (d1, d2, d3, d4, d5, d6):
     shutil.rmtree(d, ignore_errors=True)
+# ── 36. Delete Row leaves the views alone; panning keeps a tile to its edge ──
+import types
+class _Tbl:
+    def __init__(self): self.rows, self.blocked, self.log = [0, 1, 2], False, []
+    def selectedIndexes(self): return [MagicMock(row=lambda: 1)]
+    def blockSignals(self, b): self.blocked = b
+    def removeRow(self, r): self.log.append(("rm", r, self.blocked)); self.rows.pop(r)
+    def clearSelection(self): self.log.append(("clear", self.blocked))
+d = types.SimpleNamespace(table=_Tbl(), update_stats=MagicMock())
+R.QCDashboard.delete_row(d)
+assert d.table.rows == [0, 2] and d.table.log == [("rm", 1, True), ("clear", True)]
+assert d.table.blocked is False
+print("Delete Row removes and clears the selection with signals blocked: no jump")
+
+class _G:
+    def __init__(self, inside): self.inside = inside
+    def contains(self, t): return self.inside
+    def area(self): return 1.0
+here = "/refs/A.tif"
+h = types.SimpleNamespace(
+    current_ref_layer=MagicMock(isValid=lambda: True, source=lambda: here),
+    ref_footprints={here: {"ring_proj": "ring"}})
+saved36 = (R.QgsGeometry, R.ring_wkt)
+R.ring_wkt = lambda ring: ring
+h._tiles_containing = R.QCDashboard._tiles_containing.__get__(h)
+holds = R.QCDashboard._current_ref_holds.__get__(h)
+for inside, data, want in ((True, True, True), (True, None, True),
+                           (True, False, False), (False, True, False)):
+    R.QgsGeometry = type("G", (), {"fromWkt": staticmethod(lambda w, i=inside: _G(i)),
+                                   "fromPointXY": staticmethod(lambda p: p)})
+    h._has_data_at = lambda path, pt, v=data: v
+    assert holds((0, 0)) is want, (inside, data)
+R.QgsGeometry, R.ring_wkt = saved36
+print("panning keeps the tile on screen while its own data is under the centre")
+
 print("\nstubbed integration OK")

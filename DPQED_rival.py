@@ -3539,6 +3539,8 @@ class QCDashboard(QMainWindow):
         self._syncing = True
         try:
             centre = self._from_ref_canvas(self.canvas_right.center())
+            if self._current_ref_holds(centre):
+                return           # still on this tile's data: pan it to its edge
             best = self.reference_for_point(centre)
             if best:
                 self.show_reference_for(centre)
@@ -3546,6 +3548,23 @@ class QCDashboard(QMainWindow):
             print(f"[REF PAN] {e}")
         finally:
             self._syncing = False
+
+    def _current_ref_holds(self, pt):
+        """Does the tile on screen still have data under a working-CRS point?
+
+        Panning keeps the tile until its own data runs out under the view
+        centre. Tiles overlap, and swapping to the 'best' (smallest) one as
+        soon as the centre entered a neighbour made the edge of a tile
+        unreachable: the neighbour took over before the edge came into view.
+        """
+        lyr = self.current_ref_layer
+        if lyr is None or not lyr.isValid():
+            return False
+        path = lyr.source()
+        inside = self._tiles_containing(QgsGeometry.fromPointXY(pt), [path])
+        if not inside:
+            return False
+        return self._has_data_at(path, pt) is not False
 
     def show_reference_for(self, pt):
         """Bring up the reference tile covering a point. True if one is showing."""
@@ -4529,10 +4548,20 @@ class QCDashboard(QMainWindow):
         self.update_stats()
 
     def delete_row(self):
-        for row in sorted(
-            {i.row() for i in self.table.selectedIndexes()}, reverse=True
-        ):
-            self.table.removeRow(row)
+        """Remove the selected rows; the views stay where they are.
+
+        Removing a row moves the selection to a neighbouring one, which used to
+        fire sync_view_to_row and jump both canvases to that row's point. The
+        selection is cleared with signals blocked instead.
+        """
+        rows = sorted({i.row() for i in self.table.selectedIndexes()}, reverse=True)
+        try:
+            self.table.blockSignals(True)
+            for row in rows:
+                self.table.removeRow(row)
+            self.table.clearSelection()
+        finally:
+            self.table.blockSignals(False)
         self.update_stats()
 
     def clear_rows(self):
@@ -4617,6 +4646,32 @@ class QCDashboard(QMainWindow):
             return
         self.load_input_path(cog, source=src, naming=naming)
 
+    def _ask_band_mode(self, src, n, saved):
+        """'auto' or 'manual' for this COG, or None if cancelled.
+
+        Automatic scores every band (sharpness, noise, striping) and takes the
+        best three -- it cannot see misregistration between bands. Manual opens
+        the Red / Green / Blue drop-downs, preselected with the last hand choice
+        for this band count.
+        """
+        box = QMessageBox(self)
+        box.setWindowTitle("COG bands")
+        last = (f"\nLast manual choice for {n}-band products: "
+                f"{'-'.join(map(str, saved))}" if saved else "")
+        box.setText(f"{os.path.basename(src)} has {n} bands.\n"
+                    f"Which bands go into the COG?{last}")
+        b_auto = box.addButton("Automatic", QMessageBox.AcceptRole)
+        b_man = box.addButton("Manual...", QMessageBox.ActionRole)
+        box.addButton(QMessageBox.Cancel)
+        box.setDefaultButton(b_man)
+        box.exec_()
+        hit = box.clickedButton()
+        if hit is b_auto:
+            return "auto"
+        if hit is b_man:
+            return "manual"
+        return None
+
     def _ask_bands(self, src):
         """Red / Green / Blue band for the COG, as 1-based bands, or None.
 
@@ -4649,6 +4704,19 @@ class QCDashboard(QMainWindow):
         except Exception:
             pass
         if ALWAYS_ASK_BANDS:
+            mode = self._ask_band_mode(src, n, saved)
+            if mode is None:
+                return None
+            if mode == "auto":
+                auto = None
+                if AUTO_PICK_BANDS and n > 3:
+                    try:
+                        auto = auto_rgb(src)
+                    except Exception as e:
+                        print(f"[COG] automatic band pick failed: {e}")
+                auto = auto or default_rgb(n)
+                print(f"[COG] bands {auto} picked automatically from {n}")
+                return auto
             shift = True
         auto = None
         if AUTO_PICK_BANDS and n > 3 and not (ALWAYS_ASK_BANDS and saved) \
@@ -4666,7 +4734,7 @@ class QCDashboard(QMainWindow):
                   f"(Shift+Load Input Folder to choose again)")
             return saved
 
-        default = (saved or auto) if ALWAYS_ASK_BANDS else (auto or saved)
+        default = saved if ALWAYS_ASK_BANDS else (auto or saved)
         default = default or default_rgb(n)
         dlg = QDialog(self)
         dlg.setWindowTitle(f"Display bands -- {os.path.basename(src)} ({n} bands)")
