@@ -507,8 +507,15 @@ matches are parallel; random matches give about 0 %.
   `[GPU n]` in the log. A job with one detector runs on the first GPU.
 - **Two runs at once:** open two windows, one per GPU (each window picks
   its GPU and has its own queue), as before.
-- **The other tools** (cloud test, cloud sweep, benchmark, GPU service)
-  take one GPU; with *all GPUs* they use the first.
+- **Cloud sweep and benchmark over both GPUs:** with *all GPUs* (or
+  `--device cuda:0,1`) the sweep deals its images round the GPUs and the
+  benchmark its job folders, one worker per GPU. The workers write
+  `CLOUD_SWEEP_gpu<n>.csv` into one `<time>_sweep` folder, or
+  `BENCH_JOBS_gpu<n>.csv` and the like, and the parent merges them into
+  the usual files and summaries. A sweep of one image, or a benchmark
+  whose jobs all land in one share, gains nothing from it.
+- **The cloud test and the GPU service** take one GPU; with *all GPUs*
+  they use the first.
 
 ## Clouds (OmniCloudMask)
 

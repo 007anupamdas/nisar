@@ -2755,6 +2755,7 @@ def test_bench(tmp):
     import rasterio
     from rasterio.transform import from_origin
     from pyproj import Transformer
+    import glob
     import automatch_bench as B
     rng = np.random.default_rng(11)
     H, W = 600, 800
@@ -2818,6 +2819,17 @@ def test_bench(tmp):
     jobs = pd.read_csv(os.path.join(parent, 'BENCH_JOBS.csv'))
     dets = pd.read_csv(os.path.join(parent, 'BENCH_DETECTORS.csv'))
     summ = pd.read_csv(os.path.join(parent, 'BENCH_SUMMARY.csv'))
+    one = (jobs.copy(), dets.copy(), summ.copy())
+    r = subprocess.run([sys.executable, os.path.join(HERE, 'automatch_bench.py'), parent, '--top', '3',
+                        '--device', 'cuda:0,1'], capture_output=True, text=True)
+    jobs2 = pd.read_csv(os.path.join(parent, 'BENCH_JOBS.csv'))
+    summ2 = pd.read_csv(os.path.join(parent, 'BENCH_SUMMARY.csv'))
+    check('bench: over two GPUs the jobs are dealt round two workers and the merged tables equal the one-GPU run',
+          (r.returncode, '[GPU 0]' in r.stdout and '[GPU 1]' in r.stdout,
+           sorted(glob.glob(os.path.join(parent, 'BENCH_JOBS_gpu*.csv'))) != [],
+           sorted(jobs2['job'].astype(str)) == sorted(one[0]['job'].astype(str)),
+           len(summ2) == len(one[2]) and set(summ2['detector']) == set(one[2]['detector'])),
+          (0, True, True, True, True))
     j = jobs.iloc[0]
     check('bench: the job row: sensor, band, error from its truth, clouds, best detector',
           (rc, j['sensor'], j['band'], abs(j['error_km'] - 64.3) < 1.5, j['cloud_pct'] > 15, j['best_detector']),
@@ -3477,6 +3489,18 @@ def test_cloud_phys(tmp):
           (6, {'ir'}, [4.0, 8.0, 12.0], True, 6, 1, True))
     text = CS.format_summary(res['summary'])
     check('phys: the sweep summary names the test settings', 'dt 4' in text or 'dt 8' in text, True)
+    r = subprocess.run([sys.executable, os.path.join(HERE, 'automatch_cloudsweep.py'), img, cold, '--out',
+                        os.path.join(tmp, 'phys_sweep2'), '--reference', ref, ref, '--ir-dt', '4, 8', '--ir-split', '1',
+                        '--blob-km2', '0', '--write-top', '0', '--images', 'none', '--device', 'cuda:0,1'],
+                       capture_output=True, text=True)
+    folders = glob.glob(os.path.join(tmp, 'phys_sweep2', '*_sweep*'))
+    d2 = pd.read_csv(os.path.join(folders[0], 'CLOUD_SWEEP.csv')) if folders else pd.DataFrame()
+    check('phys: the sweep over two GPUs deals the images round two workers into one sweep folder; merged CSV and '
+          'summary', (r.returncode, len(folders), '[GPU 1]' in r.stdout, len(d2),
+                      sorted(os.path.basename(i) for i in d2['image'].unique()) if len(d2) else [],
+                      os.path.exists(os.path.join(folders[0], 'CLOUD_SWEEP_SUMMARY.csv')) if folders else False,
+                      len(glob.glob(os.path.join(folders[0], 'CLOUD_SWEEP_gpu*.csv'))) if folders else 0),
+          (0, 1, True, 4, ['G1A_ML_G_MOUNT.tif', 'G1A_ML_G_PHYS.tif'], True, 2))
     with contextlib.redirect_stdout(io.StringIO()):
         res2 = CS.run([hs], os.path.join(tmp, 'phys_sweep_hs'), [], '', swir_k='3, 5', swir_bright='2-4:2',
                       blob_km2=[1], write_top=0)

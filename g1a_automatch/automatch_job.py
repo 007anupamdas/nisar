@@ -130,6 +130,47 @@ def shard_detectors(detectors: List[str], n: int) -> List[List[str]]:
     return [detectors[i::n] for i in range(n)]
 
 
+def fan_out(script: str, argv: List[str], gpus: List[int], extra=None) -> int:
+    """The same command line once per GPU as a worker process (--device
+    cuda:<g> --shard <i>/<n>, plus extra(i, g) arguments), their output
+    relayed with a [GPU g] prefix; the worst exit code."""
+    import threading
+    procs = []
+    for i, g in enumerate(gpus):
+        env = dict(os.environ)
+        for k in ('CUDA_VISIBLE_DEVICES', 'AUTOMATCH_GPU'):
+            env.pop(k, None)
+        cmd = [sys.executable, script] + list(argv) + ['--device', f'cuda:{g}', '--shard', f'{i}/{len(gpus)}']
+        cmd += list(extra(i, g) if extra else [])
+        procs.append((g, subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env,
+                                          bufsize=1, encoding='utf-8', errors='replace')))
+
+    def relay(g, p):
+        for line in p.stdout:
+            line = line.rstrip('\n')
+            if line.startswith(PROGRESS_PREFIX):
+                try:
+                    ev = json.loads(line[len(PROGRESS_PREFIX):])
+                    ev['gpu'] = g
+                    emit(ev)
+                except Exception:
+                    pass
+            else:
+                print(f'[GPU {g}] {line}', flush=True)
+    ts = [threading.Thread(target=relay, args=(g, p), daemon=True) for g, p in procs]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    return max([p.wait() for _, p in procs] or [0])
+
+
+def parse_shard(text) -> Optional[Tuple[int, int]]:
+    """'i/n' -> (i, n), else None."""
+    m = re.fullmatch(r'\s*(\d+)\s*/\s*(\d+)\s*', str(text or ''))
+    return (int(m.group(1)), int(m.group(2))) if m and int(m.group(2)) > 1 else None
+
+
 def run_sharded(job: Dict, gpus: List[int], out_root: str) -> List[Dict]:
     """One worker process per GPU, each with its share of the detectors and
     the device pinned (cloud mask, auto bands and preflight already done

@@ -70,6 +70,7 @@ Writes into <folder>/<YYYYmmdd_HHMMSS>_sweep/:
 """
 from __future__ import annotations
 
+import argparse
 import itertools
 import json
 import os
@@ -551,7 +552,7 @@ def run(images: List[str], out_dir: str, references: Optional[List[str]] = None,
         vis_clear_factor: float = 1.3, unit: str = 'W/cm2/sr/um', vis_clear_paths=(),
         tiraux_opts: Optional[Dict] = None, tiraux_thresholds='0.3-0.7:0.2', tiraux_norm_hi=None,
         csmask_opts: Optional[Dict] = None, spectf_opts: Optional[Dict] = None, spectf_thresholds='0.3-0.7:0.1',
-        spectf_vnir=None, sensor_methods=None) -> Dict:
+        spectf_vnir=None, sensor_methods=None, shard: Optional[Tuple[int, int]] = None, into: str = '') -> Dict:
     """The sweep over the images into <out_dir>/<time>_sweep/; returns
     {'folder', 'rows', 'summary'}. Each image by its cloud method
     (automatch_cloud.method_for: 'auto' by sensor): OmniCloudMask images over
@@ -567,12 +568,19 @@ def run(images: List[str], out_dir: str, references: Optional[List[str]] = None,
     ukis-csmask (MV / HV) and SpecTf (HS + HV, spectf_thresholds) to
     'compare'."""
     stamp = C.run_stamp()
-    folder = os.path.join(out_dir, f'{stamp}_sweep')
-    k = 1
-    while os.path.exists(folder):
-        k += 1
-        folder = os.path.join(out_dir, f'{stamp}_sweep_{k}')
-    os.makedirs(folder)
+    if into:                                   # a GPU worker: the parent's sweep folder, its share of the images
+        folder = into
+        stamp = re.sub(r'_sweep(_\d+)?$', '', os.path.basename(folder)) or stamp
+        os.makedirs(folder, exist_ok=True)
+    else:
+        folder = os.path.join(out_dir, f'{stamp}_sweep')
+        k = 1
+        while os.path.exists(folder):
+            k += 1
+            folder = os.path.join(out_dir, f'{stamp}_sweep_{k}')
+        os.makedirs(folder)
+    mine = (lambda i: shard is None or i % shard[1] == shard[0])
+    part = f'_gpu{shard[0]}' if shard else ''
     confs, brights = parse_range(conf), parse_range(bright)
     blobs, shadows = parse_range(blob_km2), parse_range(shadow_km)
     dts, splits = parse_range(ir_dt), parse_range(ir_split)
@@ -611,9 +619,18 @@ def run(images: List[str], out_dir: str, references: Optional[List[str]] = None,
                             'swir_k': ', '.join(f'{x:g}' for x in ks),
                             'swir_bright_sd': ', '.join(f'{x:g}' for x in sbright), 'radiance_scale': scale},
                    stamp=stamp)
-    os.rename(os.path.join(folder, f'CLOUD_PARAMS_{stamp}.txt'), os.path.join(folder, f'CLOUD_SWEEP_PARAMS_{stamp}.txt'))
+    if not into:
+        os.rename(os.path.join(folder, f'CLOUD_PARAMS_{stamp}.txt'),
+                  os.path.join(folder, f'CLOUD_SWEEP_PARAMS_{stamp}.txt'))
+    else:
+        try:
+            os.remove(os.path.join(folder, f'CLOUD_PARAMS_{stamp}.txt'))
+        except OSError:
+            pass
     rows = []
     for i, img in enumerate(images):
+        if not mine(i):
+            continue
         for m in meths[i]:
             if m == 'ocm':
                 continue
@@ -627,7 +644,7 @@ def run(images: List[str], out_dir: str, references: Optional[List[str]] = None,
                                refs[i] if refs else '', scale, cp, ir_cold, max_side, pngs, unit=unit,
                                clear_factor=vis_clear_factor, shadow_km=sorted(shadows)[len(shadows) // 2],
                                tiraux_opts=tiraux_opts, device=device, model_opts=mopts)
-            pd.DataFrame(rows).to_csv(os.path.join(folder, 'CLOUD_SWEEP.csv'), index=False)
+            pd.DataFrame(rows).to_csv(os.path.join(folder, f'CLOUD_SWEEP{part}.csv'), index=False)
         if 'ocm' not in meths[i]:
             continue
         sets = band_sets(img, sensor or _sensor(img), spec, crisp)
@@ -635,9 +652,12 @@ def run(images: List[str], out_dir: str, references: Optional[List[str]] = None,
         print(f'[Sweep] {os.path.basename(img)}: {len(sets)} band set(s) x {n} combination(s)', flush=True)
         rows += sweep_image(img, folder, sensor, sets, confs, brights, blobs, shadows, classes, model_dir, device,
                             refs[i] if refs else '', predictor, max_side, images=pngs, sheets=sheets)
-        pd.DataFrame(rows).to_csv(os.path.join(folder, 'CLOUD_SWEEP.csv'), index=False)    # as it goes
+        pd.DataFrame(rows).to_csv(os.path.join(folder, f'CLOUD_SWEEP{part}.csv'), index=False)    # as it goes
     df = pd.DataFrame(rows)
-    df.to_csv(os.path.join(folder, 'CLOUD_SWEEP.csv'), index=False)
+    df.to_csv(os.path.join(folder, f'CLOUD_SWEEP{part}.csv'), index=False)
+    if shard:                                  # the parent summarises once every worker is done
+        print(f'[Sweep] GPU share {shard[0] + 1}/{shard[1]}: {len(df)} combination(s) in {folder}', flush=True)
+        return {'folder': folder, 'rows': df, 'summary': pd.DataFrame()}
     s = summarize(df)
     s.to_csv(os.path.join(folder, 'CLOUD_SWEEP_SUMMARY.csv'), index=False)
     if refs and write_top and 'ref_f1' in df.columns and df['ref_f1'].notna().any():
@@ -693,6 +713,28 @@ def run(images: List[str], out_dir: str, references: Optional[List[str]] = None,
     return {'folder': folder, 'rows': df, 'summary': s}
 
 
+def finish_sharded(folder: str, references: Optional[List[str]] = None, write_top: int = 0) -> Dict:
+    """After the GPU workers: their CLOUD_SWEEP_gpu<n>.csv merged into
+    CLOUD_SWEEP.csv and summarised (the best at full size is each worker's own
+    top_<k> folders already)."""
+    import glob
+    parts = sorted(glob.glob(os.path.join(folder, 'CLOUD_SWEEP_gpu*.csv')))
+    frames = []
+    for p in parts:
+        try:
+            frames.append(pd.read_csv(p))
+        except pd.errors.EmptyDataError:
+            continue
+    df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    df.to_csv(os.path.join(folder, 'CLOUD_SWEEP.csv'), index=False)
+    s = summarize(df)
+    s.to_csv(os.path.join(folder, 'CLOUD_SWEEP_SUMMARY.csv'), index=False)
+    print(format_summary(s))
+    print(f'[Sweep] {len(df)} combination(s) from {len(parts)} GPU worker(s) in {folder} (CLOUD_SWEEP.csv, '
+          f'CLOUD_SWEEP_SUMMARY.csv)', flush=True)
+    return {'folder': folder, 'rows': df, 'summary': s}
+
+
 def image_methods(images: List[str], method: str = 'auto', sensor: str = '', tiraux: bool = False,
                   csmask: bool = False, spectf=None, sensor_methods=None) -> List[List[str]]:
     """The cloud method(s) of each image: one by method_for, or with
@@ -715,6 +757,18 @@ def image_methods(images: List[str], method: str = 'auto', sensor: str = '', tir
             out.append(ms)
         else:
             out.append([C.method_for(dict(C.parse_sensor_methods(sensor_methods or {}), cloud_method=method), s, i)])
+    return out
+
+
+def _without(argv: List[str], flag: str, nvals: int) -> List[str]:
+    """argv without flag and its nvals values (every occurrence)."""
+    out, i = [], 0
+    while i < len(argv):
+        if argv[i] == flag:
+            i += 1 + nvals
+            continue
+        out.append(argv[i])
+        i += 1
     return out
 
 
@@ -744,7 +798,6 @@ def format_summary(s: pd.DataFrame, top: int = 15) -> str:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    import argparse
     ap = argparse.ArgumentParser(description='Cloud mask benchmark: every combination of the cloud settings')
     ap.add_argument('images', nargs='+')
     ap.add_argument('--out', default='', help='output folder (default: beside the first image)')
@@ -806,8 +859,26 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument('--swir-bright', default='2-5:1', help='HS: thick cloud brighter than the clear ground at '
                     '1250 nm by (spreads)')
     ap.add_argument('--radiance-scale', type=float, default=0.01, help='radiance = pixel value x this (G1A: 0.01)')
+    ap.add_argument('--shard', default='', help=argparse.SUPPRESS)      # a GPU worker: i/n of the images
+    ap.add_argument('--into', default='', help=argparse.SUPPRESS)       # a GPU worker: the parent's sweep folder
     a = ap.parse_args(argv)
     import automatch_job as J
+    gpus = J.gpus_of(a.device) if not a.shard else []
+    if gpus and len(a.images) >= 2:            # the images dealt round the GPUs, one worker each
+        out = a.out or os.path.join(os.path.dirname(os.path.abspath(a.images[0])), 'cloud_sweep')
+        stamp = C.run_stamp()
+        folder = os.path.join(out, f'{stamp}_sweep')
+        k = 1
+        while os.path.exists(folder):
+            k += 1
+            folder = os.path.join(out, f'{stamp}_sweep_{k}')
+        os.makedirs(folder)
+        base = [x for x in (argv if argv is not None else sys.argv[1:])]
+        base = _without(base, '--device', 1)
+        print(f'[Sweep] {len(a.images)} image(s) over GPUs {gpus}: one worker per GPU into {folder}', flush=True)
+        rc = J.fan_out(os.path.abspath(__file__), base, gpus, lambda i, g: ['--into', folder])
+        finish_sharded(folder, a.reference, a.write_top)
+        return rc
     a.device = J.use_gpu(a.device) if a.device else None   # before omnicloudmask loads torch
     sun = {'cloud_sun_zenith_deg': a.sun_zenith or None, 'cloud_acq_time_utc': a.acq_time}
     topts = None
@@ -838,7 +909,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         spectf_opts=(dict(C.phys_options(sun, 'spectf'), weights=a.spectf_weights)
                      if a.spectf_weights or 'spectf' in a.sensor_methods else None),
         spectf_thresholds=a.spectf_threshold,
-        spectf_vnir=['' if v in ('-', "''", '""') else v for v in a.spectf_vnir], sensor_methods=a.sensor_methods)
+        spectf_vnir=['' if v in ('-', "''", '""') else v for v in a.spectf_vnir], sensor_methods=a.sensor_methods,
+        shard=J.parse_shard(a.shard), into=a.into)
     return 0
 
 

@@ -457,7 +457,7 @@ def newest_per_scene(metas: List[Dict]) -> Dict[str, Optional[str]]:
 
 def batch(parent: str, jobs: str = '', success_px: float = 3.0, recompute: bool = False,
           all_jobs: bool = False, cross: Optional[Dict] = None, cloud_model_dir: Optional[str] = None,
-          accuracy: Optional[Dict] = None) -> int:
+          accuracy: Optional[Dict] = None, shard: Optional[Tuple[int, int]] = None) -> int:
     """Benchmark the finished jobs under parent; of several jobs on one scene
     only the newest counts (newest_per_scene) unless all_jobs. Each job used
     is cross-checked first (automatch_cross.cross_job with the settings in
@@ -484,7 +484,10 @@ def batch(parent: str, jobs: str = '', success_px: float = 3.0, recompute: bool 
             print(f'[Bench] SCENE_NOTES.csv unreadable: {type(e).__name__}: {e}')
     sup = {} if all_jobs else newest_per_scene(list(metas.values()))
     jrows, drows, xrows, arows = [], [], [], []
-    for d in found:
+    part = f'_gpu{shard[0]}' if shard else ''
+    for idx, d in enumerate(found):
+        if shard and idx % shard[1] != shard[0]:          # a GPU worker: its share of the jobs
+            continue
         m = metas[d]
         if sup.get(m['job']):
             print(f"[Bench] {m['job']}: {m['scene']} superseded by {sup[m['job']]} (newer job on the same scene)")
@@ -534,10 +537,50 @@ def batch(parent: str, jobs: str = '', success_px: float = 3.0, recompute: bool 
                                                 pixel_m=row.get('pixel_m'), cloud_pct=row.get('cloud_pct')))
                 except Exception as e:
                     print(f"[Bench] {row['job']}: match accuracy failed ({type(e).__name__}: {e})")
+    if shard:                                  # a GPU worker: its parts; the parent merges and summarises
+        pd.DataFrame(jrows).to_csv(os.path.join(parent, f'BENCH_JOBS{part}.csv'), index=False)
+        for name, frames in (('BENCH_DETECTORS', drows), ('ACCURACY_ALL', arows)):
+            if frames:
+                pd.concat(frames, ignore_index=True).to_csv(os.path.join(parent, f'{name}{part}.csv'), index=False)
+        if xrows:
+            pd.DataFrame(xrows).to_csv(os.path.join(parent, f'CROSS_ALL{part}.csv'), index=False)
+        print(f'[Bench] GPU share {shard[0] + 1}/{shard[1]}: {len(jrows)} job(s) done', flush=True)
+        return 0
     if not jrows:
         print(f'[Bench] no finished automatch job under {parent}')
         return 1
-    jobs_df = pd.DataFrame(jrows)
+    return _write_bench(parent, pd.DataFrame(jrows), drows, xrows, arows, success_px)
+
+
+def finish_sharded(parent: str, success_px: float = 3.0) -> int:
+    """After the GPU workers: their BENCH_JOBS_gpu<n> / BENCH_DETECTORS_gpu<n>
+    / CROSS_ALL_gpu<n> / ACCURACY_ALL_gpu<n>.csv merged and summarised."""
+    import glob
+
+    def parts(name):
+        out = []
+        for p in sorted(glob.glob(os.path.join(parent, f'{name}_gpu*.csv'))):
+            try:
+                df = pd.read_csv(p)
+            except pd.errors.EmptyDataError:          # a worker whose share held no usable job
+                continue
+            if len(df):
+                out.append(df)
+        return out
+    jobs = parts('BENCH_JOBS')
+    if not jobs:
+        print(f'[Bench] no finished automatch job under {parent}')
+        return 1
+    jobs_df = pd.concat(jobs, ignore_index=True).sort_values('job', key=lambda s: s.astype(str))
+    return _write_bench(parent, jobs_df, parts('BENCH_DETECTORS'),
+                        pd.concat(parts('CROSS_ALL'), ignore_index=True).to_dict('records') if parts('CROSS_ALL')
+                        else [], parts('ACCURACY_ALL'), success_px)
+
+
+def _write_bench(parent: str, jobs_df: pd.DataFrame, drows: list, xrows: list, arows: list,
+                 success_px: float) -> int:
+    """BENCH_JOBS / BENCH_DETECTORS / BENCH_SUMMARY / CROSS_ALL / ACCURACY_* of a benchmark."""
+    np_ = os.path.join(parent, 'SCENE_NOTES.csv')
     jobs_df.to_csv(os.path.join(parent, 'BENCH_JOBS.csv'), index=False)
     if not os.path.exists(np_):          # a form for your own cloud estimates
         used = jobs_df[jobs_df['used'].astype(bool)] if 'used' in jobs_df.columns else jobs_df
@@ -572,7 +615,7 @@ def batch(parent: str, jobs: str = '', success_px: float = 3.0, recompute: bool 
         s = A.summarize(acc)
         s.to_csv(os.path.join(parent, 'ACCURACY_SUMMARY.csv'), index=False)
         print(A.format_summary(s))
-    print(f'[Bench] written: BENCH_JOBS.csv' + (', BENCH_DETECTORS.csv, BENCH_SUMMARY.csv' if drows else '')
+    print('[Bench] written: BENCH_JOBS.csv' + (', BENCH_DETECTORS.csv, BENCH_SUMMARY.csv' if drows else '')
           + (', ACCURACY_ALL.csv, ACCURACY_SUMMARY.csv' if arows else '') + f' in {parent}')
     return 0
 
@@ -609,10 +652,25 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help='with --accuracy: also the sub-cell variants (e.g. 256 512), made from the saved matches; '
                          'sizes made before stay in the results')
     ap.add_argument('--subcell-keep', type=int, default=10, help='matches kept per sub-cell')
+    ap.add_argument('--shard', default='', help=argparse.SUPPRESS)      # a GPU worker: i/n of the jobs
     a = ap.parse_args(argv)
     global DEVICE
+    import automatch_job as J
+    gpus = J.gpus_of(a.device) if not a.shard else []
+    if gpus:                                   # the jobs dealt round the GPUs, one worker each
+        base = [x for x in (argv if argv is not None else sys.argv[1:])]
+        out, i = [], 0
+        while i < len(base):
+            if base[i] == '--device':
+                i += 2
+                continue
+            out.append(base[i])
+            i += 1
+        print(f'[Bench] jobs under {a.folder} over GPUs {gpus}: one worker per GPU', flush=True)
+        rc = J.fan_out(os.path.abspath(__file__), out, gpus)
+        rc2 = finish_sharded(a.folder, a.success_px)
+        return rc or rc2
     if a.device:
-        import automatch_job as J
         DEVICE = J.use_gpu(a.device)
     X.SHARE = (a.share_local, a.share_server)
     cross = None if a.no_cross else {'top_n': a.top, 'min_agree': a.min_agree, 'keep': a.keep,
@@ -620,7 +678,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     accuracy = ({'subcell_px': [s for s in a.subcell_px if s > 0], 'keep': a.subcell_keep}
                 if (a.accuracy or a.subcell_px) else None)
     return batch(a.folder, a.jobs, a.success_px, a.recompute, a.all_jobs, cross,
-                 a.cloud_model_dir if a.cloud == 'omnicloudmask' else None, accuracy)
+                 a.cloud_model_dir if a.cloud == 'omnicloudmask' else None, accuracy, J.parse_shard(a.shard))
 
 
 if __name__ == '__main__':
