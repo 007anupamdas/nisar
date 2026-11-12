@@ -2093,6 +2093,12 @@ win.input_source, win.input_naming = None, "folder"
 qw.QFileDialog.getExistingDirectory = MagicMock(return_value=out_dir)
 asked = []
 qw.QMessageBox.question = lambda *a, **k: asked.append(a) or qw.QMessageBox.No
+win.evaluated_bands = lambda: [6]
+p = win._export_target("csv", "Export CSV")
+assert p == os.path.join(out_dir, "csv", "NISAR_0042_b6_rival.csv"), p
+print("marking on band 6 exports NISAR_0042_b6_rival.csv")
+win.evaluated_bands = lambda: []
+store.pop("export_folder", None)
 p = win._export_target("csv", "Export CSV")
 assert p == os.path.join(out_dir, "csv", "NISAR_0042_rival.csv"), p
 assert qw.QFileDialog.getExistingDirectory.call_args[0][2] == "/data/NISAR_0042", \

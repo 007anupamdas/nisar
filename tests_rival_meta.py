@@ -748,6 +748,27 @@ check("the COG is named for its bands, beside the source",
       H["cog_path_for"]("/d/266697511_ITD_A_1.tif", [3, 1]),
       "/d/266697511_ITD_A_1_b3-1_cog.tif")
 
+# ── 23b. exports named after the band evaluated ─────────────────────────────
+print("\n-- evaluated band --")
+cog = "/d/X_GTD_A_1_b6-4-3_cog.tif"
+check("COG source bands from its name", H["cog_source_bands"](cog), [6, 4, 3])
+check("a plain tif is not a COG", H["cog_source_bands"]("/d/X_GTD_A_1.tif"), None)
+check("COG band 1 in grey is scene band 6", H["evaluated_bands"](cog, [1, 1, 1]), [6])
+check("COG band 3 in grey is scene band 3", H["evaluated_bands"](cog, [3, 3, 3]), [3])
+check("a composite keeps its order", H["evaluated_bands"](cog, [1, 2, 3]), [6, 4, 3])
+check("a plain tif's bands are its own", H["evaluated_bands"]("/d/a.tif", [5, 5, 5]), [5])
+check("one band tags b6", H["band_tag"]([6]), "b6")
+check("no band, no tag", H["band_tag"]([]), "")
+check("export named folder + band",
+      H["export_paths"]("/out", "/data/P42/X_GTD_A_1.tif", "folder", "b6")["csv"],
+      os.path.join("/out", "csv", "P42_b6_rival.csv"))
+check("stats follow the band name",
+      H["export_paths"]("/out", "/data/P42/X.tif", "file", "b2")["stats"],
+      os.path.join("/out", "stats", "X_b2_rival_stats.csv"))
+check("without a band the name is unchanged",
+      H["export_paths"]("/out", "/data/P42/X.tif")["csv"],
+      os.path.join("/out", "csv", "P42_rival.csv"))
+
 # ── 24. remembered display bands ─────────────────────────────────────────────
 print("\n-- display bands --")
 f = H["parse_band_choice"]

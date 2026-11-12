@@ -1339,7 +1339,7 @@ def stats_rows(summary):
     return rows
 
 
-def export_paths(folder, input_path, name_from="folder"):
+def export_paths(folder, input_path, name_from="folder", band=""):
     """{'csv', 'shp', 'stats'} in folder, named after the input.
 
     name_from="folder" (Load Input Folder): after the folder the input sits
@@ -1351,6 +1351,9 @@ def export_paths(folder, input_path, name_from="folder"):
     /data/scenes/G1A_ort.tif -> G1A_ort_rival.csv. Only the extension goes.
 
     With no input loaded (or a folder at a filesystem root) the stem is 'rival'.
+
+    band (band_tag) names the band evaluated: NISAR_L2_0042_b6_rival.csv, so
+    one run per band lands in its own files rather than replacing the last.
     """
     if not input_path:
         stem = ""
@@ -1359,6 +1362,8 @@ def export_paths(folder, input_path, name_from="folder"):
     else:
         parent = os.path.dirname(os.path.abspath(input_path))
         stem = os.path.basename(parent.rstrip("/\\"))
+    if band:
+        stem = f"{stem}_{band}" if stem else band
     name = (stem + EXPORT_SUFFIX) if stem else "rival"
     sub = lambda k: os.path.join(folder, EXPORT_SUBDIRS[k], name)
     return {"csv": sub("csv") + ".csv", "shp": sub("shp") + ".shp",
@@ -1407,6 +1412,39 @@ def cog_path_for(src, bands):
     """<stem>_b1-2-3_cog.tif beside src: one COG per band choice."""
     stem = os.path.splitext(src)[0]
     return f"{stem}_b{'-'.join(str(int(b)) for b in bands)}{COG_SUFFIX}.tif"
+
+
+def cog_source_bands(path):
+    """The scene bands a COG this tool wrote holds, in order, or None.
+
+    X_b6-4-3_cog.tif -> [6, 4, 3]: COG band 1 is scene band 6. Any other file
+    holds the scene's bands as they are.
+    """
+    m = re.search(r"_b(\d+(?:-\d+)*)" + re.escape(COG_SUFFIX) + r"$",
+                  os.path.splitext(os.path.basename(path or ""))[0], re.IGNORECASE)
+    return [int(b) for b in m.group(1).split("-")] if m else None
+
+
+def evaluated_bands(path, shown):
+    """The scene bands on screen, given the displayed (R, G, B) of path.
+
+    One band in all three channels -- the usual way to mark, one band at a
+    time -- gives one band. Displayed bands are mapped through the COG to
+    the scene's own numbering, so the COG's band 1 of b6-4-3 is band 6.
+    """
+    src = cog_source_bands(path)
+    out = []
+    for b in shown:
+        b = int(b)
+        b = src[b - 1] if src and 0 < b <= len(src) else b
+        if b not in out:
+            out.append(b)
+    return out
+
+
+def band_tag(bands):
+    """'b6' for one band, 'b6-4-3' for a composite, '' for none."""
+    return ("b" + "-".join(str(b) for b in bands)) if bands else ""
 
 
 def stats_path_for(export_path):
@@ -4430,7 +4468,7 @@ class QCDashboard(QMainWindow):
         # named after the scene, not the COG made from it: <tif>_b3-2-1_cog
         # would otherwise leak into every export name
         targets = export_paths(folder, self.input_source or self.input_path,
-                               self.input_naming)
+                               self.input_naming, band_tag(self.evaluated_bands()))
         wanted = list(kinds) + ["stats"]
         for k in wanted:
             os.makedirs(os.path.dirname(targets[k]), exist_ok=True)
@@ -4466,6 +4504,8 @@ class QCDashboard(QMainWindow):
                             if ERROR_FRAME == "ground" else
                             "grid: metres on the working CRS"])
                 w.writerow(["working_crs", crs, "", "the grid the picks are stored in"])
+                w.writerow(["band", band_tag(self.evaluated_bands()), "",
+                            "scene band(s) on screen when exported"])
                 w.writerow(["source", os.path.basename(export_path), "", ""])
         except OSError as e:
             QMessageBox.warning(self, "Statistics",
@@ -5070,6 +5110,15 @@ class QCDashboard(QMainWindow):
         self.band_container.raise_()
         print(f"[BANDS] input has {count}: {', '.join(labels)}")
         self.apply_input_bands()
+
+    def evaluated_bands(self):
+        """Scene band(s) on the input canvas now (evaluated_bands), or []."""
+        try:
+            if not self.input_path:
+                return []
+            return evaluated_bands(self.input_path, self._selected_bands())
+        except Exception:
+            return []
 
     def _selected_bands(self):
         """The chosen 1-based band per channel."""

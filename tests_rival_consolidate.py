@@ -120,7 +120,8 @@ check("ancillary from BAND_META", (r1["date"], r1["session_id"], r1["strip_id"],
       ("12-MAR-2025", "4471", "3", "16.500000"))
 check("Sensor from its own key, not SensorMode", r1["sensor"], "LISS4")
 check("sensor sits beside the other ancillary columns",
-      C.OUT_COLUMNS[:5], ["product_id", "request_id", "product_no", "sensor", "date"])
+      C.OUT_COLUMNS[:6], ["product_id", "request_id", "product_no", "band",
+                          "sensor", "date"])
 check("targeting mean and CE90 from the picks", (r1["n_points"], r1["mean_dx"],
                                                  r1["mean_dy"], r1["ce90"]),
       ("2", "4.000", "2.000", f"{H['error_summary']([(3, 4), (5, 0)])['ce90']:.3f}"))
@@ -133,6 +134,20 @@ check("the missing BAND_META is reported", any("no " in l and "266697521" in l
 shutil.rmtree(res, ignore_errors=True); shutil.rmtree(prod, ignore_errors=True)
 
 print()
+# ── per-band results stay separate ─────────────────────────────────────────
+check("band from a RIVAL name", (C.band_of("2666975121_b6_rival.csv"),
+      C.band_of("P_b6-4-3_rival.csv"), C.band_of("2666975121_rival.csv")),
+      ("6", "6-4-3", ""))
+res2 = tempfile.mkdtemp()
+write(os.path.join(res2, "266697511_b1_rival.csv"), old)
+write(os.path.join(res2, "266697511_b6_rival.csv"), new)
+out2 = os.path.join(res2, "out.csv")
+n2 = C.consolidate(res2, prod, out2, lambda *a: None)
+rows2 = list(csv.DictReader(open(out2, encoding="utf-8-sig")))
+check("two bands of one product are two rows, not a duplicate",
+      (n2, [(r["product_id"], r["band"]) for r in rows2]),
+      (2, [("266697511", "1"), ("266697511", "6")]))
+
 if failures:
     print(f"{len(failures)} FAILURE(S)")
     for x in failures:

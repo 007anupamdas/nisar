@@ -63,7 +63,7 @@ PICK_COLUMNS = {
 }
 
 OUT_COLUMNS = [
-    "product_id", "request_id", "product_no", "sensor", "date", "session_id",
+    "product_id", "request_id", "product_no", "band", "sensor", "date", "session_id",
     "strip_id",
     "centre_lat", "centre_lon", "n_points",
     "mean_dx", "mean_dy", "std_dx", "std_dy", "rmse_dx", "rmse_dy",
@@ -86,6 +86,16 @@ def product_id_of(filename):
     if not m:
         return None
     return m.group(1), m.group(2), m.group(3)
+
+
+BAND_RE = re.compile(r"_b(\d+(?:-\d+)*)_rival", re.IGNORECASE)
+
+
+def band_of(filename):
+    """'6' for X_b6_rival.csv (RIVAL tags exports with the band marked on),
+    '6-4-3' for a composite, '' for an untagged file."""
+    m = BAND_RE.search(os.path.basename(filename))
+    return m.group(1) if m else ""
 
 
 def _norm(key):
@@ -293,9 +303,10 @@ def error_summary(errors):
 
 
 def find_results(folder):
-    """Every results CSV under folder (recursively), keyed by product id.
+    """Every results CSV under folder (recursively), keyed by (product id, band).
 
-    When one product has several CSVs -- written by different RIVAL versions --
+    Each band of a product is its own result (RIVAL writes X_b6_rival.csv per
+    band marked on). When one product and band has several CSVs -- written by different RIVAL versions --
     the most recently modified wins, and the others are reported.
     """
     found, dupes = {}, []
@@ -305,7 +316,7 @@ def find_results(folder):
             if not ids:
                 continue
             path = os.path.join(root, f)
-            pid = ids[0]
+            pid = (ids[0], band_of(f))
             if pid in found:
                 keep, drop = sorted([found[pid][1], path], key=os.path.getmtime,
                                     reverse=True)
@@ -324,12 +335,13 @@ def consolidate(results_folder, products_folder, out_csv, log=print):
     """Build the table. Returns the number of products written."""
     found, dupes = find_results(results_folder)
     for pid, drop in dupes:
-        log(f"[DUP] {pid}: also {drop} -- the newer file is used")
+        log(f"[DUP] {pid[0]} band {pid[1] or '-'}: also {drop} -- the newer file is used")
     if not found:
         log(f"[WARN] no 26<reqid><prodno>1*.csv under {results_folder}")
     rows = []
-    for pid in sorted(found):
-        (pid, req, prodno), path = found[pid]
+    for key in sorted(found):
+        (pid, req, prodno), path = found[key]
+        band = key[1]
         with open(path, newline="", encoding="utf-8-sig") as f:
             errs, lonlats, frame = pick_errors(csv.DictReader(f))
         st = error_summary(errs)
@@ -349,6 +361,7 @@ def consolidate(results_folder, products_folder, out_csv, log=print):
             meta_path = ""
         row = {
             "product_id": pid, "request_id": req, "product_no": prodno,
+            "band": band,
             "date": anc["date"], "session_id": anc["session_id"],
             "strip_id": anc["strip_id"], "sensor": anc["sensor"],
             "centre_lat": _fmt(anc["centre_lat"], 6),
