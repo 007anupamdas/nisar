@@ -426,6 +426,7 @@ AUTO_PICK_BANDS = True
 # pick. Bands of one product can be misregistered by kilometres against each
 # other, so the bands measured on must be a deliberate choice.
 ALWAYS_ASK_BANDS = True
+COG_COUNT_KEY = "cog_count"     # last 1-or-3 answer
 INPUT_SCENE_PATTERN = r"(ITD|GTD)_.*_1$"
 COG_SUFFIX = "_cog"
 COG_CREATION_OPTIONS = ["COMPRESS=DEFLATE", "BIGTIFF=IF_SAFER",
@@ -1793,6 +1794,28 @@ def auto_rgb(path):
     """The three best bands for display, highest band number first (red), or None."""
     picked = pick_bands(band_quality(path), 3)
     return sorted(picked, reverse=True) if len(picked) == 3 else None
+
+
+def quality_pick(rows, k):
+    """The best k bands by quality: [b] for one, highest band first for three."""
+    if not rows:
+        return []
+    if k == 1:
+        usable = [r for r in rows if r.get("detail_db", 0) > 0] or rows
+        return [max(usable, key=lambda r: r["score"])["band"]]
+    picked = pick_bands(rows, k)
+    return sorted(picked, reverse=True) if len(picked) == k else []
+
+
+def quality_labels(names, rows):
+    """Band names with their quality appended, for the manual drop-downs."""
+    by = {r["band"]: r for r in rows or []}
+    out = []
+    for i, name in enumerate(names, start=1):
+        r = by.get(i)
+        out.append(f"{name}   [{r['score']:.1f}, {r['detail_db']:+.1f} dB]"
+                   if r else name)
+    return out
 
 
 def raster_band_names(path):
@@ -4647,42 +4670,79 @@ class QCDashboard(QMainWindow):
         self.load_input_path(cog, source=src, naming=naming)
 
     def _ask_band_mode(self, src, n, saved):
-        """'auto' or 'manual' for this COG, or None if cancelled.
+        """('auto' | 'manual', 1 | 3) for this COG, or None if cancelled.
 
-        Automatic scores every band (sharpness, noise, striping) and takes the
-        best three -- it cannot see misregistration between bands. Manual opens
-        the Red / Green / Blue drop-downs, preselected with the last hand choice
-        for this band count.
+        How many bands: 1 (a grey COG -- one band evaluated at a time) or 3
+        (a colour composite). Automatic then takes the best 1 or 3 by band
+        quality (detail above noise, sharpness, striping -- it cannot see
+        misregistration between bands). Manual opens 1 or 3 drop-downs, each
+        band listed with its quality, preselected with the best ones.
         """
-        box = QMessageBox(self)
-        box.setWindowTitle("COG bands")
+        try:
+            last_n = int(self._settings().value(COG_COUNT_KEY, 1) or 1)
+        except Exception:
+            last_n = 1
+        dlg = QDialog(self)
+        dlg.setWindowTitle("COG bands")
+        lay = QVBoxLayout(dlg)
         last = (f"\nLast manual choice for {n}-band products: "
                 f"{'-'.join(map(str, saved))}" if saved else "")
-        box.setText(f"{os.path.basename(src)} has {n} bands.\n"
-                    f"Which bands go into the COG?{last}")
-        b_auto = box.addButton("Automatic", QMessageBox.AcceptRole)
-        b_man = box.addButton("Manual...", QMessageBox.ActionRole)
-        box.addButton(QMessageBox.Cancel)
-        box.setDefaultButton(b_man)
-        box.exec_()
-        hit = box.clickedButton()
-        if hit is b_auto:
-            return "auto"
-        if hit is b_man:
-            return "manual"
+        lay.addWidget(QLabel(f"{os.path.basename(src)} has {n} bands.{last}"))
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Bands in the COG:"))
+        count = QComboBox()
+        count.addItems(["1 (grey, one band at a time)", "3 (colour composite)"])
+        count.setCurrentIndex(1 if last_n == 3 else 0)
+        row.addWidget(count)
+        lay.addLayout(row)
+        bb = QDialogButtonBox()
+        b_auto = bb.addButton("Automatic (best by quality)", QDialogButtonBox.AcceptRole)
+        b_man = bb.addButton("Manual...", QDialogButtonBox.AcceptRole)
+        bb.addButton(QDialogButtonBox.Cancel)
+        hit = {}
+        bb.clicked.connect(lambda b: hit.setdefault("b", b))
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        lay.addWidget(bb)
+        if dlg.exec_() != QDialog.Accepted:
+            return None
+        k = 3 if count.currentIndex() == 1 else 1
+        try:
+            self._settings().setValue(COG_COUNT_KEY, k)
+        except Exception:
+            pass
+        if hit.get("b") is b_auto:
+            return ("auto", k)
+        if hit.get("b") is b_man:
+            return ("manual", k)
         return None
 
+    def _band_scores(self, src, n):
+        """band_quality rows for src, or [] when it cannot be scored."""
+        if not AUTO_PICK_BANDS or n < 2:
+            return []
+        try:
+            rows = band_quality(src)
+            top = sorted(rows, key=lambda r: -r["score"])[:5]
+            print("[COG] band quality, best first: " + ", ".join(
+                f"{r['band']} ({r['score']:.1f}, {r['detail_db']:+.1f} dB)"
+                for r in top))
+            return rows
+        except Exception as e:
+            print(f"[COG] band quality failed: {e}")
+            return []
+
     def _ask_bands(self, src):
-        """Red / Green / Blue band for the COG, as 1-based bands, or None.
+        """The bands for the COG, as 1-based scene bands, or None.
 
         One drop-down per channel, not a checkbox per band: a hyperspectral
         scene has 150+ bands, and ticking them all built a COG of the whole
-        cube. Green and Blue may be '(none)' for a single-band view.
+        cube. With ALWAYS_ASK_BANDS a popup first asks Automatic or Manual and
+        1 or 3 bands (_ask_band_mode).
 
         Remembered per product type -- keyed by the band count, which is what
-        tells a 150-band hyperspectral product from a 4-band multispectral one
-        -- and reused without asking. Hold Shift while clicking Load Input
-        Folder to choose again; a product with another band count asks.
+        tells a 150-band hyperspectral product from a 4-band multispectral one.
+        With ALWAYS_ASK_BANDS off it is reused without asking; Shift asks.
         """
         try:
             names = raster_band_names(src)
@@ -4703,24 +4763,23 @@ class QCDashboard(QMainWindow):
             shift = bool(QApplication.keyboardModifiers() & Qt.ShiftModifier)
         except Exception:
             pass
+        k = 3
+        scores = None
         if ALWAYS_ASK_BANDS:
-            mode = self._ask_band_mode(src, n, saved)
-            if mode is None:
+            asked = self._ask_band_mode(src, n, saved)
+            if asked is None:
                 return None
+            mode, k = asked
+            scores = self._band_scores(src, n)
+            best = quality_pick(scores, k) or default_rgb(n)[:k]
             if mode == "auto":
-                auto = None
-                if AUTO_PICK_BANDS and n > 3:
-                    try:
-                        auto = auto_rgb(src)
-                    except Exception as e:
-                        print(f"[COG] automatic band pick failed: {e}")
-                auto = auto or default_rgb(n)
-                print(f"[COG] bands {auto} picked automatically from {n}")
-                return auto
+                print(f"[COG] {k} band(s) {best} picked automatically from {n}")
+                return best
             shift = True
+            if saved and (len(saved) == 1) != (k == 1):
+                saved = None     # a 3-band choice does not preselect a 1-band COG
         auto = None
-        if AUTO_PICK_BANDS and n > 3 and not (ALWAYS_ASK_BANDS and saved) \
-                and (shift or not saved):
+        if not ALWAYS_ASK_BANDS and AUTO_PICK_BANDS and n > 3 and (shift or not saved):
             try:
                 auto = auto_rgb(src)
             except Exception as e:
@@ -4734,19 +4793,26 @@ class QCDashboard(QMainWindow):
                   f"(Shift+Load Input Folder to choose again)")
             return saved
 
-        default = saved if ALWAYS_ASK_BANDS else (auto or saved)
-        default = default or default_rgb(n)
+        if ALWAYS_ASK_BANDS:
+            default = saved or quality_pick(scores, k) or default_rgb(n)[:k]
+        else:
+            default = auto or saved or default_rgb(n)
+        labels = quality_labels(names, scores)
         dlg = QDialog(self)
-        dlg.setWindowTitle(f"Display bands -- {os.path.basename(src)} ({n} bands)")
+        dlg.setWindowTitle(f"COG bands -- {os.path.basename(src)} ({n} bands)")
         lay = QVBoxLayout(dlg)
+        if scores:
+            lay.addWidget(QLabel("Quality: score (0-100) and detail above noise "
+                                 "(dB) -- higher is cleaner"))
+        channels = ("Band",) if k == 1 else ("Red", "Green", "Blue")
         combos = []
-        for ch, label in enumerate(("Red", "Green", "Blue")):
+        for ch, label in enumerate(channels):
             row = QHBoxLayout()
-            row.addWidget(QLabel(f"{label} band:"))
+            row.addWidget(QLabel(f"{label}:"))
             cb = QComboBox()
             if ch:
                 cb.addItem("(none)")
-            cb.addItems(names)
+            cb.addItems(labels)
             want = default[ch] if ch < len(default) else None
             cb.setCurrentIndex((want - 1 + (1 if ch else 0)) if want else 0)
             row.addWidget(cb)

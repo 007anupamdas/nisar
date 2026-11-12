@@ -2219,7 +2219,7 @@ print("\nClear Input unloads the raster, footprint and path, re-filters the "
 
 # ── 30. display bands: R/G/B drop-downs, remembered per product type ───────
 win._ask_bands = R.QCDashboard._ask_bands.__get__(win)
-win._ask_band_mode = lambda *a: "manual"
+win._ask_band_mode = lambda *a: ("manual", 3)
 store.clear()
 R.raster_band_names = lambda p: [str(i) for i in range(1, 156)]   # 155 bands
 R.QApplication.keyboardModifiers = MagicMock(return_value=0)
@@ -2452,39 +2452,76 @@ store.clear()
 R.QApplication.keyboardModifiers = MagicMock(return_value=0)
 asked_n.clear()
 hi = sorted(best, reverse=True)
-win._ask_band_mode = lambda *a: "auto"
+win._ask_band_mode = lambda *a: ("auto", 3)
 assert win._ask_bands(src33) == hi and not asked_n
-print("popup -> Automatic: the band-quality pick, no R/G/B dialog")
+print("popup -> Automatic, 3: the band-quality pick, no R/G/B dialog")
+q33 = R.band_quality(src33)
+top1 = max([r for r in q33 if r["detail_db"] > 0], key=lambda r: r["score"])["band"]
+win._ask_band_mode = lambda *a: ("auto", 1)
+assert win._ask_bands(src33) == [top1] and not asked_n, (win._ask_bands(src33), top1)
+print(f"popup -> Automatic, 1: the single best band ({top1})")
 win._ask_band_mode = lambda *a: None
 assert win._ask_bands(src33) is None
 print("popup -> Cancel: nothing is built")
-win._ask_band_mode = lambda *a: "manual"
+win._ask_band_mode = lambda *a: ("manual", 3)
+combos.clear()
 win._ask_bands(src33)
-assert asked_n, "Manual did not open the R/G/B dialog"
-print("popup -> Manual: the R/G/B dialog")
+assert asked_n and len(combos) == 3, "Manual 3 did not open R/G/B"
+assert "dB]" in combos[0].items[top1 - 1], combos[0].items[:3]
+win._ask_band_mode = lambda *a: ("manual", 1)
+combos.clear(); asked_n.clear()
+_orig_exec = _Dlg.exec_
+_Dlg.exec_ = lambda self: (_pre.append([c.idx for c in combos]), asked_n.append(1), 1)[-1]
+assert win._ask_bands(src33) == [top1] and len(combos) == 1 and _pre[-1] == [top1 - 1]
+_Dlg.exec_ = _orig_exec
+print("popup -> Manual: 1 or 3 drop-downs, bands labelled with quality, best preselected")
+check_q = R.quality_pick([{"band": 1, "score": 90, "detail_db": -1},
+                          {"band": 2, "score": 50, "detail_db": 3}], 1)
+assert check_q == [2], check_q
+print("one band: the best score among bands with detail above their noise")
 # the popup itself
-class _Box:
-    AcceptRole = ActionRole = 0
-    click = "Automatic"
-    def __init__(self, *a): self.btns = {}
-    def setWindowTitle(self, t): pass
-    def setText(self, t): _Box.text = t
+class _BB:
+    AcceptRole = 0; Cancel = "Cancel"
+    def __init__(self, *a): self.cb = {}
     def addButton(self, b, role=None):
-        k = b if isinstance(b, str) else "Cancel"; self.btns[k] = object(); return self.btns[k]
-    def setDefaultButton(self, b): pass
-    def exec_(self): return 0
-    def clickedButton(self): return self.btns.get(_Box.click)
-_Box.Cancel = "Cancel"
-_mb = R.QMessageBox
-R.QMessageBox = _Box
+        o = object(); _BB.btns[b if isinstance(b, str) else "Cancel"] = o; return o
+    def __getattr__(self, n):
+        return types.SimpleNamespace(connect=lambda f, n=n: self.cb.__setitem__(n, f))
+_BB.btns = {}
+class _PD:
+    Accepted = 1
+    click, n = "Automatic (best by quality)", 0
+    def __init__(self, *a): pass
+    def accept(self): pass
+    def reject(self): pass
+    def setWindowTitle(self, t): pass
+    def exec_(self):
+        bb = _BB.last
+        if _PD.click == "Cancel": return 0
+        bb.cb["clicked"](_BB.btns[_PD.click]); return 1
+class _CC(_Combo):
+    def __init__(self): super().__init__(); _CC.last = self
+    def setCurrentIndex(self, i): self.idx = i if not hasattr(_PD, "force") else _PD.force
+import types
+_saved_ui = (R.QDialog, R.QDialogButtonBox, R.QComboBox, R.QLabel)
+R.QDialog = _PD
+R.QDialogButtonBox = lambda *a: setattr(_BB, "last", _BB()) or _BB.last
+R.QDialogButtonBox.AcceptRole, R.QDialogButtonBox.Cancel = 0, "Cancel"
+R.QComboBox = _CC
+_lbls = []
+R.QLabel = lambda t: _lbls.append(t) or MagicMock()
 mode = R.QCDashboard._ask_band_mode.__get__(win)
-assert mode("/s/x_GTD_A_1.tif", 30, [2, 4, 5]) == "auto" and "2-4-5" in _Box.text
-_Box.click = "Manual..."
-assert mode("/s/x_GTD_A_1.tif", 30, None) == "manual"
-_Box.click = "Cancel"
+store.clear()
+assert mode("/s/x_GTD_A_1.tif", 30, [2, 4, 5]) == ("auto", 1) and "2-4-5" in _lbls[0]
+_PD.force = 1
+_PD.click = "Manual..."
+assert mode("/s/x_GTD_A_1.tif", 30, None) == ("manual", 3)
+assert store["cog_count"] == 3
+del _PD.force
+_PD.click = "Cancel"
 assert mode("/s/x_GTD_A_1.tif", 30, None) is None
-R.QMessageBox = _mb
-print("the popup offers Automatic / Manual... / Cancel and names the last manual choice")
+R.QDialog, R.QDialogButtonBox, R.QComboBox, R.QLabel = _saved_ui
+print("the popup asks 1 or 3 bands and Automatic / Manual / Cancel, and remembers the count")
 store.clear()
 asked_n.clear()
 R.ALWAYS_ASK_BANDS = False
