@@ -421,6 +421,11 @@ EXPORT_SUBDIRS = {"csv": "csv", "shp": "shp", "stats": "stats"}
 # neighbours of one peak, are not. A choice made by hand (Shift+Load Input
 # Folder) is remembered for that product type and wins.
 AUTO_PICK_BANDS = True
+# Always ask which 3 bands go into the COG (Red/Green/Blue drop-downs),
+# preselected with the last choice for this band count, else the automatic
+# pick. Bands of one product can be misregistered by kilometres against each
+# other, so the bands measured on must be a deliberate choice.
+ALWAYS_ASK_BANDS = True
 INPUT_SCENE_PATTERN = r"(ITD|GTD)_.*_1$"
 COG_SUFFIX = "_cog"
 COG_CREATION_OPTIONS = ["COMPRESS=DEFLATE", "BIGTIFF=IF_SAFER",
@@ -4603,8 +4608,11 @@ class QCDashboard(QMainWindow):
             shift = bool(QApplication.keyboardModifiers() & Qt.ShiftModifier)
         except Exception:
             pass
+        if ALWAYS_ASK_BANDS:
+            shift = True
         auto = None
-        if AUTO_PICK_BANDS and n > 3 and (shift or not saved):
+        if AUTO_PICK_BANDS and n > 3 and not (ALWAYS_ASK_BANDS and saved) \
+                and (shift or not saved):
             try:
                 auto = auto_rgb(src)
             except Exception as e:
@@ -4618,7 +4626,8 @@ class QCDashboard(QMainWindow):
                   f"(Shift+Load Input Folder to choose again)")
             return saved
 
-        default = auto or saved or default_rgb(n)
+        default = (saved or auto) if ALWAYS_ASK_BANDS else (auto or saved)
+        default = default or default_rgb(n)
         dlg = QDialog(self)
         dlg.setWindowTitle(f"Display bands -- {os.path.basename(src)} ({n} bands)")
         lay = QVBoxLayout(dlg)

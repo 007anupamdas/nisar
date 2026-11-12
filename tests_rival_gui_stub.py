@@ -2250,20 +2250,31 @@ assert store["cog_rgb/155"] == "34,22"
 print("\na 155-band product asks Red/Green/Blue, one drop-down each -- not "
       "155 ticked boxes -- and Blue can be none")
 
-assert win._ask_bands("/s/hs2_GTD_A_1.tif") == [34, 22] and len(asked_n) == 1
-print("the next product with 155 bands reuses 34, 22 without asking")
+_pre = []
+def _peek(self):
+    _pre.append([c.idx for c in combos[-3:]]); return _count(self)
+_Dlg.exec_ = _peek
+assert R.ALWAYS_ASK_BANDS is True
+assert win._ask_bands("/s/hs2_GTD_A_1.tif") == [34, 22] and len(asked_n) == 2
+assert _pre[-1] == [33, 22, 0], _pre
+print("the next 155-band product asks again (ALWAYS_ASK_BANDS), preselected 34, 22")
+
+R.ALWAYS_ASK_BANDS = False
+assert win._ask_bands("/s/hs2_GTD_A_1.tif") == [34, 22] and len(asked_n) == 2
+print("with ALWAYS_ASK_BANDS off it reuses 34, 22 without asking")
 
 R.QApplication.keyboardModifiers = MagicMock(return_value=R.Qt.ShiftModifier)
 win._ask_bands("/s/hs2_GTD_A_1.tif")
-assert len(asked_n) == 2
+assert len(asked_n) == 3
 R.QApplication.keyboardModifiers = MagicMock(return_value=0)
 print("Shift+Load asks again")
 
 R.raster_band_names = lambda p: ["1: B", "2: G", "3: R", "4: NIR"]
 win._ask_bands("/s/ms_GTD_A_1.tif")
-assert len(asked_n) == 3, "a 4-band product reused the hyperspectral choice"
+assert len(asked_n) == 4, "a 4-band product reused the hyperspectral choice"
 assert (combos[-3].idx, combos[-2].idx, combos[-1].idx) == (33, 22, 0)
 print("a product with another band count asks afresh")
+R.ALWAYS_ASK_BANDS = True
 
 # ── 31. panning the reference past its tile brings up the neighbour ────────
 saved31 = (R.QgsGeometry, R.ring_wkt)
@@ -2421,6 +2432,14 @@ R.raster_band_names = lambda p: [str(i) for i in range(1, 31)]
 store.clear()
 R.QApplication.keyboardModifiers = MagicMock(return_value=0)
 asked_n.clear()
+_pre.clear()
+win._ask_bands(src33)
+hi = sorted(best, reverse=True)
+assert asked_n and _pre[-1] == [hi[0] - 1, hi[1], hi[2]], (_pre, hi)
+print("with ALWAYS_ASK_BANDS the dialog opens, preselected with the automatic pick")
+store.clear()
+asked_n.clear()
+R.ALWAYS_ASK_BANDS = False
 assert win._ask_bands(src33) == sorted(best, reverse=True)
 assert not asked_n, "asked although the bands could be picked"
 print("Load Input Folder uses them without a dialog, highest band as red")
@@ -2431,6 +2450,7 @@ win._ask_bands(src33)
 assert asked_n, "Shift did not open the dialog"
 R.QApplication.keyboardModifiers = MagicMock(return_value=0)
 print("a hand choice for this product type still wins; Shift opens the dialog")
+R.ALWAYS_ASK_BANDS = True
 shutil.rmtree(d33, ignore_errors=True)
 
 # ── 34. Load Input TIF: a COG too, exports named after the TIF ─────────────
