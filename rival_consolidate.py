@@ -14,6 +14,14 @@ for date, session id, strip id and scene centre, and one row is written per
 product: ancillary info, then the targeting error -- mean, spread, RMSE, CE90
 -- and where the picks sit (centre of the GCPs in lon/lat).
 
+Special products hold several tifs in one folder, each with an XML beside it
+named after the tif: <tif stem>_META.xml (AISD layout). A results CSV named
+after such a tif (or its folder) -- <tif stem>_rival_band6.csv -- is matched
+to that XML anywhere under the products folder, and sensor (SENSORNAME), date
+(DATEOFPASS), session (SESSION_NUMBER), strip (STRIPID) and centre (mean of
+the IMD corners) come from it. Both kinds land in one table; product_kind says
+which.
+
 Runs without QGIS: plain PyQt5 for the window, or headless:
     python rival_consolidate.py --results R --products P --out table.csv
 """
@@ -29,6 +37,16 @@ import sys
 PRODUCT_ID_RE = re.compile(r"^(26(\d{5})(\d+)1)(?!\d)")
 SKIP_TOKEN = "_stats"
 BAND_META_NAME = "BAND_META.txt"
+META_XML_SUFFIX = "_META.xml"
+# AISD XML tags read for special products: field -> tags tried in order
+XML_TAGS = {
+    "sensor":     ("SENSORNAME",),
+    "date":       ("DATEOFPASS", "DATEOFIMAGE"),
+    "session_id": ("SESSION_NUMBER",),
+    "strip_id":   ("STRIPID",),
+}
+XML_CORNERS = {"lat": ("ULLAT", "URLAT", "LRLAT", "LLLAT"),
+               "lon": ("ULLON", "URLON", "LRLON", "LLLON")}
 
 # BAND_META keys are matched case-insensitively, ignoring _ - and spaces, on
 # the first key that CONTAINS one of these words. Edit if a field is missed --
@@ -64,7 +82,7 @@ PICK_COLUMNS = {
 
 OUT_COLUMNS = [
     "product_id", "request_id", "product_no", "band", "sensor", "date", "session_id",
-    "strip_id",
+    "strip_id", "product_kind",
     "centre_lat", "centre_lon", "n_points",
     "mean_dx", "mean_dy", "std_dx", "std_dy", "rmse_dx", "rmse_dy",
     "mean_radial", "rmse_radial", "max_radial", "ce90", "axis_ratio",
@@ -302,8 +320,72 @@ def error_summary(errors):
     }
 
 
-def find_results(folder):
+def results_stem(filename):
+    """The scene name a RIVAL export is named after: X_rival_band6.csv -> X."""
+    stem = os.path.splitext(os.path.basename(filename))[0]
+    return re.split(r"_rival", stem, maxsplit=1, flags=re.IGNORECASE)[0]
+
+
+def index_meta_xml(products_folder):
+    """{lower-case name: path} of every *_META.xml under products_folder.
+
+    Keyed by the tif stem the XML is named after, and also by the folder it
+    sits in -- RIVAL names an export after the folder (Load Input Folder) or
+    the tif (Load Input TIF). A folder holding several XMLs is ambiguous and
+    is not keyed.
+    """
+    idx, by_dir = {}, {}
+    if not products_folder or not os.path.isdir(products_folder):
+        return idx
+    suf = META_XML_SUFFIX.lower()
+    for root, _dirs, files in os.walk(products_folder):
+        for f in files:
+            if f.lower().endswith(suf):
+                path = os.path.join(root, f)
+                idx[f[:-len(suf)].lower()] = path
+                by_dir.setdefault(os.path.basename(root).lower(), []).append(path)
+    for d, paths in by_dir.items():
+        if len(paths) == 1:
+            idx.setdefault(d, paths[0])
+    return idx
+
+
+def parse_meta_xml(path):
+    """meta_ancillary-shaped dict from a special product's AISD XML."""
+    import xml.etree.ElementTree as ET
+    root = ET.parse(path).getroot()
+
+    def first(tag):
+        for el in root.iter(tag):
+            if el.text and el.text.strip():
+                return el.text.strip()
+        return None
+    out, sources = {}, {}
+    for field, tags in XML_TAGS.items():
+        out[field], sources[field] = None, None
+        for t in tags:
+            v = first(t)
+            if v is not None and v not in ("-9999", "-9999."):
+                out[field], sources[field] = v, t
+                break
+    out["centre_lat"] = out["centre_lon"] = None
+    imd = root.find(".//IMD")
+    if imd is not None:
+        lats = [_num(imd.findtext(t)) for t in XML_CORNERS["lat"]]
+        lons = [_num(imd.findtext(t)) for t in XML_CORNERS["lon"]]
+        if None not in lats and None not in lons:
+            out["centre_lat"], out["centre_lon"] = sum(lats) / 4, sum(lons) / 4
+            sources["centre_lat"] = sources["centre_lon"] = "mean of IMD corners"
+    out["sources"] = sources
+    return out
+
+
+def find_results(folder, meta_xml=None):
     """Every results CSV under folder (recursively), keyed by (product id, band).
+
+    Values are ((product_id, request_id, product_no), path, kind). kind is
+    'regular' for a 26<reqid><prodno>1 name, 'special' for a name whose scene
+    has a *_META.xml in meta_xml (index_meta_xml); any other CSV is ignored.
 
     Each band of a product is its own result (RIVAL writes X_rival_band6.csv per
     band marked on). When one product and band has several CSVs -- written by different RIVAL versions --
@@ -312,18 +394,24 @@ def find_results(folder):
     found, dupes = {}, []
     for root, _dirs, files in os.walk(folder):
         for f in files:
-            ids = product_id_of(f)
+            ids, kind = product_id_of(f), "regular"
             if not ids:
-                continue
+                if (not f.lower().endswith(".csv") or SKIP_TOKEN in f.lower()
+                        or not meta_xml):
+                    continue
+                stem = results_stem(f)
+                if stem.lower() not in meta_xml:
+                    continue
+                ids, kind = (stem, "", ""), "special"
             path = os.path.join(root, f)
             pid = (ids[0], band_of(f))
             if pid in found:
                 keep, drop = sorted([found[pid][1], path], key=os.path.getmtime,
                                     reverse=True)
                 dupes.append((pid, drop))
-                found[pid] = (ids, keep)
+                found[pid] = (ids, keep, kind)
             else:
-                found[pid] = (ids, path)
+                found[pid] = (ids, path, kind)
     return found, dupes
 
 
@@ -333,22 +421,32 @@ def _fmt(v, nd=3):
 
 def consolidate(results_folder, products_folder, out_csv, log=print):
     """Build the table. Returns the number of products written."""
-    found, dupes = find_results(results_folder)
+    xml_index = index_meta_xml(products_folder)
+    found, dupes = find_results(results_folder, xml_index)
     for pid, drop in dupes:
         log(f"[DUP] {pid[0]} band {pid[1] or '-'}: also {drop} -- the newer file is used")
     if not found:
-        log(f"[WARN] no 26<reqid><prodno>1*.csv under {results_folder}")
+        log(f"[WARN] no 26<reqid><prodno>1*.csv, nor a CSV named after a "
+            f"*{META_XML_SUFFIX} product, under {results_folder}")
     rows = []
     for key in sorted(found):
-        (pid, req, prodno), path = found[key]
+        (pid, req, prodno), path, kind = found[key]
         band = key[1]
         with open(path, newline="", encoding="utf-8-sig") as f:
             errs, lonlats, frame = pick_errors(csv.DictReader(f))
         st = error_summary(errs)
-        meta_path = os.path.join(products_folder, pid, BAND_META_NAME)
+        meta_path = (xml_index.get(pid.lower(), "") if kind == "special"
+                     else os.path.join(products_folder, pid, BAND_META_NAME))
         anc = {"sensor": None, "date": None, "session_id": None, "strip_id": None,
                "centre_lat": None, "centre_lon": None, "sources": {}}
-        if os.path.isfile(meta_path):
+        if kind == "special" and meta_path:
+            try:
+                anc = parse_meta_xml(meta_path)
+                used = ", ".join(f"{k}<-{v}" for k, v in anc["sources"].items() if v)
+                log(f"[META] {pid} (special): {used}")
+            except Exception as e:
+                log(f"[META] {pid}: cannot read {meta_path}: {e}")
+        elif os.path.isfile(meta_path):
             with open(meta_path, encoding="utf-8", errors="replace") as f:
                 anc = meta_ancillary(parse_band_meta(f.read()))
             missing = [k for k in ("date", "session_id", "strip_id",
@@ -361,7 +459,7 @@ def consolidate(results_folder, products_folder, out_csv, log=print):
             meta_path = ""
         row = {
             "product_id": pid, "request_id": req, "product_no": prodno,
-            "band": band,
+            "band": band, "product_kind": kind,
             "date": anc["date"], "session_id": anc["session_id"],
             "strip_id": anc["strip_id"], "sensor": anc["sensor"],
             "centre_lat": _fmt(anc["centre_lat"], 6),

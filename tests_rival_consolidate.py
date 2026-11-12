@@ -148,6 +148,56 @@ check("two bands of one product are two rows, not a duplicate",
       (n2, [(r["product_id"], r["band"]) for r in rows2]),
       (2, [("266697511", "1"), ("266697511", "6")]))
 
+# ── special products: several tifs per folder, <tif stem>_META.xml beside each
+SP = "G1AHS026111104EX000006_S062321_E063509_11112026DIP_DQ_ort"
+XML = """<?xml version="1.0" encoding="utf-8"?>
+<AISD><IMD><ULLON>71.844418</ULLON><ULLAT>28.351090</ULLAT>
+<URLON>88.926815</URLON><URLAT>28.351090</URLAT><LRLON>88.926815</LRLON>
+<LRLAT>25.532447</LRLAT><LLLON>71.844418</LLLON><LLLAT>25.532447</LLLAT></IMD>
+<IMAGE><SATID>G1A</SATID><SENSORNAME>HS</SENSORNAME><DATEOFPASS>11-11-2026</DATEOFPASS>
+<STRIPID>000006</STRIPID><SESSION_NUMBER>026111104</SESSION_NUMBER>
+<IMAGING_ORBIT>-9999</IMAGING_ORBIT></IMAGE></AISD>"""
+res3, prod3 = tempfile.mkdtemp(), tempfile.mkdtemp()
+d = os.path.join(prod3, "batch_11nov", "HSfolder")
+os.makedirs(d)
+open(os.path.join(d, SP + "_META.xml"), "w").write(XML)
+open(os.path.join(d, "OTHER_scene_META.xml"), "w").write(XML.replace("000006", "000007"))
+os.makedirs(os.path.join(prod3, "266697511"))
+open(os.path.join(prod3, "266697511", "BAND_META.txt"), "w").write(
+    "Sensor = LISS4\nDateOfPass = 12-MAR-2025\nSessionID = 4471\nStripId = 3\n")
+os.makedirs(os.path.join(res3, "csv"))
+write(os.path.join(res3, "csv", SP + "_rival_band6.csv"), new)
+write(os.path.join(res3, "csv", "266697511_rival_band2.csv"), old)
+write(os.path.join(res3, "csv", "unrelated_rival.csv"), old)
+write(os.path.join(res3, "csv", SP + "_rival_band6_stats.csv"),
+      [{"Statistic": "ce90", "Value": "1"}])
+idx = C.index_meta_xml(prod3)
+check("XML indexed by tif stem; a folder with two XMLs is not a key",
+      (SP.lower() in idx, "hsfolder" in idx), (True, False))
+a = C.parse_meta_xml(idx[SP.lower()])
+check("special ancillary from the XML",
+      (a["sensor"], a["date"], a["session_id"], a["strip_id"],
+       round(a["centre_lat"], 6), round(a["centre_lon"], 6)),
+      ("HS", "11-11-2026", "026111104", "000006", 26.941769, 80.385616))
+out3 = os.path.join(res3, "all.csv")
+n3 = C.consolidate(res3, prod3, out3, lambda *a: None)
+rows3 = {r["product_id"]: r for r in csv.DictReader(open(out3, encoding="utf-8-sig"))}
+check("regular and special products in one table; stats and unknown CSVs skipped",
+      (n3, sorted((k, r["product_kind"], r["band"]) for k, r in rows3.items())),
+      (2, sorted([("266697511", "regular", "2"), (SP, "special", "6")])))
+r = rows3[SP]
+check("special row carries the XML fields and path",
+      (r["sensor"], r["date"], r["session_id"], r["strip_id"], r["n_points"],
+       r["band_meta"].endswith(SP + "_META.xml")),
+      ("HS", "11-11-2026", "026111104", "000006", "2", True))
+check("regular row unchanged", (rows3["266697511"]["sensor"],
+      rows3["266697511"]["product_kind"]), ("LISS4", "regular"))
+# a lone XML in its folder also keys the folder: export named after the folder
+prod4 = tempfile.mkdtemp(); os.makedirs(os.path.join(prod4, "HS_ONE"))
+open(os.path.join(prod4, "HS_ONE", SP + "_META.xml"), "w").write(XML)
+check("folder-named export matches a folder holding one XML",
+      "hs_one" in C.index_meta_xml(prod4), True)
+
 if failures:
     print(f"{len(failures)} FAILURE(S)")
     for x in failures:
