@@ -60,6 +60,7 @@ META_KEYS = {
     "sensor":     ("sensor",),
     "session_id": ("sessionnumber", "sessionid", "sessionno", "session"),
     "strip_id":   ("stripnumber", "stripid", "stripno", "strip"),
+    "prod_code":  ("prodcode", "productcode"),
     "centre_lat": ("scenecenterlat", "scenecentrelat", "centerlat", "centrelat"),
     "centre_lon": ("scenecenterlon", "scenecentrelon", "centerlon", "centrelon"),
 }
@@ -82,7 +83,7 @@ PICK_COLUMNS = {
 
 OUT_COLUMNS = [
     "product_id", "request_id", "product_no", "band", "sensor", "date", "session_id",
-    "strip_id", "product_kind",
+    "strip_id", "prod_code", "product_kind",
     "centre_lat", "centre_lon", "n_points",
     "mean_dx", "mean_dy", "std_dx", "std_dy", "rmse_dx", "rmse_dy",
     "mean_radial", "rmse_radial", "max_radial", "ce90", "axis_ratio",
@@ -462,6 +463,7 @@ def consolidate(results_folder, products_folder, out_csv, log=print):
             "band": band, "product_kind": kind,
             "date": anc["date"], "session_id": anc["session_id"],
             "strip_id": anc["strip_id"], "sensor": anc["sensor"],
+            "prod_code": anc.get("prod_code"),
             "centre_lat": _fmt(anc["centre_lat"], 6),
             "centre_lon": _fmt(anc["centre_lon"], 6),
             "n_points": st["n"], "results_csv": path, "band_meta": meta_path,

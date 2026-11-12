@@ -105,7 +105,7 @@ write(os.path.join(res, "csv", "266697521_rival_stats.csv"),
 write(os.path.join(res, "picks.csv"), old)
 os.makedirs(os.path.join(prod, "266697511"))
 open(os.path.join(prod, "266697511", "BAND_META.txt"), "w").write(
-    "Sensor = LISS4\nSensorMode = MX\n"
+    "Sensor = LISS4\nSensorMode = MX\nProdCode = STGE0BBS\n"
     "DateOfPass = 12-MAR-2025\nSessionID = 4471\nStripId = 3\n"
     "SceneCenterLat = 16.5\nSceneCenterLon = 78.5\n")
 out = os.path.join(res, "out", "all.csv")
@@ -119,6 +119,7 @@ check("ancillary from BAND_META", (r1["date"], r1["session_id"], r1["strip_id"],
                                    r1["centre_lat"]),
       ("12-MAR-2025", "4471", "3", "16.500000"))
 check("Sensor from its own key, not SensorMode", r1["sensor"], "LISS4")
+check("ProdCode for a regular product", r1["prod_code"], "STGE0BBS")
 check("sensor sits beside the other ancillary columns",
       C.OUT_COLUMNS[:6], ["product_id", "request_id", "product_no", "band",
                           "sensor", "date"])
@@ -190,6 +191,7 @@ check("special row carries the XML fields and path",
       (r["sensor"], r["date"], r["session_id"], r["strip_id"], r["n_points"],
        r["band_meta"].endswith(SP + "_META.xml")),
       ("HS", "11-11-2026", "026111104", "000006", "2", True))
+check("a special product has no ProdCode", r["prod_code"], "")
 check("regular row unchanged", (rows3["266697511"]["sensor"],
       rows3["266697511"]["product_kind"]), ("LISS4", "regular"))
 # a lone XML in its folder also keys the folder: export named after the folder
