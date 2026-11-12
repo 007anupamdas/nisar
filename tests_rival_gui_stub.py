@@ -2095,8 +2095,8 @@ asked = []
 qw.QMessageBox.question = lambda *a, **k: asked.append(a) or qw.QMessageBox.No
 win.evaluated_bands = lambda: [6]
 p = win._export_target("csv", "Export CSV")
-assert p == os.path.join(out_dir, "csv", "NISAR_0042_b6_rival.csv"), p
-print("marking on band 6 exports NISAR_0042_b6_rival.csv")
+assert p == os.path.join(out_dir, "csv", "NISAR_0042_rival_band6.csv"), p
+print("marking on band 6 exports NISAR_0042_rival_band6.csv")
 win.evaluated_bands = lambda: []
 store.pop("export_folder", None)
 p = win._export_target("csv", "Export CSV")

@@ -135,12 +135,12 @@ shutil.rmtree(res, ignore_errors=True); shutil.rmtree(prod, ignore_errors=True)
 
 print()
 # ── per-band results stay separate ─────────────────────────────────────────
-check("band from a RIVAL name", (C.band_of("2666975121_b6_rival.csv"),
-      C.band_of("P_b6-4-3_rival.csv"), C.band_of("2666975121_rival.csv")),
+check("band from a RIVAL name", (C.band_of("2666975121_rival_band6.csv"),
+      C.band_of("P_rival_band6-4-3.csv"), C.band_of("2666975121_rival.csv")),
       ("6", "6-4-3", ""))
 res2 = tempfile.mkdtemp()
-write(os.path.join(res2, "266697511_b1_rival.csv"), old)
-write(os.path.join(res2, "266697511_b6_rival.csv"), new)
+write(os.path.join(res2, "266697511_rival_band1.csv"), old)
+write(os.path.join(res2, "266697511_rival_band6.csv"), new)
 out2 = os.path.join(res2, "out.csv")
 n2 = C.consolidate(res2, prod, out2, lambda *a: None)
 rows2 = list(csv.DictReader(open(out2, encoding="utf-8-sig")))

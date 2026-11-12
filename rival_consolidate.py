@@ -88,11 +88,11 @@ def product_id_of(filename):
     return m.group(1), m.group(2), m.group(3)
 
 
-BAND_RE = re.compile(r"_b(\d+(?:-\d+)*)_rival", re.IGNORECASE)
+BAND_RE = re.compile(r"_band(\d+(?:-\d+)*)(?=[._]|$)", re.IGNORECASE)
 
 
 def band_of(filename):
-    """'6' for X_b6_rival.csv (RIVAL tags exports with the band marked on),
+    """'6' for X_rival_band6.csv (RIVAL tags exports with the band marked on),
     '6-4-3' for a composite, '' for an untagged file."""
     m = BAND_RE.search(os.path.basename(filename))
     return m.group(1) if m else ""
@@ -305,7 +305,7 @@ def error_summary(errors):
 def find_results(folder):
     """Every results CSV under folder (recursively), keyed by (product id, band).
 
-    Each band of a product is its own result (RIVAL writes X_b6_rival.csv per
+    Each band of a product is its own result (RIVAL writes X_rival_band6.csv per
     band marked on). When one product and band has several CSVs -- written by different RIVAL versions --
     the most recently modified wins, and the others are reported.
     """

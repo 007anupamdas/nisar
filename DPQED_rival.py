@@ -1352,7 +1352,7 @@ def export_paths(folder, input_path, name_from="folder", band=""):
 
     With no input loaded (or a folder at a filesystem root) the stem is 'rival'.
 
-    band (band_tag) names the band evaluated: NISAR_L2_0042_b6_rival.csv, so
+    band (band_tag) names the band evaluated: NISAR_L2_0042_rival_band6.csv, so
     one run per band lands in its own files rather than replacing the last.
     """
     if not input_path:
@@ -1362,9 +1362,9 @@ def export_paths(folder, input_path, name_from="folder", band=""):
     else:
         parent = os.path.dirname(os.path.abspath(input_path))
         stem = os.path.basename(parent.rstrip("/\\"))
-    if band:
-        stem = f"{stem}_{band}" if stem else band
     name = (stem + EXPORT_SUFFIX) if stem else "rival"
+    if band:
+        name = f"{name}_{band}"
     sub = lambda k: os.path.join(folder, EXPORT_SUBDIRS[k], name)
     return {"csv": sub("csv") + ".csv", "shp": sub("shp") + ".shp",
             "stats": sub("stats") + "_stats.csv"}
@@ -1443,8 +1443,8 @@ def evaluated_bands(path, shown):
 
 
 def band_tag(bands):
-    """'b6' for one band, 'b6-4-3' for a composite, '' for none."""
-    return ("b" + "-".join(str(b) for b in bands)) if bands else ""
+    """'band6' for one band, 'band6-4-3' for a composite, '' for none."""
+    return ("band" + "-".join(str(b) for b in bands)) if bands else ""
 
 
 def stats_path_for(export_path):
