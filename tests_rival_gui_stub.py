@@ -2282,6 +2282,18 @@ assert (combos[-3].idx, combos[-2].idx, combos[-1].idx) == (33, 22, 0)
 print("a product with another band count asks afresh")
 R.ALWAYS_ASK_BANDS = True
 
+# ── 30b. input band labels use the scene's band numbers ───────────────────
+_lbl = R.QCDashboard._band_labels.__get__(win)
+def _lyr(src, names):
+    return MagicMock(source=lambda: src, bandName=lambda b: names[b - 1],
+                     dataProvider=lambda: MagicMock(bandCount=lambda: len(names)))
+assert _lbl(_lyr("/d/X_1_b2-4-5_cog.tif", ["Band 1", "", "Band 003"])) == \
+    ["Band 2", "Band 4", "Band 5"], _lbl(_lyr("/d/X_1_b2-4-5_cog.tif", ["Band 1", "", "Band 003"]))
+assert _lbl(_lyr("/d/X_1_b6-4-3_cog.tif", ["SWIR", "NIR", "Red"])) == \
+    ["6: SWIR", "4: NIR", "3: Red"]
+assert _lbl(_lyr("/d/X_1.tif", ["", ""])) == ["Band 1", "Band 2"]
+print("a COG of bands 2-4-5 lists Band 2, Band 4, Band 5 on the input canvas")
+
 # ── 31. panning the reference past its tile brings up the neighbour ────────
 saved31 = (R.QgsGeometry, R.ring_wkt)
 R.QgsGeometry = type("G", (), {"fromWkt": staticmethod(lambda w: _Box(w)),

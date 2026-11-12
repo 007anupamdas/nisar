@@ -5050,20 +5050,27 @@ class QCDashboard(QMainWindow):
 
         cog_locate's --gtiff writes the polarization into each band description,
         so a NISAR chip lists 'HH' and 'HV' rather than 'Band 1'.
+
+        A COG this tool built is labelled with the SCENE's band numbers: the
+        first band of X_b2-4-5_cog.tif reads 'Band 2', not 'Band 1', so the
+        canvas, the log and the export name (..._rival_band2) agree.
         """
         provider = layer.dataProvider()
+        src = cog_source_bands(layer.source())
         labels = []
         for band in range(1, provider.bandCount() + 1):
+            true = src[band - 1] if src and band <= len(src) else band
             name = ""
             try:
                 name = (layer.bandName(band) or "").strip()
             except Exception:
                 pass
-            # QGIS synthesises 'Band 001' when a raster names nothing
-            if not name or re.fullmatch(r"Band\s*0*\d+", name):
-                name = f"Band {band}"
+            # QGIS synthesises 'Band 001' when a raster names nothing; a COG
+            # may carry 'Band 1' copied from nothing -- both mean "unnamed"
+            if not name or re.fullmatch(r"Band\s*0*\d+", name, re.IGNORECASE):
+                name = f"Band {true}"
             elif not name.lower().startswith("band"):
-                name = f"{band}: {name}"
+                name = f"{true}: {name}"
             labels.append(name)
         return labels
 
@@ -5221,13 +5228,18 @@ class QCDashboard(QMainWindow):
             if count < 2:
                 renderer = QgsSingleBandGrayRenderer(provider, 1)
                 renderer.setContrastEnhancement(self._stretch_for(layer, 1))
-                shown = "grey band 1"
+                shown = f"grey band {evaluated_bands(layer.source(), [1])[0]}"
             else:
                 renderer = QgsMultiBandColorRenderer(provider, red, green, blue)
                 renderer.setRedContrastEnhancement(self._stretch_for(layer, red))
                 renderer.setGreenContrastEnhancement(self._stretch_for(layer, green))
                 renderer.setBlueContrastEnhancement(self._stretch_for(layer, blue))
-                shown = f"R={red} G={green} B={blue}"
+                t = evaluated_bands(layer.source(), [red]) + \
+                    evaluated_bands(layer.source(), [green]) + \
+                    evaluated_bands(layer.source(), [blue])
+                shown = (f"R={red} G={green} B={blue}" if t == [red, green, blue]
+                         else f"scene bands R={t[0]} G={t[1]} B={t[2]} "
+                              f"(COG bands {red}, {green}, {blue})")
             layer.setRenderer(renderer)
             layer.triggerRepaint()
             self.canvas_left.refresh()
