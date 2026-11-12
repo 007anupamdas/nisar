@@ -2462,21 +2462,30 @@ top1 = max([r for r in q33 if r["detail_db"] > 0], key=lambda r: r["score"])["ba
 win._ask_band_mode = lambda *a: ("auto", 1)
 assert win._ask_bands(src33) == [top1] and not asked_n, (win._ask_bands(src33), top1)
 print(f"popup -> Automatic, 1: the single best band ({top1})")
+store["cog_rgb/30"] = "2,4,5"
+asked_n.clear()
+win._ask_band_mode = lambda *a: ("last", 3)
+assert win._ask_bands(src33) == [2, 4, 5] and not asked_n
+print("popup -> Last manual: the saved bands, no dialog")
+store.clear()
 win._ask_band_mode = lambda *a: None
 assert win._ask_bands(src33) is None
 print("popup -> Cancel: nothing is built")
+_bq = R.band_quality
+R.band_quality = lambda *a, **k: (_ for _ in ()).throw(AssertionError("Manual scored bands"))
 win._ask_band_mode = lambda *a: ("manual", 3)
 combos.clear()
 win._ask_bands(src33)
 assert asked_n and len(combos) == 3, "Manual 3 did not open R/G/B"
-assert "dB]" in combos[0].items[top1 - 1], combos[0].items[:3]
+assert combos[0].items[:3] == ["1", "2", "3"], combos[0].items[:3]
 win._ask_band_mode = lambda *a: ("manual", 1)
 combos.clear(); asked_n.clear()
 _orig_exec = _Dlg.exec_
 _Dlg.exec_ = lambda self: (_pre.append([c.idx for c in combos]), asked_n.append(1), 1)[-1]
-assert win._ask_bands(src33) == [top1] and len(combos) == 1 and _pre[-1] == [top1 - 1]
+assert win._ask_bands(src33) == [1] and len(combos) == 1 and _pre[-1] == [0]
 _Dlg.exec_ = _orig_exec
-print("popup -> Manual: 1 or 3 drop-downs, bands labelled with quality, best preselected")
+R.band_quality = _bq
+print("popup -> Manual: 1 or 3 plain drop-downs, no quality computed")
 check_q = R.quality_pick([{"band": 1, "score": 90, "detail_db": -1},
                           {"band": 2, "score": 50, "detail_db": 3}], 1)
 assert check_q == [2], check_q
@@ -2515,6 +2524,15 @@ R.QLabel = lambda t: _lbls.append(t) or MagicMock()
 mode = R.QCDashboard._ask_band_mode.__get__(win)
 store.clear()
 assert mode("/s/x_GTD_A_1.tif", 30, [2, 4, 5]) == ("auto", 1) and "2-4-5" in _lbls[0]
+_PD.click = "Last manual (2-4-5)"
+assert mode("/s/x_GTD_A_1.tif", 30, [2, 4, 5]) == ("last", 3)
+_PD.click = "Last manual (6)"
+assert mode("/s/x_GTD_A_1.tif", 30, [6]) == ("last", 1)
+_BB.btns.clear()
+_PD.click = "Cancel"
+assert mode("/s/x_GTD_A_1.tif", 30, None) is None
+assert not any(k.startswith("Last") for k in _BB.btns), "offered with nothing saved"
+print("the popup offers 'Last manual (2-4-5)' only when a manual choice exists")
 _PD.force = 1
 _PD.click = "Manual..."
 assert mode("/s/x_GTD_A_1.tif", 30, None) == ("manual", 3)

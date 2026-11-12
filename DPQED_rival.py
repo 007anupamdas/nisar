@@ -4704,7 +4704,10 @@ class QCDashboard(QMainWindow):
         self.load_input_path(cog, source=src, naming=naming)
 
     def _ask_band_mode(self, src, n, saved):
-        """('auto' | 'manual', 1 | 3) for this COG, or None if cancelled.
+        """('auto' | 'manual' | 'last', count) for this COG, or None if cancelled.
+
+        'last' reuses the previous manual choice for this band count (offered
+        only when there is one), with its own count.
 
         How many bands: 1 (a grey COG -- one band evaluated at a time) or 3
         (a colour composite). Automatic then takes the best 1 or 3 by band
@@ -4732,6 +4735,12 @@ class QCDashboard(QMainWindow):
         bb = QDialogButtonBox()
         b_auto = bb.addButton("Automatic (best by quality)", QDialogButtonBox.AcceptRole)
         b_man = bb.addButton("Manual...", QDialogButtonBox.AcceptRole)
+        b_last = None
+        if saved:
+            # one click to reuse the previous manual choice; it carries its own
+            # band count, so the 1-or-3 box does not apply to it
+            b_last = bb.addButton(f"Last manual ({'-'.join(map(str, saved))})",
+                                  QDialogButtonBox.AcceptRole)
         bb.addButton(QDialogButtonBox.Cancel)
         hit = {}
         bb.clicked.connect(lambda b: hit.setdefault("b", b))
@@ -4749,6 +4758,8 @@ class QCDashboard(QMainWindow):
             return ("auto", k)
         if hit.get("b") is b_man:
             return ("manual", k)
+        if b_last is not None and hit.get("b") is b_last:
+            return ("last", len(saved))
         return None
 
     def _band_scores(self, src, n):
@@ -4804,9 +4815,15 @@ class QCDashboard(QMainWindow):
             if asked is None:
                 return None
             mode, k = asked
-            scores = self._band_scores(src, n)
-            best = quality_pick(scores, k) or default_rgb(n)[:k]
+            if mode == "last" and saved:
+                print(f"[COG] bands {saved}: the last manual choice for "
+                      f"{n}-band products")
+                return saved
             if mode == "auto":
+                # quality is computed for Automatic only: Manual is a plain
+                # choice and must open at once, even on a 256-band cube
+                scores = self._band_scores(src, n)
+                best = quality_pick(scores, k) or default_rgb(n)[:k]
                 print(f"[COG] {k} band(s) {best} picked automatically from {n}")
                 return best
             shift = True
@@ -4828,7 +4845,7 @@ class QCDashboard(QMainWindow):
             return saved
 
         if ALWAYS_ASK_BANDS:
-            default = saved or quality_pick(scores, k) or default_rgb(n)[:k]
+            default = saved or default_rgb(n)[:k]
         else:
             default = auto or saved or default_rgb(n)
         labels = quality_labels(names, scores)
