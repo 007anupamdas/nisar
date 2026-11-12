@@ -36,6 +36,7 @@ import math
 import os
 import re
 import shutil
+import subprocess
 import sys
 import time
 import traceback
@@ -83,9 +84,12 @@ def use_gpu(device: str) -> str:
     not only those that take a device, as 'cuda:N' alone would. Returns the
     device name to use from then on ('cuda'), or the name unchanged when it
     names no single GPU or torch is already loaded (then 'cuda:N' as is)."""
+    gl = gpus_of(device)                               # 'all' / 'cuda:0,1' in a one-GPU tool: the first of them
+    if gl:
+        device = f'cuda:{gl[0]}'
     m = re.fullmatch(r'cuda:(\d+)', str(device or '').strip().lower())
     if not m:
-        return device
+        return 'auto' if str(device or '').strip().lower() in ('all', 'cuda:all', 'gpus', 'all-gpus') else device
     if os.environ.get('AUTOMATCH_GPU') == m.group(1):
         return 'cuda'                                  # pinned already
     if 'torch' in sys.modules:
@@ -96,6 +100,95 @@ def use_gpu(device: str) -> str:
     print(f'[Device] GPU {m.group(1)} only (CUDA_VISIBLE_DEVICES={m.group(1)}): every model of this run uses it',
           flush=True)
     return 'cuda'
+
+def visible_gpus() -> List[int]:
+    """The GPUs of this machine as nvidia-smi numbers them ([] without any)."""
+    try:
+        r = subprocess.run(['nvidia-smi', '--query-gpu=index', '--format=csv,noheader'], capture_output=True,
+                           text=True, timeout=5, creationflags=0x08000000 if os.name == 'nt' else 0)
+        return [int(x) for x in r.stdout.split() if x.strip().isdigit()] if r.returncode == 0 else []
+    except Exception:
+        return []
+
+
+def gpus_of(device: str) -> List[int]:
+    """The GPUs a job spreads its detectors over: 'all' / 'cuda:all' = every
+    GPU of this machine; 'cuda:0,1' / 'cuda:0+cuda:1' = those; else [] (one
+    device, run as before)."""
+    d = str(device or 'auto').strip().lower().replace(' ', '')
+    if d in ('all', 'cuda:all', 'gpus', 'all-gpus'):
+        return visible_gpus()
+    nums = re.findall(r'(?:cuda:|(?<=[,+]))(\d+)', d) if d.startswith('cuda') else (
+        d.split(',') if re.fullmatch(r'\d+(,\d+)+', d) else [])
+    if len(nums) >= 2:
+        return sorted({int(n) for n in nums})
+    return []
+
+
+def shard_detectors(detectors: List[str], n: int) -> List[List[str]]:
+    """The detectors dealt round n GPUs (heavy and light ones spread)."""
+    return [detectors[i::n] for i in range(n)]
+
+
+def run_sharded(job: Dict, gpus: List[int], out_root: str) -> List[Dict]:
+    """One worker process per GPU, each with its share of the detectors and
+    the device pinned (cloud mask, auto bands and preflight already done
+    here); their output is relayed with a [GPU n] prefix. Returns the merged
+    manifest rows of the workers (RUN_MANIFEST_gpu<n>.csv each)."""
+    shards = shard_detectors(list(job['detectors']), len(gpus))
+    procs, paths = [], []
+    for g, dets in zip(gpus, shards):
+        if not dets:
+            continue
+        sub = {k: v for k, v in job.items() if not k.startswith('_') or k == '_channel_rasters'}
+        sub.update(device=f'cuda:{g}', cloud_device=f'cuda:{g}' if job.get('cloud_device') else '',
+                   detectors=dets, _shard=g, _channel_rasters=job.get('_channel_rasters') or {})
+        jp = os.path.join(out_root, f'job_gpu{g}.json')
+        with open(jp, 'w', encoding='utf-8') as f:
+            json.dump(sub, f, indent=2)
+        env = dict(os.environ)
+        for k in ('CUDA_VISIBLE_DEVICES', 'AUTOMATCH_GPU'):
+            env.pop(k, None)
+        print(f'[Job] GPU {g}: {len(dets)} detector(s): {", ".join(dets)}', flush=True)
+        p = subprocess.Popen([sys.executable, os.path.abspath(__file__), 'run', jp], stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT, text=True, env=env, bufsize=1, encoding='utf-8',
+                             errors='replace')
+        procs.append((g, p))
+        paths.append(os.path.join(out_root, f'RUN_MANIFEST_gpu{g}.csv'))
+    import threading
+
+    def relay(g, p):
+        for line in p.stdout:
+            line = line.rstrip('\n')
+            if line.startswith(PROGRESS_PREFIX):          # events pass through, tagged with the GPU
+                try:
+                    ev = json.loads(line[len(PROGRESS_PREFIX):])
+                    if ev.get('event') in ('done', 'job', 'failed'):
+                        continue
+                    ev['gpu'] = g
+                    emit(ev)
+                except Exception:
+                    pass
+            else:
+                print(f'[GPU {g}] {line}', flush=True)
+    threads = [threading.Thread(target=relay, args=(g, p), daemon=True) for g, p in procs]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    rows = []
+    for (g, p), mp in zip(procs, paths):
+        rc = p.wait()
+        if rc != 0:
+            print(f'[Job] GPU {g} worker ended with code {rc}', flush=True)
+        if os.path.exists(mp):
+            import pandas as pd
+            rows += pd.read_csv(mp).to_dict('records')
+        else:
+            rows.append({'sweep': '', 'detector': f'(GPU {g} worker)', 'status': 'failed',
+                         'error': f'no manifest from the GPU {g} worker (exit code {rc})'})
+    return rows
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Job specification
@@ -261,7 +354,7 @@ DEFAULT_JOB: Dict = {
     'rival_max_points_per_chip': 200,   # 0 = all inliers
 
     # misc
-    'device': 'auto',            # auto | cuda | cuda:0 | cpu
+    'device': 'auto',            # auto | cuda | cuda:0 | cpu | all (every GPU: detectors spread over them) | cuda:0,1
     'use_amp': True,
     'min_valid_fraction': 0.3,
     'min_area_km2': 50.0,
@@ -312,6 +405,9 @@ def normalize(job: Dict) -> Dict:
             _WARNED_KEYS.add(k)
             print(f'[Job] WARNING: {unknown_key_note(k)}', flush=True)
     out.update(copy.deepcopy({k: v for k, v in job.items() if k in DEFAULT_JOB}))
+    for k in ('_shard', '_channel_rasters'):          # a GPU worker's share, handed down by its parent
+        if job.get(k) is not None:
+            out[k] = copy.deepcopy(job[k])
     if not out['temp_dir'] and out['output_dir']:
         out['temp_dir'] = os.path.join(out['output_dir'], '_cache')
     for k in ('window_sizes', 'num_features', 'detectors', 'smnn_thresholds',
@@ -761,7 +857,7 @@ def preflight(job: Dict, check_weights: bool = True) -> Dict:
                 warnings.append('window sizes > 2048 px may not fit a GPU under 20 GB')
         else:
             info['gpu'] = 'none (CPU)'
-            if job['device'].startswith('cuda'):
+            if job['device'].startswith('cuda') and not os.environ.get('AUTOMATCH_CPU_OK'):
                 errors.append('device=cuda requested but CUDA is not available')
     except Exception:
         pass
@@ -1121,6 +1217,11 @@ def prepare_cloud_mask(job: Dict, scene, out_root: str) -> Dict[str, List]:
 
 def run_job(job: Dict) -> Dict:
     job = expand_selection(normalize(job))
+    gpus = [] if job.get('_shard') is not None else gpus_of(job['device'])
+    if gpus and len(job['detectors']) < 2:
+        gpus = []
+    if gpus:                                   # the parent: preflight, cloud mask, then one worker per GPU
+        job = dict(job, device=f'cuda:{gpus[0]}')
     device = use_gpu(job['device'])            # before anything loads torch
     if job.get('cloud_device'):
         job['cloud_device'] = use_gpu(job['cloud_device'])
@@ -1162,19 +1263,26 @@ def run_job(job: Dict) -> Dict:
     detectors = job['detectors']
     sweep = [(w, nf) for w in job['window_sizes'] for nf in job['num_features']]
     emit({'event': 'job', 'scene': scene.name, 'channels': job['channels'] or scene.channels,
-          'detectors': detectors, 'sweep': sweep, 'resolution_m': res})
+          'detectors': detectors, 'sweep': sweep, 'resolution_m': res, 'gpus': gpus})
+    shard = job.get('_shard')
+    t_job = time.time()
+    if gpus:
+        print(f'[Job] {len(detectors)} detectors over GPUs {gpus}: one worker per GPU, the same job folder',
+              flush=True)
+        manifest = run_sharded(job, gpus, out_root)
+        return _finish_job(job, out_root, scene, manifest, t_job)
     print(f'[Job] {scene.name}: {len(sweep)} sweep point(s), working resolution {res} m, '
           f'RANSAC thresholds {job["ransac_thresholds_m"] or [t * res for t in job["ransac_thresholds_px"]]} m')
 
     manifest = []
     rival_dir = os.path.join(out_root, 'rival')
-    t_job = time.time()
+    suffix = f'_gpu{shard}' if shard is not None else ''
     for k, (win, nf) in enumerate(sweep):
         tag = f'win{win}_nf{nf or "auto"}'
         out_dir = os.path.join(out_root, tag)
         emit({'event': 'sweep', 'done': k, 'total': len(sweep), 'point': tag})
-        summary_csv = os.path.join(out_dir, 'POL_RUN_SUMMARY.csv')
-        key_path = os.path.join(out_dir, 'SWEEP_KEY.txt')
+        summary_csv = os.path.join(out_dir, f'POL_RUN_SUMMARY{suffix}.csv')
+        key_path = os.path.join(out_dir, f'SWEEP_KEY{suffix}.txt')
         key = _sweep_key(job, win, nf)
         prev = None
         if os.path.exists(key_path):
@@ -1193,6 +1301,7 @@ def run_job(job: Dict) -> Dict:
             print(f'[Job] >>> {tag}: window {win} px, {cfg.num_features} keypoints per window '
               f'({cfg.num_features / (win * win / 1e6):.0f} per megapixel)')
             try:
+                cfg.summary_name = f'POL_RUN_SUMMARY{suffix}.csv'
                 records = E.AutoMatchPipeline(cfg).run(job['input_path'], detectors)
                 with open(key_path, 'w') as fh:
                     fh.write(key)
@@ -1234,6 +1343,19 @@ def run_job(job: Dict) -> Dict:
                       'detector': row['detector'], 'status': row['status'], 'error': row['error']})
             manifest.append(row)
 
+    if shard is not None:                      # a worker: its manifest only; the parent finishes the job
+        man_path = os.path.join(out_root, f'RUN_MANIFEST_gpu{shard}.csv')
+        pd.DataFrame(manifest).to_csv(man_path, index=False)
+        emit({'event': 'done', 'manifest': man_path, 'minutes': round((time.time() - t_job) / 60.0, 2)})
+        print(f'[Job] GPU {shard} share done in {(time.time() - t_job) / 60.0:.1f} min')
+        return {'manifest': man_path, 'best': {}}
+    return _finish_job(job, out_root, scene, manifest, t_job)
+
+
+def _finish_job(job: Dict, out_root: str, scene, manifest: List[Dict], t_job: float) -> Dict:
+    """The shared end of a job: truth, RUN_MANIFEST.csv, the performance
+    table, the best per channel, the cross-check."""
+    import pandas as pd
     truth_files = {}
     if job['truth_csv']:
         truth_files = _compare_with_truth(job, out_root, scene.working_crs, manifest)

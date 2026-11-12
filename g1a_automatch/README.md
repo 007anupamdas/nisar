@@ -494,6 +494,22 @@ The benchmark adds both to `BENCH_DETECTORS.csv`, with
 checked against the truth error. On the synthetic scene, 90–94 % of
 matches are parallel; random matches give about 0 %.
 
+## Two GPUs
+
+- **One run over both GPUs:** set the device to *all GPUs* (Output & run;
+  jobs: `device: all`, or `cuda:0,1`). The job does preflight and the
+  cloud mask once, then starts one worker process per GPU, each pinned to
+  its GPU with its share of the detectors (dealt round, so heavy and light
+  ones spread: 28 detectors become 14 and 14). Both write into the same
+  job folder (`POL_RUN_SUMMARY_gpu<n>.csv`, `RUN_MANIFEST_gpu<n>.csv`);
+  the parent merges them into `RUN_MANIFEST.csv` and picks the best, runs
+  the truth comparison and the cross-check as usual. Worker lines show as
+  `[GPU n]` in the log. A job with one detector runs on the first GPU.
+- **Two runs at once:** open two windows, one per GPU (each window picks
+  its GPU and has its own queue), as before.
+- **The other tools** (cloud test, cloud sweep, benchmark, GPU service)
+  take one GPU; with *all GPUs* they use the first.
+
 ## Clouds (OmniCloudMask)
 
 `cloud_mask: on` (`omnicloudmask`, as older jobs say, means the same; GUI:

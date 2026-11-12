@@ -370,9 +370,13 @@ class DeviceCombo(QtWidgets.QComboBox):
         if not gpus:                                  # nvidia-smi not found: still offer two GPUs by number
             for i in (0, 1):
                 self.addItem(f'GPU {i}', f'cuda:{i}')
+        if len(gpus) >= 2 or not gpus:
+            self.addItem('all GPUs: the detectors spread over them (one worker per GPU)', 'all')
         self.addItem('CPU', 'cpu')
         self.setToolTip('One GPU: the whole run uses that GPU only (the others are hidden from it), so two '
-                        'windows can run on two GPUs at once.')
+                        'windows can run on two GPUs at once. All GPUs: a matching run deals its detectors round '
+                        'the GPUs, one worker process each, into the same job folder (the cloud test, sweep and '
+                        'benchmark take one GPU).')
 
     def value(self) -> str:
         return str(self.currentData() or self.currentText() or 'auto')

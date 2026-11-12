@@ -137,12 +137,12 @@ def test_engine_helpers():
 
 
 # ── end to end ───────────────────────────────────────────────────────────────
-def _run_job(job, tmp, want_output=False):
+def _run_job(job, tmp, want_output=False, env=None):
     path = os.path.join(tmp, 'job.json')
     with open(path, 'w') as f:
         json.dump(job, f)
     out = subprocess.run([sys.executable, os.path.join(HERE, 'automatch_job.py'), 'run', path],
-                         capture_output=True, text=True)
+                         capture_output=True, text=True, env=env)
     if out.returncode != 0:
         print(out.stdout[-3000:], out.stderr[-3000:])
     return (out.returncode, out.stdout) if want_output else out.returncode
@@ -492,6 +492,38 @@ def test_e2e_truth(tmp):
     code, stdout = _run_job(bad, tmp, want_output=True)
     check('truth e2e: RIVAL file as manual GCP stops the job in preflight, before matching',
           (code, 'manual_gcp_csv is a RIVAL CSV' in stdout, 'Processing pair' in stdout), (2, True, False))
+
+
+def test_e2e_multigpu(tmp):
+    """device 'cuda:0,1' (or 'all'): the detectors are dealt round the GPUs,
+    one worker process per GPU into the same job folder (here without CUDA
+    the workers fall back to CPU, which tests the mechanics), their
+    manifests merged, the best picked over both, the workers' output relayed
+    with a [GPU n] prefix."""
+    import glob
+    import pandas as pd
+    import synthetic_data as S
+    import automatch_rival as AR
+    dE, dN = 4013.0, -2487.0
+    data = S.make_all(os.path.join(tmp, 'synth_mg'), dE, dN)
+    out = os.path.join(tmp, 'out_mg')
+    rc, log = _run_job({'input_path': data['input'], 'reference_dir': data['C1'], 'output_dir': out,
+                        'channels': ['band1'], 'detectors': ['sift', 'dog'], 'window_sizes': [1024],
+                        'max_expected_error_m': 10000, 'smnn_thresholds': [0.95], 'use_amp': False,
+                        'device': 'cuda:0,1', 'cross_top_n': 0}, tmp, want_output=True,
+                       env={**os.environ, 'AUTOMATCH_CPU_OK': '1'})       # no CUDA here: workers fall back to CPU
+    man = pd.read_csv(os.path.join(out, 'RUN_MANIFEST.csv')) if os.path.exists(os.path.join(out, 'RUN_MANIFEST.csv')) \
+        else pd.DataFrame()
+    best = os.path.join(out, 'RIVAL_BEST_G1A_SYNTH_L1_band1.csv')
+    pts = AR.read_rival_csv(best) if os.path.exists(best) else None
+    check('multi-GPU: two workers (sift on GPU 0, dog on GPU 1), one merged manifest, the best over both, '
+          'the workers\' lines relayed',
+          (rc, sorted(glob.glob(os.path.join(out, 'RUN_MANIFEST_gpu*.csv'))) != [], len(man),
+           sorted({str(d).split('/')[0].split('+')[0] for d in man['detector']}) if len(man) else [],
+           '[GPU 1]' in log and '[GPU 0]' in log, 'GPU 0: 1 detector(s): sift' in log,
+           pts is not None and abs(float((pts.ix - pts.rx).mean()) - dE) < 10.0,
+           sorted(os.path.basename(p) for p in glob.glob(os.path.join(out, 'win1024_nfauto', 'POL_RUN_SUMMARY*')))),
+          (0, True, 2, ['dog_hardnet', 'sift'], True, True, True, ['POL_RUN_SUMMARY_gpu0.csv', 'POL_RUN_SUMMARY_gpu1.csv']))
 
 
 def test_pack(tmp):
@@ -926,7 +958,7 @@ def test_gui_cloud():
                   'GPU', (items, dc.itemText(2), cd.args()[cd.args().index('--device') + 1],
                           sw.args()[sw.args().index('--device') + 1], ba[ba.index('--device') + 1],
                           w.device.value()),
-                  (['auto', 'cuda:0', 'cuda:1', 'cpu'], 'GPU 1: NVIDIA RTX A4000 (16 GB)', 'cuda:1', 'cuda:1', 'cuda:1',
+                  (['auto', 'cuda:0', 'cuda:1', 'all', 'cpu'], 'GPU 1: NVIDIA RTX A4000 (16 GB)', 'cuda:1', 'cuda:1', 'cuda:1',
                    'cuda:1'))
             w.device.setValue('auto')
             w2 = G.AutoMatchWindow()
@@ -1072,6 +1104,10 @@ def test_gpu_pinning(tmp):
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
+    check('gpu: all / cuda:0,1 name the GPUs a run spreads over; one-GPU tools take the first of them',
+          (J.gpus_of('cuda:0,1'), J.gpus_of('cuda:1'), J.shard_detectors(['a', 'b', 'c'], 2),
+           J.use_gpu('cuda:1,cuda:0') in ('cuda', 'cuda:0'), J.use_gpu('all') in ('auto', 'cuda', 'cuda:0')),
+          ([0, 1], [], [['a', 'c'], ['b']], True, True))
     check('gpu: the device is not a result setting, so resume works on either GPU',
           J._sweep_key(J.normalize({'device': 'cuda:0'}), 512, None) == J._sweep_key(J.normalize({'device': 'cuda:1'}),
                                                                                     512, None), True)
@@ -4628,6 +4664,7 @@ def main():
             test_e2e_missing_weights(tmp)
             test_e2e_truth(tmp)
             test_e2e_cloud(tmp)
+            test_e2e_multigpu(tmp)
             test_pack(tmp)
     finally:
         if not a.keep:

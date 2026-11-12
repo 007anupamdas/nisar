@@ -432,6 +432,7 @@ class PipelineConfig:
     # at window_size and step down whenever the GPU runs out of memory -- each
     # detector finds the size that fits this GPU.
     gpu_window_px: int = 0
+    summary_name: str = 'POL_RUN_SUMMARY.csv'   # per sweep point; a GPU worker writes its own
 
     use_disk_cache: bool = True
     cleanup_after_pair: bool = False
@@ -5947,7 +5948,8 @@ class AutoMatchPipeline:
 
         os.makedirs(self.config.output_base_dir, exist_ok=True)
         pd.DataFrame(all_runs).to_csv(
-            os.path.join(self.config.output_base_dir, 'POL_RUN_SUMMARY.csv'), index=False)
+            os.path.join(self.config.output_base_dir, getattr(self.config, 'summary_name', None)
+                         or 'POL_RUN_SUMMARY.csv'), index=False)
         print('=' * 80)
         print('ALL CHANNELS COMPLETE')
         print('=' * 80)
