@@ -702,7 +702,7 @@ Every pixel is judged on its own. Clouds come in every shape and size
 (broken cumulus, cirrus streaks, haze), so there is no blob-size limit
 unless `cloud_min_blob_km2` sets one (0 by default).
 
-- **Radiance:** pixel value × `radiance_scale` (0.01), in `radiance_unit`
+- **Radiance:** pixel value × `radiance_scale` (0.001), in `radiance_unit`
   (W/cm²/sr/µm for every G1A sensor). For ML, if that unit does not give
   Earth temperatures at 10.8 µm (median 200–330 K), the unit that does is
   used instead, with a WARNING in the log (`auto`: always the one nearest
@@ -781,7 +781,7 @@ unless `cloud_min_blob_km2` sets one (0 by default).
 - **Cloud test:**
 
       python automatch_job.py cloud <ML or HS image> --out <folder>
-          [--method auto|omnicloudmask|ir|swir] [--radiance-scale 0.01]
+          [--method auto|omnicloudmask|ir|swir] [--radiance-scale 0.001]
           [--ir-dt 8 --ir-split 1 --ir-cold 240 --clear <earlier ML scenes>]
           [--swir-k 4 --swir-bright 3] [--vis-bright 3 --vis-white 0.25 --vis-clear-factor 1.3]
           [--radiance-unit W/cm2/sr/um] [--min-blob-km2 0] [--from <MV/HV image>]

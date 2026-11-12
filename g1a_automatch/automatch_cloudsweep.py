@@ -8,7 +8,7 @@ images, without a matching run.
         [--reference <cloud mask raster | polygons .geojson / .shp> ...]
         [--model-dir <weights>/omnicloudmask] [--device cpu] [--max-side 2048]
         [--images grid|all|none] [--sheets]
-        [--method auto|omnicloudmask|ir|swir] [--radiance-scale 0.01]
+        [--method auto|omnicloudmask|ir|swir] [--radiance-scale 0.001]
         [--ir-dt 4-12:2] [--ir-split 0.75 1 1.5] [--clear <earlier ML scenes>]
         [--swir-k 2-6:1] [--swir-bright 2-5:1]
         [--vis-bright 2-5:1] [--vis-white 0.15 0.25 0.35] [--vis-clear <earlier MV scenes>]
@@ -385,7 +385,7 @@ PHYS_KEYS = {'ir': ('ir_dt_k', 'ir_split_scale'), 'swir': ('swir_k', 'swir_brigh
 
 def sweep_phys(path: str, out_dir: str, sensor: str, method: str, first: Sequence[float], second: Sequence[float],
                blobs: Sequence[float] = (1.0,), classes: Sequence[int] = (1,), reference: str = '',
-               scale: float = 0.01, clear_paths=(), cold_k: float = 240.0, max_side: int = 2048,
+               scale: float = 0.001, clear_paths=(), cold_k: float = 240.0, max_side: int = 2048,
                images: str = 'grid', image_side: int = 1600, unit: str = 'W/cm2/sr/um',
                clear_factor: float = 1.3, shadow_km: float = 10.0, tiraux_opts: Optional[Dict] = None,
                device: Optional[str] = None, model_opts: Optional[Dict] = None) -> List[Dict]:
@@ -548,7 +548,7 @@ def run(images: List[str], out_dir: str, references: Optional[List[str]] = None,
         crisp: int = 6, spec: bool = True, classes=(1,), model_dir: str = '', device: Optional[str] = None,
         max_side: int = 2048, write_top: int = 3, predictor=None, pngs: str = 'grid', sheets: bool = False,
         method: str = 'auto', ir_dt='4-12:2', ir_split=(0.75, 1.0, 1.5), swir_k='2-6:1', swir_bright='2-5:1',
-        scale: float = 0.01, clear_paths=(), ir_cold: float = 240.0, vis_bright='2-5:1', vis_white=(0.15, 0.25, 0.35),
+        scale: float = 0.001, clear_paths=(), ir_cold: float = 240.0, vis_bright='2-5:1', vis_white=(0.15, 0.25, 0.35),
         vis_clear_factor: float = 1.3, unit: str = 'W/cm2/sr/um', vis_clear_paths=(),
         tiraux_opts: Optional[Dict] = None, tiraux_thresholds='0.3-0.7:0.2', tiraux_norm_hi=None,
         csmask_opts: Optional[Dict] = None, spectf_opts: Optional[Dict] = None, spectf_thresholds='0.3-0.7:0.1',
@@ -858,7 +858,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument('--swir-k', default='2-6:1', help='HS: cirrus ratio robust sd: lo-hi:step or values')
     ap.add_argument('--swir-bright', default='2-5:1', help='HS: thick cloud brighter than the clear ground at '
                     '1250 nm by (spreads)')
-    ap.add_argument('--radiance-scale', type=float, default=0.01, help='radiance = pixel value x this (G1A: 0.01)')
+    ap.add_argument('--radiance-scale', type=float, default=0.001, help='radiance = pixel value x this (G1A: 0.001)')
     ap.add_argument('--shard', default='', help=argparse.SUPPRESS)      # a GPU worker: i/n of the images
     ap.add_argument('--into', default='', help=argparse.SUPPRESS)       # a GPU worker: the parent's sweep folder
     a = ap.parse_args(argv)

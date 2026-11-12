@@ -299,7 +299,7 @@ def main(argv: List[str] = None) -> int:
                      int(job.get('cloud_from_margin_px') or 0) + int(job.get('cloud_dilate_px') or 0),
                      refine_opts=C.refine_options(job), method={'ocm': 'omnicloudmask'}.get(method, method),
                      phys_opts=(C.phys_options(job, method) if method in C.PHYS_NAMES else None),
-                     scale=float(job.get('radiance_scale') or 0.01),
+                     scale=float(job.get('radiance_scale') or 0.001),
                      clear_paths=job.get(C.CLEAR_KEY.get(method, '')) or [] if method in C.CLEAR_KEY else [],
                      from_method=job.get('cloud_from_method') or 'auto',  # tirauxcloud: device from cloud_device
                      unit=job.get('radiance_unit') or 'W/cm2/sr/um')
@@ -327,7 +327,7 @@ def main(argv: List[str] = None) -> int:
                ir_dt=job.get('cloud_sweep_ir_dt') or '4-12:2', ir_split=job.get('cloud_sweep_ir_split') or [1.0],
                swir_k=job.get('cloud_sweep_swir_k') or '2-6:1',
                swir_bright=job.get('cloud_sweep_swir_bright') or [3.0],
-               scale=float(job.get('radiance_scale') or 0.01), clear_paths=job.get('cloud_ir_clear') or [],
+               scale=float(job.get('radiance_scale') or 0.001), clear_paths=job.get('cloud_ir_clear') or [],
                ir_cold=float(job.get('cloud_ir_cold_k') or 240.0),
                vis_bright=job.get('cloud_sweep_vis_bright') or '2-5:1',
                vis_white=job.get('cloud_sweep_vis_white') or [0.25],

@@ -1016,7 +1016,7 @@ def test_gui_cloud():
         check('gui: the cloud test takes the window\'s method and the infrared settings',
               (ca[ca.index('--method') + 1], ca[ca.index('--ir-dt') + 1], ca[ca.index('--radiance-scale') + 1],
                ca[ca.index('--clear') + 1:], ca[ca.index('--swir-bright') + 1]),
-              ('ir', '6', '0.01', [img, img], '3'))
+              ('ir', '6', '0.001', [img, img], '3'))
         check('gui: the TIRAuxCloud checkpoint reaches the cloud test command (SegFormer, OLS input)',
               (ca[ca.index('--tiraux-checkpoint') + 1], ca[ca.index('--tiraux-arch') + 1],
                ca[ca.index('--tiraux-mode') + 1]), ('/x/model_hash_78713d1f6de22d2.pth', 'SegFormer', 'ols'))
@@ -1069,7 +1069,7 @@ def test_gui_cloud():
                            transform=from_origin(500000, 2500000, 1200, 1200), nodata=0) as d:
             for i, u in enumerate(P.ML_UM, 1):
                 L = P.C1 / (u ** 5 * (np.exp(P.C2 / (u * (bt - (30.0 if u in (7.35, 13.25) else 0.0)))) - 1))
-                d.write((L / 0.01).astype(np.float32), i)
+                d.write((L / 0.001).astype(np.float32), i)
         with contextlib.redirect_stdout(io.StringIO()):
             C.standalone(ml, os.path.join(tmp, 'ct_ml'), '', None, 'spec', [0.7])
         mres = G.CloudResultDialog(os.path.join(tmp, 'ct_ml'), w)
@@ -3335,7 +3335,7 @@ def test_cloud_phys(tmp):
 
     def ml(path, bt, unit='cm-1', x0=500000.0):
         conv = {'cm-1': lambda L, u: L * u ** 2 / 10.0, 'um': lambda L, u: L}[unit]   # to the stored unit
-        v = np.stack([np.round(conv(planck(bt[u], u), u) / 0.01) for u in um]).astype(np.float32)
+        v = np.stack([np.round(conv(planck(bt[u], u), u) / 0.001) for u in um]).astype(np.float32)
         v[:, :3, :] = 0                                        # a no-data strip
         with rasterio.open(path, 'w', driver='GTiff', width=W, height=H, count=6, dtype='float32', crs='EPSG:32644',
                            transform=from_origin(x0, 2500000, px, px), nodata=0) as d:
@@ -3346,12 +3346,12 @@ def test_cloud_phys(tmp):
     cirrus = (yy > 75) & (yy < 105) & (xx > 70) & (xx < 110)
     img = ml(os.path.join(tmp, 'G1A_ML_G_PHYS.tif'), scene(ground, thick, cirrus))
     with contextlib.redirect_stdout(io.StringIO()):
-        d = C.load_phys(img, 'ir', 'ML', 0.01)
+        d = C.load_phys(img, 'ir', 'ML', 0.001)
         info = C.compute_phys(img, 'ir', os.path.join(tmp, 'phys_ir'), C.phys_options({}, 'ir'), 'ML', data=d)
     with rasterio.open(info['mask']) as m:
         cls = m.read(1)
     rest = ~thick & ~cirrus & (yy >= 3)
-    check('phys: the radiance unit is found from the values (mW/m2/sr/cm-1, x 0.01): ground ~300 K',
+    check('phys: the radiance unit is found from the values (mW/m2/sr/cm-1, x 0.001): ground ~300 K',
           (info['radiance_unit'], abs(info['bt108_median_k'] - 300) < 2), ('mW/m2/sr/cm-1', True))
     check('phys: ML thick cloud found, thin cirrus by the split window, clear ground clear, no data kept',
           ((cls[thick] == 1).mean() > 0.97, (cls[cirrus] == 2).mean() > 0.97, (cls[rest] == 0).mean() > 0.99,
@@ -3397,7 +3397,7 @@ def test_cloud_phys(tmp):
                     a = np.where(scir, 14.0, a)
                 a = np.where(sthick, {1250: 200.0, 1380: 60.0, 1650: 150.0, 2200: 80.0}[key], a)
                 a = a * (1e-4 if night else 1.0) + (0.001 if night else 0)
-                dd.write((a / 0.01).astype(np.float32), b)
+                dd.write((a / 0.001).astype(np.float32), b)
         return path
     hs = hs_img(os.path.join(tmp, 'G1A_HS_G_PHYS.tif'))
     with contextlib.redirect_stdout(io.StringIO()):
@@ -3648,11 +3648,11 @@ def test_tiraux(tmp):
                        transform=from_origin(500000, 2500000, 1200, 1200), nodata=0) as d:
         for i, u in enumerate(P.ML_UM, 1):
             L = P.C1 / (u ** 5 * (np.exp(P.C2 / (u * bt)) - 1)) / 1e4          # W/cm2/sr/um, as G1A
-            a = (L / 0.01).astype(np.float32)
+            a = (L / 0.001).astype(np.float32)
             a[:2] = 0
             d.write(a, i)
     with contextlib.redirect_stdout(io.StringIO()):
-        dat = C.load_phys(img, 'tiraux', 'ML', 0.01, (), 'W/cm2/sr/um')
+        dat = C.load_phys(img, 'tiraux', 'ML', 0.001, (), 'W/cm2/sr/um')
     x = T.model_input(dat['bt'], dat['rad_si'], dat['valid'], o)
     check('tiraux: OLS input (BT - 190) / 118.1 from the mean of BT10.8 and BT12.0, in the stated unit',
           (round(float(np.nanmedian(x[~cold])), 2), round(float(np.nanmedian(x[cold])), 2), dat['unit']),
@@ -3732,7 +3732,7 @@ def test_reflect_models(tmp):
                        transform=from_origin(500000, 2500000, 45, 45), nodata=0) as dd:
         for i, n in enumerate(nm, 1):
             L = rho[n] * R.e0(n) * cz / (np.pi * d ** 2)                 # W/m2/sr/um
-            dd.write((L / 1e4 / 0.01).astype(np.float32), i)             # W/cm2/sr/um, x 0.01
+            dd.write((L / 1e4 / 0.001).astype(np.float32), i)             # W/cm2/sr/um, x 0.001
     with open(os.path.join(folder, 'G1A_MV_G_REFL.xml'), 'w') as f:
         f.write('<meta><ProcessingTime>2026-03-02T10:00:00Z</ProcessingTime><SunElevation>60.0</SunElevation>'
                 '<SceneCenterTime>2026-03-01T05:30:00Z</SceneCenterTime></meta>')
@@ -3750,9 +3750,9 @@ def test_reflect_models(tmp):
     check('reflect: zenith from the raster tags; date and time from separate metadata lines',
           (s2['zenith_deg'], s2['time'], R.sun_info(txt, {'cloud_sun_zenith_deg': 20})['zenith_deg']),
           (41.5, t, 20.0))
-    refl, valid, rinfo = R.read_reflectance(mv, [(1, 485.0), (6, 860.0)], 0.01, 'W/cm2/sr/um',
+    refl, valid, rinfo = R.read_reflectance(mv, [(1, 485.0), (6, 860.0)], 0.001, 'W/cm2/sr/um',
                                             {'cloud_sun_zenith_deg': 30})
-    check('reflect: TOA reflectance back from W/cm2/sr/um x 0.01 (sun 30 deg, Earth-Sun distance on the day)',
+    check('reflect: TOA reflectance back from W/cm2/sr/um x 0.001 (sun 30 deg, Earth-Sun distance on the day)',
           (round(float(np.median(refl[0][cloud])), 3), round(float(np.median(refl[1][~cloud])), 3), rinfo['d_au']),
           (0.6, 0.32, round(d, 4)))
     # ukis-csmask, through a stand-in for its package: cloud where blue reflectance > 0.4
@@ -3802,7 +3802,7 @@ def test_reflect_models(tmp):
                 base = 0.25 if x < 1300 else 0.15
                 rr = np.where(((np.mgrid[0:h, 0:w][0] * px) < 3000), 0.7, base)     # cloud: the top 3 km
                 L = rr * R.e0(x) * cz / (np.pi * d ** 2)
-                dd.write((L / 1e4 / 0.01).astype(np.float32), i)
+                dd.write((L / 1e4 / 0.001).astype(np.float32), i)
             dd.update_tags(SUN_ZENITH='30')
         return path
     hs = cube(os.path.join(tmp, 'G1A_HS_G_SPEC.tif'), 60, 900, 2500, 180.0, 50, 50)

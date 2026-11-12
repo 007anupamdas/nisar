@@ -345,7 +345,7 @@ class CloudMethodCombo(QtWidgets.QComboBox):
                         'ice 8.5-10.8 µm, CO2 / water-vapour bands, edges; day and night). HS (SWIR) by the 1.38 µm '
                         'cirrus band and bright SWIR blobs. MV / HV by the VNIR tests: brighter than the ground, '
                         'white across blue..NIR and as bright in blue as in red (and 940 nm water vapour on HV). '
-                        'OmniCloudMask: the model, as before. Radiance = pixel value x the radiance scale (G1A: 0.01) '
+                        'OmniCloudMask: the model, as before. Radiance = pixel value x the radiance scale (G1A: 0.001) '
                         'in W/cm²/sr/µm.')
 
     def value(self):
@@ -1225,8 +1225,8 @@ class CloudTestDialog(QtWidgets.QDialog):
         self.scale = QtWidgets.QDoubleSpinBox()
         self.scale.setDecimals(6)
         self.scale.setRange(1e-6, 1e6)
-        self.scale.setValue(g('radiance_scale', 0.01))
-        self.scale.setToolTip('radiance = pixel value x this (G1A metadata: scaled radiance, scaling factor 0.01)')
+        self.scale.setValue(g('radiance_scale', 0.001))
+        self.scale.setToolTip('radiance = pixel value x this (G1A metadata: scaled radiance, scaling factor 0.001)')
         self.unit = QtWidgets.QComboBox()
         self.unit.setEditable(True)
         self.unit.addItems(['W/cm2/sr/um', 'mW/cm2/sr/um', 'W/m2/sr/um', 'mW/m2/sr/cm-1', 'auto'])
@@ -1599,8 +1599,8 @@ class CloudSweepDialog(QtWidgets.QDialog):
             hs.addWidget(w)
         f.addRow('HS: SWIR tests', hs)
         self.scale = QtWidgets.QLineEdit(settings.value('cloud_sweep/scale', '') or
-                                         f"{float(job.get('radiance_scale') or 0.01):g}")
-        self.scale.setToolTip('radiance = pixel value x this (G1A: 0.01)')
+                                         f"{float(job.get('radiance_scale') or 0.001):g}")
+        self.scale.setToolTip('radiance = pixel value x this (G1A: 0.001)')
         f.addRow('Radiance scale (ML / HS)', self.scale)
         wdir = job.get('cloud_model_dir') or (os.path.join(job['weights_cache_dir'], 'omnicloudmask')
                                               if job.get('weights_cache_dir') else '')
@@ -1683,7 +1683,7 @@ class CloudSweepDialog(QtWidgets.QDialog):
                 raise ValueError('confidence thresholds lie between 0 and 1')
             self._phys_ranges()
             if float(self.scale.text()) <= 0:
-                raise ValueError('the radiance scale is a positive number (G1A: 0.01)')
+                raise ValueError('the radiance scale is a positive number (G1A: 0.001)')
         except ValueError as e:
             QtWidgets.QMessageBox.warning(self, 'Cloud sweep', str(e))
             return

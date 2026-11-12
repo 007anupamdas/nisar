@@ -6,7 +6,7 @@ and HyS-VNIR (HV).
 
 ML -- infrared tests, as the operational geostationary cloud masks (GOES
 ABI, Himawari AHI, Meteosat SEVIRI) use on the same channels; day and night.
-  radiance   value x radiance_scale (G1A: scaled radiance, 0.01) in
+  radiance   value x radiance_scale (G1A: scaled radiance, 0.001) in
              radiance_unit (G1A: W/cm2/sr/um). If that unit gives no Earth-
              like brightness temperatures (median 200-330 K at 10.8 um), the
              unit that does (W/m2/sr/um, mW/cm2/sr/um, mW/m2/sr/um or per
@@ -514,7 +514,7 @@ def ml_band_centres(path: str) -> List[float]:
     return ML_UM[:n]
 
 
-def clear_from_scenes(paths: Sequence[str], onto: str, scale: float = 0.01, unit: str = 'auto'
+def clear_from_scenes(paths: Sequence[str], onto: str, scale: float = 0.001, unit: str = 'auto'
                       ) -> Optional[np.ndarray]:
     """Clear-sky BT10.8 on the grid of `onto`: the warmest value of each pixel
     over earlier thermal scenes of the same ground (each converted to BT with

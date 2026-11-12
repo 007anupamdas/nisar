@@ -4,7 +4,7 @@ that need it (ukis-csmask on MV / HV, SpecTf on HV / HS):
 
     rho = pi * L * d^2 / (E0(lambda) * cos(sun zenith))
 
-  L        pixel value x radiance_scale in radiance_unit (G1A: x 0.01,
+  L        pixel value x radiance_scale in radiance_unit (G1A: x 0.001,
            W/cm2/sr/um), as W/m2/sr/um.
   E0       extraterrestrial solar irradiance at the band centre (about
            Thuillier 2003 / the Sentinel-2 band values, smoothed; a few %).
@@ -273,7 +273,7 @@ def toa_reflectance(L_si: np.ndarray, nm: float, cos_z: np.ndarray, d_au: float 
     return (math.pi * L_si * d_au ** 2 / (e0(nm) * np.maximum(cos_z, 1e-3))).astype(np.float32)
 
 
-def read_reflectance(path: str, bands: List[Tuple[int, float]], scale: float = 0.01, unit: str = 'W/cm2/sr/um',
+def read_reflectance(path: str, bands: List[Tuple[int, float]], scale: float = 0.001, unit: str = 'W/cm2/sr/um',
                      job: Optional[Dict] = None) -> Tuple[np.ndarray, np.ndarray, Dict]:
     """(reflectance [len(bands), H, W] float32 with NaN where not valid,
     valid, info {'zenith_how', 'd_au', 'sun_zenith_median_deg', 'night'})

@@ -20,7 +20,7 @@ SWIR tests of automatch_cloudphys (physics, no model: brightness
 temperatures, split window, ice, CO2 / water-vapour bands; the 1.38 um
 cirrus band and bright SWIR blobs), the other sensors by OmniCloudMask;
 'omnicloudmask', 'ir' or 'swir' choose one for every image. Radiance =
-pixel value x radiance_scale (0.01: G1A stores scaled radiance). Each
+pixel value x radiance_scale (0.001: G1A stores scaled radiance). Each
 payload covers its own ground, so every image gets its own mask; with
 cloud_mask_from (the VNIR product of the same pass), that mask is added to
 an ML / HS image's own where it covers it.
@@ -58,7 +58,7 @@ confidence threshold gets its own mask and quicklook):
         [--sensor MV] [--bands 3 2 6 | --choice quality] [--from <VNIR image>]
         [--model-dir <weights>] [--device cpu] [--model-only]
         [--bright-pct 90 --min-blob-km2 1 --shadow-near-km 10]
-        [--method auto|omnicloudmask|ir|swir] [--radiance-scale 0.01]
+        [--method auto|omnicloudmask|ir|swir] [--radiance-scale 0.001]
         [--ir-dt 8 --ir-split 1 --ir-cold 240 --clear <earlier ML scenes>]
         [--swir-k 4 --swir-bright 3]
     (also: automatch_job.py cloud ..., and the GPU service's mode "cloud")
@@ -706,7 +706,7 @@ def load_reflectance(path: str, method: str, sensor: str, scale: float, unit: st
             'show': np.nan_to_num(show)}
 
 
-def load_phys(path: str, method: str, sensor: str, scale: float = 0.01, clear_paths=(),
+def load_phys(path: str, method: str, sensor: str, scale: float = 0.001, clear_paths=(),
               unit: str = 'W/cm2/sr/um', opts: Optional[Dict] = None) -> Dict:
     """What the infrared, SWIR or VNIR tests read from an image: {'valid',
     'px', 'prof', 'show' (3 bands for the quicklook), and 'bt', 'clear',
@@ -773,7 +773,7 @@ def load_phys(path: str, method: str, sensor: str, scale: float = 0.01, clear_pa
     return out
 
 
-def compute_phys(path: str, method: str, out_dir: str, opts: Dict, sensor: str, scale: float = 0.01,
+def compute_phys(path: str, method: str, out_dir: str, opts: Dict, sensor: str, scale: float = 0.001,
                  clear_paths=(), stamp: Optional[str] = None, data: Optional[Dict] = None,
                  unit: str = 'W/cm2/sr/um') -> Dict:
     """CLOUD_MASK.tif, CLOUD_QUICKLOOK.png and CLOUD_PARAMS_<time>.txt of the
@@ -947,7 +947,7 @@ def _prepare_phys(job: Dict, path: str, method: str, channels: List[str], cache_
     and TIRAuxCloud; with cloud_mask_from, that product's mask is added where
     it covers this image (the payloads cover different ground)."""
     opts = phys_options(job, method)
-    scale = float(job.get('radiance_scale') or 0.01)
+    scale = float(job.get('radiance_scale') or 0.001)
     unit = str(job.get('radiance_unit') or 'W/cm2/sr/um')
     clear_paths = [p for p in (job.get(CLEAR_KEY.get(method, '')) or []) if p] if method in CLEAR_KEY else []
     st = os.stat(path)
@@ -1072,7 +1072,7 @@ def standalone(path: str, out_dir: str, sensor: str = '', bands: Optional[List[s
                confidences=(0.5, 0.7, 0.85), model_dir: str = '', device: Optional[str] = None,
                mask_from: str = '', margin_px: int = 10, predictor=None,
                refine_opts: Optional[Dict] = 'default', stamp: Optional[str] = None, method: str = 'auto',
-               phys_opts: Optional[Dict] = None, scale: float = 0.01, clear_paths=(),
+               phys_opts: Optional[Dict] = None, scale: float = 0.001, clear_paths=(),
                from_method: str = 'auto', unit: str = 'W/cm2/sr/um') -> List[Dict]:
     """The cloud mask of one image at each confidence threshold, without a
     matching run (module docstring). refine_opts: refine()'s settings
@@ -1318,7 +1318,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument('--destripe-window', type=int, default=31, help='running median over this many rows')
     ap.add_argument('--from-method', default='auto', choices=['auto', 'omnicloudmask', 'vnir'],
                     help='how the --from (VNIR) image is masked')
-    ap.add_argument('--radiance-scale', type=float, default=0.01, help='radiance = pixel value x this (G1A: 0.01)')
+    ap.add_argument('--radiance-scale', type=float, default=0.001, help='radiance = pixel value x this (G1A: 0.001)')
     ap.add_argument('--radiance-unit', default='W/cm2/sr/um',
                     help='unit of the scaled radiance (G1A: W/cm2/sr/um); auto: whatever gives Earth temperatures')
     ap.add_argument('--spectf-weights', default='', help='SpecTf: its current.pt')
