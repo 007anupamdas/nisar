@@ -3628,6 +3628,19 @@ def test_cloud_phys(tmp):
     check('phys: the sweep compares the VNIR tests with OmniCloudMask on MV (method compare), blob size 0 kept',
           (sorted(cdf['method'].fillna('ocm').unique().tolist()), int((cdf['method'] == 'vnir').sum()),
            0.0 in cdf['min_blob_km2'].dropna().tolist()), (['ocm', 'vnir'], 4, True))
+    with contextlib.redirect_stdout(io.StringIO()) as mbuf:
+        ms = CS.band_sets(mvi, 'MV', spec=False, crisp=0,
+                          manual=CS.parse_manual_sets('3 2 6; 650nm 555nm 860nm; 1 2 9'))
+    check('phys: manual band sets for the sweep: numbers or wavelengths (nearest band), duplicates once, a band '
+          'the image lacks skipped with a note',
+          ([m[1] for m in ms], [m[0] for m in ms], 'skipped' in mbuf.getvalue()),
+          ([[3, 2, 6]], ['m3-2-6'], True))
+    try:
+        CS.parse_manual_sets('3 2')
+        bad = False
+    except ValueError:
+        bad = True
+    check('phys: a manual set of other than three bands is refused', bad, True)
     import contextlib as _cl
     with _cl.redirect_stdout(io.StringIO()) as buf:
         sk = CS.image_methods([mvi, hs, img], 'swir')

@@ -1564,6 +1564,13 @@ class CloudSweepDialog(QtWidgets.QDialog):
         hb.addWidget(self.spec)
         hb.addWidget(self.crisp)
         f.addRow('Band sets', hb)
+        self.manual_bands = QtWidgets.QLineEdit(settings.value('cloud_sweep/manual_bands', '') or '')
+        self.manual_bands.setPlaceholderText("+ your own: three bands per set, ';' between sets, e.g. "
+                                             "3 2 6; 650nm 560nm 860nm (nm: the nearest band)")
+        self.manual_bands.setToolTip('Band sets for OmniCloudMask beside the spec and crispest ones (set crispest to '
+                                     '0 for yours only). Wavelengths pick the nearest band of each image, so one '
+                                     'set works across HV / HS images with different band counts.')
+        f.addRow('', self.manual_bands)
         self.bright = QtWidgets.QLineEdit(settings.value('cloud_sweep/bright', '') or '60-90:5')
         f.addRow('Brighter than (percentile)', self.bright)
         self.blob = QtWidgets.QLineEdit(settings.value('cloud_sweep/blob', '') or '0, 0.25, 1')
@@ -1662,7 +1669,13 @@ class CloudSweepDialog(QtWidgets.QDialog):
             self.lbl_n.setText(str(e))
             return
         import math
-        sets = int(self.spec.isChecked()) + (math.comb(self.crisp.value(), 3) if self.crisp.value() >= 3 else 0)
+        try:
+            import automatch_cloudsweep as CS
+            nman = len(CS.parse_manual_sets(self.manual_bands.text()))
+        except ValueError as e:
+            self.lbl_n.setText(str(e))
+            return
+        sets = int(self.spec.isChecked()) + (math.comb(self.crisp.value(), 3) if self.crisp.value() >= 3 else 0) + nman
         n = len(c) * (1 + len(b) * len(k) * len(s))
         self.lbl_n.setText(f'MV / HV: {len(vb) * len(vw) * len(k)}, ML: {len(dt) * len(sp) * len(k)}, HS: '
                            f'{len(sk) * len(sb) * len(k)} rows per image; with OmniCloudMask (method omnicloudmask '
@@ -1695,7 +1708,8 @@ class CloudSweepDialog(QtWidgets.QDialog):
         for k, w in (('out', self.out), ('conf', self.conf), ('bright', self.bright), ('blob', self.blob),
                      ('shadow', self.shadow), ('ir_dt', self.ir_dt), ('ir_split', self.ir_split),
                      ('swir_k', self.swir_k), ('swir_bright', self.swir_bright), ('scale_v2', self.scale),
-                     ('vis_bright', self.vis_bright), ('vis_white', self.vis_white)):
+                     ('vis_bright', self.vis_bright), ('vis_white', self.vis_white),
+                     ('manual_bands', self.manual_bands)):
             self.settings.setValue(f'cloud_sweep/{k}', w.text())
         self.accept()
 
@@ -1703,6 +1717,8 @@ class CloudSweepDialog(QtWidgets.QDialog):
         a = ['cloudsweep'] + self._lines(self.images) + ['--out', self.out_dir(), '--conf', self.conf.text().strip(),
                                                          '--bright', self.bright.text().strip(),
                                                          '--crisp', str(self.crisp.value())]
+        if self.manual_bands.text().strip():
+            a += ['--bands', self.manual_bands.text().strip()]
         a += ['--blob-km2'] + [f'{v:g}' for v in self._ranges()[2]]
         a += ['--shadow-km'] + [f'{v:g}' for v in self._ranges()[3]]
         if not self.spec.isChecked():

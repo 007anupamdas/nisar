@@ -119,12 +119,53 @@ def parse_range(v) -> List[float]:
     return sorted({round(x, 6) for x in vals})
 
 
-def band_sets(path: str, sensor: str, spec: bool = True, crisp: int = 6) -> List[Tuple[str, List[int], str, List]]:
-    """[(name, bands, how chosen, wavelengths)]: the spec bands and every 3 of
-    the crisp crispest bands (short to long wavelength)."""
+def parse_manual_sets(text) -> List[List[str]]:
+    """'3 2 6; 650nm 560nm 860nm' -> [['3', '2', '6'], ['650nm', '560nm', '860nm']]
+    (sets split by ; or new lines, items by spaces or commas; three each)."""
+    out = []
+    for part in re.split(r'[;\n]+', str(text or '')):
+        items = [x for x in re.split(r'[,\s]+', part.strip()) if x]
+        if not items:
+            continue
+        if len(items) != 3:
+            raise ValueError(f'band set {part.strip()!r}: three bands (numbers, or wavelengths like 650nm)')
+        out.append(items)
+    return out
+
+
+def resolve_manual(items: List[str], wl_all: Optional[List]) -> List[int]:
+    """Three 1-based bands from numbers or wavelengths ('650nm': the nearest band)."""
+    out = []
+    for it in items:
+        m = re.fullmatch(r'(\d+(?:\.\d+)?)\s*nm', it.strip().lower())
+        if m:
+            if not wl_all:
+                raise ValueError(f'{it}: the band wavelengths of this image are unknown; give band numbers')
+            nm = float(m.group(1))
+            out.append(int(np.argmin([abs((w if w is not None else -1e9) - nm) for w in wl_all])) + 1)
+        else:
+            out.append(int(re.sub(r'(?i)^(band|b)', '', it.strip())))
+    return out
+
+
+def band_sets(path: str, sensor: str, spec: bool = True, crisp: int = 6, manual=None
+              ) -> List[Tuple[str, List[int], str, List]]:
+    """[(name, bands, how chosen, wavelengths)]: the spec bands, every 3 of
+    the crisp crispest bands (short to long wavelength), and the manual sets
+    (parse_manual_sets: band numbers or wavelengths)."""
     import automatch_engine as E
     sets = []
     wl_all = C.band_wavelengths(path, sensor)
+    with rasterio_count(path) as n:
+        for items in (manual or []):
+            try:
+                b = resolve_manual(items, wl_all)
+                if any(not 1 <= x <= n for x in b):
+                    raise ValueError(f'bands {b}: this image has {n}')
+                sets.append((f"m{'-'.join(str(x) for x in b)}", b, 'manual: ' + ' '.join(items),
+                             [wl_all[x - 1] if wl_all else None for x in b]))
+            except ValueError as e:
+                print(f'[Sweep] {os.path.basename(path)}: manual band set {" ".join(items)} skipped ({e})')
     if spec:
         try:
             b, how, wl = C.choose_bands(path, sensor, None, 'spec')
@@ -145,6 +186,21 @@ def band_sets(path: str, sensor: str, spec: bool = True, crisp: int = 6) -> List
             seen.add(tuple(s[1]))
             out.append(s)
     return out
+
+
+class rasterio_count:
+    """with rasterio_count(path) as n: the band count of an image."""
+
+    def __init__(self, path):
+        self.path = path
+
+    def __enter__(self):
+        import rasterio as rio
+        with rio.open(self.path) as s:
+            return s.count
+
+    def __exit__(self, *a):
+        return False
 
 
 def load_reference(ref: str, image: str) -> Tuple[np.ndarray, np.ndarray]:
@@ -552,7 +608,8 @@ def run(images: List[str], out_dir: str, references: Optional[List[str]] = None,
         vis_clear_factor: float = 1.3, unit: str = 'W/cm2/sr/um', vis_clear_paths=(),
         tiraux_opts: Optional[Dict] = None, tiraux_thresholds='0.3-0.7:0.2', tiraux_norm_hi=None,
         csmask_opts: Optional[Dict] = None, spectf_opts: Optional[Dict] = None, spectf_thresholds='0.3-0.7:0.1',
-        spectf_vnir=None, sensor_methods=None, shard: Optional[Tuple[int, int]] = None, into: str = '') -> Dict:
+        spectf_vnir=None, sensor_methods=None, shard: Optional[Tuple[int, int]] = None, into: str = '',
+        manual_bands='') -> Dict:
     """The sweep over the images into <out_dir>/<time>_sweep/; returns
     {'folder', 'rows', 'summary'}. Each image by its cloud method
     (automatch_cloud.method_for: 'auto' by sensor): OmniCloudMask images over
@@ -581,6 +638,7 @@ def run(images: List[str], out_dir: str, references: Optional[List[str]] = None,
         os.makedirs(folder)
     mine = (lambda i: shard is None or i % shard[1] == shard[0])
     part = f'_gpu{shard[0]}' if shard else ''
+    manual_sets = parse_manual_sets(manual_bands)
     confs, brights = parse_range(conf), parse_range(bright)
     if brights and max(brights) <= 1.0:          # 0.9 meant as a fraction: the 90th percentile
         print(f'[Sweep] brightness {", ".join(f"{b:g}" for b in brights)} read as percentiles '
@@ -657,7 +715,7 @@ def run(images: List[str], out_dir: str, references: Optional[List[str]] = None,
             pd.DataFrame(rows).to_csv(os.path.join(folder, f'CLOUD_SWEEP{part}.csv'), index=False)
         if 'ocm' not in meths[i]:
             continue
-        sets = band_sets(img, sensor or _sensor(img), spec, crisp)
+        sets = band_sets(img, sensor or _sensor(img), spec, crisp, manual_sets)
         n = len(confs) * (1 + len(brights) * len(blobs) * len(shadows))
         print(f'[Sweep] {os.path.basename(img)}: {len(sets)} band set(s) x {n} combination(s)', flush=True)
         rows += sweep_image(img, folder, sensor, sets, confs, brights, blobs, shadows, classes, model_dir, device,
@@ -847,6 +905,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument('--blob-km2', nargs='+', default=[str(v) for v in DEFAULTS['blob_km2']])
     ap.add_argument('--shadow-km', nargs='+', default=[str(v) for v in DEFAULTS['shadow_km']])
     ap.add_argument('--crisp', type=int, default=DEFAULTS['crisp'], help='every 3 of the N crispest bands (0: none)')
+    ap.add_argument('--bands', default='', help="manual band sets for OmniCloudMask, ';' between sets: band numbers "
+                    "or wavelengths, e.g. '3 2 6; 650nm 560nm 860nm'")
     ap.add_argument('--no-spec', action='store_true', help='leave out the spec bands')
     ap.add_argument('--classes', type=int, nargs='+', default=DEFAULTS['classes'],
                     help='classes compared with the reference: 1 thick, 2 thin, 3 shadow')
@@ -947,7 +1007,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                      if a.spectf_weights or 'spectf' in a.sensor_methods else None),
         spectf_thresholds=a.spectf_threshold,
         spectf_vnir=['' if v in ('-', "''", '""') else v for v in a.spectf_vnir], sensor_methods=a.sensor_methods,
-        shard=J.parse_shard(a.shard), into=a.into)
+        shard=J.parse_shard(a.shard), into=a.into, manual_bands=a.bands)
     return 0
 
 
