@@ -404,6 +404,15 @@ points that picked it). If a run's consensus did not complete, `compare`
 rebuilds it from the saved matches, so the run can still be ranked without
 matching again.
 
+### Ground truth per band
+
+Truth points measured on one band can be kept in one file per band, named
+with the band as a suffix: `pts_band4.csv`, `pts_band5.csv` (also `_B4`,
+`_b4`, `_4`). Set `truth_csv` to any one of them: a band whose own file
+exists is scored against that file; the others use the file given.
+Preflight lists which band gets which file, and `TRUTH_*` outputs carry the
+band's own points. A file without a band suffix applies to every band.
+
 ## Cross-check between detectors (RIVAL_CROSS)
 
 A single configuration can be consistently wrong: many matches on the wrong
@@ -516,6 +525,33 @@ matches are parallel; random matches give about 0 %.
   whose jobs all land in one share, gains nothing from it.
 - **The cloud test and the GPU service** take one GPU; with *all GPUs*
   they use the first.
+
+## Thermal (ML) against an optical reference
+
+A thermal image shares its edges with an optical one (coastlines, lakes,
+rivers, field and city boundaries) but not their sign: by day land is
+warm and bright, water cool and dark; by night the other way round, and
+inland contrast collapses. The operational geostationary systems (GOES
+ABI, Himawari, MTG) therefore register thermal images on shoreline chips
+with edge or phase correlation, on the 10.8 µm window band. Here:
+- **`window_prep`** (GUI: *window prep*, Output & run): what both windows
+  of a pair become after the stretch. `auto` (default) uses `gradient`
+  for ML and nothing for the others. `gradient` is the Scharr gradient
+  magnitude with local contrast normalisation, so the detectors see edge
+  strength, which has the same sign in both images. `invert` flips the
+  input only. Tested: opposite-polarity synthetic images correlate at
+  −0.9 raw and +0.9 as gradient.
+- **Bands:** match ML's band 4 (10.8 µm), then band 5 (12.0) or band 2
+  (8.5). Bands 1 (7.35 µm, water vapour) and 6 (13.25 µm, CO₂) see the
+  atmosphere, not the ground; preflight warns when a job selects them.
+- **Reference:** the evidence (NASA's ABI landmarking) matches thermal
+  against Landsat's thermal band 10 rather than the panchromatic band.
+  Thermal references would need to be added to the reference set.
+- **Deep matchers:** vanilla SIFT / DISK / ALIKED / XFeat were trained on
+  optical pairs. Cross-modal weights exist for the same architectures
+  (MINIMA for RoMa / LoFTR / LightGlue, MatchAnything for ELoFTR; both
+  Apache-2.0) and did best on aerial thermal-to-satellite benchmarks, but
+  none has been evaluated at kilometre-scale thermal; not wired in.
 
 ## Clouds (OmniCloudMask)
 

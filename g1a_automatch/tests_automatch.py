@@ -1610,6 +1610,27 @@ def _shift_of(rec):
     return len(d), round(float(np.median(d))), round(float(np.median(e)))
 
 
+def test_truth_per_band(tmp):
+    """Ground truth measured per band: a truth file named with a band suffix
+    scores that band, and each other band takes its own sibling file
+    (<stem>_band5.csv ...) when there is one, else the job's file."""
+    import automatch_truth as T
+    d = os.path.join(tmp, 'truth_bands')
+    os.makedirs(d)
+    for n in ('pts_band4.csv', 'pts_band5.csv', 'pts_B2.csv', 'plain.csv', 'plain_band6.csv'):
+        open(os.path.join(d, n), 'w').close()
+    b4, plain = os.path.join(d, 'pts_band4.csv'), os.path.join(d, 'plain.csv')
+    check('truth per band: the suffixes of a channel; the file of each band',
+          (T.band_suffixes('band4')[:4],
+           os.path.basename(T.truth_for_channel(b4, 'band4')), os.path.basename(T.truth_for_channel(b4, 'band5')),
+           os.path.basename(T.truth_for_channel(b4, 'band2')), os.path.basename(T.truth_for_channel(b4, 'band3')),
+           os.path.basename(T.truth_for_channel(plain, 'band6')), os.path.basename(T.truth_for_channel(plain, 'band1')),
+           T.channel_of_run(os.path.join('out', 'win1024_nfauto', 'band5_toL8', 'filtered_x_y')),
+           T.channel_of_run(os.path.join('out', 'HH_toS1', 'filtered_x'))),
+          (['band4', 'BAND4', 'band_4', 'b4'], 'pts_band4.csv', 'pts_band5.csv', 'pts_B2.csv', 'pts_band4.csv',
+           'plain_band6.csv', 'plain.csv', 'band5', 'HH'))
+
+
 def test_truth_helpers(tmp):
     """Ground-truth scoring of one configuration: local median near a truth
     point, error surface elsewhere, extrapolation flagged and not scored."""
@@ -3889,6 +3910,33 @@ def test_stretch():
     check('stretch: at 90 about a tenth saturates, at 99 about a hundredth',
           (abs(float((a90 >= 0.999).mean()) - 0.10) < 0.02, abs(float((a99 >= 0.999).mean()) - 0.01) < 0.01), (True, True))
     check('stretch: the darker ground gets more grey levels at 90', float(np.median(a90)) > float(np.median(a99)), True)
+    # thermal vs optical: the same edges with the opposite sign (land warm by day, water cool) give the same
+    # gradient-magnitude picture; the input alone is inverted with window_prep 'invert'
+    yy, xx = np.mgrid[0:200, 0:200]
+    land = ((xx - 100) ** 2 + (yy - 90) ** 2 < 60 ** 2) | (yy > 170)
+    optical = np.where(land, 800.0, 200.0) + rng.normal(0, 10, (200, 200))
+    thermal = np.where(land, 200.0, 800.0) + rng.normal(0, 10, (200, 200))       # night: water warmer than land
+    g1 = E.BaseMatcher._norm_img(optical.astype(np.float32), nodata=0, prep='gradient')
+    g2 = E.BaseMatcher._norm_img(thermal.astype(np.float32), nodata=0, prep='gradient')
+    raw1 = E.BaseMatcher._norm_img(optical.astype(np.float32), nodata=0)
+    raw2 = E.BaseMatcher._norm_img(thermal.astype(np.float32), nodata=0)
+    inv2 = E.BaseMatcher._norm_img(thermal.astype(np.float32), nodata=0, prep='invert')
+    ref2 = E.BaseMatcher._norm_img(thermal.astype(np.float32), nodata=0, prep='invert', invert_this=False)
+    corr = (lambda a, b: float(np.corrcoef(a.ravel(), b.ravel())[0, 1]))
+    check('prep: opposite-polarity images agree as gradient magnitude (corr > 0.9) where raw they anti-correlate; '
+          'invert flips the input only',
+          (corr(g1, g2) > 0.9, corr(raw1, raw2) < -0.9, corr(raw1, inv2) > 0.9, corr(raw2, ref2) > 0.99,
+           0.0 <= float(g1.min()) and float(g1.max()) <= 1.0), (True, True, True, True, True))
+
+    class _Sc:
+        name, native_res = 'G1A_ML_G_X', 1200.0
+
+    class _Mv:
+        name, native_res = 'G1A_MV_G_X', 45.0
+    check('prep: auto turns the gradient on for ML only; the absorption bands of ML are warned about',
+          (J.window_prep_for({'window_prep': 'auto'}, _Sc()), J.window_prep_for({'window_prep': 'auto'}, _Mv()),
+           J.window_prep_for({'window_prep': 'invert'}, _Mv()), len(J.ml_band_notes({'channels': ['band1', 'band4']}, _Sc())),
+           J.ml_band_notes({'channels': ['band1']}, _Mv())), ('gradient', 'none', 'invert', 1, []))
     cfg = J._config_for(J.normalize({'stretch_percentiles': [1, 85]}), 512, None, 45.0, '/tmp/x')
 
     class M(E.BaseMatcher):
@@ -4646,6 +4694,7 @@ def main():
         test_imcui_mock()
         test_weights_check(tmp)
         test_truth_helpers(tmp)
+        test_truth_per_band(tmp)
         test_server(tmp)
         test_gpuaas_args(tmp)
         test_version_skew_and_coarse(tmp)

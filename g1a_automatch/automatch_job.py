@@ -183,7 +183,8 @@ def run_sharded(job: Dict, gpus: List[int], out_root: str) -> List[Dict]:
             continue
         sub = {k: v for k, v in job.items() if not k.startswith('_') or k == '_channel_rasters'}
         sub.update(device=f'cuda:{g}', cloud_device=f'cuda:{g}' if job.get('cloud_device') else '',
-                   detectors=dets, _shard=g, _channel_rasters=job.get('_channel_rasters') or {})
+                   detectors=dets, _shard=g, _channel_rasters=job.get('_channel_rasters') or {},
+                   _window_prep=job.get('_window_prep') or 'none')
         jp = os.path.join(out_root, f'job_gpu{g}.json')
         with open(jp, 'w', encoding='utf-8') as f:
             json.dump(sub, f, indent=2)
@@ -244,6 +245,9 @@ DEFAULT_JOB: Dict = {
     # Clouds: OmniCloudMask (thick / thin cloud, shadow) masked out before matching
     'stretch_percentiles': [1, 99],   # contrast stretch of each window: low / high percentile (e.g. [1, 90])
     'stretch_mode': 'percentile',     # percentile | clahe: local contrast too (dark ground beside bright cloud)
+    'window_prep': 'auto',            # auto (ML: gradient; others none) | none | gradient | invert: both windows
+                                      # of a pair after the stretch; gradient = polarity-free edge strength,
+                                      # for thermal vs optical (land / water swap sign day and night)
     'cloud_mask': 'none',        # none | on (or 'omnicloudmask', as before): mask clouds, by cloud_method
     'cloud_method_MV': 'auto',   # per sensor, with cloud_method auto: auto (= VNIR tests) | omnicloudmask | csmask
     'cloud_method_HV': 'auto',   # auto (= VNIR tests) | omnicloudmask | csmask
@@ -446,7 +450,7 @@ def normalize(job: Dict) -> Dict:
             _WARNED_KEYS.add(k)
             print(f'[Job] WARNING: {unknown_key_note(k)}', flush=True)
     out.update(copy.deepcopy({k: v for k, v in job.items() if k in DEFAULT_JOB}))
-    for k in ('_shard', '_channel_rasters'):          # a GPU worker's share, handed down by its parent
+    for k in ('_shard', '_channel_rasters', '_window_prep'):   # a GPU worker's share, handed down by its parent
         if job.get(k) is not None:
             out[k] = copy.deepcopy(job[k])
     if not out['temp_dir'] and out['output_dir']:
@@ -761,6 +765,16 @@ def preflight(job: Dict, check_weights: bool = True) -> Dict:
             except Exception as e:
                 errors.append(f'cloud_mask: {type(e).__name__}: {e}')
         if scene.kind == 'raster':
+            warnings += ml_band_notes(job, scene)
+            if job.get('truth_csv'):
+                import automatch_truth as T
+                files = T.truth_files_for(job['truth_csv'], job.get('channels') or [])
+                own = {ch: p for ch, p in files.items() if os.path.abspath(p) != os.path.abspath(job['truth_csv'])}
+                if own:
+                    info['truth_by_channel'] = own
+                    warnings.append('ground truth per band: ' + ', '.join(
+                        f'{ch} -> {os.path.basename(p)}' for ch, p in own.items())
+                        + '; the other bands use ' + os.path.basename(job['truth_csv']))
             picked, note = resolve_auto_bands(job, scene, E)
             if note:
                 warnings.append(note)
@@ -944,6 +958,7 @@ def _config_for(job: Dict, win: int, nf: Optional[int], res: float, out_dir: str
         coarse_shared=bool(job['coarse_shared']),
         stretch_percentiles=tuple(float(v) for v in (job.get('stretch_percentiles') or [1, 99])[:2]),
         stretch_mode=str(job.get('stretch_mode') or 'percentile'),
+        window_prep=str(job.get('_window_prep') or 'none'),
         channel_rasters=job.get('_channel_rasters') or None,
         coarse_detectors=list(job['coarse_detectors']) or None,
         consensus_model=job['consensus_model'], consensus_surface_degree=job['consensus_surface'],
@@ -1154,7 +1169,8 @@ def _compare_with_truth(job: Dict, out_root: str, working_crs: str, manifest: Li
     for row in manifest:
         if row.get('detail_csv') and os.path.exists(row['detail_csv']):
             try:
-                m = T.score_detail_csv(row['detail_csv'], res['truth'], float(job['truth_radius_m']))
+                tr = (res.get('truth_by_channel') or {}).get(str(row.get('channel')), res['truth'])
+                m = T.score_detail_csv(row['detail_csv'], tr, float(job['truth_radius_m']))
                 row.update({'truth_rmse_m': m.get('truth_rmse_m'), 'truth_reached': m.get('truth_reached'),
                             'truth_mean_dE_m': m.get('truth_mean_dE_m'),
                             'truth_mean_dN_m': m.get('truth_mean_dN_m')})
@@ -1230,6 +1246,34 @@ def resolve_auto_bands(job: Dict, scene, E, out_dir: str = '') -> Tuple[List[str
     return picked, ''
 
 
+ML_ABSORPTION_BANDS = {1: '7.35 um (water vapour)', 6: '13.25 um (CO2)'}   # MX-LWIR bands that do not see the ground
+
+
+def window_prep_for(job: Dict, scene) -> str:
+    """The window_prep a job runs with: as set, or for 'auto' 'gradient' on
+    a thermal (ML) input and 'none' otherwise."""
+    w = str(job.get('window_prep') or 'auto').strip().lower()
+    if w != 'auto':
+        return w if w in ('none', 'gradient', 'invert') else 'none'
+    import automatch_bench as B
+    return 'gradient' if B.sensor_of(scene.name, scene.native_res) == 'ML' else 'none'
+
+
+def ml_band_notes(job: Dict, scene) -> List[str]:
+    """Warnings for an ML job matching a band that does not see the ground."""
+    import automatch_bench as B
+    if B.sensor_of(scene.name, scene.native_res) != 'ML':
+        return []
+    out = []
+    for ch in (job.get('channels') or []):
+        m = re.search(r'(\d+)$', str(ch))
+        if m and int(m.group(1)) in ML_ABSORPTION_BANDS:
+            out.append(f'{ch} is the {ML_ABSORPTION_BANDS[int(m.group(1))]} band: it sees the atmosphere, not the '
+                       f'ground, so it cannot be matched to an optical reference; use band4 (10.8 um), then band5 '
+                       f'(12.0) or band2 (8.5)')
+    return out
+
+
 def cloud_on(job: Dict) -> bool:
     """Whether the job masks clouds (cloud_mask other than none / off / '')."""
     return str(job.get('cloud_mask') or 'none').strip().lower() not in ('none', 'off', 'no', 'false', '0', '')
@@ -1300,6 +1344,9 @@ def run_job(job: Dict) -> Dict:
                 json.dump(job, f, indent=2)
     if cloud_on(job):
         job = dict(job, _channel_rasters=prepare_cloud_mask(job, scene, out_root))
+    job = dict(job, _window_prep=window_prep_for(job, scene))
+    if job['_window_prep'] != 'none':
+        print(f"[Job] window preparation: {job['_window_prep']} (both windows of a pair, after the stretch)")
     res = job['target_resolution'] or scene.native_res or 10.0
     detectors = job['detectors']
     sweep = [(w, nf) for w in job['window_sizes'] for nf in job['num_features']]

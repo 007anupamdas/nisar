@@ -2384,6 +2384,17 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
                                      'cloud is brought up (job 369 matched on clouds because the ground went black). '
                                      'Cloud masking removes the clouds from the stretch altogether.')
         hl.addWidget(self.stretch_mode)
+        self.window_prep = QtWidgets.QComboBox()
+        for k, t in (('auto', 'window prep: auto (thermal ML: gradient)'), ('none', 'window prep: none'),
+                     ('gradient', 'window prep: gradient (polarity-free edges)'),
+                     ('invert', 'window prep: invert the input')):
+            self.window_prep.addItem(t, k)
+        self.window_prep.setToolTip('What both windows of a pair become after the stretch. Thermal vs optical: land '
+                                    'and water swap sign between day and night, so the detectors see the gradient '
+                                    'magnitude (edges: coastlines, lakes, rivers, field and city boundaries), which '
+                                    'has the same sign either way, as the GOES / Himawari landmarking does. auto turns '
+                                    'it on for ML only.')
+        hl.addWidget(self.window_prep)
         hl.addStretch(1)
         f.addRow('Contrast stretch (percentiles)', hl)
         self.amp = QtWidgets.QCheckBox('mixed precision (AMP)')
@@ -2502,6 +2513,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.stretch_lo.setValue(float(sp[0]))
         self.stretch_hi.setValue(float(sp[1]))
         self.stretch_mode.setCurrentIndex(1 if str(j.get('stretch_mode') or '') == 'clahe' else 0)
+        self.window_prep.setCurrentIndex(max(0, self.window_prep.findData(str(j.get('window_prep') or 'auto'))))
         self.amp.setChecked(bool(j['use_amp']))
         self.resume.setChecked(bool(j['resume']))
         self.save_imgs.setChecked(bool(j['save_match_images']))
@@ -2597,6 +2609,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             'min_valid_fraction': self.min_valid.value(),
             'stretch_percentiles': [self.stretch_lo.value(), self.stretch_hi.value()],
             'stretch_mode': 'clahe' if self.stretch_mode.currentIndex() == 1 else 'percentile',
+            'window_prep': self.window_prep.currentData() or 'auto',
             'use_amp': self.amp.isChecked(),
             'resume': self.resume.isChecked(),
             'save_match_images': self.save_imgs.isChecked(),

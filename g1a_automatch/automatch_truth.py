@@ -50,6 +50,7 @@ import argparse
 import glob
 import json
 import os
+import re
 import sys
 from typing import Dict, List, Optional, Tuple
 
@@ -172,6 +173,66 @@ def load_truth(path: str, max_error_km: float = MAX_TRUTH_ERROR_KM) -> pd.DataFr
     return pd.DataFrame({'truth_id': [ids[i] for i in df.index[keep]],
                          'in_lon': ilo[keep].astype(float).values, 'in_lat': ila[keep].astype(float).values,
                          'ref_lon': rlo[keep].astype(float).values, 'ref_lat': rla[keep].astype(float).values})
+
+
+def band_suffixes(channel: str) -> List[str]:
+    """The file-name suffixes that name a channel: band4 -> band4, b4, B4, band_4, _4."""
+    ch = str(channel or '').strip()
+    m = re.search(r'(\d+)$', ch)
+    out = [ch, ch.lower(), ch.upper()]
+    if m:
+        n = m.group(1)
+        out += [f'band{n}', f'band_{n}', f'b{n}', f'B{n}', f'Band{n}', f'Band_{n}', f'BAND{n}', n]
+    seen, uniq = set(), []
+    for s in out:
+        if s and s not in seen:
+            seen.add(s)
+            uniq.append(s)
+    return uniq
+
+
+def truth_for_channel(truth_csv: str, channel: str) -> str:
+    """The ground-truth file of one channel: the job's truth_csv when its own
+    name ends in that channel's suffix or no band file exists; else the
+    sibling whose name is the truth file's stem plus _<suffix> (or with the
+    truth file's own band suffix swapped), e.g. truth_band4.csv ->
+    truth_band5.csv for band5. Truth files measured per band thus each score
+    their own band."""
+    if not truth_csv or not channel:
+        return truth_csv
+    folder, name = os.path.split(truth_csv)
+    stem, ext = os.path.splitext(name)
+    sufs = band_suffixes(channel)
+    for s in sufs:                                     # already this channel's file
+        if re.search(r'[_\-. ]' + re.escape(s) + r'$', stem):
+            return truth_csv
+    m = re.search(r'^(.*?)([_\-. ])((?:band|Band|BAND|b|B)_?\d+|\d+)$', stem)
+    base = (m.group(1), m.group(2)) if m else (stem, '_')
+    cands = []
+    for s in sufs:
+        cands.append(os.path.join(folder, f'{base[0]}{base[1]}{s}{ext}'))
+        if m:
+            cands.append(os.path.join(folder, f'{stem}_{s}{ext}'))
+    for c in cands:
+        if os.path.exists(c):
+            return c
+    return truth_csv
+
+
+def truth_files_for(truth_csv: str, channels) -> Dict[str, str]:
+    """{channel: its truth file} (truth_for_channel for each)."""
+    return {str(ch): truth_for_channel(truth_csv, str(ch)) for ch in (channels or [])}
+
+
+def channel_of_run(filtered_dir: str) -> str:
+    """The channel of a run's filtered folder: its config_points() channel
+    when the folder name carries one (<channel>_...), else ''."""
+    parts = os.path.normpath(filtered_dir).split(os.sep)
+    for p in reversed(parts):                     # <channel>_to<reference tag>
+        m = re.match(r'^(.+?)_to', p)
+        if m:
+            return m.group(1)
+    return ''
 
 
 def truth_in_crs(truth: pd.DataFrame, crs: str) -> pd.DataFrame:
@@ -758,16 +819,32 @@ def compare(output_dir: str, truth_csv: str, radius_m: float = 5000.0, chips: st
     settings = consensus_settings(output_dir) if rebuild else None
     field = truth_field(truth)
     misfits: Dict = {}                                 # raw match files scored once, shared by the runs
+    per_channel: Dict[str, Tuple[pd.DataFrame, Optional[Dict]]] = {}   # a channel's own truth file, if any
+
+    def truth_of(channel):
+        ch = str(channel)
+        if ch not in per_channel:
+            p = truth_for_channel(truth_csv, ch)
+            if os.path.abspath(p) == os.path.abspath(truth_csv):
+                per_channel[ch] = (truth, field)
+            else:
+                t = truth_in_crs(load_truth(p), crs)
+                if not quiet:
+                    print(f'[Truth] {ch}: its own ground truth {os.path.basename(p)} ({len(t)} points)')
+                per_channel[ch] = (t, truth_field(t))
+        return per_channel[ch]
     run_list = runs if runs is not None else find_runs(output_dir)
     for k, run in enumerate(run_list, 1):
         if progress:
             print(f"[Truth] {progress}scoring run {k}/{len(run_list)}: "
                   f"{os.path.relpath(run['filtered_dir'], output_dir)}", flush=True)
-        if field is not None:
+        run_channel = channel_of_run(run['filtered_dir'])
+        r_truth, r_field = truth_of(run_channel) if run_channel else (truth, field)
+        if r_field is not None:
             win, nf = sweep_parts(run['sweep'])
             try:
                 acc_rows += [{'sweep': run['sweep'], 'window_size': win, 'num_features': nf, **r}
-                             for r in match_accuracy(run['filtered_dir'], field, radius_m, run.get('raw_dir'),
+                             for r in match_accuracy(run['filtered_dir'], r_field, radius_m, run.get('raw_dir'),
                                                      misfits)]
             except Exception as e:
                 print(f"[Truth] match accuracy of {run['filtered_dir']}: {type(e).__name__}: {e}")
@@ -779,7 +856,7 @@ def compare(output_dir: str, truth_csv: str, radius_m: float = 5000.0, chips: st
             except Exception:                         # empty or cut off: no timing, still scored
                 timing = {}
         for key, cfg in config_points(run['filtered_dir'], run['final_dir'], chips, settings).items():
-            summary, prow = score_config(cfg, truth, radius_m, local)
+            summary, prow = score_config(cfg, truth_of(cfg['channel'])[0], radius_m, local)
             t = timing.get(cfg['matcher'], {})
             summary['pass_seconds'] = t.get('seconds')
             summary['sec_per_window'] = t.get('sec_per_window')
@@ -853,7 +930,8 @@ def compare(output_dir: str, truth_csv: str, radius_m: float = 5000.0, chips: st
         for ch, b in best.items():
             print(f"[Truth] best for {ch}: {b['detector']} + {b['matcher']} {b['ransac']} -> {b['csv']}")
     return {'by_detector_matcher': by, 'ranking': ranking, 'points': points, 'truth': truth, 'crs': crs,
-            'best': best, 'truth_csv': truth_csv, 'accuracy': acc, 'field': field}
+            'best': best, 'truth_csv': truth_csv, 'accuracy': acc, 'field': field,
+            'truth_by_channel': {ch: t for ch, (t, _) in per_channel.items()}}
 
 
 def write_truth_best(by: pd.DataFrame, chip_files: Dict, crs: str, output_dir: str,

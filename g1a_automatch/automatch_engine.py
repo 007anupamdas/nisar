@@ -555,6 +555,8 @@ class PipelineConfig:
     # percentiles of its valid pixels (after log1p) map to 0 / 1
     stretch_percentiles: Tuple[float, float] = (1.0, 99.0)
     stretch_mode: str = 'percentile'    # percentile | clahe (local contrast after the stretch)
+    window_prep: str = 'none'           # none | gradient | invert: both windows after the stretch (thermal vs
+                                        # optical: polarity-free gradient magnitude, or the input inverted)
     # {channel: [raster, band]} read instead of the input's own band (e.g. the
     # cloud-masked copy automatch_cloud writes); None = the input itself
     channel_rasters: Optional[Dict[str, List]] = None
@@ -2333,11 +2335,14 @@ class BaseMatcher(ABC):
         kw = {'plo': float(lo), 'phi': float(hi)}
         if str(getattr(self.config, 'stretch_mode', 'percentile') or 'percentile').lower() == 'clahe':
             kw['clahe'] = True
+        prep = str(getattr(self.config, 'window_prep', 'none') or 'none').lower()
+        if prep in ('gradient', 'invert'):
+            kw['prep'] = prep
         return kw
 
     @staticmethod
     def _norm_img(img: np.ndarray, nodata=None, plo: float = 1, phi: float = 99,
-                  return_mask: bool = False, clahe: bool = False):
+                  return_mask: bool = False, clahe: bool = False, prep: str = 'none', invert_this: bool = True):
         x = img.astype(np.float32)
         if nodata is not None:
             x[x == nodata] = np.nan
@@ -2366,9 +2371,44 @@ class BaseMatcher(ABC):
         y = (y - lo) / (hi - lo + 1e-6)
         if clahe:
             y = BaseMatcher._clahe(y, valid_mask)
+        if prep == 'gradient':
+            y = BaseMatcher._gradient_prep(y, valid_mask)
+        elif prep == 'invert' and invert_this:
+            y = 1.0 - y
         y[~valid_mask] = 0.0  # zero out nodata
 
         return (y, valid_mask) if return_mask else y
+
+    @staticmethod
+    def _gradient_prep(y: np.ndarray, valid: np.ndarray, sigma_px: float = 1.5, norm_px: int = 15) -> np.ndarray:
+        """Polarity-free structure of a 0..1 window (window_prep 'gradient'):
+        the Scharr gradient magnitude after a light blur, divided by its local
+        mean over norm_px (local contrast normalisation), then stretched to
+        0..1 at its 99th percentile. A thermal image and an optical one share
+        edges (coastlines, lakes, rivers, field and city boundaries) but not
+        their sign: by day land is warm and bright, water cool and dark; by
+        night the other way round -- the magnitude is the same either way
+        (as the GEO landmarking systems and CM-Bench's gradient front end).
+        No-data is filled with the valid median first, so its edge adds no
+        gradient; a 2 px rim inside the edge is zeroed."""
+        import cv2
+        if not valid.any():
+            return y
+        fill = float(np.median(y[valid]))
+        v = np.where(valid, y, fill).astype(np.float32)
+        if sigma_px > 0:
+            v = cv2.GaussianBlur(v, (0, 0), sigma_px)
+        gx = cv2.Scharr(v, cv2.CV_32F, 1, 0)
+        gy = cv2.Scharr(v, cv2.CV_32F, 0, 1)
+        g = np.sqrt(gx * gx + gy * gy)
+        k = max(3, int(norm_px) | 1)
+        local = cv2.blur(g, (k, k))
+        # the floor keeps flat ground flat: noise there is not boosted to the strength of a real edge
+        g = g / (local + float(np.percentile(g[valid], 90)) + 1e-9)
+        rim = cv2.erode(valid.astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool)
+        g[~rim] = 0.0
+        hi = float(np.percentile(g[rim], 99)) if rim.any() else 1.0
+        return np.clip(g / (hi + 1e-9), 0.0, 1.0).astype(np.float32)
 
     @staticmethod
     def _clahe(y: np.ndarray, valid: np.ndarray, clip: float = 2.0, tiles: int = 8) -> np.ndarray:
@@ -3176,7 +3216,8 @@ class DiskBasedMatcher(BaseMatcher):
         try:
             # ── Level 0: normalise + extract masks ──────────────────────────
             img1, mask1 = self._norm_img(nisar_data, nodata=nisar_nodata, return_mask=True, **self._stretch_kw())
-            img2, mask2 = self._norm_img(s1_data, nodata=s1_nodata, return_mask=True, **self._stretch_kw())
+            img2, mask2 = self._norm_img(s1_data, nodata=s1_nodata, return_mask=True, invert_this=False,
+                                         **self._stretch_kw())
 
             if img1.max() == 0.0 or img2.max() == 0.0:
                 return None
@@ -3627,7 +3668,8 @@ class LoFTRMatcher(DiskBasedMatcher):
                                nisar_nodata=None, s1_nodata=None):
         try:
             img1, mask1 = self._norm_img(nisar_data, nodata=nisar_nodata, return_mask=True, **self._stretch_kw())  # was: self.norm_img
-            img2, mask2 = self._norm_img(s1_data, nodata=s1_nodata, return_mask=True, **self._stretch_kw())  # was: self.norm_img
+            img2, mask2 = self._norm_img(s1_data, nodata=s1_nodata, return_mask=True, invert_this=False,
+                                         **self._stretch_kw())  # was: self.norm_img
 
             if img1.max() == 0.0 or img2.max() == 0.0:
                 return None
@@ -3987,7 +4029,8 @@ class DenseWindowMatcher(DiskBasedMatcher):
                                metadata, matcher_name, matcher_param,
                                nisar_nodata=None, s1_nodata=None):
         img1, mask1 = self._norm_img(nisar_data, nodata=nisar_nodata, return_mask=True, **self._stretch_kw())
-        img2, mask2 = self._norm_img(s1_data, nodata=s1_nodata, return_mask=True, **self._stretch_kw())
+        img2, mask2 = self._norm_img(s1_data, nodata=s1_nodata, return_mask=True, invert_this=False,
+                                         **self._stretch_kw())
         if img1.max() == 0.0 or img2.max() == 0.0:
             return None
         if (mask1.mean() < self.config.min_valid_fraction
