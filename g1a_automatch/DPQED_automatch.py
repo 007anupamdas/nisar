@@ -338,6 +338,9 @@ class CloudMethodCombo(QtWidgets.QComboBox):
             if only is None or k in only:
                 self.addItem(auto_text if (k == 'auto' and auto_text) else t, k)
         if compare:
+            self.addItem('all: every method that fits each image (MV / HV: VNIR tests, OmniCloudMask, ukis-csmask '
+                         'if installed; HS: SWIR tests, SpecTf with its HV image; ML: infrared tests, TIRAuxCloud '
+                         'with its checkpoint)', 'all')
             self.addItem('compare: MV / HV by the VNIR tests and OmniCloudMask; ML by the infrared tests and '
                          'TIRAuxCloud (with its checkpoint)', 'compare')
         self.setToolTip('auto: each image by its sensor, no model. ML (MX-LWIR, thermal) by the infrared tests of '
@@ -1598,7 +1601,7 @@ class CloudSweepDialog(QtWidgets.QDialog):
             hs.addWidget(QtWidgets.QLabel(lab))
             hs.addWidget(w)
         f.addRow('HS: SWIR tests', hs)
-        self.scale = QtWidgets.QLineEdit(settings.value('cloud_sweep/scale', '') or
+        self.scale = QtWidgets.QLineEdit(settings.value('cloud_sweep/scale_v2', '') or
                                          f"{float(job.get('radiance_scale') or 0.001):g}")
         self.scale.setToolTip('radiance = pixel value x this (G1A: 0.001)')
         f.addRow('Radiance scale (ML / HS)', self.scale)
@@ -1691,7 +1694,7 @@ class CloudSweepDialog(QtWidgets.QDialog):
             self.settings.setValue(f'cloud_sweep/{k}', w.toPlainText())
         for k, w in (('out', self.out), ('conf', self.conf), ('bright', self.bright), ('blob', self.blob),
                      ('shadow', self.shadow), ('ir_dt', self.ir_dt), ('ir_split', self.ir_split),
-                     ('swir_k', self.swir_k), ('swir_bright', self.swir_bright), ('scale', self.scale),
+                     ('swir_k', self.swir_k), ('swir_bright', self.swir_bright), ('scale_v2', self.scale),
                      ('vis_bright', self.vis_bright), ('vis_white', self.vis_white)):
             self.settings.setValue(f'cloud_sweep/{k}', w.text())
         self.accept()

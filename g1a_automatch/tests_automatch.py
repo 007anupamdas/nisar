@@ -1003,7 +1003,7 @@ def test_gui_cloud():
         mc.setValue('swir')
         check('gui: the cloud method choice (auto, VNIR, OmniCloudMask, infrared, SWIR; the sweep also compare)',
               ([mc.itemData(i) for i in range(mc.count())], v1, mc.value(),
-               G.CloudMethodCombo(compare=True).itemData(8)),
+               G.CloudMethodCombo(compare=True).itemData(9)),
               (['auto', 'vnir', 'omnicloudmask', 'ir', 'swir', 'tirauxcloud', 'csmask', 'spectf'], 'omnicloudmask',
                'swir', 'compare'))
         w.cloud_method.setValue('ir')
@@ -3628,6 +3628,14 @@ def test_cloud_phys(tmp):
     check('phys: the sweep compares the VNIR tests with OmniCloudMask on MV (method compare), blob size 0 kept',
           (sorted(cdf['method'].fillna('ocm').unique().tolist()), int((cdf['method'] == 'vnir').sum()),
            0.0 in cdf['min_blob_km2'].dropna().tolist()), (['ocm', 'vnir'], 4, True))
+    import contextlib as _cl
+    with _cl.redirect_stdout(io.StringIO()) as buf:
+        sk = CS.image_methods([mvi, hs, img], 'swir')
+        al = CS.image_methods([mvi, hs, img], 'all', tiraux=True)
+    check('phys: sweep method all runs every method that fits each sensor; a forced method that does not fit is '
+          'skipped with a note, not a crash',
+          (sk, al, 'does not apply to MV' in buf.getvalue()),
+          ([[], ['swir'], []], [['vnir', 'ocm'], ['swir'], ['ir', 'tiraux']], True))
     import automatch_job as J
     check('phys: cloud masking is on for any cloud_mask but none / off (old jobs: omnicloudmask)',
           [J.cloud_on({'cloud_mask': v}) for v in ('none', 'off', '', 'on', 'omnicloudmask')],

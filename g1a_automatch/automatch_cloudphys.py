@@ -313,7 +313,9 @@ def destripe(a: np.ndarray, valid: np.ndarray, mode: Optional[str] = None, windo
     out = a.astype(np.float64, copy=True)
     for ax in ((1,) if mode == 'rows' else (0,) if mode == 'cols' else (1, 0)):
         x = np.where(valid, out, np.nan)
-        with np.errstate(all='ignore'):
+        import warnings
+        with np.errstate(all='ignore'), warnings.catch_warnings():
+            warnings.simplefilter('ignore', RuntimeWarning)       # rows that are all no-data
             med = np.nanmedian(x, axis=ax)
             share = valid.mean(axis=ax)
         med = np.where(share >= 0.2, med, np.nan)

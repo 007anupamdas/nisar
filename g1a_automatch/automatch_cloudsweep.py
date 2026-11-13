@@ -582,6 +582,10 @@ def run(images: List[str], out_dir: str, references: Optional[List[str]] = None,
     mine = (lambda i: shard is None or i % shard[1] == shard[0])
     part = f'_gpu{shard[0]}' if shard else ''
     confs, brights = parse_range(conf), parse_range(bright)
+    if brights and max(brights) <= 1.0:          # 0.9 meant as a fraction: the 90th percentile
+        print(f'[Sweep] brightness {", ".join(f"{b:g}" for b in brights)} read as percentiles '
+              f'{", ".join(f"{100 * b:g}" for b in brights)} (they run 50-99)', flush=True)
+        brights = [round(100.0 * b, 3) for b in brights]
     blobs, shadows = parse_range(blob_km2), parse_range(shadow_km)
     dts, splits = parse_range(ir_dt), parse_range(ir_split)
     ks, sbright = parse_range(swir_k), parse_range(swir_bright)
@@ -592,6 +596,12 @@ def run(images: List[str], out_dir: str, references: Optional[List[str]] = None,
     sps = parse_range(spectf_thresholds)
     vn = list(spectf_vnir or [])
     vn = vn + [''] * (len(images) - len(vn))
+    if str(method).lower() == 'all' and csmask_opts is None:
+        try:
+            import ukis_csmask  # noqa: F401
+            csmask_opts = C.phys_options({}, 'csmask')
+        except Exception:
+            print('[Sweep] ukis-csmask not installed here: MV / HV without it', flush=True)
     meths = image_methods(images, method, sensor, has_tiraux, csmask_opts is not None,
                           [bool((spectf_opts or {}).get('weights')) and bool(v) for v in vn], sensor_methods)
     if any(not 0 < c < 1 for c in confs):
@@ -747,6 +757,13 @@ def image_methods(images: List[str], method: str = 'auto', sensor: str = '', tir
     sp = list(spectf or [])
     for n, i in enumerate(images):
         s = sensor or _sensor(i)
+        if str(method).lower() == 'all':          # every method that fits this image's sensor
+            m = C.method_for({'cloud_method': 'auto'}, s, i)
+            ms = {'vnir': ['vnir', 'ocm'] + (['csmask'] if csmask else []),
+                  'swir': ['swir'] + (['spectf'] if n < len(sp) and sp[n] else []),
+                  'ir': ['ir'] + (['tiraux'] if tiraux else [])}.get(m, [m])
+            out.append(ms)
+            continue
         if str(method).lower() == 'compare':
             m = C.method_for({'cloud_method': 'auto'}, s, i)
             ms = [m, 'ocm'] if m == 'vnir' else ([m, 'tiraux'] if m == 'ir' and tiraux else [m])
@@ -756,8 +773,28 @@ def image_methods(images: List[str], method: str = 'auto', sensor: str = '', tir
                 ms.append('spectf')
             out.append(ms)
         else:
-            out.append([C.method_for(dict(C.parse_sensor_methods(sensor_methods or {}), cloud_method=method), s, i)])
+            m = C.method_for(dict(C.parse_sensor_methods(sensor_methods or {}), cloud_method=method), s, i)
+            if not fits(m, s, i):
+                print(f'[Sweep] {os.path.basename(i)} ({s}): {C.PHYS_NAMES.get(m, m)} does not apply to {s} '
+                      f'images ({FITS_NOTE.get(m, "")}); skipped', flush=True)
+                out.append([])
+            else:
+                out.append([m])
     return out
+
+
+FIT_SENSORS = {'vnir': ('MV', 'HV'), 'ocm': ('MV', 'HV'), 'csmask': ('MV', 'HV'), 'swir': ('HS',),
+               'spectf': ('HS',), 'ir': ('ML',), 'tiraux': ('ML',)}
+FITS_NOTE = {'vnir': 'it needs blue..NIR bands', 'ocm': 'it needs red, green, NIR', 'csmask': 'it needs blue..NIR',
+             'swir': 'it needs the 1250 and 1380 nm bands of HS', 'spectf': 'it needs the HS spectrum with its HV pass',
+             'ir': 'it needs the thermal bands of ML', 'tiraux': 'it needs the thermal bands of ML'}
+
+
+def fits(method: str, sensor: str, path: str = '') -> bool:
+    """Whether a cloud method can run on an image of this sensor (an unknown
+    sensor: tried)."""
+    want = FIT_SENSORS.get(method)
+    return want is None or sensor not in ('MV', 'HV', 'HS', 'ML') or sensor in want
 
 
 def _without(argv: List[str], flag: str, nvals: int) -> List[str]:
@@ -823,8 +860,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                          "and shadow values (default); all = every combination (thousands); none")
     ap.add_argument('--sheets', action='store_true', help='also the stacked contact sheets SHEET_*.png')
     ap.add_argument('--method', default='auto',
-                    choices=['auto', 'compare', 'omnicloudmask', 'ir', 'swir', 'vnir', 'tirauxcloud', 'csmask',
-                             'spectf'],
+                    choices=['auto', 'all', 'compare', 'omnicloudmask', 'ir', 'swir', 'vnir', 'tirauxcloud',
+                             'csmask', 'spectf'],
                     help='auto: infrared tests for ML, SWIR tests for HS, VNIR tests for MV / HV; compare: MV / HV '
                          'both by the VNIR tests and by OmniCloudMask')
     ap.add_argument('--destripe', default='rows', choices=['rows', 'cols', 'both', 'off'],
