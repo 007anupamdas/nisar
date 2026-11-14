@@ -56,7 +56,7 @@ CODE_FILES = ('automatch_engine.py', 'automatch_job.py', 'automatch_imcui.py', '
               'automatch_rival.py', 'automatch_truth.py', 'automatch_weights.py', 'automatch_gpuaas.py',
               'automatch_native.py', 'imw_configs.py', 'automatch_cross.py', 'automatch_bench.py',
               'automatch_cloud.py', 'automatch_accuracy.py', 'automatch_cloudsweep.py', 'automatch_cloudphys.py',
-              'automatch_tirauxcloud.py', 'automatch_reflect.py', 'automatch_cloudmodels.py')
+              'automatch_tirauxcloud.py', 'automatch_reflect.py', 'automatch_cloudmodels.py', 'automatch_refsubset.py')
 
 
 def code_fingerprint() -> str:
@@ -1530,6 +1530,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     sub.add_parser('cloudsweep', help='cloud mask benchmark: every combination of thresholds, band sets and '
                                       'bright-blob settings (options: python automatch_cloudsweep.py -h)'
                    ).add_argument('rest', nargs=argparse.REMAINDER)
+    sub.add_parser('refsubset', help='copy the reference tiles inside a region (G1A: India and neighbours) to a '
+                                     'local folder (options: python automatch_refsubset.py -h)'
+                   ).add_argument('rest', nargs=argparse.REMAINDER)
     k = sub.add_parser('pack', help='copy a scene, the references it needs and server settings for the '
                                     'GPU server (options: python automatch_pack.py -h)')
     k.add_argument('rest', nargs=argparse.REMAINDER)
@@ -1550,6 +1553,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     if argv and argv[0] == 'cloudsweep':
         import automatch_cloudsweep as CS
         return CS.main(list(argv[1:]))
+    if argv and argv[0] == 'refsubset':
+        import automatch_refsubset as RS
+        return RS.main(list(argv[1:]))
     if argv and argv[0] == 'pack':
         import automatch_pack as P
         return P.main(list(argv[1:]))

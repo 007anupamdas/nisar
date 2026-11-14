@@ -131,6 +131,31 @@ The score measures image quality, not the spectral match to the reference.
 Among bands of similar score, the one closest to the reference's band (e.g.
 Landsat red / NIR) may match better.
 
+## A local reference set for the G1A region
+
+G1A sees India and its neighbours only, so a job never needs the rest of a
+global reference set; scanning the whole share each time is the slow part
+of building pairs. Copy the region once:
+
+    python automatch_job.py refsubset Y:/RefImagesNRSC/L8Ref D:/refs/L8Ref_G1A --dry-run
+    python automatch_job.py refsubset Y:/RefImagesNRSC/L8Ref D:/refs/L8Ref_G1A [--per-tile 1]
+
+- **Region:** `--region 40 -10 110 45` (lon/lat) by default; every
+  reference whose footprint meets it is copied.
+- **`--per-tile N`:** keep only the newest N dates of each Landsat
+  path/row (your set has two or three per tile; each date is its own pair
+  in a job).
+- **`--dry-run`:** the count and total size, nothing copied. Run this first:
+  pan tiles are large.
+- **Footprints:** each copy gets a `<name>.met` sidecar with its footprint,
+  so the local folder needs no index and is scanned in seconds. A second
+  run copies only what is new; `REFSUBSET.csv` lists what was taken.
+- Point the jobs' reference folder at the local folder.
+- **Hull cache:** independently, each reference's valid-data outline is
+  now computed once and kept in `~/.automatch/ref_valid_hulls.json`
+  (`AUTOMATCH_REF_CACHE` to move it), shared by every job, channel, window
+  size and GPU worker.
+
 ## Output → RIVAL
 
 ```

@@ -3954,6 +3954,44 @@ def test_ref_hull_cache(tmp):
         E._HULLS = None
 
 
+def test_refsubset(tmp):
+    """A local copy of the references inside a region: only those meeting it
+    are copied, each with a .met footprint, and the copy is read back by the
+    reference scanner (sidecar mode) with the same footprints; the newest N
+    dates per Landsat tile; a second run copies nothing."""
+    import contextlib
+    import io
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_origin
+    import automatch_refs as refs
+    import automatch_refsubset as RS
+    src = os.path.join(tmp, 'refs_global')
+    os.makedirs(src)
+    for name in ('N16E73.tif', 'N20E80.tif', 'N50E10.tif', 'S30E150.tif'):
+        lat = int(name[1:3]) * (1 if name[0] == 'N' else -1)
+        lon = int(re.search(r'E(\d+)', name).group(1))
+        with rasterio.open(os.path.join(src, name), 'w', driver='GTiff', width=10, height=10, count=1, dtype='uint8',
+                           crs='EPSG:4326', transform=from_origin(lon, lat + 1, 0.1, 0.1)) as d:
+            d.write(np.full((10, 10), 9, np.uint8), 1)
+    dst = os.path.join(tmp, 'refs_local')
+    with contextlib.redirect_stdout(io.StringIO()):
+        r1 = RS.subset(src, dst, RS.G1A_REGION)
+        r2 = RS.subset(src, dst, RS.G1A_REGION)
+        local = refs.scan_reference_folder(dst)
+    names = sorted(os.path.basename(p) for p in local['footprints'])
+    ring = local['footprints'][os.path.join(dst, 'N16E73.tif')]['ring']
+    lons, lats = sorted({round(p[0], 3) for p in ring}), sorted({round(p[1], 3) for p in ring})
+    check('refsubset: the G1A region keeps India\'s tiles only, copies each with a .met footprint the scanner reads; '
+          'a second run copies nothing',
+          (r1['n'], r1['copied'], r2['copied'], local['mode'], names, lons, lats),
+          (2, 2, 0, 'sidecar', ['N16E73.tif', 'N20E80.tif'], [73.0, 74.0], [16.0, 17.0]))
+    fp = {f'/x/LC8150040{d}LGN00_B8.tif': {'ring': [(73, 16), (74, 16), (74, 17), (73, 17)]}
+          for d in ('2015103', '2016282', '2016314')}
+    check('refsubset: per tile, the newest dates of a Landsat path/row',
+          [os.path.basename(p) for p in RS.pick(fp, RS.G1A_REGION, 1)], ['LC81500402016314LGN00_B8.tif'])
+
+
 def test_stretch():
     """The contrast stretch before matching follows stretch_percentiles: at 90
     the brightest tenth saturates and the rest spreads over more grey levels."""
@@ -4743,6 +4781,7 @@ def main():
     try:
         test_refs(tmp)
         test_ref_hull_cache(tmp)
+        test_refsubset(tmp)
         test_rival_parity(a.rival)
         test_engine_helpers()
         test_nisar_h5(tmp)
