@@ -2285,7 +2285,15 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.max_err = QtWidgets.QDoubleSpinBox()
         self.max_err.setRange(0, 500)
         self.max_err.setSuffix(' km')
-        f.addRow('Max expected error', self.max_err)
+        self.max_err_truth = QtWidgets.QCheckBox('from the truth file when there is one (largest error + a third)')
+        self.max_err_truth.setChecked(True)
+        self.max_err_truth.setToolTip('With a truth file, the run measures the largest error among its points '
+                                      '(sqrt(dx\u00b2 + dy\u00b2)), adds a third and uses that instead of the value '
+                                      'typed here; the log says so. Without a truth file the value typed here is used.')
+        hme = QtWidgets.QHBoxLayout()
+        hme.addWidget(self.max_err)
+        hme.addWidget(self.max_err_truth, 1)
+        f.addRow('Max expected error', hme)
         self.coarse = QtWidgets.QComboBox()
         self.coarse.addItems(COARSE_CHOICES)
         f.addRow('Coarse alignment', self.coarse)
@@ -2502,6 +2510,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self._update_kp_label()
         self.target_res.setText('' if j['target_resolution'] is None else f"{j['target_resolution']:g}")
         self.max_err.setValue(float(j['max_expected_error_m']) / 1000.0)
+        self.max_err_truth.setChecked(bool(j.get('max_error_from_truth', True)))
         self.coarse.setCurrentText(j['coarse_method'])
         self.coarse_res.setValue(float(j['coarse_resolution_m']))
         off = j['initial_offset_m']
@@ -2603,6 +2612,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             'cloud_refine': self.cloud_refine.isChecked(),
             'target_resolution': float(tr) if tr else None,
             'max_expected_error_m': self.max_err.value() * 1000.0,
+            'max_error_from_truth': self.max_err_truth.isChecked(),
             'coarse_method': self.coarse.currentText(),
             'coarse_resolution_m': self.coarse_res.value(),
             'initial_offset_m': [self.init_dx.value(), self.init_dy.value()] if self.use_init.isChecked() else None,

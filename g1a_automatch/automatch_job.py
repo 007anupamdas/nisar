@@ -356,6 +356,7 @@ DEFAULT_JOB: Dict = {
 
     # large offsets (coarse-to-fine)
     'max_expected_error_m': 50000,
+    'max_error_from_truth': True,   # with a truth file: max_expected_error_m = its largest error x 1.33 (min 5 km)
     'coarse_method': 'auto',     # auto | matcher | phasecorr | manual | none
     'coarse_resolution_m': 60,
     'initial_offset_m': None,    # [dE, dN] metres, input minus reference
@@ -417,6 +418,7 @@ JOB_HELP = {
     'auto_bands_range': '[first, last] band auto_bands searches, e.g. [1, 70]; [] = all bands',
     'reference_dir': 'Reference collection (L8_ref, C1, ...) - discovered like DPQED_rival.py',
     'max_expected_error_m': 'Worst-case geolocation error; search buffer for references and coarse alignment',
+    'max_error_from_truth': 'With a truth file, take the worst-case error from it (largest error + a third)',
     'coarse_method': 'auto = matcher at coarse resolution, phase correlation if weak',
     'coarse_shared': 'One coarse offset per channel, measured by a few detectors and given to every detector',
     'coarse_detectors': 'Detectors that measure the shared coarse offset ([] = automatic)',
@@ -634,6 +636,28 @@ def _scale_warnings(job: Dict, scene, res: float, E) -> List[str]:
     return out
 
 
+def max_error_from_truth(job: Dict) -> Tuple[Dict, str]:
+    """(the job with max_expected_error_m taken from its truth file, a note)
+    when max_error_from_truth is on and a truth file is readable: the largest
+    total error of its points (sqrt(dE^2 + dN^2)) plus a third, at least 5 km,
+    rounded up to the km. Otherwise the job unchanged and ''."""
+    if not job.get('max_error_from_truth', True) or not job.get('truth_csv') or not os.path.exists(job['truth_csv']):
+        return job, ''
+    try:
+        import automatch_truth as T
+        from pyproj import Geod
+        t = T.load_truth(job['truth_csv'])
+        _, _, dist = Geod(ellps='WGS84').inv(t['in_lon'].to_numpy(), t['in_lat'].to_numpy(),
+                                             t['ref_lon'].to_numpy(), t['ref_lat'].to_numpy())
+        worst = float(max(abs(d) for d in dist))
+    except Exception as e:
+        return job, f'max_expected_error_m kept ({type(e).__name__} reading the truth: {e})'
+    new = max(5000.0, math.ceil(worst * 4.0 / 3.0 / 1000.0 - 0.1) * 1000.0)     # 20.03 km -> 20, not 21
+    note = (f'max_expected_error_m {new / 1000:.0f} km from the truth file (largest error {worst / 1000:.1f} km '
+            f'+ a third; was {float(job.get("max_expected_error_m") or 0) / 1000:.0f} km)')
+    return dict(job, max_expected_error_m=new), note
+
+
 def preflight(job: Dict, check_weights: bool = True) -> Dict:
     """Validate a job without matching. {'errors', 'warnings', 'info'}.
     check_weights: also look for every model weight file the job will load
@@ -642,6 +666,10 @@ def preflight(job: Dict, check_weights: bool = True) -> Dict:
     warnings += [unknown_key_note(k) for k in
                  dict.fromkeys(list(job.get('_ignored_keys') or []) + unknown_keys(job))]
     job = normalize(job)
+    job, note = max_error_from_truth(job)
+    if note:
+        info['max_expected_error_m'] = job['max_expected_error_m']
+        warnings.append(note)
 
     if not job['input_path'] or not os.path.exists(job['input_path']):
         errors.append(f"input_path not found: {job['input_path']!r}")
@@ -1310,6 +1338,9 @@ def run_job(job: Dict) -> Dict:
     device = use_gpu(job['device'])            # before anything loads torch
     if job.get('cloud_device'):
         job['cloud_device'] = use_gpu(job['cloud_device'])
+    job, note = max_error_from_truth(job)
+    if note:
+        print(f'[Job] {note}', flush=True)
     pf = preflight(job, check_weights=False)   # warmup stops a detector whose weights are missing
     for w in pf['warnings']:
         print(f'[Preflight] WARNING: {w}')

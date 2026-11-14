@@ -1653,6 +1653,29 @@ def test_truth_per_band(tmp):
            'plain_band6.csv', 'plain.csv', 'band5', 'HH'))
 
 
+def test_max_error_from_truth(tmp):
+    """With a truth file the worst-case error is taken from it: the largest
+    total error of its points plus a third, rounded up to the km, at least
+    5 km; off, or without a truth file, the stated value stays."""
+    import automatch_job as J
+    p = os.path.join(tmp, 'truth_maxerr.csv')
+    # one point 12 km east and 9 km north at ~23 N: total 15 km
+    import math as _m
+    lat = 23.0
+    dlon = 12.0 / (111.32 * _m.cos(_m.radians(lat)))
+    dlat = 9.0 / 110.57
+    with open(p, 'w') as f:
+        f.write('In_X,In_Y,Ref_X,Ref_Y,Row,In_Lon,In_Lat,Ref_Lon,Ref_Lat\n')
+        f.write(f'0,0,0,0,1,{80 + dlon},{lat + dlat},80,{lat}\n')
+        f.write(f'0,0,0,0,2,{81 + dlon / 3},{lat},81,{lat}\n')
+    j1, n1 = J.max_error_from_truth({'truth_csv': p, 'max_expected_error_m': 100000})
+    j2, n2 = J.max_error_from_truth({'truth_csv': p, 'max_expected_error_m': 100000, 'max_error_from_truth': False})
+    j3, n3 = J.max_error_from_truth({'truth_csv': '', 'max_expected_error_m': 100000})
+    check('max error from truth: 12 x 9 km (15 km total) gives 20 km; off or without truth the stated value',
+          (j1['max_expected_error_m'], '15.0 km' in n1, j2['max_expected_error_m'], n2, j3['max_expected_error_m']),
+          (20000.0, True, 100000, '', 100000))
+
+
 def test_truth_helpers(tmp):
     """Ground-truth scoring of one configuration: local median near a truth
     point, error surface elsewhere, extrapolation flagged and not scored."""
@@ -4813,6 +4836,7 @@ def main():
         test_imcui_mock()
         test_weights_check(tmp)
         test_truth_helpers(tmp)
+        test_max_error_from_truth(tmp)
         test_truth_per_band(tmp)
         test_server(tmp)
         test_gpuaas_args(tmp)
