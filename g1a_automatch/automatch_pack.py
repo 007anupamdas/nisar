@@ -278,6 +278,10 @@ def curl_command(input_path: str, code_path: str, url: str, conda_env: str, gpu_
 
 PATH_KEYS = ('input_path', 'reference_dir', 'output_dir', 'temp_dir', 'weights_cache_dir',
              'truth_csv', 'manual_gcp_csv')
+# cloud settings that name files on this machine: copied under extra/<key>/ and pointed at there
+EXTRA_FILE_KEYS = (('cloud_mask_from', 'raster'), ('cloud_spectf_vnir', 'raster'), ('cloud_ir_clear', 'raster'),
+                   ('cloud_vis_clear', 'raster'), ('cloud_spectf_weights', 'file'),
+                   ('cloud_tiraux_checkpoint', 'file'))
 
 
 def server_settings(settings: Dict) -> Dict:
@@ -365,6 +369,29 @@ def pack(job: Dict, dest: str, server_dir: str, server_weights: str = '', server
             used.add(base)
             plan.append((os.path.abspath(job[key]), os.path.join(dest, 'truth', base)))
             settings[key] = posixpath.join(server_dir, 'truth', base)
+
+    # cloud files the job names: images (with their companions) and model files, under extra/
+    for key, kind in EXTRA_FILE_KEYS:
+        val = job.get(key)
+        vals = val if isinstance(val, (list, tuple)) else [val]
+        out = []
+        for v in vals:
+            if not v:
+                continue
+            if not os.path.exists(v):
+                raise FileNotFoundError(f'{key} not found here: {v!r}')
+            src = os.path.abspath(v)
+            base = os.path.basename(src)
+            sub = posixpath.join('extra', key)
+            plan.append((src, os.path.join(dest, 'extra', key, base)))
+            if kind == 'raster':
+                plan += [(c, os.path.join(dest, 'extra', key, os.path.basename(c))) for c in companions(src)]
+            out.append(posixpath.join(server_dir, sub, base))
+        if out:
+            settings[key] = out if isinstance(val, (list, tuple)) else out[0]
+    if job.get('cloud_model_dir'):                      # OmniCloudMask weights: the server's own weights folder
+        settings['cloud_model_dir'] = ''
+        notes.append('cloud_model_dir: left to the server (<server weights>/omnicloudmask)')
 
     settings['output_dir'] = posixpath.join(server_dir, 'output')   # the GPU service replaces it
     settings['temp_dir'] = server_cache or ''

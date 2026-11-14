@@ -529,6 +529,8 @@ def test_e2e_multigpu(tmp):
 def test_pack(tmp):
     """pack: only the references the scene can need, with their index; paths
     rewritten for the server; the bundle runs through the GPU-service entry."""
+    import contextlib
+    import io
     import synthetic_data as S
     import automatch_pack as P
     import automatch_job as J
@@ -561,6 +563,26 @@ def test_pack(tmp):
         check(f'pack {ref}: a second pack copies nothing again', (again['copied'], again['skipped'] > 0), (0, True))
     sh = open(os.path.join(dest, 'submit_gpuaas.sh')).read()
     check('pack: curl script for env / weights / preflight / run', 'submit_job' in sh and 'mode_$1.json' in sh)
+    # cloud files named by the job go along under extra/ and are pointed at there
+    wpt = os.path.join(tmp, 'current.pt')
+    open(wpt, 'wb').write(b'0' * 64)
+    cjob = J.normalize({'input_path': os.path.join(data, 'G1A_SYNTH_L1.tif'), 'reference_dir': os.path.join(data, 'C1'),
+                        'output_dir': os.path.join(tmp, 'pack_cloud_out'), 'channels': ['band1'], 'detectors': ['sift'],
+                        'max_expected_error_m': 10000, 'cloud_mask': 'on', 'cloud_mask_from': os.path.join(data, 'G1A_SYNTH_L1.tif'),
+                        'cloud_vis_clear': [os.path.join(data, 'G1A_SYNTH_L1.tif')], 'cloud_spectf_weights': wpt,
+                        'cloud_model_dir': os.path.join(tmp, 'ocm')})
+    cdest = os.path.join(tmp, 'bundle_cloud')
+    with contextlib.redirect_stdout(io.StringIO()):
+        P.pack(cjob, cdest, '/srv/set9')
+    cst = json.load(open(os.path.join(cdest, 'automatch_settings.json')))
+    check('pack: the cloud files a job names are copied under extra/ and the settings point there; the '
+          'OmniCloudMask weights are left to the server',
+          (cst.get('cloud_mask_from'), cst.get('cloud_vis_clear'), cst.get('cloud_spectf_weights'),
+           os.path.exists(os.path.join(cdest, 'extra', 'cloud_spectf_weights', 'current.pt')),
+           os.path.exists(os.path.join(cdest, 'extra', 'cloud_mask_from', 'G1A_SYNTH_L1.tif')),
+           cst.get('cloud_model_dir', '')),
+          ('/srv/set9/extra/cloud_mask_from/G1A_SYNTH_L1.tif', ['/srv/set9/extra/cloud_vis_clear/G1A_SYNTH_L1.tif'],
+           '/srv/set9/extra/cloud_spectf_weights/current.pt', True, True, ''))
     # the Pack dialog's window field (remembered) overriding the job's list must be visible
     jf = os.path.join(tmp, 'pack_windows_job.json')
     with open(jf, 'w') as f:
