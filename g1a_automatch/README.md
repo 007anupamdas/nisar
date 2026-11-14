@@ -1,0 +1,1409 @@
+# g1a_automatch — automatic geolocation assessment for G1A (and NISAR)
+
+Measures the geolocation error of an image (G1A multi-band raster, or a NISAR
+GSLC/GCOV `.h5`) against a reference collection (**L8_ref**, **C1**, or any
+folder `DPQED_rival.py` understands) by automatic feature matching. It writes
+**CSV files that `DPQED_rival.py` loads directly** (*Load CSV*), so every
+automatic match can be inspected and edited in RIVAL.
+
+This folder is self-contained (no imports from the rest of the repo). The
+NISAR↔S1 production scripts in the repo root are separate and untouched.
+
+## Files
+
+| File | Role |
+|------|------|
+| `DPQED_automatch.py` | GUI (PyQt5 / PyQt6 / PySide6). Every setting is a control; runs jobs as a subprocess. |
+| `automatch_job.py` | Job file + CLI: `template`, `preflight`, `run`, `detectors`, `weights`, `compare`, `inspect`. The GUI uses exactly this. |
+| `automatch_engine.py` | Engine: input reader (raster bands / NISAR pols), reference search, coarse-to-fine matching, RANSAC, statistics, chip consensus. Derived from `dqeagdq_integrated_v2.py`. |
+| `automatch_refs.py` | Reference discovery. The rules are **copied verbatim from `DPQED_rival.py`** (index-shp / sidecar / degree-tile); the tests check they still match. No QGIS needed. |
+| `automatch_rival.py` | RIVAL CSV writer (RIVAL's own header, `csv_record` and `accuracy_stats`). |
+| `automatch_imcui.py` | image-matching-webui models, **only for algorithms kornia lacks**. |
+| `imw_configs.py` | imcui catalogue: the full matrix (22 sparse + 16 dense rows), resolved from the installed imcui's registry. |
+| `automatch_weights.py` | Which weight files each detector needs and whether they are on this machine (nothing is downloaded). |
+| `automatch_truth.py` | Ranks every detector + matcher of a run against manually measured ground truth. |
+| `automatch_accuracy.py` | Match accuracy of finished jobs (good / bad matches against the truth field; sub-cells). |
+| `automatch_cloud.py` | Cloud masks before matching, and the stand-alone cloud test: the physical tests (MV / HV, ML, HS), OmniCloudMask or TIRAuxCloud. |
+| `automatch_cloudphys.py` | Physical cloud tests: VNIR (MV / HV: bright, white, blue), infrared (ML: brightness temperature, split window, ice, CO₂ / water vapour) and SWIR (HS: 1.38 µm cirrus, bright SWIR). |
+| `automatch_cloudsweep.py` | Cloud benchmark: every combination of the cloud settings, against reference outlines. |
+| `automatch_tirauxcloud.py` | TIRAuxCloud's released thermal checkpoints as an experimental ML cloud method. |
+| `automatch_reflect.py` | TOA reflectance: sun angle / time from the metadata, per-pixel sun zenith, Earth-Sun distance, solar irradiance. |
+| `automatch_cloudmodels.py` | Learned cloud masks on reflectance: ukis-csmask (MV / HV) and SpecTf (HS + HV). |
+| `automatch_gpuaas.py` | Entry point for the GPU service (`submit_job` `code_path`). |
+| `automatch_server.py` | HTTP front end for a GPU server: submit and follow jobs with curl. |
+| `prefetch_weights.py` | Collect all kornia + imcui weights into one folder for an offline workstation. |
+| `tests_automatch.py`, `synthetic_data.py` | Tests, with synthetic data whose geolocation error is known. |
+
+## Install (workstation, 16 GB GPU)
+
+```bash
+conda create -n automatch python=3.11
+conda activate automatch
+pip install torch --index-url https://download.pytorch.org/whl/cu121   # match your CUDA
+pip install -r requirements.txt
+# optional, for SuperPoint/SuperGlue/RoMa/DKM/eLoFTR/ASpanFormer:
+pip install -e /path/to/image-matching-webui
+```
+
+## Use
+
+**GUI:** `python DPQED_automatch.py`
+1. *Data*: input image → **Inspect input** (fills the Channels drop-down
+   with band1…bandN or HH/HV…). Tick channels in the drop-down or type
+   them: `47, 50-55`, `band47`, `HH, HV`. Empty = all; *Auto bands* picks
+   the cleanest bands of a hyperspectral cube. Reference folder (mode is detected like RIVAL).
+   Output folder.
+2. *Detectors & matchers*: tick detectors and their matchers. **Check weights**
+   shows which weight files they need and whether they are on this machine.
+3. *Windows & offsets*: window sizes, keypoints, **max expected error**
+   (default 50 km), coarse method, optional known offset from RIVAL.
+4. **Preflight** (checks paths, bands, reference coverage, detectors, weight
+   files, GPU), then **Run**. Results appear in the table; double-click a row
+   to open its folder.
+5. **Queue run** adds the job as it stands to a queue (*Output & run* tab)
+   instead: runs go one after another on the GPU, the next starting when
+   the running one finishes.
+   - Each queued run keeps a copy of its settings
+     (`job_queued_<time>.json` in its output folder), so the window can be
+     changed for the next job meanwhile.
+   - *Start no earlier than* holds a run until a set time (e.g. overnight).
+   - Two runs never share an output folder.
+   - **Stop** pauses the queue; tick *Run the queue* to go on. *Up* and
+     *Remove* reorder it.
+   - Runs still queued when the window closes come back, paused, the next
+     time it opens.
+
+**Command line (same job file):**
+```bash
+python automatch_job.py template > job.json      # edit paths
+python automatch_job.py preflight job.json
+python automatch_job.py run job.json --set window_sizes=[1024,2048]
+python automatch_job.py weights job.json          # weight files that job needs
+python automatch_job.py compare <output> --truth manual_pts_rival.csv
+python automatch_job.py bands G1A_HV.tif --top 3  # band quality of a cube
+```
+
+## Hyperspectral cubes: which band (auto_bands)
+
+The good bands of a G1A HS/HV cube change from image to image. In one, the
+first bands are poor and those around 50 are crisp. In another, everything
+above 40 is junk. `auto_bands: N` (GUI: *Auto bands*) matches only the N
+crispest bands: those with the most fine detail above their noise. No
+reference is needed. It applies to
+rasters when `channels` is `[]`; ticked channels win.
+
+How each band is scored:
+- **noise**: the pixel noise on six full-resolution 256 px blocks, measured
+  with a kernel that cancels flat areas, ramps and most edges (Immerkær).
+  Striping (column and row gains) is added to it.
+- **signal**: the spread of the band's own values (p98 − p2), with the noise
+  taken out.
+- **detail**: fine features 2–6 px across (a difference of Gaussians), with
+  the share of the noise and the striping taken out.
+- **sharpness** = detail / signal: how much of the band's contrast is in
+  edges and small features rather than in broad shading.
+- **detail dB** = 20·log10(detail / the noise's detail).
+- **score** = 100 × sharpness × d² / (d² + 4), where d is the detail over the
+  noise's detail (half weight at 6 dB). Bands are ranked by this score.
+- **SNR dB** (signal / noise) is shown for reference only. It ranked a
+  soft, hazy band 3 of a G1A HV cube above a band 30 ten times crisper:
+  smooth bands have almost no measurable noise.
+- A band with no signal above its noise, or less than half of the best
+  band's data, scores 0. A band whose detail does not beat its noise
+  (detail dB ≤ 0) is never picked.
+- The picks are at least 1/30 of the band count apart (6 bands in a
+  180-band cube), so a top-3 is not three neighbours of one peak.
+
+`auto_bands_range: [1, 70]` (GUI: *within bands* `1-70`) limits the search.
+In G1A HS/HV cubes the good bands are usually within the first 60–70 of 180,
+and a third of the bands is scored in a third of the time.
+
+The scores are written to `BAND_QUALITY.csv` in the output folder and the
+log. **Pack for server** picks the bands on the workstation and writes them
+into the server's settings as `channels`. The server then runs exactly the
+bands preflight showed, and `BAND_QUALITY.csv` goes into the pack. The image
+footprint comes from the picked band; a band with no valid pixels (a corrupt
+band 1) is passed over. Preflight prints them too, so a server preflight shows the pick before
+a long run. With more than 20 bands, `channels` `[]` and `auto_bands` 0,
+preflight warns that every band will be matched.
+
+The score measures image quality, not the spectral match to the reference.
+Among bands of similar score, the one closest to the reference's band (e.g.
+Landsat red / NIR) may match better.
+
+## A local reference set for the G1A region
+
+G1A sees India and its neighbours only, so a job never needs the rest of a
+global reference set; scanning the whole share each time is the slow part
+of building pairs. Copy the region once:
+
+    python automatch_job.py refsubset Y:/RefImagesNRSC/L8Ref D:/refs/L8Ref_G1A --dry-run
+    python automatch_job.py refsubset Y:/RefImagesNRSC/L8Ref D:/refs/L8Ref_G1A [--per-tile 1]
+
+- **Region:** `--region 40 -10 110 45` (lon/lat) by default; every
+  reference whose footprint meets it is copied.
+- **`--per-tile N`:** keep only the newest N dates of each Landsat
+  path/row (your set has two or three per tile; each date is its own pair
+  in a job).
+- **`--dry-run`:** the count and total size, nothing copied. Run this first:
+  pan tiles are large.
+- **Footprints:** each copy gets a `<name>.met` sidecar with its footprint,
+  so the local folder needs no index and is scanned in seconds. A second
+  run copies only what is new; `REFSUBSET.csv` lists what was taken.
+- Point the jobs' reference folder at the local folder.
+- **Hull cache:** independently, each reference's valid-data outline is
+  now computed once and kept in `~/.automatch/ref_valid_hulls.json`
+  (`AUTOMATCH_REF_CACHE` to move it), shared by every job, channel, window
+  size and GPU worker.
+
+## Output → RIVAL
+
+```
+<output>/RIVAL_BEST_<scene>_<channel>.csv   best run per channel (highest consensus score)
+<output>/rival/RIVAL_<scene>_win<W>_nf<N>_<channel>_to<ref>_<detector>_<matcher>_r<thr>.csv
+<output>/rival/..._detail.csv               same rows + detector/RANSAC/chip provenance
+<output>/RUN_MANIFEST.csv                   every run: status, coarse offsets, mean dE/dN, RMSE, CE90
+<output>/automatch.log
+```
+Columns are RIVAL's export layout: `In_X, In_Y, Ref_X, Ref_Y, DX_Err, DY_Err,
+Row, In_Lon, In_Lat, Ref_Lon, Ref_Lat`. In = the assessed image, Ref = the
+reference, in the working CRS (the input's projected CRS, or the UTM zone of
+its centre when the input is in lon/lat, the same rule RIVAL uses). DX/DY =
+In − Ref. In RIVAL: load the input raster and the reference folder, then
+*Load CSV*; RIVAL recomputes RMSE and CE90 itself.
+
+## Errors of kilometres
+
+Windows compared at the same map position cannot match when the error is
+2–30 km (a 1024 px window at 10–20 m is only 10–20 km wide). So:
+
+1. References are searched, and cropped, **`max_expected_error_m` beyond** the
+   declared overlap.
+2. Per image/reference pair, a **coarse offset** is estimated at ~60 m (at
+   the image's own pixel size when that is coarser, and coarser still for
+   very large pairs): the selected matcher first (robust 2-D mode of all
+   match offsets), then phase correlation of gradient magnitude, then
+   `initial_offset_m` if given. All pairs share one image, so the estimates
+   are then checked against each other. First the matcher's own: offsets
+   are grouped with their neighbours (within 5 km, plus 50 m per km between
+   the pairs, which the scene's own distortion needs), each group weighing
+   its matches. When the heaviest group outweighs every other at least
+   twice and rests on a well-supported matcher offset, matcher offsets
+   outside it are replaced by the nearest group member's (`from-pair-N
+   (matcher outlier)`; job 325: XoFTR had five pairs 19–51 km off on 8–13
+   matches). Then a phase-correlation offset more than 5 km (or 3 x
+   `search_margin_m`) from every offset the matcher measured is replaced by
+   the nearest matcher pair's offset, as a failed pair is
+   (`from-pair-N (phasecorr disagreed)` in the log).
+   When the pairs still differ by more than half of `max_expected_error_m`,
+   the log warns. Every estimate is written to `raw_matches_*/COARSE_OFFSETS.csv`.
+   **One coarse offset per channel, for every detector** (`coarse_shared`,
+   on by default). The offset belongs to the image, not to the detector. It
+   is measured once, by a panel of up to three of the job's detectors that
+   are best at it: TopicFM, MINIMA-RoMa, LoFTR, GIM-RoMa, ALIKED-LG, SFD2,
+   DISK, SIFT, in that order; `coarse_detectors` names them instead.
+   - Each pair keeps the panel's best-supported estimate, and the checks
+     above run on the pooled set. Every detector then gets the result.
+   - It is written to `COARSE_SHARED.csv` in each sweep's channel folder.
+     It is cached in the pair cache (`COARSE_SHARED.json`) while the coarse
+     settings, panel and pairs stay the same. With `coarse_cell_km` set, every
+     window size reuses it; with 0, the cell follows the window size.
+   - A panel detector without weights is skipped.
+   - Why: when each detector measured its own offset (job 342, G1A HS), 18
+     detectors whose coarse matcher found nothing borrowed phase-correlation
+     guesses. They put 34 of 55 pairs 60–110 km off, so their windows
+     compared ground that does not match. `coarse_shared: false` brings back
+     per-detector offsets.
+   - A coarse matcher that runs out of GPU memory retries once at twice the
+     coarse pixel (job 346, RDD on a 16 GB card).
+   - **Errors that change across a long scene.** With 6 or more measured
+     pairs spanning 50 km or more, a plane is fitted through their offsets.
+     Pairs more than 25 km from any measured pair take the plane's value,
+     with a search margin that widens with that distance, instead of copying
+     the nearest pair. A phase-correlation offset that agrees with the plane
+     is kept. The plane is only used when it fits the measured pairs within
+     5 km. Why: job 347/359 (G1A HV, ~800 km) had errors growing from +49 km
+     in the west to +77 km in the east. Only western pairs were measured, and
+     eastern pairs copying them were up to 27 km wrong.
+   - An estimate longer than `max_expected_error_m` is refused. The
+     references are only searched that far, so such a match lies outside the
+     search (job 356: one pair's 167 km offset, with a 150 km buffer, had been
+     given to all 23 pairs). When the shared offset rests on fewer than 3
+     measured pairs, the log warns. Then a RIVAL point as `initial_offset_m`,
+     or other `coarse_detectors`, may be needed.
+3. Fine windows read the reference **shifted by that offset and padded by
+   `search_margin_m`**. The final errors are measured from the matched
+   coordinates themselves, so they contain the full offset.
+
+The reference is reprojected onto a grid **snapped to the input's pixel grid**
+(same origin modulo one pixel). With an arbitrary sub-pixel phase between the
+two grids, integer-precision keypoints split the measured offset between two
+values either side of the truth.
+
+RANSAC thresholds and consensus tolerance are given **in pixels** of the
+working resolution (the input's native resolution unless `target_resolution`
+is set), so the defaults suit any pixel size.
+
+## Errors that vary across the scene (internal distortion)
+
+Scenes with a large scale or warp error do not have "an" error: in the manual
+RIVAL points seen so far the east-west error ran from 17 to 40 km across one
+scene, and from -8.6 to +3.9 km across another. The tool treats the error as
+a field:
+
+- **Coarse offsets per cell.** The coarse stage estimates the offset in a grid
+  of cells about one window wide (`coarse_cell_km`, 0 = one window) and each
+  window reads the reference at its own interpolated offset. The field is
+  written to `raw_matches_*/COARSE_FIELD_pair###.csv`.
+- **Search margin per window** grows by how much the offset changes between
+  the window's centre and its corners.
+- **Chip consistency against a surface** (`consensus_model: surface`, the
+  default). Chips are compared with a robust smooth surface through all chips'
+  errors (`consensus_surface`: auto picks affine / bilinear / quadratic /
+  biquadratic from the chip count), with a tolerance that adapts to how well
+  the surface fits, and against their neighbours when it cannot fit closely.
+  `constant` (the NISAR rule: agree with the most common error) keeps only the
+  chips near that value when the error varies -- on a synthetic 6 % scale
+  error it kept a handful of 25 windows. `none` keeps every chip that passed
+  RANSAC.
+- **Distortion summary** in `RUN_MANIFEST.csv` and the GUI results: error range
+  (`dE_min_m`..`dE_max_m`, `dN_min_m`..`dN_max_m`), an affine fit of the error
+  over the scene (`affine_dE_m`, `affine_dN_m` at the points' centroid,
+  `affine_rot_deg`, `affine_scale_E_ppm`, `affine_scale_N_ppm`,
+  `affine_shear_ppm`) and `affine_resid_rmse_m`, the distortion left after the
+  best affine correction.
+
+How to read the results:
+
+1. The per-point errors in the RIVAL CSV *are* the result. Load it in
+   `DPQED_rival.py` (or `quiver.py`) to see the field; a mean, RMSE or CE90
+   over such a scene mixes different errors and describes no single place.
+2. `affine_*` says how much is a simple rotation / scale / shear (a sensor or
+   projection model error that a first-order correction removes);
+   `affine_resid_rmse_m` says how much is left for a higher-order model.
+3. Keep windows small enough that the error is close to linear inside each one
+   (per-window RANSAC fits an affine); where the error curves strongly, try
+   smaller windows in the window-size sweep.
+4. With a manual GCP CSV the consensus score uses each chip's distance from
+   the GCP-fitted error surface, which is the most direct check of the result.
+
+## Detectors
+
+`python automatch_job.py detectors` (or the GUI's list) shows the whole
+catalogue: what can be selected, and every imcui row that is not offered with
+the reason.
+
+**kornia first.** Detectors: `sift`, `disk`, `dedode`, `aliked`, `xfeat`,
+`xfeatstar` (XFeat* semi-dense), `keynet` (with or without AffNet), `dog` (DoG
+keypoints with a learned descriptor: HardNet, HardNet8, SOSNet, HyNet or
+TFeat, AffNet on/off), `gftt` and `hessian` (GFTT- / Hessian-AffNet-HardNet),
+`loftr`.
+
+Matchers run by default: `smnn`; `ada` (AdaLAM) for every sparse detector;
+`lgm` (LightGlue) for SIFT, DISK, DeDoDe (`dedodeb`/`dedodeg` weights from the
+descriptor), ALIKED, KeyNet and DoG-HardNet. kornia's LightGlue cannot run
+XFeat, so XFeat has no `lgm`. Offered but run only when ticked: `mnn` (mutual
+nearest neighbour), `snn` (ratio test), `nn` and `fginn`. On a synthetic pair
+shifted by (7, −4) px every detector recovered the shift with every matcher.
+AdaLAM uses kornia's own defaults (search expansion 4, 128 iterations, min
+confidence 200); the NISAR-S1 pipeline's 1 / 2048 / 1000 can be set in
+Configure….
+
+A detector whose class the installed kornia lacks is not offered on that
+machine (kornia 0.8.1 has no ALIKED or XFeat); imcui's version of it is
+offered there instead, and `detectors` / the env check list it as
+"not available here".
+
+**imcui adds only what kornia lacks.** The catalogue is the full matrix
+(`imw_configs.py`): SuperPoint + LightGlue / SuperGlue / mutual-NN, R2D2,
+RoRD, D2-Net, ALIKE, SFD2, RDD, LiftFeat, RIPE, DarkFeat, LANet (each with
+mutual-NN), MINIMA-LoFTR / -RoMa, XoFTR, OmniGlue, GIM-RoMa / -DKM, eLoFTR,
+ASpanFormer, TopicFM, RoMa, DKM, DaD-RoMa, RDD-dense and XFeat+LightGlue. Rows
+kornia covers are refused, each with the kornia replacement named (DISK/ALIKED
+/SIFT LightGlue → `disk`/`aliked`/`sift` with `lgm`; `hardnet-nn`,
+`sosnet-nn` → `dog` with that descriptor and `mnn`; `rootsift-nn` → `sift`;
+`dedode-nn` → `dedode`; AdaLAM rows → `ada`; `loftr` → `loftr`;
+`xfeat-dense` → `xfeatstar`). MINIMA and GIM rows are always offered: kornia
+does not ship those weights. Rows missing from the installed imcui are listed
+as such.
+
+### Detector and matcher parameters
+
+In the GUI, **Configure…** on a detector's row opens its parameters. Tick
+several choices, or type a comma-separated list, to try each value:
+
+| Detector | Parameters |
+|---|---|
+| `sift` | RootSIFT on/off, upright on/off, response threshold |
+| `disk` | weights: depth / epipolar |
+| `dedode` | detector weights × descriptor weights, as listed by the installed kornia (0.8: L-upright / L-C4 / L-SO2 / L-C4-v2 × B-/G- upright / C4 / SO2; G-* load a 1.2 GB DINOv2-L) |
+| `aliked` | model t16 / n16 / n16rot / n32, detection threshold, NMS radius |
+| `xfeat` | detection threshold |
+| `keynet` | AffNet on/off, upright on/off, response threshold |
+| `dog` | descriptor HardNet / HardNet8 / SOSNet / HyNet / TFeat, AffNet on/off, upright on/off, response threshold |
+| `gftt`, `hessian` | upright on/off |
+| `loftr` | weights: outdoor / indoor / indoor_new, coarse match threshold (kornia default 0.2) |
+| LightGlue (`lgm`) | filter threshold, depth confidence, width confidence |
+| AdaLAM (`ada`) | search expansion, RANSAC iterations, min confidence, min inliers, refit, mutual-NN seeds |
+| SNN (`snn`), FGINN (`fginn`) | ratio threshold; FGINN also spatial threshold and mutual check |
+| imcui models | detection / match threshold, plus each model's own settings read from the installed imcui |
+
+- Every combination of **detector** values runs as its own variant, named
+  after the values that differ from the default (`sift-rs0` = RootSIFT off,
+  `dedode_L-C4-v2_B-upright`, `aliked_aliked-n16-dt0p3`). Variants compete
+  with each other and with the other detectors for `RIVAL_BEST_*`.
+- **Matcher** values (LightGlue, AdaLAM) add matching passes inside one
+  variant (`lgm`, `lgm_lf0p2`, …) and compete in that variant's consensus,
+  like the SMNN thresholds.
+- Preflight shows how many matching passes the job will make. Only one model
+  is loaded at a time, whatever the number of variants.
+
+The same thing in a job file:
+```json
+"detector_params": {
+  "sift":   {"rootsift": [true, false]},
+  "dedode": {"detector_weights": ["L-C4-v2"], "descriptor_weights": ["B-upright", "G-upright"]},
+  "disk":   {"checkpoint": ["depth", "epipolar"], "lgm.filter_threshold": [0.1, 0.2]}
+}
+```
+
+**What "best" means.** Without a manual GCP CSV the consensus score is the
+number of matches that agree with each other, which favours dense matchers
+and high keypoint counts. With `manual_gcp_csv` the score uses each chip's
+distance from the GCP-fitted error surface, which is the better basis for
+choosing between variants.
+
+## Which detector + matcher is most accurate? (ground truth)
+
+Give the manually measured points (a RIVAL CSV such as `manual_pts_rival.csv`:
+`In_X … In_Lon, In_Lat, Ref_Lon, Ref_Lat`) as **Ground truth CSV** (`truth_csv`).
+After the run, **every configuration each detector ran** -- detector variant ×
+matcher × matcher setting × RANSAC setting, not only the one the consensus
+picked -- is scored against it:
+
+- at each truth point the configuration's own error is estimated from its
+  matches within `truth_radius_m` (5 km): a robust plane through them,
+  evaluated at the truth point, so the error gradient of a distorted scene
+  does not bias it (the median of the neighbours did: on a synthetic scene
+  with a 60 m/km east-west gradient it scored points that are accurate to
+  17 m at 82 m RMSE, the plane at 8 m; `compare --local median` gives the
+  earlier rule). Without neighbours, its robust error surface; points outside
+  its coverage are listed as extrapolated and not scored. Truth errors are
+  recomputed from the lon/lat columns in the working CRS, so the truth file's
+  own X/Y grid does not matter;
+- `TRUTH_BY_DETECTOR_MATCHER.csv`: each detector + matcher at its best setting,
+  with the bias (mean dE, dN) and the largest disagreement. Ranked: the
+  configurations that reach at least half of the truth points first, among
+  them the lowest RMSE of (tool − truth), then the most points reached. (The
+  number reached used to come before the RMSE, and on job 315 a GFTT + NN
+  set 63 km off at all 8 points ranked above sets within 250 m at 6 of 8.)
+  A warning follows the ranking when rank 1 is more than 1 km off while a
+  configuration reaching fewer points (at least 2) is three times closer:
+  the matches then cover only part of the scene (job 343: 1.1 km at 5 of 9
+  points against 179 m at 2 of 9), and no configuration is reliable across it;
+  `TRUTH_RANKING.csv` has every configuration, `TRUTH_POINTS.csv` every
+  configuration × truth point; `PERFORMANCE.csv` follows the same order;
+- the GUI shows the ranking when the run ends and adds `truth_rmse_m` to each
+  result row; `RUN_MANIFEST.csv` gets the same columns;
+- `RIVAL_TRUTH_BEST_<channel>.csv`: the points of the configuration ranked
+  first, for RIVAL. With ground truth, `RIVAL_BEST_*` is that file; the pick
+  of the chip consensus is kept as `RIVAL_CONSENSUS_BEST_*` (on the first G1A
+  scene the consensus picked a DeDoDe set 13 km off the truth: many
+  consistent but wrong matches outvote the right ones).
+
+Existing results can be scored again, e.g. with more truth points, without
+matching again:
+```bash
+python automatch_job.py compare <output> --truth manual_pts_rival.csv [--radius-km 5] [--chips all]
+```
+To choose a detector + matcher first and fine-tune later: tick all detectors
+and all matchers (including the optional ones), keep one window size and one
+RANSAC setting, and read `TRUTH_BY_DETECTOR_MATCHER.csv`. The ground truth is
+used for evaluation only; it does not steer matching or the consensus.
+
+**Manual GCP CSV is a different input**: NISAR-style GCPs (`scan, pix, Map_X,
+Map_Y, Map_X_ref, Map_Y_ref`) that steer the chip consensus. A RIVAL file
+there is refused by preflight; leave it empty when choosing a detector +
+matcher (the same file in both fields would score the consensus with the
+points that picked it). If a run's consensus did not complete, `compare`
+rebuilds it from the saved matches, so the run can still be ranked without
+matching again.
+
+### Ground truth per band
+
+Truth points measured on one band can be kept in one file per band, named
+with the band as a suffix: `pts_band4.csv`, `pts_band5.csv` (also `_B4`,
+`_b4`, `_4`). Set `truth_csv` to any one of them: a band whose own file
+exists is scored against that file; the others use the file given.
+Preflight lists which band gets which file, and `TRUTH_*` outputs carry the
+band's own points. A file without a band suffix applies to every band.
+
+## Cross-check between detectors (RIVAL_CROSS)
+
+A single configuration can be consistently wrong: many matches on the wrong
+ground pass its own RANSAC and chip consensus. After every run, and after
+compare, the top `cross_top_n` configurations (default 5, one per detector)
+are checked against each other:
+
+- **Choosing the top N:** with ground truth they follow `TRUTH_RANKING.csv`.
+  Without it, they are the configurations that agree most with all the
+  others; a detector that is 20 km off everywhere does not get in, however
+  many matches it has.
+- **Agreement per cell:** the scene is cut into `cross_cell_km` cells
+  (default 25 km). In each cell every top configuration with matches gives
+  its median offset. The cell counts when `cross_min_agree` of them (default
+  more than half) lie within 1.5 × the RANSAC threshold (3 px by default) of
+  their common median. The chip-consensus tolerance is not used, because
+  jobs set it loosely (job 364: 31.5 km) and then nothing would be filtered.
+- **The least distorted per cell:** of the configurations that agree in a
+  cell, only the `cross_keep_per_cell` (default 3) whose matches scatter
+  least there give the points; that scatter reflects local distortion, noise
+  and stray wrong matches. `CROSS_CELLS` lists their scatter and how far
+  apart their medians are.
+- **Stray points:** within each kept cell, points further than 3 × that
+  cell's own scatter from the cell's centre are dropped. Distortion differs
+  from cell to cell, so each cell is judged against itself, not against one
+  scene-wide limit. `CROSS_CELLS` lists the cell's scatter and the points
+  dropped.
+- **Reliable or not:** a job counts as reliable when at least 15 % of its
+  cells pass. In 34 earlier jobs, every job whose best single configuration
+  was kilometres off kept 0–4 % of its cells, and the good ones 17–85 %.
+  `CROSS_SUMMARY`, `CROSS_ALL` and the GUI table carry the flag.
+- **Output:**
+  - `RIVAL_CROSS_<channel>.csv` (+ `_detail.csv` naming each point's
+    detector): the matches of the agreeing configurations in the kept cells.
+  - `CROSS_CELLS_<channel>.csv`: every cell.
+  - `CROSS_SUMMARY.csv`: the configurations used and, with ground truth, the
+    truth RMSE of the cross-checked points.
+
+GUI: *Cross-check top detectors* (Output & run tab) sets it for runs; 0
+turns it off. On finished jobs it runs as part of **Benchmark & cross-check…**
+(see Benchmark below). Choose a
+job output folder, or a folder of them, then the top N, the agreement, the
+cell size. Each job's ground truth is taken from its own settings
+(`truth_csv` in `job_used.json`), with the server path translated to the
+share as this machine mounts it. The results open as a table, one row
+per job and channel, with the cross-checked RMSE beside the best single
+configuration's. Double-click a row to open that job's folder.
+
+Finished jobs, without rerunning:
+
+```bash
+python automatch_job.py cross <output folder>                        # full, from the match files
+python automatch_job.py cross <output folder> --from-truth-points    # from TRUTH_POINTS.csv + TRUTH_RANKING.csv only
+python automatch_job.py cross <folder of output folders> --batch     # every job; one table, CROSS_ALL.csv
+```
+
+In a shared output folder (`output/output359`, …), `--batch` takes only
+finished automatch jobs. A job counts as finished when its folder has
+`job_used.json` and `RUN_MANIFEST.csv`, and `[Job] done` ends its
+`automatch.log`; compare jobs with `TRUTH_RANKING.csv` + `TRUTH_POINTS.csv`
+count too. Running jobs are listed as skipped, and other users' or other
+tools' folders are ignored. `--jobs "335-363, 370"` (GUI: *Jobs*) limits the
+check to those job numbers.
+
+A folder that already holds a cross-check made with the same settings
+(`CROSS_SETTINGS.json` beside `CROSS_SUMMARY.csv` /
+`CROSS_FROM_TRUTH_POINTS.csv`) is read back instead of computed again. Runs
+record theirs. It is computed again when the settings differ, when
+`TRUTH_RANKING.csv` is newer (a later compare), or with `--recompute` (GUI:
+*compute again*). CROSS_ALL.csv marks the rows read back.
+
+`--from-truth-points` replays the check at the truth points: there the top
+configurations' estimates are compared, and their median is used where
+enough agree. It needs only the two small CSVs each job with ground truth
+writes. Its tolerance defaults to 1.5 × the RANSAC threshold.
+
+## Parallel match lines (a quality check without ground truth)
+
+In a match image, good matches all move the same way and their lines run
+parallel; bad matches point anywhere. `PERFORMANCE.csv` measures this per
+detector and matcher:
+- `parallel_share`: of all matches, the share whose displacement lies within
+  the RANSAC threshold of their window's median displacement.
+- `windows_parallel`: the share of windows where most are parallel.
+
+The benchmark adds both to `BENCH_DETECTORS.csv`, with
+`median_parallel_share` per detector in `BENCH_SUMMARY.csv`, so it can be
+checked against the truth error. On the synthetic scene, 90–94 % of
+matches are parallel; random matches give about 0 %.
+
+## Two GPUs
+
+- **One run over both GPUs:** set the device to *all GPUs* (Output & run;
+  jobs: `device: all`, or `cuda:0,1`). The job does preflight and the
+  cloud mask once, then starts one worker process per GPU, each pinned to
+  its GPU with its share of the detectors (dealt round, so heavy and light
+  ones spread: 28 detectors become 14 and 14). Both write into the same
+  job folder (`POL_RUN_SUMMARY_gpu<n>.csv`, `RUN_MANIFEST_gpu<n>.csv`);
+  the parent merges them into `RUN_MANIFEST.csv` and picks the best, runs
+  the truth comparison and the cross-check as usual. Worker lines show as
+  `[GPU n]` in the log. A job with one detector runs on the first GPU.
+- **Two runs at once:** open two windows, one per GPU (each window picks
+  its GPU and has its own queue), as before.
+- **Cloud sweep and benchmark over both GPUs:** with *all GPUs* (or
+  `--device cuda:0,1`) the sweep deals its images round the GPUs and the
+  benchmark its job folders, one worker per GPU. The workers write
+  `CLOUD_SWEEP_gpu<n>.csv` into one `<time>_sweep` folder, or
+  `BENCH_JOBS_gpu<n>.csv` and the like, and the parent merges them into
+  the usual files and summaries. A sweep of one image, or a benchmark
+  whose jobs all land in one share, gains nothing from it.
+- **The cloud test and the GPU service** take one GPU; with *all GPUs*
+  they use the first.
+
+## Thermal (ML) against an optical reference
+
+A thermal image shares its edges with an optical one (coastlines, lakes,
+rivers, field and city boundaries) but not their sign: by day land is
+warm and bright, water cool and dark; by night the other way round, and
+inland contrast collapses. The operational geostationary systems (GOES
+ABI, Himawari, MTG) therefore register thermal images on shoreline chips
+with edge or phase correlation, on the 10.8 µm window band. Here:
+- **`window_prep`** (GUI: *window prep*, Output & run): what both windows
+  of a pair become after the stretch. `auto` (default) uses `gradient`
+  for ML and nothing for the others. `gradient` is the Scharr gradient
+  magnitude with local contrast normalisation, so the detectors see edge
+  strength, which has the same sign in both images. `invert` flips the
+  input only. Tested: opposite-polarity synthetic images correlate at
+  −0.9 raw and +0.9 as gradient.
+- **Bands:** match ML's band 4 (10.8 µm), then band 5 (12.0) or band 2
+  (8.5). Bands 1 (7.35 µm, water vapour) and 6 (13.25 µm, CO₂) see the
+  atmosphere, not the ground; preflight warns when a job selects them.
+- **Reference:** the evidence (NASA's ABI landmarking) matches thermal
+  against Landsat's thermal band 10 rather than the panchromatic band.
+  Thermal references would need to be added to the reference set.
+- **Deep matchers:** vanilla SIFT / DISK / ALIKED / XFeat were trained on
+  optical pairs. Cross-modal weights exist for the same architectures
+  (MINIMA for RoMa / LoFTR / LightGlue, MatchAnything for ELoFTR; both
+  Apache-2.0) and did best on aerial thermal-to-satellite benchmarks, but
+  none has been evaluated at kilometre-scale thermal; not wired in.
+
+## Clouds (OmniCloudMask)
+
+`cloud_mask: on` (`omnicloudmask`, as older jobs say, means the same; GUI:
+*Clouds*, Data tab) masks clouds before matching. `cloud_method` says how:
+`auto` (the default) uses the physical tests of the next section, with no
+model: VNIR tests for MV / HV, infrared tests for ML, SWIR tests for HS.
+`vnir`, `ir`, `swir` or `omnicloudmask` choose one for every image.
+OmniCloudMask did poorly on G1A MV, even with the brightness check below,
+and is kept as an option. OmniCloudMask finds thick cloud,
+thin cloud and cloud shadow (Wright et al., *Remote
+Sensing of Environment* 2025; sensor-agnostic, MIT licence). Those pixels
+are left out of matching: each band the job matches is copied with them set
+to no data, and the job matches that copy.
+- **Bands:** `cloud_band_choice` picks how. `spec` (the default) takes Red,
+  Green and NIR by the band specs, which is what the model was trained on.
+  `quality` takes the three crispest bands, whatever their wavelength; the
+  model takes exactly three bands, so not four. `cloud_bands` names three
+  bands and wins over both. By the specs:
+  - **MV** (MX-VNIR: B1 485, B2 555, B3 650, B4 815, B5 725, B6 860 nm):
+    B3, B2, B6.
+  - **HV** (Hysis-VNIR, 375–1000 nm): the bands nearest 650, 560 and 860 nm.
+  - **HS** (Hysis-SWIR, 900–2500 nm): none, so HS gets the SWIR tests
+    (next section). `cloud_mask_from` adds the mask of the HV (or MV)
+    product of the same pass, laid on by map coordinates (grown by
+    `cloud_from_margin_px`, 10, for the few km their geolocation differs),
+    where that product covers the HS image.
+- **Contrast normalisation:** OmniCloudMask standardises each band per
+  patch, so raw DN works. Before matching, each window is stretched (log,
+  then `stretch_percentiles`, default the 1st–99th percentile) over its valid
+  pixels only. With [1, 90] or [1, 85] (GUI: *Contrast stretch*, Output &
+  run tab), the brightest tenth or more saturates, and the darker ground is
+  spread over more grey levels. `stretch_mode: clahe` (GUI: *+ local contrast*)
+  adds contrast-limited adaptive histogram equalisation after the stretch,
+  so each part of a window gets its own contrast. In job 369 the bright
+  clouds took the grey levels, the ground went nearly black, and most
+  matches landed on cloud. CLAHE brings that ground up, but it also brings
+  up texture inside clouds. Cloud masking, which takes the clouds out of
+  the stretch altogether, is the main remedy. Masked cloud is
+  no data, so it neither flattens the land's contrast nor yields keypoints.
+- **Resolution:** the model runs at the image's own resolution, as its
+  documentation asks. It is trained at 10–50 m; 180 m and 315 m are outside
+  that range but work (below).
+- **Masked classes:** `cloud_mask_classes`, default `[1]`: thick cloud
+  only (2 thin cloud, 3 shadow; GUI: *mask thick cloud* / *+ shadow* /
+  *+ thin + shadow*). The mask is grown by `cloud_dilate_px` (2).
+- **Bright clouds only** (`cloud_refine`, on by default):
+  - **Why:** the model standardises each band per 1000 px tile. In a
+    cloud-free tile the brightest ground then looks like cloud, and on G1A
+    MV it took water and vegetation for cloud at every confidence from 0.2
+    to 0.9.
+  - **The check:** its clouds are kept only where they are bright, above
+    the `cloud_bright_pct` (90th) percentile of the clear ground in both
+    visible bands. `cloud_min_blob_km2` can also drop patches smaller than
+    a size. It is 0 by default: clouds come in every shape and size, so
+    every pixel is judged on its own.
+  - **Shadows:** kept only within `cloud_shadow_near_km` (10 km) of
+    cloud.
+  - **What is reported:** the log says what the model said and what the
+    check removed. `CLOUD_QUICKLOOK_MODEL.png` beside the quicklook is the
+    model's own result.
+- **Confidence:** a pixel is cloud only when the model gives
+  P(thick) + P(thin) ≥ `cloud_min_confidence` (0.7), and shadow only when
+  P(shadow) reaches it; otherwise the pixel is clear. The plain most-likely
+  class took haze and bright ground for thin cloud on G1A MV. On the
+  Sentinel-2 test, false clouds fell from 5.3 % at 0.5 to 2.7 % at 0.7 and
+  1.2 % at 0.85, at the cost of missing more thin cloud edges.
+- **Checks:** `CLOUD_INFO.json` gives `dark_cloud_pct`, the share of cloud
+  pixels darker in red than the median clear pixel. Real clouds are
+  brighter, so above 20 % the log warns that ground is probably being taken
+  for cloud (with the bright-blob check on, little such cloud is left).
+  `CLOUD_QUICKLOOK.png` in the
+  output folder shows false colour (NIR, red, green) with thick cloud purple,
+  thin yellow and shadow blue.
+- **Outputs and reuse:** the mask (`CLOUD_MASK.tif`) and its statistics are
+  kept in the job's cache and reused for the same image. `CLOUD_INFO.json`
+  in the output folder gives the cloud and shadow %.
+- **Installation:** `pip install omnicloudmask==1.8.0` in the job's
+  environment. Its two weight files go into `<weights folder>/omnicloudmask`
+  (or `cloud_model_dir`), from https://huggingface.co/NickWright/OmniCloudMask:
+  - `PM_model_OCM_7.97_R_G_NIR_3_smp_regnety_004.pycls_in1k_PT_state.safetensors`
+  - `PM_model_OCM_7.97_R_G_NIR_3_smp_edgenext_small.usi_in1k_PT_state.safetensors`
+
+  Preflight names anything missing, and a job never matches clouds without
+  saying so.
+- **Testing the mask alone, without a matching run:**
+
+      python automatch_job.py cloud <image> --out <folder> --conf 0.5 0.7 0.85
+          [--bands 3 2 6 | --choice quality] [--from <HV image of the same pass>]
+          [--model-dir <weights>/omnicloudmask] [--device cpu]
+          [--model-only | --bright-pct 90 --min-blob-km2 1 --shadow-near-km 10]
+
+  (GUI: *Cloud mask test…*; its output folder defaults to the job's output
+  folder, not the image's.)
+  - **One model pass:** the model runs once for all the thresholds.
+  - **One folder per run,** named by when it ran and its bands, e.g.
+    `20261028_101500_bands_3-2-6/`. No run overwrites another, whether it
+    used other bands or other settings.
+  - **In each folder:** every threshold has its `conf_<c>/CLOUD_MASK.tif`,
+    `CLOUD_QUICKLOOK.png` (thick cloud purple, thin yellow, shadow blue),
+    `CLOUD_QUICKLOOK_MODEL.png` (the model alone) and
+    `CLOUD_PARAMS_<time>.txt`. The params file records how the mask was made
+    (image, bands and wavelengths, confidence, the bright-blob settings,
+    model weights, device, code version) and what it found.
+  - **`CLOUD_TEST_ALL.csv`** in the output folder lists every run made
+    there: cloud, thick, thin and shadow %, what the model alone said, what
+    the bright-blob check removed, and `dark_cloud_pct`.
+  - **The GUI** shows the runs newest first, each quicklook beside the
+    model's own.
+  - **A job with cloud masking** also writes `CLOUD_PARAMS_<time>.txt` into
+    its output folder, with what it masked and how far it grew the mask.
+
+  On the GPU service, use
+  `<image>,<reference folder>,<mode_cloud.json>` with
+  `{"mode": "cloud", "cloud_test_confidences": [0.5, 0.7, 0.85]}`. The
+  job's other `cloud_*` settings apply (`cloud_mask_from` for HS), and the
+  results go to `<output>/cloud_test/`.
+- **Benchmark: every combination** (`automatch_cloudsweep.py`; GUI: *Cloud
+  sweep…*):
+
+      python automatch_job.py cloudsweep <image> [<image> ...] --out <folder>
+          [--conf 0.6-0.99:0.1] [--crisp 6] [--no-spec] [--bright 60-90:5]
+          [--blob-km2 0.25 1 4] [--shadow-km 5 10 20]
+          [--reference <mask .tif | outlines .geojson / .shp> ...] [--images grid|all|none] [--sheets]
+
+  - **Ranges:** `lo-hi:step`, keeping the end (`0.6-0.99:0.1` = 0.6, 0.7,
+    0.8, 0.9, 0.99), or a list.
+  - **Band sets:** the spec bands, plus every 3 of the N crispest (MV: all
+    20 combinations of its 6 bands).
+  - **What runs:** the model runs once per band set. Every threshold, and
+    every brightness × blob × shadow setting, is applied to its
+    probabilities on an overview (at most 2048 px). The model alone is
+    included each time.
+  - **Cost:** on MV, about 21 model runs, then minutes, for about 7000
+    combinations per image.
+  - **Per combination** (`CLOUD_SWEEP.csv`): cloud, thick, thin and shadow
+    %, the masked share, cloud blobs, `dark_cloud_pct` and
+    `brightness_gap`. The gap is how far the clouds' median brightness
+    stands above the clear ground's 95th percentile, in robust standard
+    deviations.
+  - **Quicklooks, one PNG per combination:** in `<image>/<band set>/`, e.g.
+    `conf0.7_model.png` and `conf0.7_bright75_blob1_shadow10.png`, with the
+    settings written above the picture. The `png` column of
+    `CLOUD_SWEEP.csv` names each row's image.
+    - `--images grid` (the default) writes, per threshold, the model alone
+      and each brightness at the middle blob and shadow values.
+    - `--images all` writes every combination (thousands of images);
+      `none` writes none.
+    - `--sheets` also stacks a band set's grid into one
+      `SHEET_<image>_<band set>.png`.
+    - The GUI's results have an image browser: pick a combination from the
+      list to see it.
+  - **With references** (a cloud mask raster, or outlines drawn in QGIS as
+    polygons, one per image): IoU, precision, recall and F1 of the masked
+    classes. `CLOUD_SWEEP_SUMMARY.csv` is then ranked by the median F1 over
+    the images, and the best combinations are written at full size
+    (`top_<k>_*/`). Without references the numbers describe the masks but
+    cannot say which one is right.
+  - **Output:** each sweep goes into its own `<time>_sweep/` folder, with
+    `CLOUD_SWEEP_PARAMS_<time>.txt`.
+  - **GPU service:** mode `cloudsweep`, with `cloud_sweep_conf`,
+    `cloud_sweep_bright`, `cloud_sweep_blob_km2`, `cloud_sweep_shadow_km`,
+    `cloud_sweep_crisp`, `cloud_sweep_reference`, `cloud_sweep_images` (more
+    images than `input_path`) and `cloud_sweep_pngs` (grid / all / none).
+
+Checked here on two cloudy Sentinel-2 scenes over India (tile 43QGU,
+52–59 % cloud), against the scenes' own cloud classification:
+
+| Bands | 40 m | 180 m | 320 m |
+|---|---|---|---|
+| Red / Green / NIR | IoU 0.71 | IoU 0.68–0.81 | IoU 0.82 |
+| SWIR only (945, 1610, 2190 nm, as HS has) | | IoU 0.00–0.04 | |
+
+With SWIR only, the model found 0–3 % cloud. Hence the SWIR tests and
+`cloud_mask_from` for HS.
+
+## Clouds from physical tests (MV / HV, ML, HS)
+
+OmniCloudMask needs red, green and NIR, which ML (MX-LWIR: six thermal
+bands at 1.2–1.5 km) and HS (SWIR) do not have, and it did poorly on MV.
+So every payload gets physical tests (`automatch_cloudphys.py`). No model
+is involved, so nothing needs installing and nothing runs on the GPU.
+Every pixel is judged on its own. Clouds come in every shape and size
+(broken cumulus, cirrus streaks, haze), so there is no blob-size limit
+unless `cloud_min_blob_km2` sets one (0 by default).
+
+- **Radiance:** pixel value × `radiance_scale` (0.001), in `radiance_unit`
+  (W/cm²/sr/µm for every G1A sensor). For ML, if that unit does not give
+  Earth temperatures at 10.8 µm (median 200–330 K), the unit that does is
+  used instead, with a WARNING in the log (`auto`: always the one nearest
+  285 K). The log and `CLOUD_PARAMS` name the unit and the median
+  temperature found; check that they look right (about 280–310 K over
+  warm clear ground).
+- **MV / HV, the VNIR tests** (Fmask-like, without SWIR or thermal;
+  daylight). Reflectance is relative: radiance / solar irradiance at the
+  band centre. The unknown sun elevation scales every band alike, so the
+  ratios between bands are true.
+  - **bright:** the visible mean is brighter than the ground by
+    `cloud_vis_bright_sd` (3) spreads. The ground is the pixels that are
+    not cloud-coloured (vegetation, soil, water), so a scene mostly under
+    cloud still has a ground to compare with (tested at 70 % cloud).
+  - **white:** the spectral spread over blue, green, red and NIR is below
+    `cloud_vis_white` (0.25). Vegetation, water and coloured soil fail it.
+  - **blue:** blue is at least 0.8 × red, the colour side of the
+    haze-optimised transform. Bright desert, sand and roofs fail it.
+  - **classes:** thick = bright + white + blue; thin = half as bright
+    (and on HV, high cloud by the 940 nm water-vapour band). Shadow = dark
+    in NIR, not water, within `cloud_shadow_near_km` of cloud.
+  - **snow** is white and bright, so from one scene it is taken for
+    cloud. `cloud_vis_clear` lists earlier MV / HV scenes of the same
+    ground; each pixel's darkest (second darkest from three scenes) is the
+    clear sky, and cloud must be `cloud_vis_clear_factor` (1.3) × brighter.
+    Snow and bright desert then stay clear (tested).
+- **ML, the infrared tests** (as the GOES ABI, Himawari AHI and SEVIRI
+  cloud masks use on the same channels; day and night). Brightness
+  temperatures come from inverse Planck at 7.35, 8.5, 9.6, 10.8, 12.0 and
+  13.25 µm (B1–B6), unless the band descriptions state other centres.
+  - **cold:** BT10.8 is colder than the clear sky by `cloud_ir_dt_k` (8 K).
+    Thick cloud is twice that, or colder than `cloud_ir_cold_k` (240 K).
+  - **clear sky:** taken from earlier scenes of the same ground when
+    `cloud_ir_clear` lists them (each pixel's warmest; the same hour is
+    best). Otherwise it comes from the scene itself: the 90th percentile of
+    ~100 km blocks. From the scene alone, a cold mountain looks like cloud;
+    with earlier scenes it does not (tested).
+  - **split window:** BT10.8 − BT12.0 above the Saunders & Kriebel
+    threshold for its temperature, × `cloud_ir_split_scale` (1). This
+    finds thin cirrus.
+  - **ice:** BT8.5 − BT10.8 > 0.5 K.
+  - **high:** the CO₂ (13.25 µm) or water-vapour (7.35 µm) band is within
+    8 K of the window band, while the window band is colder than clear sky.
+  - **edges:** a ragged 10.8 µm field next to cold pixels.
+  - **Classes:** thick = cold by twice the threshold, very cold, or high;
+    thin = the other tests. Blobs smaller than `cloud_min_blob_km2` are
+    dropped.
+- **HS, the SWIR tests** (daylight; at night they say so and mask nothing):
+  - **cirrus:** L1380 / L1250 is above its clear level by `cloud_swir_k`
+    (4) robust standard deviations. Water vapour hides the ground at
+    1.38 µm, so high and thin cloud shows; this is Landsat 8 band 9 and
+    Sentinel-2 B10. High terrain shows through a little too.
+  - **thick:** L1250 is brighter than the clear ground by
+    `cloud_swir_bright_sd` (3) spreads, and L1650 is above the ground too
+    (snow is dark at 1.65 µm). A spread is the median's distance down to
+    the 16th percentile, and the dark half of the scene is ground even when
+    much of it is cloud.
+  - Low cloud over bright ground stays hard from SWIR alone.
+- **Banding** (full-width bright lines from the detector or line
+  calibration) is removed before the VNIR / SWIR tests and the
+  reflectance models, so it is not taken for cloud. Each image row is
+  scaled to the running median of the row medians over
+  `cloud_destripe_window` (31) rows. Clouds taller than about half of that
+  stay. `cloud_destripe`: `rows` (default), `cols`, `both` or `off`
+  (`--destripe` in the cloud test and sweep). ML is left as it is.
+- **Method per sensor** (GUI: Data tab, *Cloud method per sensor*; jobs:
+  `cloud_method_MV`, `_HV`, `_HS`, `_ML`; `--sensor-methods MV=csmask,HS=spectf`):
+  each sensor uses its physical tests unless a model is chosen for it
+  (MV / HV: `omnicloudmask`, `csmask`; HS: `spectf`; ML: `tirauxcloud`).
+- **Each sensor its own mask:** the payloads cover different ground, so ML
+  and HS always make their own. With `cloud_mask_from` (the MV / HV
+  product of the same pass), that product's mask is added where it covers
+  the image: thick over thin over shadow over clear.
+  `covered_by_laid_pct` says how much it covered. `cloud_from_method`
+  says how that product is masked (`auto`: VNIR tests; `omnicloudmask`).
+- **Cloud test:**
+
+      python automatch_job.py cloud <ML or HS image> --out <folder>
+          [--method auto|omnicloudmask|ir|swir] [--radiance-scale 0.001]
+          [--ir-dt 8 --ir-split 1 --ir-cold 240 --clear <earlier ML scenes>]
+          [--swir-k 4 --swir-bright 3] [--vis-bright 3 --vis-white 0.25 --vis-clear-factor 1.3]
+          [--radiance-unit W/cm2/sr/um] [--min-blob-km2 0] [--from <MV/HV image>]
+          [--clear <earlier scenes of the same sensor>]
+
+  It writes `<time>_ir/own/` (or `_swir`, `_vnir`): the mask, the quicklook and
+  `CLOUD_PARAMS`. ML quicklooks show 10.8 µm inverted, so cold cloud looks
+  bright. With `--from`, it also writes `plus_vnir_conf_<c>/`, one for each
+  threshold of the VNIR mask. The GUI's *Cloud mask test…* has the method
+  and these settings.
+- **Sweep:** `cloudsweep` sweeps ML images over `--ir-dt` (4-12:2) ×
+  `--ir-split` (0.75 1 1.5) × blob size. It sweeps HS images over
+  `--swir-k` (2-6:1) × `--swir-bright` (2-5:1) × blob size. It sweeps
+  MV / HV images over `--vis-bright` (2-5:1) × `--vis-white` (0.15 0.25
+  0.35) × blob size. `--method compare` also runs OmniCloudMask's sweep
+  on the MV / HV images, so the two can be ranked side by side against
+  reference outlines. Rows carry `method` ir / swir / vnir and those
+  settings. PNGs go into `<image>/ir/`, `swir/` or `vnir/`. The blob sizes
+  default to 0, 0.25 and 1 km². With reference outlines, the rows have F1 / IoU as for
+  OmniCloudMask, and the best one is written at full size. GPU-service
+  keys: `cloud_sweep_ir_dt`, `cloud_sweep_ir_split`, `cloud_sweep_swir_k`,
+  `cloud_sweep_swir_bright`, `cloud_sweep_vis_bright`,
+  `cloud_sweep_vis_white` and `cloud_sweep_method` (auto / compare).
+- **Thresholds:** these are starting points from the literature, not tuned
+  on G1A. Draw cloud outlines on a few ML and HS scenes and let the sweep
+  pick.
+- **Where model files go** (found there when no path is set): the
+  weights folder (GUI: Output & run, the one holding `omnicloudmask/`):
+  `<weights folder>/spectf/current.pt` and
+  `<weights folder>/tirauxcloud/model_hash_<...>.pth` (the OLS SegFormer
+  `78713d1f6de22d2` is taken first). For the GPU server, the same layout
+  under its weights folder.
+- **Learned masks on TOA reflectance** (`automatch_reflect.py`,
+  `automatch_cloudmodels.py`): options to compare with the tests, not the
+  default.
+  - **Reflectance:** ρ = π·L·d² / (E0·cos θs). L is the radiance as above;
+    E0 is the solar irradiance at the band centre; d is the Earth–Sun
+    distance on the day. The sun zenith θs is computed per pixel from the
+    acquisition time and each pixel's latitude / longitude, else taken from
+    the scene's sun elevation or zenith.
+  - **Where the sun and time come from:** the raster's tags, or the
+    metadata files beside the image (`<name>.xml / .json / .txt / .met`,
+    `*META*.txt`), with keys like `SunElevation`, `SolarZenith`,
+    `SceneCenterTime`, `AcquisitionTime`, or `DateOfPass` plus a time.
+    Processing and creation dates are skipped. The log names the key it
+    used. `cloud_sun_zenith_deg` or `cloud_acq_time_utc` overrides it (GUI:
+    the cloud test's *Reflectance* row). Preflight lists the sun and time
+    keys it saw when none fits.
+  - **ukis-csmask** (`cloud_method: csmask`, MV / HV; DLR, Apache-2.0):
+    its 4-band model (blue, green, red, NIR), trained on Sentinel-2 /
+    Landsat at about 30 m. It gives cloud and cloud shadow.
+    `pip install ukis-csmask[gpu]` (or `[cpu]`); the weights come with it.
+  - **SpecTf** (`cloud_method: spectf`, HS with its HV pass; NASA JPL,
+    Apache-2.0): the EMIT cloud mask (F1 0.95 on EMIT), a per-pixel
+    transformer over the spectrum (405–2455 nm).
+    - Its small model is rebuilt here; only its weights `current.pt`
+      (109 KB) are needed, from
+      https://raw.githubusercontent.com/emit-sds/SpecTf/main/spectf_cloud/weights/current.pt
+      (`cloud_spectf_weights`; GUI: Data tab).
+    - It needs the whole spectrum. Checked with its published weights: on
+      the SWIR part alone, or the VNIR part alone, it calls vegetation and
+      soil cloud. So on HS it is refused unless `cloud_spectf_vnir` (or
+      `cloud_mask_from`) names the HV image of the same pass. That image's
+      bands below 900 nm are added on the HS grid.
+    - On full spectra it gave thick and high cloud 0.99, cirrus over
+      vegetation 1.0, vegetation 0.0 and bright sand 0.16. Snow came out as
+      cloud (1.0).
+  - **Compare:** `cloudsweep --method compare --csmask` adds ukis-csmask
+    on MV / HV. `--spectf-weights current.pt --spectf-vnir <HV per image>`
+    adds SpecTf on HS, with thresholds `--spectf-threshold 0.3-0.7:0.1`.
+- **TIRAuxCloud (ML, experimental;** `cloud_method: tirauxcloud`,
+  `automatch_tirauxcloud.py`**):** a learned thermal cloud mask (Orion-AI-
+  Lab, arXiv 2602.21905; code Apache-2.0, data and weights CC BY 4.0).
+  Only its architectures are rebuilt here, with segmentation-models-pytorch;
+  none of its code runs.
+  - **What its checkpoints take** (read from its code): one thermal
+    channel, normalised to about 0–1 when its training patches were made.
+    ML's split-window, CO₂ and water-vapour bands go unused.
+    - Its "VIIRS" models are, by their files, DMSP-OLS night thermal at
+      200 m. Their input works out as (BT − 190 K) / 118.1, from the mean
+      of BT10.8 and BT12.0 (`cloud_tiraux_mode: ols`, the default). This is
+      inferred from the data, not stated by the authors.
+    - Its Landsat models (100 m, radiance) need scaling constants that are
+      published nowhere. `cloud_tiraux_norm` [0, 72] W/m²/sr/µm is a guess
+      to tune.
+    - Moving its models to another sensor without retraining gave
+      mIoU 0.22–0.24 in its authors' own tests. So score it against
+      reference outlines before trusting it.
+  - **Install** on the workstation, in the job's environment:
+    `pip install segmentation-models-pytorch==0.5.0`. Then take
+    `model_files.tar.gz` (10.6 GB) from
+    https://huggingface.co/datasets/tirauxcloud/TIRAuxCloud and unpack it.
+    Point `cloud_tiraux_checkpoint` (GUI: Data tab, the cloud test, the
+    sweep) at one checkpoint:
+    - OLS: SegFormer `model_hash_78713d1f6de22d2.pth` (the default
+      architecture) or Unet `model_hash_8ce85fd78026576.pth` (set
+      `cloud_tiraux_arch: Unet`);
+    - Landsat: Unet `41be05a2c8237ec`, SegFormer `50d4e5a4775675d`.
+    Which file sits in which tarball is unverified; check with
+    `tar tzvf`.
+  - **How it runs:** each ML tile of about 256 model pixels is resampled
+    to the model's pixel size and predicted. The cloud probability is
+    averaged back onto the ML grid; cloud where it is ≥
+    `cloud_tiraux_threshold` (0.5). It uses the GPU when there is one
+    (`cloud_device`).
+  - **Compare:** `cloudsweep --method compare --tiraux-checkpoint <pth>`
+    runs the infrared tests and TIRAuxCloud (thresholds
+    `--tiraux-threshold 0.3-0.7:0.2`) on the same ML images, with F1
+    against reference outlines.
+
+The benchmark reports the model's cloud % for jobs that ran with masking.
+`--cloud omnicloudmask` (GUI: *Cloud estimate*) runs the model on the other
+jobs' inputs too, so their cloud classes come from the model instead of
+the rough brightness estimate.
+
+## Benchmark: which detector on which kind of image
+
+`python automatch_job.py bench <folder of job outputs> [--jobs 335-366]`
+(GUI: **Benchmark & cross-check…**) reads every finished job; nothing is
+matched again. Each job is cross-checked first, with its results read back
+when they were made with the same settings. The cross-check's reliability
+and RMSE go into `BENCH_JOBS.csv`, and its rows into `CROSS_ALL.csv`;
+`--no-cross` skips it.
+For each job it records:
+- the sensor (MV / HS / HV from the G1A name), the band run and the pixel size;
+- the image's error from the job's own ground truth: the mean In − Ref, and
+  how much it changes across the scene;
+- a cloud estimate of the band that ran, with `SCENE_CLOUD.png` showing the
+  mask in red so you can check it by eye;
+- a ground-texture measure;
+- every detector's best result against the truth, in metres and pixels;
+- the cross-check's reliability, when the job has one.
+
+A scene is named by its G1A product name, or else by the packed set folder
+plus the file name (`267403461/cog`). Jobs packed as `cog.tif` would
+otherwise all look like one scene. Without a G1A name, the sensor comes
+from the pixel size: 45 m is MV, 180 m HS, 315 m HV.
+
+The automatic cloud estimate is rough. Your own values replace it: fill in
+`SCENE_NOTES_TEMPLATE.csv`, which the first run writes, and save it as
+`SCENE_NOTES.csv` in the same folder. Its columns are `job` or `scene`,
+`cloud_pct`, `water_pct` and `notes`. `BENCH_JOBS.csv` marks the source in
+`cloud_source` (manual or estimate).
+
+Of several jobs on one scene, only the newest counts. Newest means the
+newest automatch version in its log, then the latest finish, then the
+highest job number. The older ones are listed in `BENCH_JOBS.csv` as
+superseded; `--all-jobs` (GUI: *count every job*) counts them all.
+
+It writes three files:
+- `BENCH_JOBS.csv`: one row per job.
+- `BENCH_DETECTORS.csv`: one row per job × detector.
+- `BENCH_SUMMARY.csv`: per detector **and sensor**, the number of jobs, the
+  success rate (half of the truth points reached within `--success-px`,
+  default 3 px), the median error and how often it was first. Detectors are
+  never ranked across sensors, because MV, HS and HV favour different
+  detectors. Within each sensor the table is also split per cloud class
+  (<10 %, 10–30 %, >30 %) and per error class (<20 km, 20–80 km, >80 km).
+
+The GUI shows the jobs and, per group, the detector table, sortable by
+column.
+
+**Match accuracy of finished jobs** (`--accuracy`; GUI: *match accuracy*).
+Every job's saved matches are scored again against its own truth: the share
+of each window's matches that are right (see *Few but right*), by window
+size, keypoint count and RANSAC setting. Nothing is matched again.
+- **Sub-cells afterwards:** `--subcell-px 256 512` (`--subcell-keep 10`)
+  also makes the sub-cell variants of the jobs' large windows from the saved
+  raw matches and RANSAC inliers. They go into `<job>/SUBCELLS_256/` and
+  `SUBCELLS_512/`, never into the job's own folders, and are scored beside
+  the plain results.
+- **Per job, one file:** `TRUTH_MATCH_ACCURACY.csv` holds every window
+  size, keypoint count and sub-cell size as columns (`window_size`,
+  `num_features`, `subcell_px`, 0 = plain). Sizes made before stay in it
+  when you ask for another, so 256 after 512 keeps both. With sub-cells,
+  `TRUTH_RANKING_SUBCELLS.csv` ranks them all. The job's own
+  `TRUTH_RANKING.csv` stays as it was. Results made with the same settings
+  are read back.
+- **Over the jobs:** `ACCURACY_ALL.csv` (every job × configuration × window
+  size) and `ACCURACY_SUMMARY.csv` (medians per sensor × window size ×
+  keypoints × plain or sub-cells, then per detector + matcher). The log
+  prints the per-sensor table, and the GUI adds a *Match accuracy* tab.
+
+The cloud estimate is needed because G1A comes with no cloud mask.
+- How it works: the band's brightness is split in two (Otsu). When the two
+  groups are clearly apart (4 standard deviations), the bright pixels that
+  are at least twice as smooth as the land count as cloud.
+- Its limit: bright smooth ground (sand, snow, salt flats) can pass for
+  cloud, so check `SCENE_CLOUD.png`.
+- Scene measures are kept in `SCENE_INFO.json` and read back on later runs;
+  *measure again* (`--recompute`) redoes them.
+- Input and truth paths go through the same share mapping as Pack.
+
+## GPU service (gpuaas submit_job): step by step
+
+The GPU server already has the packages and weights the NISAR runs use, but
+not the G1A image or the reference collection. Everything below is done from
+the workstation; the server is only reached through the GPU service.
+
+**1. Copy the code once.** Copy this folder to the server's exe folder, e.g.
+`V:\ICIGDev\GPUPOC\exe\g1a_automatch` (= `/maintenance/ICIGDev/GPUPOC/exe/g1a_automatch`).
+Copy it again after updating the code, **into the folder the curl's
+`code_path` names** (pack's default is `/maintenance/ICIGDev/GPUPOC/exe/anup/nisar/g1a_automatch/`).
+Every log starts with the code it ran, `automatch 2026.10.05, code 1a2b3c4d (<folder>)`,
+and `PACK_REPORT.txt` shows the workstation's: the two fingerprints match
+only when the server runs the same code. A settings file holds the paths and
+only the settings that differ from the defaults, and a setting the server's
+code does not know is ignored with a warning (`PREFLIGHT.json` lists it) --
+code older than 2026.10.05 refuses it instead: `Unknown job key(s)` (jobs 304–307).
+
+**2. Make a job in the GUI on the workstation**, as for a local run (input,
+reference folder, Ground truth CSV, Manual GCP CSV empty, detectors,
+matchers, window size, ...), and *Save job…*. This only collects the
+settings and paths; nothing needs to run locally.
+
+**3. Pack the scene for the server.** In the GUI: *Pack for server…* (bottom
+row). It remembers the folders that stay the same (server weights folder,
+code path, the `V:\` = `/maintenance/` share mapping, GPU memory to request),
+fills the server folder from the share folder, and shows the copying in the
+Log and the curl requests at the end. Window sizes and the keypoint cap come
+from the main window only (the dialog shows them). Or from the conda prompt:
+```bat
+python automatch_job.py pack D:\jobs\set1.json ^
+   --to V:\ICIGDev\GPUPOC\input\g1a\set1 ^
+   --server-dir /maintenance/ICIGDev/GPUPOC/input/g1a/set1 ^
+   --server-weights /maintenance/ICIGDev/GPUPOC/input/dqe/imw_runtime/imw_cache ^
+   --set window_sizes=[3072] --set detectors=all --set matchers=all
+```
+It prints its progress (copying references can take a while: one scene
+with 24 Landsat-8 pan tiles was 12 GB) and copies the image (with its sidecars), **only the reference rasters within
+`max_expected_error_m` of the image** together with the collection's index
+shapefile or sidecars, and the truth CSV, and writes
+`automatch_settings.json` with the server paths, the three `mode_*.json`
+files, `submit_gpuaas.sh` and `PACK_REPORT.txt` (the four curl requests,
+ready to paste). It also checks, through the share, that `code_path` and
+`--server-weights` exist on the server. An interrupted pack can be started
+again: files already copied are kept. `--dry-run`
+shows the list and size first. `--server-weights` is the folder `imw.py` uses
+(imcui weights; kornia's default folder on the server is searched as well).
+`--set` changes settings for the server only: 3072 px windows suit a 40 GB
+A100; `"all"` takes every detector and every matcher the server offers
+(kornia + imcui).
+
+**4. Submit, in this order** (from `PACK_REPORT.txt`, or `./submit_gpuaas.sh <mode>`).
+The service checks that every item of `input_path` is an existing file, so
+the check to run is chosen with a file: the settings, plus `mode_env.json`,
+`mode_weights.json` or `mode_preflight.json` (written by pack, each just
+`{"mode": "env"}` etc.); the run is the settings file alone.
+```bash
+curl -X POST "http://gpuaas.private.nrsc.gov.in:8000/submit_job" -H "Content-Type: application/json" -H "X-User-Name: $(whoami)" -d '{
+ "code_path": "/maintenance/ICIGDev/GPUPOC/exe/g1a_automatch/automatch_gpuaas.py",
+ "conda_env": "mpad",
+ "max_gpu_mem_required": 40000,
+ "input_path": "/maintenance/ICIGDev/GPUPOC/input/g1a/set1/automatch_settings.json,/maintenance/ICIGDev/GPUPOC/input/g1a/set1/mode_env.json"
+ }'
+```
+then the same with `mode_weights.json`, `mode_preflight.json`, and finally
+`"input_path": ".../automatch_settings.json"` alone for the run:
+
+| input_path | what it does (seconds unless run) | read in the job's output folder |
+|---|---|---|
+| settings + `mode_env.json` | packages and versions, GPU and free memory, internet, weight folders, detector list on the node | `ENVIRONMENT.txt` |
+| settings + `mode_weights.json` | every weight file the selection needs, found or missing (nothing downloaded) | `WEIGHTS_REPORT.txt` |
+| settings + `mode_preflight.json` | image, references, truth, settings; number of matching passes; warns about windows too large on the ground for the pixel size or larger than the image, and settings the code does not know | `PREFLIGHT.json` |
+| settings alone | the run | `PERFORMANCE.csv`, `TRUTH_BY_DETECTOR_MATCHER.csv`, `RUN_MANIFEST.csv`, `rival/`, `automatch.log` |
+
+If `weights` lists missing files (a detector the NISAR runs never used),
+either drop that detector, or run `python prefetch_weights.py D:\w --only <detectors>`
+on a connected machine and copy `D:\w\torch\hub\checkpoints\*` into
+`<weights folder>/torch/hub/checkpoints/`.
+
+**5. Read the result.** `PERFORMANCE.csv`: one row per detector + matcher,
+best first -- truth RMSE, seconds per window, chips and inliers kept, peak
+GPU memory, and `gpu_window_px`: the largest piece of a window the detector
+could match on that GPU (smaller than the window size when it had to work
+in tiles, see *GPU windows*). `TRUTH_BY_DETECTOR_MATCHER.csv`: the accuracy
+ranking alone.
+
+Notes:
+- All paths in the settings are server paths (`/maintenance/...`), never `V:\`.
+- To rank a finished run again on the server (newer scoring rule, more truth
+  points), make a mode file `{"mode": "compare", "compare_dir": "/maintenance/.../output297"}`
+  and submit settings + that file (`max_gpu_mem_required` can be small: no
+  GPU is used). The truth comes from the settings' `truth_csv`; the TRUTH files
+  and `RIVAL_TRUTH_BEST_*.csv` go into that run's folder and the job's own, and
+  `PERFORMANCE.csv` and `RIVAL_BEST_*` are rewritten in the new order. A run
+  made by an older version (e.g. under the earlier ranking rule) needs only
+  this, not a new run. On the workstation: `python automatch_job.py compare
+  <output folder> --truth <truth.csv>` does the same.
+- To change a setting, edit `automatch_settings.json` on the server share (or
+  re-run pack with other `--set` values: files already copied are kept).
+- `"env": {"NISAR_IMW_RESIZE_MAX": "3072"}` in the settings sets environment
+  variables for the job (here: imcui models see the full 3072 px window
+  instead of 2048).
+- Without pack: put the image, references and truth on the server yourself
+  and use `examples/gpuaas_g1a_select.json` with its paths filled in.
+
+## A100 server: run it with curl
+
+`automatch_server.py` puts an HTTP front end on the same job runner (standard
+library only). Jobs are the same JSON files; paths in them are paths on the
+server. Jobs run one at a time on the GPU.
+
+```bash
+# on the server
+python automatch_server.py --port 8765 --jobs-dir /data/automatch_jobs        # localhost only
+#   or reachable from other machines:  --host 0.0.0.0 --token SECRET
+# from the workstation: ssh -L 8765:localhost:8765 user@server   (then use localhost:8765)
+
+H="Authorization: Bearer SECRET"                    # only if --token was given
+curl -s -H "$H" -X POST localhost:8765/weights   --data-binary @examples/a100_select_job.json
+curl -s -H "$H" -X POST localhost:8765/preflight --data-binary @examples/a100_select_job.json
+curl -s -H "$H" -X POST localhost:8765/jobs      --data-binary @examples/a100_select_job.json   # -> {"id": ...}
+curl -s -H "$H" localhost:8765/jobs/<id>                        # state, progress, results, truth ranking
+curl -s -H "$H" "localhost:8765/jobs/<id>/log?tail=50"
+curl -s -H "$H" localhost:8765/jobs/<id>/files                  # output files
+curl -s -H "$H" localhost:8765/jobs/<id>/files/TRUTH_BY_DETECTOR_MATCHER.csv -o ranking.csv
+curl -s -H "$H" -X POST localhost:8765/jobs/<id>/stop
+curl -s -H "$H" -X POST localhost:8765/compare -d '{"output_dir": "/data/out", "truth_csv": "/data/manual.csv"}'
+```
+Without HTTP: `nohup python automatch_job.py run job.json > run.log 2>&1 &` does the same.
+
+`examples/a100_select_job.json` is a detector + matcher selection run for a
+40 GB A100: every kornia detector with every matcher, one RANSAC setting,
+3072 px windows, the ground truth. Window size: at 2048 px the keypoint budget
+already reaches its 32 000 cap, so larger windows mostly grow the image-sized
+memory, about with window area -- 16 GB full at 2048 px scales to about 3072 px
+on 40 GB (2.25x the area); 4096 px (4x) is likely too much for DeDoDe-G / DISK.
+Add imcui detectors (`imw-...`) to `detectors` as listed by `/detectors`.
+
+**Speed next to accuracy.** Each run records the wall time of every matching
+pass (`PASS_TIMING.csv`: seconds and seconds per window, detection included,
+since each pass detects again) and each detector's total time and peak GPU
+memory (`detector_seconds`, `gpu_peak_gb` in `RUN_MANIFEST.csv`); the truth
+ranking carries `sec_per_window` beside the RMSE.
+
+## Keypoints per window
+
+With `num_features` "auto", a window gets `keypoint_density` keypoints per
+megapixel (9000), up to `max_num_features` (32000, GUI: *Max keypoints per
+window*; the Windows tab shows what each window size gets). 2048 px windows
+already reach 32000, so larger windows get fewer keypoints per km² unless the
+cap is raised: 90000 keeps the density at 3072 px. Matching then builds no
+keypoints × keypoints distance table (29 GB at 85000 a side): SMNN, MNN, SNN,
+NN, FGINN and AdaLAM find nearest neighbours a slice at a time above
+1.5e8 pairs, with the same matches as kornia's functions. LightGlue and the
+detectors' time still grow with the count. FGINN follows the method row by
+row (kornia's version compares every row with the first row's candidates).
+The log prints each detector's time and peak GPU memory when it finishes.
+
+### Large windows, judged in sub-cells
+
+A large window gives the matcher context: a whole city is easier to place
+than one of its streets. But one RANSAC model over 2048 px (92 km at 45 m)
+has to bend with the scene's distortion, and the matches crowd where the
+texture is. `"subcell_px": 512` (or a list, `[256, 512]`: each size its own
+variant) keeps the large windows and then judges each of them in 512 px
+cells:
+- **The window plane:** the window's RANSAC inliers give its error plane.
+- **Each cell's own correction:** in each cell, the inliers there correct
+  the plane. With 6 or more, a plane through their misfit; with 3 or more,
+  their median shift. A cell with fewer keeps the window's plane.
+- **The pick:** the matches within the RANSAC threshold of the corrected
+  plane are ranked by misfit, and the `subcell_keep` (10) least distorted
+  of each cell are kept. A match the window RANSAC rejected can come back
+  this way.
+- **Side by side:** the result is written beside the plain one as RANSAC
+  variant `<method>-sc512` (label e.g. `magsac90-sc512`). The truth ranking,
+  `TRUTH_MATCH_ACCURACY.csv`, the consensus and RIVAL export treat it as a
+  configuration of its own, so one run shows whether it helps.
+
+With windows of 512 px or less nothing changes. Compare window sizes with
+`"window_sizes": [512, 1024, 2048]`; the accuracy table then lists each
+configuration by window size.
+
+### Few but right: accuracy by keypoint count
+
+`num_features` takes several values; each is its own sweep point
+(`win<W>_nf<N>`), with the same windows and references. With a truth CSV,
+`TRUTH_MATCH_ACCURACY.csv` then says, per configuration and keypoint count,
+how many of each window's matches are right. When the run swept several
+counts, the log prints a table of the inliers' precision (and good inliers
+per window) by count.
+
+- **The truth field:** the truth points give the scene's error field
+  (affine, or quadratic when it predicts left-out points better). A
+  mis-marked truth point is dropped (up to three).
+- **A good match:** its displacement lies within its RANSAC threshold of the
+  field at its position (or twice the field's leave-one-out error, if that
+  is larger). Matches beyond 5 km of the truth points' area are not judged.
+- **Columns:**
+  - `precision_all`: of all matches, before RANSAC;
+  - `precision_inliers`: of the RANSAC inliers, the matches that are used;
+  - `good_inliers_per_window` (median);
+  - `windows_90pct_good`: the share of windows whose inliers are at least
+    90 % right;
+  - `windows_mostly_wrong`: under 50 % right, where RANSAC was fooled;
+  - `windows_no_inliers`: fewer than 3 inliers.
+- **Every window counts,** not only those that survive the chip
+  consensus. A configuration that never reaches `min_inliers_per_chip` is
+  still measured.
+- **Finished jobs:** `compare` adds this without matching again.
+
+A sweep for this, e.g. `"num_features": [10, 25, 50, 100, 300, 1000]` with
+one window size:
+- **Inliers per window:** set `"min_inliers_per_chip": 4`. At 10 keypoints a
+  window rarely keeps 6 inliers, and with fewer the consensus drops it.
+- **Which detectors:** only keypoint detectors use the count (SIFT, DISK,
+  ALIKED, XFeat, DeDoDe, KeyNet, DoG, GFTT, Hessian, SuperPoint…). Dense
+  matchers (LoFTR, ELoFTR, RoMa, TopicFM, XoFTR…) match the same at every
+  value, so leave them out of such a sweep.
+- **GPU tiles:** when a window is matched in GPU tiles, each tile gets its
+  area's share of the count (at least `min_num_features`, but never more
+  than the window's own count).
+
+## Two or more GPUs
+
+Every tool can run on one chosen GPU: *Device* on Output & run (a run),
+and the device list in *Cloud mask test…*, *Cloud sweep…* and the
+benchmark's OmniCloudMask cloud estimate. The lists name the GPUs as
+`nvidia-smi` numbers them, e.g. "GPU 1: NVIDIA RTX A4000 (16 GB)".
+- **One GPU means only that GPU:** the process hides the other GPUs before
+  torch loads (`CUDA_VISIBLE_DEVICES`, numbered as `nvidia-smi` lists them).
+  Every model, memory check and cache clear of the run then uses that GPU,
+  not only the parts that take a device. The log says
+  `[Device] GPU 1 only`.
+- **Two at once:** open the GUI twice. The second window says "window 2"
+  in its title and keeps its own run queue, and each window runs on the GPU
+  set on its own Output & run tab.
+- **Command line:** `--device cuda:1` (run: `"device": "cuda:1"` in the job
+  file; `cloud`, `cloudsweep`, `bench --cloud omnicloudmask`: `--device
+  cuda:1`).
+- **Resume:** the device is not a result setting, so a run started on one
+  GPU resumes on the other.
+
+## GPU memory (16 GB workstation, GPU windows)
+
+Defaults: 1024 px windows, one model resident at a time (unloaded after its
+run), windows skipped rather than crashing when less than `min_gpu_free_gb`
+is free. Dense imcui models (RoMa, DKM, the LoFTR family) are the heaviest;
+they now find their own tile size (below).
+
+**GPU windows.** A window that does not fit in the GPU is matched in tiles.
+Each detector starts with whole windows; when it runs out of GPU memory it
+cuts every window into 2 x 2 tiles, then 3 x 3, 4 x 4, 6 x 6, 8 x 8 (never
+below 256 px) until its tiles fit, and keeps that size for the rest of its
+run. So each detector finds the window size that fits this GPU, whatever
+`window_sizes` says. The tiles share the window's keypoint budget by area,
+and their matches are pooled into the window: every detector still gives one
+result per window, comparable with the others. The log says when a detector
+steps down (`out of GPU memory in 2048 px (...): 2048 px windows now matched
+in 1024 px tiles on NVIDIA A100-SXM4-40GB (40 GB), 8000 keypoints per tile`),
+and `RUN_MANIFEST.csv` and `PERFORMANCE.csv` give each detector's
+`gpu_window_px`. Setting `gpu_window_px` forces a tile size (0 = find it).
+Before this, runs 297 (A4500, 20 GB, 2048 px) and 299 (A100, 40 GB, 3072 px)
+lost 217 and 190 windows to out-of-memory, 178 and 169 of them in RDD, XoFTR,
+ELoFTR, ASpanFormer, MINIMA-LoFTR and TopicFM, whose match matrix grows with
+the fourth power of the window side.
+
+On Windows the NVIDIA driver can hand out more memory than the card has,
+spilling into system RAM ("CUDA - Sysmem Fallback Policy"): nothing runs out,
+everything slows down. On the 16 GB RTX 5000 DeDoDe reached 25–27 GB and took
+14–30 min per variant (0.5–2 min on the A100). A detector whose memory spills
+is treated as out of memory: smaller tiles from the next window on, and the
+log names the setting. NVIDIA Control Panel > Manage 3D settings > CUDA -
+Sysmem Fallback Policy > *Prefer No Sysmem Fallback* (for python.exe) makes
+it a plain out-of-memory, handled at the first window.
+
+## Offline weights
+
+Weights are looked for, before any download, in kornia's default folder
+(`~/.cache/torch/hub/checkpoints`, on Windows `%USERPROFILE%\.cache\torch\hub\checkpoints`),
+in `TORCH_HOME` if set, and in the GUI's **Weights folder** (`weights_cache_dir`);
+imcui's HuggingFace files likewise in the active HuggingFace cache, the Weights
+folder's and `~/.cache/huggingface/hub`. Weights downloaded earlier with kornia
+or imcui are therefore used as they are.
+
+**Checking** (GUI: *Check weights*; CLI below; preflight does it for the
+selected detectors): every model is built on the CPU while its weight requests
+are intercepted and looked up; nothing is downloaded and no weight file is
+read, so the whole catalogue takes about half a minute. For each detector it
+lists every file with its model, status (ok / MISSING / TRUNCATED -- an
+interrupted download / EMPTY), the folder it was found in, and for missing
+files the URL and the exact name to save it under.
+```bash
+python automatch_weights.py                          # every detector, every weight choice
+python automatch_weights.py --detectors dedode,dog   # or: automatch_job.py weights job.json
+python automatch_weights.py --load                   # also load each model from the files (slower)
+```
+Some imcui models load their weights in ways the quick check cannot follow;
+they are marked `partial` -- use `--load` for those.
+
+For anything missing, on a connected machine run
+`python prefetch_weights.py /path/cache` (every weight choice of every
+detector and the imcui models; `--defaults-only` for just the defaults;
+`--only dog,sift`): files already on that machine are copied into the folder,
+the rest downloaded under the names the loaders expect. Copy the folder and
+set it as the Weights folder. A model whose weights cannot be found stops that
+detector at once with a message naming the folders searched; the other
+detectors go on.
+
+## Tests
+
+```bash
+python tests_automatch.py                                  # fast
+python tests_automatch.py --e2e --rival /path/DPQED_rival.py
+```
+The e2e test builds a 3-band raster whose georeferencing is wrong by
+(4013 m, −2487 m), a C1 degree-tile set and an L8 index collection, runs the
+CLI with SIFT and requires the RIVAL CSV to recover the offset within half a
+pixel (achieved: C1 4013.3 / −2487.2 m, L8 4013.5 / −2484.4 m).
+
+## Moving to its own repository
+
+```bash
+git subtree split --prefix=g1a_automatch -b g1a-automatch
+git push <new-repo-url> g1a-automatch:main
+```
+(or simply copy this folder).
+
+## Known limits
+
+- **imcui XFeat + LighterGlue and kornia LightGlue in one process:**
+  LighterGlue replaces kornia's LightGlue defaults (a class attribute) with
+  its own 96-dimension settings, and every kornia LightGlue built after it
+  failed to load its weights (job 318, second sweep: SIFT, DISK, KeyNet, DoG,
+  DeDoDe). automatch keeps kornia's defaults and puts them back before each
+  kornia LightGlue it builds.
+
+- **Coarse offsets of dense matchers:** RoMa, DKM, GIM, XoFTR and similar
+  sometimes return a wrong coarse offset for a few pairs (run 297: 3 of 22
+  pairs for MINIMA-RoMa; job 325: 5 of 15 for XoFTR). Offsets outside the
+  clearly heaviest group are replaced (see *Errors of kilometres*); when no
+  group clearly outweighs the others they are kept, and the log warns when
+  the pairs disagree by more than half of `max_expected_error_m`.
+- **Window size is a ground size.** 2048 px is 92 km at 45 m (G1A MX-VNIR)
+  but 369 km at 180 m (G1A HS) and 645 km at 315 m. Run 300 (315 m, 2048 px)
+  got 4–6 chips and results tens of km off; on jobs 312–317 (180 m and 315 m)
+  most reference pairs gave no window or one (windows under 500 px a side were
+  skipped; now windows go down to 128 px, for strips like a 39 km wide HS
+  scene, 216 px at 180 m), and on job 313 (3072 px) no detector reached a
+  consensus. Choose windows of about 90 km: 2048 px at 45 m, 512 px at 180 m,
+  about 300 px at 315 m. Preflight warns when a window is more than twice
+  that, or larger than the image.
+
+- **Mixed conda / pip environments (Linux):** if a pip wheel (pandas, torch)
+  loads the system C++ runtime before conda-forge GDAL, rasterio fails with
+  "GLIBCXX_3.4.30 not found". `automatch_native.py` imports rasterio first in
+  every entry module to avoid it.
+
+- **G1A format:** read through rasterio (GeoTIFF/VRT/JP2/…, any georeferenced
+  multi-band raster). A product that needs per-pixel lat/lon arrays (no
+  affine georeferencing) needs a small reader added to `InputScene`.
+- Not verified here: the imcui models themselves (imcui is not installed in
+  the test sandbox; the bridge, the catalogue and the HuggingFace lookup are
+  tested against a mock with imcui's registry layout).
+- LightGlue for SIFT and KeyNet used to find no matches: their descriptors
+  came as a (1, N, D) batch, which kornia's LightGlue matcher reads as a
+  single descriptor. Fixed; with LightGlue they now match (95–100 % correct
+  on the synthetic test).
+- LoFTR used a configuration (Sinkhorn coarse matching with an untrained
+  dustbin score, threshold 1) that finds no matches with the released weights,
+  and a module kornia does not ship. It now uses kornia's own configuration for
+  those weights (dual softmax, threshold 0.2, settable).

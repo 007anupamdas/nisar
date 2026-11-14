@@ -1,0 +1,120 @@
+{
+  "input_path": "/data/g1a/<scene>.tif",
+  "channels": [
+    "band1"
+  ],
+  "reference_dir": "/data/refs/L8_ref",
+  "output_dir": "/data/automatch_out/<scene>_select",
+  "detectors": [
+    "sift",
+    "disk",
+    "dedode",
+    "aliked",
+    "xfeat",
+    "xfeatstar",
+    "keynet",
+    "dog",
+    "gftt",
+    "hessian",
+    "loftr"
+  ],
+  "matchers": {
+    "sift": [
+      "smnn",
+      "lgm",
+      "ada",
+      "mnn",
+      "snn",
+      "nn",
+      "fginn"
+    ],
+    "disk": [
+      "smnn",
+      "lgm",
+      "ada",
+      "mnn",
+      "snn",
+      "nn",
+      "fginn"
+    ],
+    "dedode": [
+      "smnn",
+      "lgm",
+      "ada",
+      "mnn",
+      "snn",
+      "nn",
+      "fginn"
+    ],
+    "aliked": [
+      "smnn",
+      "lgm",
+      "ada",
+      "mnn",
+      "snn",
+      "nn",
+      "fginn"
+    ],
+    "keynet": [
+      "smnn",
+      "lgm",
+      "ada",
+      "mnn",
+      "snn",
+      "nn",
+      "fginn"
+    ],
+    "dog": [
+      "smnn",
+      "lgm",
+      "ada",
+      "mnn",
+      "snn",
+      "nn",
+      "fginn"
+    ],
+    "xfeat": [
+      "smnn",
+      "ada",
+      "mnn",
+      "snn",
+      "nn",
+      "fginn"
+    ],
+    "gftt": [
+      "smnn",
+      "ada",
+      "mnn",
+      "snn",
+      "nn",
+      "fginn"
+    ],
+    "hessian": [
+      "smnn",
+      "ada",
+      "mnn",
+      "snn",
+      "nn",
+      "fginn"
+    ]
+  },
+  "window_sizes": [
+    3072
+  ],
+  "max_expected_error_m": 50000,
+  "coarse_local": true,
+  "ransac_methods": [
+    "magsac"
+  ],
+  "ransac_thresholds_px": [
+    2.0
+  ],
+  "ransac_confidences": [
+    0.99
+  ],
+  "truth_csv": "/data/g1a/<scene>_manual_rival.csv",
+  "manual_gcp_csv": "",
+  "weights_cache_dir": "",
+  "device": "cuda",
+  "use_amp": true
+}
