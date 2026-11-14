@@ -3918,6 +3918,42 @@ def test_destripe(tmp):
           (True, True, True, 'rows'))
 
 
+def test_ref_hull_cache(tmp):
+    """A reference's valid-data hull is scanned once and then read from the
+    hull cache: a second fetcher (another channel, window size, GPU worker or
+    job) does not open the file again; a changed file is scanned again."""
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_origin
+    import automatch_engine as E
+    os.environ['AUTOMATCH_REF_CACHE'] = os.path.join(tmp, 'hulls.json')
+    E._HULLS = None
+    try:
+        ref = os.path.join(tmp, 'ref_hull.tif')
+        with rasterio.open(ref, 'w', driver='GTiff', width=200, height=200, count=1, dtype='uint8',
+                           crs='EPSG:32644', transform=from_origin(500000, 2500000, 30, 30), nodata=0) as d:
+            a = np.zeros((200, 200), np.uint8)
+            a[20:180, 30:170] = 100
+            d.write(a, 1)
+        calls = []
+        real = E.ReferenceFetcher._scan_valid_footprint
+        E.ReferenceFetcher._scan_valid_footprint = lambda self, p: (calls.append(p), real(self, p))[1]
+        try:
+            h1 = E.ReferenceFetcher(tmp)._valid_footprint(ref)
+            E._HULLS = None                                   # as a new process: from the file
+            h2 = E.ReferenceFetcher(tmp)._valid_footprint(ref)
+            os.utime(ref, (os.path.getmtime(ref) + 10, os.path.getmtime(ref) + 10))
+            E.ReferenceFetcher(tmp)._valid_footprint(ref)
+        finally:
+            E.ReferenceFetcher._scan_valid_footprint = real
+        check('refs: the hull is scanned once, read back from the cache by a new process, scanned again when '
+              'the file changes', (len(calls), h1 is not None and h2 is not None and abs(h1.area - h2.area) < 1e-12,
+                                   os.path.exists(os.path.join(tmp, 'hulls.json'))), (2, True, True))
+    finally:
+        os.environ.pop('AUTOMATCH_REF_CACHE', None)
+        E._HULLS = None
+
+
 def test_stretch():
     """The contrast stretch before matching follows stretch_percentiles: at 90
     the brightest tenth saturates and the rest spreads over more grey levels."""
@@ -4706,6 +4742,7 @@ def main():
     tmp = tempfile.mkdtemp(prefix='automatch_test_')
     try:
         test_refs(tmp)
+        test_ref_hull_cache(tmp)
         test_rival_parity(a.rival)
         test_engine_helpers()
         test_nisar_h5(tmp)

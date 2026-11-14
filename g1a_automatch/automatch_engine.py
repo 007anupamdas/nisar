@@ -1042,7 +1042,22 @@ class ReferenceFetcher:
         return self.catalog
 
     def _valid_footprint(self, tif_path: str) -> Optional[Polygon]:
-        """Valid-data hull of a reference raster, in lon/lat."""
+        """Valid-data hull of a reference raster, in lon/lat; from the hull
+        cache (ref_hull_cache) when the file and the probe settings are
+        unchanged, so each reference is scanned once for every job, channel,
+        window size and GPU worker."""
+        key = _hull_key(tif_path, self.decimation, self.fill_values)
+        if key is not None:
+            hit = _hull_cache_get(key)
+            if hit is not None:
+                return None if hit == 'none' else _wkt_loads(hit)
+        poly = self._scan_valid_footprint(tif_path)
+        if key is not None:
+            _hull_cache_put(key, 'none' if poly is None else poly.wkt)
+        return poly
+
+    def _scan_valid_footprint(self, tif_path: str) -> Optional[Polygon]:
+        """Valid-data hull of a reference raster, in lon/lat (read from the file)."""
         try:
             with rt.open(tif_path) as src:
                 crs = src.crs
@@ -1128,6 +1143,66 @@ class ReferenceFetcher:
         print(f'[RefFetch] Total confirmed: {len(overlapping_refs)} references '
               f'(of {len(catalog["footprints"])} in the {catalog["mode"]} catalog)')
         return overlapping_refs
+
+
+# Reference hull cache: a reference's valid-data hull depends only on the file
+# and the probe settings, so it is kept in a JSON file (AUTOMATCH_REF_CACHE, else
+# ~/.automatch/ref_valid_hulls.json) shared by jobs, channels and GPU workers.
+_HULLS: Optional[Dict[str, str]] = None
+
+
+def _hull_cache_path() -> str:
+    return os.environ.get('AUTOMATCH_REF_CACHE') or os.path.join(os.path.expanduser('~'), '.automatch',
+                                                                  'ref_valid_hulls.json')
+
+
+def _hull_key(path: str, decimation: int, fill_values) -> Optional[str]:
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return f'{os.path.abspath(path)}|{st.st_size}|{int(st.st_mtime)}|{decimation}|{tuple(fill_values or ())}'
+
+
+def _hull_load() -> Dict[str, str]:
+    global _HULLS
+    if _HULLS is None:
+        try:
+            with open(_hull_cache_path(), encoding='utf-8') as f:
+                _HULLS = dict(json.load(f))
+        except (OSError, ValueError):
+            _HULLS = {}
+    return _HULLS
+
+
+def _hull_cache_get(key: str) -> Optional[str]:
+    return _hull_load().get(key)
+
+
+def _hull_cache_put(key: str, value: str) -> None:
+    """Store one hull, merged with what other processes wrote meanwhile; an
+    atomic replace, so two GPU workers never leave a half-written file."""
+    _hull_load()[key] = value
+    path = _hull_cache_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        try:
+            with open(path, encoding='utf-8') as f:
+                disk = dict(json.load(f))
+        except (OSError, ValueError):
+            disk = {}
+        disk.update(_HULLS)
+        tmp = f'{path}.{os.getpid()}.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(disk, f)
+        os.replace(tmp, path)
+    except OSError as e:                   # a read-only home: the cache stays in memory for this run
+        print(f'[RefFetch] reference hull cache not written ({type(e).__name__}: {e})')
+
+
+def _wkt_loads(text: str):
+    from shapely import wkt
+    return wkt.loads(text)
 
 
 # =============================================================================
