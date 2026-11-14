@@ -575,6 +575,17 @@ def test_pack(tmp):
     with contextlib.redirect_stdout(io.StringIO()):
         P.pack(cjob, cdest, '/srv/set9')
     cst = json.load(open(os.path.join(cdest, 'automatch_settings.json')))
+    tcsv = os.path.join(tmp, 'pack_truth.csv')
+    with open(tcsv, 'w') as f:
+        f.write('In_X,In_Y,Ref_X,Ref_Y,Row,In_Lon,In_Lat,Ref_Lon,Ref_Lat\n0,0,0,0,1,80.1,23.0,80.0,23.0\n')
+    tjob = J.normalize({'input_path': os.path.join(data, 'G1A_SYNTH_L1.tif'), 'reference_dir': os.path.join(data, 'C1'),
+                        'output_dir': os.path.join(tmp, 'pack_t_out'), 'channels': ['band1'], 'detectors': ['sift'],
+                        'max_expected_error_m': 2000, 'truth_csv': tcsv})
+    with contextlib.redirect_stdout(io.StringIO()):
+        tres = P.pack(tjob, os.path.join(tmp, 'bundle_truth'), '/srv/set8')
+    check('pack: the references are chosen with the limit the truth file gives, as the server run will use',
+          any('from the truth file' in n for n in tres.get('notes', [])) or
+          'from the truth file' in open(os.path.join(tmp, 'bundle_truth', 'PACK_REPORT.txt')).read(), True)
     check('pack: the cloud files a job names are copied under extra/ and the settings point there; the '
           'OmniCloudMask weights are left to the server',
           (cst.get('cloud_mask_from'), cst.get('cloud_vis_clear'), cst.get('cloud_spectf_weights'),

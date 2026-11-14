@@ -327,6 +327,11 @@ def pack(job: Dict, dest: str, server_dir: str, server_weights: str = '', server
     if note:
         log(note)
         notes.append(note)
+    import automatch_job as J
+    job, note = J.max_error_from_truth(job)        # the references the server's run will look for
+    if note:
+        log(note)
+        notes.append(note)
     settings = dict(job)
 
     # input image (a NISAR scene folder is copied whole)
