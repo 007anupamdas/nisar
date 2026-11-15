@@ -190,6 +190,7 @@ def filter_job(job_dir: str, overrides: Optional[Dict] = None, classes=None, dil
         if int(c.get('top_n', 5)) >= 2:
             xr = X.run(job_dir, int(c.get('top_n', 5)), int(c.get('min_agree', 0)), float(c.get('cell_km', 25.0)),
                        truth_csv=truth_csv, working_crs=crs, quiet=True, out_dir=out,
+                       max_points=X._job_max_points(job_dir),
                        ranking_csv=os.path.join(out, 'TRUTH_RANKING.csv'))
             for ch, r in xr.items():
                 row[f'cross_{ch}_points'] = r.get('points')

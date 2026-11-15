@@ -469,6 +469,15 @@ band's own points. A file without a band suffix applies to every band.
 
 ## Cross-check between detectors (RIVAL_CROSS)
 
+**The file for RIVAL is `RIVAL_FINAL_<band>.csv`**: at most `cross_max_points`
+(500; *points for RIVAL* in the GUI, `--max-points`) of the cross-checked
+points, spread over everything they cover: a grid as fine as gives that many
+occupied cells, and of each cell the one point closest to the offset the
+points there agree on. Dense areas are thinned, sparse areas keep their
+point. `RIVAL_CROSS_<band>.csv` stays the full set (it can hold thousands).
+`python automatch_job.py cross <job folder> --max-points 300` makes it for a
+finished job without matching again.
+
 A single configuration can be consistently wrong: many matches on the wrong
 ground pass its own RANSAC and chip consensus. After every run, and after
 compare, the top `cross_top_n` configurations (default 5, one per detector)

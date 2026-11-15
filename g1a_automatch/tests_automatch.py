@@ -2766,6 +2766,19 @@ def test_cross_check(tmp):
     half = cfg('sift', lambda c: true if c < 3 else (9000.0, 4000.0))
     twin = cfg('imw-xoftr', lambda c: true, sweep='win1024_nfauto')      # same detector, other sweep
     cfgs = good + [wrong, half, twin]
+    rt = np.random.default_rng(2)
+    dense = pd.DataFrame({'E': np.r_[rt.uniform(0, 10000, 14000), rt.uniform(0, 100000, 1000)],
+                          'N': np.r_[rt.uniform(0, 10000, 14000), rt.uniform(0, 100000, 1000)],
+                          'dE': 1000.0 + rt.normal(0, 30, 15000), 'dN': -500.0 + rt.normal(0, 30, 15000)})
+    dense.loc[::50, 'dE'] += 900.0                               # some wrong ones
+    few = X.thin(dense, 500)
+    gx = (np.floor(few['E'] / 20000).astype(int) * 10 + np.floor(few['N'] / 20000).astype(int)).nunique()
+    g0 = (np.floor(dense['E'] / 20000).astype(int) * 10 + np.floor(dense['N'] / 20000).astype(int)).nunique()
+    check('cross thin: 15000 points -> at most 500, the whole coverage kept, the dense corner thinned, the '
+          'wrong ones mostly gone',
+          (350 < len(few) <= 500, gx == g0, int(((few['E'] < 10000) & (few['N'] < 10000)).sum()) < 60,
+           float((few['dE'] > 1500).mean()) < 0.01, len(X.thin(dense.head(100), 500))),
+          (True, True, True, True, 100))
     top, how = X.pick_top(cfgs, 5, 25000.0, 1000.0)
     names = [c['detector'] for c in top]
     check('cross: without truth, the consistently wrong detector is not among the top by agreement',

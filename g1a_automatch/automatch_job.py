@@ -471,6 +471,7 @@ DEFAULT_JOB: Dict = {
     'cross_min_agree': 0,        # how many must agree in a cell; 0 = more than half
     'cross_cell_km': 25.0,       # cell size of the comparison
     'cross_keep_per_cell': 3,    # of those agreeing in a cell, the least distorted kept
+    'cross_max_points': 500,     # RIVAL_FINAL_<channel>.csv: the best points over the whole coverage (0: off)
 
     # RIVAL export
     'rival_max_points_per_chip': 200,   # 0 = all inliers
@@ -1139,7 +1140,8 @@ def _config_for(job: Dict, win: int, nf: Optional[int], res: float, out_dir: str
 _RESULT_NEUTRAL_KEYS = {'output_dir', 'temp_dir', 'resume', 'debug', 'rival_max_points_per_chip',
                         'device', 'cloud_device',        # the same results on either GPU: resume across them
                         'save_match_images', 'weights_cache_dir', 'truth_csv', 'truth_radius_m',
-                        'cross_top_n', 'cross_min_agree', 'cross_cell_km', 'cross_keep_per_cell'}
+                        'cross_top_n', 'cross_min_agree', 'cross_cell_km', 'cross_keep_per_cell',
+                        'cross_max_points'}
 
 
 def _key_blob(job: Dict, win: int, nf: Optional[int]) -> Dict:
@@ -1291,7 +1293,8 @@ def run_cross(job: Dict, out_root: str, working_crs: str) -> Dict:
     try:
         res = X.run(out_root, int(job['cross_top_n']), int(job.get('cross_min_agree') or 0),
                     float(job.get('cross_cell_km') or 25.0), truth_csv=job.get('truth_csv') or '',
-                    working_crs=working_crs, keep=int(job.get('cross_keep_per_cell') or 3))
+                    working_crs=working_crs, keep=int(job.get('cross_keep_per_cell') or 3),
+                    max_points=int(500 if job.get('cross_max_points') is None else job['cross_max_points']))
         if res:      # the batch cross-check reads this back instead of computing it again
             X._remember(out_root, 'matches', {'top_n': int(job['cross_top_n']),
                                               'min_agree': int(job.get('cross_min_agree') or 0),

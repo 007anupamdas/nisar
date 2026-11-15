@@ -18,7 +18,11 @@ more likely right. So:
    the tolerance of that median, are written as RIVAL_CROSS_<channel>.csv
    (+ _detail.csv naming the detector of every point), and CROSS_SUMMARY.csv
    lists the configurations used, the cells and, with ground truth, how the
-   cross-checked points score against it.
+   cross-checked points score against it;
+4. RIVAL_FINAL_<channel>.csv is the file to load in RIVAL: at most
+   cross_max_points (500) of those points, spread over the whole area they
+   cover (thin): one per cell of a fine grid, the one closest to the offset
+   the points of that cell agree on.
 
     python automatch_job.py cross <output_dir> [--top 5] [--min-agree 3] [--cell-km 25] [--truth pts.csv]
     python automatch_job.py cross <output_dir> --from-truth-points     # a finished job, no match files
@@ -42,6 +46,7 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
 MAX_POINTS_PER_CELL = 200      # per configuration and cell, in the RIVAL file
+MAX_FINAL_POINTS = 500         # RIVAL_FINAL_<channel>.csv: the best points, spread over the image (0: off)
 KEEP_PER_CELL = 3              # agreeing configurations kept per cell: the least distorted there
 OUTLIER_K = 3.0                # points further than this many x the cell's own scatter are dropped
 RELIABLE_SHARE = 0.15          # share of cells that must pass for a job to count as reliable
@@ -196,10 +201,43 @@ def cross_check(top: List[Dict], cell_m: float, tol_m: float, min_agree: int,
     return pts, pd.DataFrame(rows)
 
 
+def thin(pts: pd.DataFrame, max_points: int) -> pd.DataFrame:
+    """At most max_points of the cross-checked points, spread over the whole
+    area they cover: a square grid as fine as gives no more occupied cells
+    than max_points, and of each cell the one point closest to the median
+    offset of the points around it (4 x 4 cells: the offset most of them
+    agree on); a point far off that (OUTLIER_K x the usual scatter) is left
+    out. Every part of the image that has points keeps one; dense parts are
+    thinned."""
+    if max_points <= 0 or len(pts) <= max_points:
+        return pts
+    E, N = pts['E'].to_numpy(float), pts['N'].to_numpy(float)
+    e0, n0 = E.min(), N.min()
+
+    def cells(size):
+        return np.floor((E - e0) / size).astype(np.int64) * 1000003 + np.floor((N - n0) / size).astype(np.int64)
+    lo, hi = 1.0, max(E.max() - e0, N.max() - n0, 1.0) + 1.0      # hi: one cell
+    for _ in range(40):
+        mid = math.sqrt(lo * hi)
+        if len(np.unique(cells(mid))) > max_points:
+            lo = mid
+        else:
+            hi = mid
+    p = pts.assign(_cell=cells(hi), _near=cells(4.0 * hi))      # the offset agreed on: of the 4 x 4 cells around
+    g = p.groupby('_near')
+    p['_d'] = np.hypot(p['dE'] - g['dE'].transform('median'), p['dN'] - g['dN'].transform('median'))
+    best = p.loc[p.groupby('_cell')['_d'].idxmin().to_numpy()]
+    limit = OUTLIER_K * 1.4826 * float(np.median(p['_d']))       # a cell's only point, off its surroundings: dropped
+    if limit > 0:
+        best = best[best['_d'] <= limit]
+    return pts.loc[best.index].reset_index(drop=True)
+
+
 def run(output_dir: str, top_n: int = 5, min_agree: int = 0, cell_km: float = 25.0,
         tol_m: Optional[float] = None, truth_csv: str = '', working_crs: Optional[str] = None,
         cfgs: Optional[List[Dict]] = None, quiet: bool = False, keep: int = KEEP_PER_CELL,
-        out_dir: Optional[str] = None, ranking_csv: Optional[str] = None) -> Dict[str, Dict]:
+        out_dir: Optional[str] = None, ranking_csv: Optional[str] = None,
+        max_points: int = MAX_FINAL_POINTS) -> Dict[str, Dict]:
     """Cross-check every channel of an output folder; returns per channel
     {'csv', 'summary', 'configs', 'cells', 'points', 'truth_rmse_m'}.
     out_dir: where its files go (default output_dir); ranking_csv: the truth
@@ -255,6 +293,15 @@ def run(output_dir: str, top_n: int = 5, min_agree: int = 0, cell_km: float = 25
             path = os.path.join(out_dir, f'RIVAL_CROSS_{ch}.csv')
             R.write_rival_csv(pts, crs, path, path[:-4] + '_detail.csv')
             res['csv'] = path
+            if max_points > 0:             # the file for RIVAL: few, the best, over the whole coverage
+                fin = thin(pts, max_points)
+                fpath = os.path.join(out_dir, f'RIVAL_FINAL_{ch}.csv')
+                R.write_rival_csv(fin, crs, fpath, fpath[:-4] + '_detail.csv')
+                res.update({'final_csv': fpath, 'final_points': int(len(fin))})
+                if truth is not None:
+                    s, _ = T.score_config({'points': fin.assign(chip=fin['source_file'])[
+                        ['E', 'N', 'dE', 'dN', 'chip']]}, truth, 5000.0)
+                    res.update({'final_truth_rmse_m': s['truth_rmse_m'], 'final_truth_reached': s['truth_reached']})
             if truth is not None:
                 s, _ = T.score_config({'points': pts.assign(chip=pts['source_file'])[['E', 'N', 'dE', 'dN', 'chip']]},
                                       truth, 5000.0)
@@ -270,6 +317,11 @@ def run(output_dir: str, top_n: int = 5, min_agree: int = 0, cell_km: float = 25
             if res.get('truth_rmse_m') is not None:
                 msg += f"; truth RMSE {res['truth_rmse_m']:.0f} m at {res['truth_reached']}/{res['truth_total']}"
             print(msg + (f" -> {res['csv']}" if res.get('csv') else ''))
+            if res.get('final_csv'):
+                print(f"[Cross] {ch}: for RIVAL: {res['final_points']} best points over the whole coverage"
+                      + (f" (truth RMSE {res['final_truth_rmse_m']:.0f} m at {res['final_truth_reached']}/"
+                         f"{res['truth_total']})" if res.get('final_truth_rmse_m') is not None else '')
+                      + f" -> {res['final_csv']}")
             for c in top:
                 print(f"         {c['detector']} + {c['matcher']} {c['ransac']} ({c['sweep']})")
     if summary_rows:
@@ -495,6 +547,17 @@ def _remember(d: str, kind: str, want: Dict) -> None:
         pass
 
 
+def _job_max_points(d: str) -> int:
+    """The job's cross_max_points (job_used.json), else the default."""
+    try:
+        import json
+        with open(os.path.join(d, 'job_used.json'), encoding='utf-8') as f:
+            v = json.load(f).get('cross_max_points')
+        return MAX_FINAL_POINTS if v is None else int(v)
+    except (OSError, ValueError, TypeError):
+        return MAX_FINAL_POINTS
+
+
 def cross_job(d: str, job: str, top_n: int = 5, min_agree: int = 0, cell_km: float = 25.0,
               tol_m: Optional[float] = None, truth_csv: str = '', recompute: bool = False,
               keep: int = KEEP_PER_CELL) -> List[Dict]:
@@ -515,7 +578,7 @@ def cross_job(d: str, job: str, top_n: int = 5, min_agree: int = 0, cell_km: flo
         try:
             tcsv = truth_csv or job_truth_csv(d)
             print(f'[Cross] {job}: ground truth ' + (tcsv if tcsv else 'none found in its settings'))
-            res = run(d, top_n, min_agree, cell_km, tol_m, tcsv, keep=keep)
+            res = run(d, top_n, min_agree, cell_km, tol_m, tcsv, keep=keep, max_points=_job_max_points(d))
             for ch, r in res.items():
                 rows.append({'job': job, 'mode': 'matches', 'reused': False,
                              **{k: v for k, v in r.items() if k != 'channel'}, 'channel': ch})
@@ -578,6 +641,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument('output_dir')
     ap.add_argument('--top', type=int, default=5, help='configurations compared, one per detector (default 5)')
     ap.add_argument('--min-agree', type=int, default=0, help='how many must agree in a cell (default: more than half)')
+    ap.add_argument('--max-points', type=int, default=None,
+                    help=f'RIVAL_FINAL_<channel>.csv: at most this many best points over the whole coverage '
+                         f'(default the job\'s, else {MAX_FINAL_POINTS}; 0: off)')
     ap.add_argument('--keep', type=int, default=KEEP_PER_CELL,
                     help='agreeing configurations kept per cell, the least distorted there (default 3)')
     ap.add_argument('--cell-km', type=float, default=25.0, help='cell size (default 25 km)')
@@ -606,7 +672,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(t.to_string(index=False))
         t.to_csv(os.path.join(a.output_dir, 'CROSS_FROM_TRUTH_POINTS.csv'), index=False)
         return 0 if len(t) else 1
-    res = run(a.output_dir, a.top, a.min_agree, a.cell_km, a.tolerance_m, a.truth, keep=a.keep)
+    res = run(a.output_dir, a.top, a.min_agree, a.cell_km, a.tolerance_m, a.truth, keep=a.keep,
+              max_points=_job_max_points(a.output_dir) if a.max_points is None else a.max_points)
     return 0 if res else 1
 
 

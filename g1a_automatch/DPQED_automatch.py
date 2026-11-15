@@ -2198,6 +2198,14 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.cross_keep.setToolTip('Of those agreeing in a cell, keep the least distorted')
         hl.addWidget(QtWidgets.QLabel('keep'))
         hl.addWidget(self.cross_keep)
+        self.cross_max = QtWidgets.QSpinBox()
+        self.cross_max.setRange(0, 100000)
+        self.cross_max.setSingleStep(100)
+        self.cross_max.setValue(500)
+        self.cross_max.setToolTip('RIVAL_FINAL_<band>.csv, the file for RIVAL: at most this many of the cross-checked '
+                                  'points, the best of each cell of a fine grid over the whole coverage (0: off)')
+        hl.addWidget(QtWidgets.QLabel('points for RIVAL'))
+        hl.addWidget(self.cross_max)
         hl.addWidget(QtWidgets.QLabel('per cell of'))
         hl.addWidget(self.cross_cell)
         f.addRow('Cross-check top detectors', hl)
@@ -2486,6 +2494,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.cross_agree.setValue(int(j.get('cross_min_agree') or 0))
         self.cross_cell.setValue(float(j.get('cross_cell_km') or 25.0))
         self.cross_keep.setValue(int(j.get('cross_keep_per_cell') or 3))
+        self.cross_max.setValue(int(500 if j.get('cross_max_points') is None else j['cross_max_points']))
         self.channels.set_checked(list(j['channels'] or []))
         self.detector_params = {k: {p: list(v) for p, v in d.items()}
                                 for k, d in (j.get('detector_params') or {}).items()}
@@ -2597,6 +2606,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             'cross_min_agree': self.cross_agree.value(),
             'cross_cell_km': self.cross_cell.value(),
             'cross_keep_per_cell': self.cross_keep.value(),
+            'cross_max_points': self.cross_max.value(),
             'detectors': dets,
             'matchers': matchers,
             'detector_params': {k: v for k, v in self.detector_params.items() if v},
