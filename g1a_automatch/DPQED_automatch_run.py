@@ -89,10 +89,14 @@ class RunWindow(QtWidgets.QMainWindow):
         self.sensor.addItems(['from the file name'] + list(self.presets))
         self.sensor.setToolTip('The preset used. From the file name: G1A_MV_ / G1A_HV_ / G1A_HS_ / G1A_ML_')
         self.bands = QtWidgets.QLineEdit()
-        self.bands.setPlaceholderText("the preset's (or the truth file's)")
-        self.bands.setMaximumWidth(220)
-        self.bands.setToolTip('Bands to match, e.g. 28 or 28, 50. Empty: the band in the truth file\'s name '
-                              '(pts_band28.csv), else the preset\'s')
+        self.bands.setPlaceholderText('e.g. 28 or 28, 50')
+        self.bands.setMaximumWidth(160)
+        self.bands.setToolTip('The band(s) to match: yours to name. Empty is accepted only with crispest ticked, '
+                              'or with a truth file whose name ends in the band (pts_band28.csv)')
+        self.crispest = QtWidgets.QCheckBox('crispest')
+        self.crispest.setToolTip('Instead of naming a band: let the job pick the band with the most fine detail '
+                                 '(hyperspectral cubes). Off by default')
+        self.crispest.toggled.connect(lambda on: self.bands.setEnabled(not on))
         self.max_err = QtWidgets.QDoubleSpinBox()
         self.max_err.setRange(1.0, 500.0)
         self.max_err.setValue(25.0)
@@ -111,6 +115,8 @@ class RunWindow(QtWidgets.QMainWindow):
                            ('Device', self.device)):
             h.addWidget(QtWidgets.QLabel(label))
             h.addWidget(wid)
+            if wid is self.bands:
+                h.addWidget(self.crispest)
         h.addWidget(self.cloud)
         h.addStretch(1)
         v.addLayout(h)
@@ -179,9 +185,12 @@ class RunWindow(QtWidgets.QMainWindow):
                            ('output folder', self.output)):
             if not row.text():
                 raise ValueError(f'set the {label}')
+        crisp = self.crispest.isChecked()
         job, _ = P.job_for(s, self.input.text(), self.reference.text(), self.output.text(), self.truth.text(),
-                           P.parse_bands(self.bands.text()), None if self.truth.text() else self.max_err.value(),
-                           self.device.currentText(), self.cloud.isChecked(), self.weights.text(), self.presets)
+                           [] if crisp else P.parse_bands(self.bands.text()),
+                           None if self.truth.text() else self.max_err.value(),
+                           self.device.currentText(), self.cloud.isChecked(), self.weights.text(), self.presets,
+                           crispest=1 if crisp else 0)
         return job
 
     # ── running ──────────────────────────────────────────────────────────────

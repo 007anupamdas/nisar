@@ -1363,7 +1363,7 @@ def _compare_with_truth(job: Dict, out_root: str, working_crs: str, manifest: Li
         traceback.print_exc()
         return {}
     for row in manifest:
-        if row.get('detail_csv') and os.path.exists(row['detail_csv']):
+        if isinstance(row.get('detail_csv'), str) and os.path.exists(row['detail_csv']):   # NaN: a failed detector
             try:
                 tr = (res.get('truth_by_channel') or {}).get(str(row.get('channel')), res['truth'])
                 m = T.score_detail_csv(row['detail_csv'], tr, float(job['truth_radius_m']))

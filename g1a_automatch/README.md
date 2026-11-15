@@ -90,7 +90,9 @@ python automatch_job.py bands G1A_HV.tif --top 3  # band quality of a cube
 input image, reference folder, output folder, optionally a ground-truth file,
 then **Run**. The settings come from the preset of the image's sensor (from
 the file name `G1A_MV_ / G1A_HV_ / G1A_HS_ / G1A_ML_`, or chosen), shown in
-the window before the run; **Check** runs the preflight only. Band(s), the
+the window before the run; **Check** runs the preflight only. The band(s)
+are yours to name each run (no preset picks one); empty is accepted only with
+*crispest* ticked or a truth file named `..._band<n>.csv`. The
 largest expected error (without truth), the device and clouds on / off can be
 changed there, nothing else. At the end it names the files for RIVAL
 (`RIVAL_FINAL_<band>.csv`, `RIVAL_BEST_FINAL_*`). `DPQED_automatch.py` stays
@@ -100,7 +102,7 @@ the window for every setting, sweeps and the benchmark.
 |---|---|---|---|---|
 | Detectors | imw-eloftr, imw-xoftr, imw-xfeat-dense, imw-rdd-nn, imw-darkfeat-nn | imw-lanet-nn, imw-ripe-nn, imw-rdd-nn, imw-minima-loftr, disk | imw-minima-roma, imw-roma, imw-eloftr, imw-topicfm, imw-lanet-nn | as HS (no benchmark yet) |
 | Window | 1024 | 512 | 512 | 512 |
-| Band | band3 | crispest | crispest | crispest |
+| Band | yours (suggested band3) | yours | yours (near 1250 / 1650 / 2200 nm) | yours (not band1 / band6) |
 | Clouds | OmniCloudMask, bands 5, 4, 6 | VNIR tests | SWIR tests | infrared tests |
 
 All: keypoints auto, MAGSAC and LMedS, 512 px sub-cells, cross-check top 5

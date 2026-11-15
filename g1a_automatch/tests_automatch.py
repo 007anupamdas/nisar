@@ -1007,7 +1007,7 @@ def test_presets(tmp):
     import automatch_job as J
     import automatch_presets as P
     pre = P.load('')
-    bad = {s: J.unknown_keys({k: v for k, v in p.items() if k != 'note'}) for s, p in pre.items()}
+    bad = {s: J.unknown_keys({k: v for k, v in p.items() if k not in P.INFO_KEYS}) for s, p in pre.items()}
     check('presets: MV / HV / HS / ML, every key a job setting', (sorted(pre), [v for v in bad.values() if v]),
           (['HS', 'HV', 'ML', 'MV'], []))
     job, note = P.job_for('HS', '/d/G1A_HS_x.tif', '/ref', '/out', '/t/pts_band28.csv', presets=pre)
@@ -1023,6 +1023,18 @@ def test_presets(tmp):
            pre['MV']['cloud_method_MV'], pre['MV']['cloud_bands'], P.sensor_of('/x/G1A_ML_20260101.tif'),
            P.sensor_of('scene.tif')),
           (['band4', 'band6'], 0, 30000.0, 'cpu', 'none', 'omnicloudmask', ['band5', 'band4', 'band6'], 'ML', ''))
+    def refused(**kw):
+        try:
+            P.job_for('HS', '/d/G1A_HS_x.tif', '/ref', '/out', presets=pre, **kw)
+            return False
+        except ValueError:
+            return True
+    crisp, _ = P.job_for('HS', '/d/G1A_HS_x.tif', '/ref', '/out', presets=pre, crispest=1)
+    check('presets: the bands are the user\'s: none named is refused (also with a truth file without a band); '
+          'crispest only when asked; no preset names a band',
+          (refused(), refused(truth_csv='/t/pts.csv'), refused(truth_csv='/t/pts_B7.csv'), crisp['auto_bands'],
+           crisp['channels'], [s for s, p in pre.items() if p.get('channels') or p.get('auto_bands')]),
+          (True, True, False, 1, [], []))
     pf = os.path.join(tmp, 'presets.json')
     with open(pf, 'w') as f:
         json.dump({'HS': {'window_sizes': [1024]}, 'XX': {'detectors': ['sift']}}, f)
@@ -1057,7 +1069,8 @@ def test_gui_run(tmp):
     data = os.path.join(tmp, 'synth')
     if not os.path.exists(os.path.join(data, 'G1A_SYNTH_L1.tif')):
         S.make_all(data, 4013.0, -2487.0)
-    w.presets['MV'].update(detectors=['sift'], channels=['band1'])
+    w.presets['MV'].update(detectors=['sift'])
+    w.bands.setText('1')
     w.input.edit.setText(os.path.join(data, 'G1A_SYNTH_L1.tif'))
     w.reference.edit.setText(os.path.join(data, 'C1'))
     w.output.edit.setText(os.path.join(tmp, 'out_runwin'))

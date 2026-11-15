@@ -699,7 +699,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                                                  'only reads the saved matches and needs no GPU (cpu is fine)')
     a = ap.parse_args(argv)
     if str(a.device).strip().lower() == 'cpu':
-        os.environ['CUDA_VISIBLE_DEVICES'] = ''
+        os.environ['CUDA_VISIBLE_DEVICES'] = '-1'      # '' is read as "not set" by some torch builds
     global SHARE
     SHARE = (a.share_local, a.share_server)
     if a.batch:

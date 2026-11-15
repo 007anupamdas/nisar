@@ -150,10 +150,19 @@ warnings.filterwarnings('ignore')
 # =============================================================================
 # DEVICE
 # =============================================================================
+def _cuda_usable() -> bool:
+    """CUDA with at least one GPU this process may use (hidden GPUs, e.g.
+    --device cpu, can leave is_available() true with none to use)."""
+    try:
+        return bool(th.cuda.is_available() and th.cuda.device_count() > 0)
+    except Exception:
+        return False
+
+
 def _auto_device() -> th.device:
     # kornia.utils is not reachable as an attribute on every kornia release,
     # so pick the device with torch directly.
-    if th.cuda.is_available():
+    if _cuda_usable():
         return th.device('cuda')
     mps = getattr(th.backends, 'mps', None)
     if mps is not None and mps.is_available():
@@ -171,7 +180,7 @@ def set_device(name: str = 'auto'):
     name = (name or 'auto').lower()
     if name == 'auto':
         device = _auto_device()
-    elif name.startswith('cuda') and not th.cuda.is_available():
+    elif name.startswith('cuda') and not _cuda_usable():
         print(f'[Device] {name} requested but CUDA is not available -- using CPU')
         device = th.device('cpu')
     else:
@@ -182,15 +191,18 @@ def set_device(name: str = 'auto'):
 
 def describe_device():
     print(f'Using device: {device}')
-    if device.type == 'cuda' and th.cuda.is_available():
+    if device.type == 'cuda' and _cuda_usable():
         th.backends.cuda.matmul.allow_tf32 = True
         th.backends.cudnn.allow_tf32 = True
         th.backends.cudnn.benchmark = True
         idx = device.index or 0
-        print(f'GPU: {th.cuda.get_device_name(idx)}')
-        print(f'CUDA: {th.version.cuda}')
-        mem_total = th.cuda.get_device_properties(idx).total_memory / 1024**3
-        print(f'GPU Memory: {mem_total:.1f} GB')
+        try:                                   # a report only: never the reason a command stops
+            print(f'GPU: {th.cuda.get_device_name(idx)}')
+            print(f'CUDA: {th.version.cuda}')
+            mem_total = th.cuda.get_device_properties(idx).total_memory / 1024**3
+            print(f'GPU Memory: {mem_total:.1f} GB')
+        except Exception as e:
+            print(f'GPU: not described ({type(e).__name__}: {e})')
 
 
 describe_device()
