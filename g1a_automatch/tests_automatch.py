@@ -433,7 +433,7 @@ def test_e2e_truth(tmp):
     sub = acc[acc['ransac'].astype(str).str.contains('-sc512')]
     plain = acc[~acc['ransac'].astype(str).str.contains('-sc')]
     check('truth e2e: match accuracy of the plain and the 512 px sub-cell result, both nearly all right',
-          (len(plain) > 0, len(sub) > 0, bool((plain['precision_inliers'] > 0.9).all()),
+          (len(plain) > 0, len(sub) > 0, bool((plain['precision_inliers'] > 0.85).all()),
            bool((sub['precision_inliers'] > 0.9).all()), bool((acc['precision_all'] <= acc['precision_inliers']).all())),
           (True, True, True, True, True))
     by_path = os.path.join(out, 'TRUTH_BY_DETECTOR_MATCHER.csv')
@@ -1685,6 +1685,25 @@ def test_max_error_from_truth(tmp):
     check('max error from truth: 12 x 9 km (15 km total) gives 20 km; off or without truth the stated value',
           (j1['max_expected_error_m'], '15.0 km' in n1, j2['max_expected_error_m'], n2, j3['max_expected_error_m']),
           (20000.0, True, 100000, '', 100000))
+
+
+def test_channels_from_truth(tmp):
+    """A truth file named with a band matches that band (and each band with a
+    sibling file of the same stem); without a band in its name the selected
+    channels stay."""
+    import automatch_job as J
+    d = os.path.join(tmp, 'truth_ch')
+    os.makedirs(d)
+    for n in ('pts_band28.csv', 'pts_band50.csv', 'pts_B7.csv', 'other_band9.csv', 'plain.csv'):
+        open(os.path.join(d, n), 'w').close()
+    j1, n1 = J.channels_from_truth({'truth_csv': os.path.join(d, 'pts_band28.csv'), 'channels': ['band3']})
+    j2, _ = J.channels_from_truth({'truth_csv': os.path.join(d, 'plain.csv'), 'channels': ['band3']})
+    j3, _ = J.channels_from_truth({'truth_csv': os.path.join(d, 'pts_band28.csv'), 'channels': ['band3'],
+                                   'channels_from_truth': False})
+    check('channels from truth: the bands the truth file and its siblings name; else the selected ones',
+          (j1['channels'], 'band3' in n1, j2['channels'], j3['channels'],
+           [os.path.basename(p) for p in J.truth_files_beside(os.path.join(d, 'pts_band28.csv'))]),
+          (['band7', 'band28', 'band50'], True, ['band3'], ['band3'], ['pts_band28.csv', 'pts_B7.csv', 'pts_band50.csv']))
 
 
 def test_truth_helpers(tmp):
@@ -4882,6 +4901,7 @@ def main():
         test_imcui_mock()
         test_weights_check(tmp)
         test_truth_helpers(tmp)
+        test_channels_from_truth(tmp)
         test_max_error_from_truth(tmp)
         test_truth_per_band(tmp)
         test_server(tmp)

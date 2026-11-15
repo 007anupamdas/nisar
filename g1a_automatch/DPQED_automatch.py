@@ -2041,10 +2041,13 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.auto_range.setPlaceholderText('all bands (or e.g. 1-70)')
         self.auto_range.setToolTip('Bands Auto bands searches, first-last. G1A HS/HV: the good bands are '
                                    'usually within the first 60-70.')
+        self.auto_bands.setMaximumWidth(190)
+        self.auto_range.setMaximumWidth(150)
         hl = QtWidgets.QHBoxLayout()
-        hl.addWidget(self.auto_bands, 1)
+        hl.addWidget(self.auto_bands)
         hl.addWidget(QtWidgets.QLabel('within bands'))
         hl.addWidget(self.auto_range)
+        hl.addStretch(1)
         f.addRow('Auto bands (N crispest)', hl)
         self.cloud_mask = QtWidgets.QCheckBox('mask clouds before matching')
         self.cloud_mask.setToolTip('Clouds (and, if chosen, shadow) are left out of matching. By sensor (the method '

@@ -356,7 +356,9 @@ DEFAULT_JOB: Dict = {
 
     # large offsets (coarse-to-fine)
     'max_expected_error_m': 50000,
-    'max_error_from_truth': True,   # with a truth file: max_expected_error_m = its largest error x 1.33 (min 5 km)
+    'max_error_from_truth': True,
+    'channels_from_truth': True,    # a truth file named <stem>_band28.csv: match band28 (and each band with a
+                                    # sibling <stem>_band<n>.csv); else the selected channels   # with a truth file: max_expected_error_m = its largest error x 1.33 (min 5 km)
     'coarse_method': 'auto',     # auto | matcher | phasecorr | manual | none
     'coarse_resolution_m': 60,
     'initial_offset_m': None,    # [dE, dN] metres, input minus reference
@@ -658,6 +660,64 @@ def max_error_from_truth(job: Dict) -> Tuple[Dict, str]:
     return dict(job, max_expected_error_m=new), note
 
 
+TRUTH_BAND = re.compile(r'^(.*?)([_\-. ])(?:band_?|b)(\d+)$', re.I)
+
+
+def truth_bands(truth_csv: str) -> List[str]:
+    """The bands a truth file names: its own suffix (pts_band28.csv, pts_B28.csv
+    -> band28) and those of its siblings <stem>_band<n>.csv beside it, in band
+    order; [] when its name carries no band."""
+    import glob as _g
+    if not truth_csv:
+        return []
+    folder, name = os.path.split(truth_csv)
+    stem, ext = os.path.splitext(name)
+    m = TRUTH_BAND.match(stem)
+    if not m:
+        return []
+    base = m.group(1)
+    bands = {int(m.group(3))}
+    for p in _g.glob(os.path.join(folder, _g.escape(base) + '*' + ext)):
+        mm = TRUTH_BAND.match(os.path.splitext(os.path.basename(p))[0])
+        if mm and mm.group(1) == base:
+            bands.add(int(mm.group(3)))
+    return [f'band{n}' for n in sorted(bands)]
+
+
+def truth_files_beside(truth_csv: str) -> List[str]:
+    """The truth file and its per-band siblings (<stem>_band<n>.csv)."""
+    import glob as _g
+    if not truth_csv:
+        return []
+    folder, name = os.path.split(truth_csv)
+    stem, ext = os.path.splitext(name)
+    m = TRUTH_BAND.match(stem)
+    if not m:
+        return [truth_csv]
+    out = [truth_csv]
+    for p in sorted(_g.glob(os.path.join(folder, _g.escape(m.group(1)) + '*' + ext))):
+        mm = TRUTH_BAND.match(os.path.splitext(os.path.basename(p))[0])
+        if mm and mm.group(1) == m.group(1) and os.path.abspath(p) != os.path.abspath(truth_csv):
+            out.append(p)
+    return out
+
+
+def channels_from_truth(job: Dict) -> Tuple[Dict, str]:
+    """(the job matching the bands its truth file names, a note) when
+    channels_from_truth is on and the truth file's name carries a band;
+    otherwise the job unchanged (its selected channels) and ''."""
+    if not job.get('channels_from_truth', True):
+        return job, ''
+    bands = truth_bands(job.get('truth_csv') or '')
+    if not bands:
+        return job, ''
+    if list(job.get('channels') or []) == bands:
+        return job, ''
+    was = ', '.join(job.get('channels') or []) or 'none (auto)'
+    return dict(job, channels=bands, auto_bands=0), (f'channels {", ".join(bands)} from the truth file name(s) '
+                                                     f'(selected: {was})')
+
+
 def preflight(job: Dict, check_weights: bool = True) -> Dict:
     """Validate a job without matching. {'errors', 'warnings', 'info'}.
     check_weights: also look for every model weight file the job will load
@@ -669,6 +729,10 @@ def preflight(job: Dict, check_weights: bool = True) -> Dict:
     job, note = max_error_from_truth(job)
     if note:
         info['max_expected_error_m'] = job['max_expected_error_m']
+        warnings.append(note)
+    job, note = channels_from_truth(job)
+    if note:
+        info['channels'] = job['channels']
         warnings.append(note)
 
     if not job['input_path'] or not os.path.exists(job['input_path']):
@@ -1359,6 +1423,9 @@ def run_job(job: Dict) -> Dict:
     if job.get('cloud_device'):
         job['cloud_device'] = use_gpu(job['cloud_device'])
     job, note = max_error_from_truth(job)
+    if note:
+        print(f'[Job] {note}', flush=True)
+    job, note = channels_from_truth(job)
     if note:
         print(f'[Job] {note}', flush=True)
     pf = preflight(job, check_weights=False)   # warmup stops a detector whose weights are missing
