@@ -1001,6 +1001,79 @@ def test_gui_cross():
         w.close()
 
 
+def test_presets(tmp):
+    """Sensor presets: every key is a job setting, the paths and the few
+    choices of the run window go in, the presets file overrides per sensor."""
+    import automatch_job as J
+    import automatch_presets as P
+    pre = P.load('')
+    bad = {s: J.unknown_keys({k: v for k, v in p.items() if k != 'note'}) for s, p in pre.items()}
+    check('presets: MV / HV / HS / ML, every key a job setting', (sorted(pre), [v for v in bad.values() if v]),
+          (['HS', 'HV', 'ML', 'MV'], []))
+    job, note = P.job_for('HS', '/d/G1A_HS_x.tif', '/ref', '/out', '/t/pts_band28.csv', presets=pre)
+    n = J.normalize(job)
+    check('presets: an HS job: its detectors and window, truth decides range and band, all GPUs, cross-check 3 of 5',
+          (n['detectors'][:2], n['window_sizes'], n['max_error_from_truth'], n['channels_from_truth'], n['device'],
+           n['cross_top_n'], n['cross_min_agree'], 'note' in job, bool(note)),
+          (['imw-minima-roma', 'imw-roma'], [512], True, True, 'all', 5, 3, False, True))
+    job, _ = P.job_for('MV', '/d/G1A_MV_x.tif', '/ref', '/out', bands=P.parse_bands('4, band6'), max_error_km=30,
+                       device='cpu', cloud=False, presets=pre)
+    check('presets: bands, range, device and clouds chosen in the window win; MV clouds are OmniCloudMask on 5, 4, 6',
+          (job['channels'], job['auto_bands'], job['max_expected_error_m'], job['device'], job['cloud_mask'],
+           pre['MV']['cloud_method_MV'], pre['MV']['cloud_bands'], P.sensor_of('/x/G1A_ML_20260101.tif'),
+           P.sensor_of('scene.tif')),
+          (['band4', 'band6'], 0, 30000.0, 'cpu', 'none', 'omnicloudmask', ['band5', 'band4', 'band6'], 'ML', ''))
+    pf = os.path.join(tmp, 'presets.json')
+    with open(pf, 'w') as f:
+        json.dump({'HS': {'window_sizes': [1024]}, 'XX': {'detectors': ['sift']}}, f)
+    pre2 = P.load(pf)
+    check('presets file: overrides key by key, adds a sensor',
+          (pre2['HS']['window_sizes'], pre2['HS']['detectors'] == pre['HS']['detectors'], pre2['XX']['detectors'],
+           pre2['XX']['device']), ([1024], True, ['sift'], 'all'))
+
+
+def test_gui_run(tmp):
+    """The short window: the preset follows the file name, the job is built
+    from it, a check run goes through automatch_job and reports back."""
+    try:
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+        import DPQED_automatch_run as G
+    except Exception as e:
+        print(f'SKIP  GUI run window ({type(e).__name__}: {e})')
+        return
+    import synthetic_data as S
+    app = G.QtWidgets.QApplication.instance() or G.QtWidgets.QApplication([])
+    st = G.QtCore.QSettings(os.path.join(tmp, 'runwin.ini'), G.QtCore.QSettings.Format.IniFormat
+                            if G.QT_API != 'PyQt5' else G.QtCore.QSettings.IniFormat)
+    w = G.RunWindow(st)
+    w.input.edit.setText('/data/G1A_HS_20260101_L1.tif')
+    shown = w.summary.text()
+    w.input.edit.setText('/data/scene.tif')
+    unknown = w.summary.text()
+    w.sensor.setCurrentText('MV')
+    check('run window: the preset of the file\'s sensor is shown; unknown asks; choosing a sensor sets it',
+          ('HS preset' in shown and 'imw-minima-roma' in shown, 'choose it' in unknown, 'MV preset' in w.summary.text()),
+          (True, True, True))
+    data = os.path.join(tmp, 'synth')
+    if not os.path.exists(os.path.join(data, 'G1A_SYNTH_L1.tif')):
+        S.make_all(data, 4013.0, -2487.0)
+    w.presets['MV'].update(detectors=['sift'], channels=['band1'])
+    w.input.edit.setText(os.path.join(data, 'G1A_SYNTH_L1.tif'))
+    w.reference.edit.setText(os.path.join(data, 'C1'))
+    w.output.edit.setText(os.path.join(tmp, 'out_runwin'))
+    w.device.setCurrentText('cpu')
+    w.cloud.setChecked(False)
+    job = w.job()
+    w.start('preflight')
+    ok = w.proc is not None and w.proc.waitForFinished(180000)
+    app.processEvents()
+    check('run window: the job carries the paths and choices; Check runs the preflight and reports',
+          (job['detectors'], job['device'], job['cloud_mask'], job['max_expected_error_m'], ok,
+           os.path.exists(os.path.join(tmp, 'out_runwin', 'job_preset.json')), w.stage.text()),
+          (['sift'], 'cpu', 'none', 25000.0, True, True, 'check passed: ready to run'))
+    w.close()
+
+
 def test_gui_cloud():
     """Cloud mask test from the GUI: the dialog builds the stand-alone
     command from the job's cloud settings; the result shows the table and a
@@ -5041,6 +5114,7 @@ def main():
         test_version_skew_and_coarse(tmp)
         test_gpu_windows(tmp)
         test_gpu_queue(tmp)
+        test_presets(tmp)
         test_jobs_312_317(tmp)
         test_jobs_318_323(tmp)
         test_coarse_outliers()
@@ -5071,6 +5145,7 @@ def main():
             test_gui_queue()
             test_gui_cross()
             test_gui_cloud()
+            test_gui_run(tmp)
         if a.e2e:
             test_e2e(tmp)
             test_e2e_variants(tmp)

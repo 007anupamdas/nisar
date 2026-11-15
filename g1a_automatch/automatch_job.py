@@ -57,7 +57,7 @@ CODE_FILES = ('automatch_engine.py', 'automatch_job.py', 'automatch_imcui.py', '
               'automatch_native.py', 'imw_configs.py', 'automatch_cross.py', 'automatch_bench.py',
               'automatch_cloud.py', 'automatch_accuracy.py', 'automatch_cloudsweep.py', 'automatch_cloudphys.py',
               'automatch_tirauxcloud.py', 'automatch_reflect.py', 'automatch_cloudmodels.py', 'automatch_refsubset.py',
-              'automatch_cloudfilter.py')
+              'automatch_cloudfilter.py', 'automatch_presets.py')
 
 
 def code_fingerprint() -> str:
