@@ -966,6 +966,9 @@ class BenchDialog(QtWidgets.QDialog):
         self.folder = PathRow('dir')
         self.folder.setText(settings.value('bench_folder', '') or settings.value('cross_folder', '')
                             or defaults.get('output_dir', ''))
+        self.folder.setToolTip('One job folder, or a folder of jobs. Several separated by ; (e.g. the workstation\'s '
+                               'D:\\g1a\\automatch; the server\'s V:\\ICIGDev\\GPUPOC\\output): one benchmark over '
+                               'all of them, its tables in the first')
         f.addRow('Job output folder(s)', self.folder)
         self.jobs = QtWidgets.QLineEdit(settings.value('bench_jobs', '') or '')
         self.jobs.setPlaceholderText('all finished automatch jobs (or e.g. 335-366, 370)')
@@ -1075,9 +1078,15 @@ class BenchDialog(QtWidgets.QDialog):
         bb.rejected.connect(self.reject)
         f.addRow(bb)
 
+    def folders(self):
+        """The job folders named (several separated by ';'): the results go to the first."""
+        return [p.strip() for p in self.folder.text().split(';') if p.strip()]
+
     def _ok(self):
-        if not self.folder.text() or not os.path.isdir(self.folder.text()):
-            QtWidgets.QMessageBox.warning(self, 'Benchmark', 'Choose an existing folder.')
+        missing = [p for p in self.folders() if not os.path.isdir(p)]
+        if not self.folders() or missing:
+            QtWidgets.QMessageBox.warning(self, 'Benchmark', 'Choose existing folder(s)'
+                                          + (': not found: ' + '; '.join(missing) if missing else '.'))
             return
         try:
             import automatch_cross as X
@@ -1095,7 +1104,7 @@ class BenchDialog(QtWidgets.QDialog):
         self.accept()
 
     def args(self):
-        a = ['bench', self.folder.text(), '--success-px', f'{self.success.value():g}']
+        a = ['bench'] + self.folders() + ['--success-px', f'{self.success.value():g}']
         if self.jobs.text().strip():
             a += ['--jobs', self.jobs.text().strip()]
         if self.share_local.text().strip() and self.share_server.text().strip():
@@ -3215,7 +3224,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self._start(args, 'cloud')
 
     def _start_bench(self, dlg):
-        self._bench_dir = dlg.folder.text()
+        self._bench_dir = (dlg.folders() or [''])[0]
         args = dlg.args()
         self.log.appendPlainText('--- ' + ' '.join(args))
         self._start(args, 'bench')

@@ -3217,6 +3217,21 @@ def test_bench(tmp):
     check('bench: SCENE_NOTES.csv replaces the cloud estimate (job row and detector classes)',
           (jrow['cloud_pct'], jrow['cloud_source'], drow['cloud_class'].iloc[0]), (55.0, 'manual', 'cloudy (>30 %)'))
     os.remove(os.path.join(parent, 'SCENE_NOTES.csv'))
+    # jobs in two places (workstation and server): one benchmark over both
+    import shutil as _sh
+    parent2, both = os.path.join(tmp, 'bench_ws'), os.path.join(tmp, 'bench_both')
+    if not os.path.exists(parent2):
+        _sh.copytree(jd, os.path.join(parent2, 'job901'))
+    with contextlib.redirect_stdout(io.StringIO()):
+        B.main([parent, parent2, '--out', both, '--no-cross', '--all-jobs'])
+    jb = pd.read_csv(os.path.join(both, 'BENCH_JOBS.csv')) if os.path.exists(os.path.join(both, 'BENCH_JOBS.csv')) \
+        else pd.DataFrame(columns=['job', 'folder'])
+    check('bench: several folders give one benchmark (the jobs of both, where each is, written to --out)',
+          ({'output366', 'job901'} <= set(jb['job'].astype(str)),
+           sorted({os.path.basename(str(f)) for f in jb.loc[jb['job'].astype(str).isin(['output366', 'job901']),
+                                                             'folder']}) == sorted(
+               [os.path.basename(parent), 'bench_ws']),
+           os.path.exists(os.path.join(both, 'BENCH_SUMMARY.csv'))), (True, True, True))
     # a job that ran with cloud masking reports the model's cloud %
     with open(os.path.join(jd, 'CLOUD_INFO.json'), 'w') as f:
         json.dump({'cloud_pct': 37.5, 'shadow_pct': 4.0, 'band_choice': 'red, green, nir by wavelength'}, f)

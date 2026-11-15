@@ -1039,6 +1039,13 @@ the rough brightness estimate.
 
 ## Benchmark: which detector on which kind of image
 
+Jobs run in more than one place (the workstation and the server) go into one
+benchmark: name the folders together, `python automatch_job.py bench
+D:\g1a\automatch V:\ICIGDev\GPUPOC\output --share-local V:\ --share-server
+/maintenance/` (GUI: the folders separated by `;`). The tables are written to
+the first folder (or `--out`); `BENCH_JOBS.csv` says in `folder` where each
+job is, and of several jobs on one scene the newest counts, wherever it ran.
+
 `python automatch_job.py bench <folder of job outputs> [--jobs 335-366]`
 (GUI: **Benchmark & cross-check…**) reads every finished job; nothing is
 matched again. Each job is cross-checked first, with its results read back

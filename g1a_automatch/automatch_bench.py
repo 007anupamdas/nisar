@@ -39,7 +39,8 @@ smooth ground (sand, snow, salt flats) can pass for cloud: check
 SCENE_CLOUD.png. The result is kept in SCENE_INFO.json and read back on later
 runs (--recompute redoes it).
 
-    python automatch_job.py bench <folder of job outputs> [--jobs 335-366] [--success-px 3]
+    python automatch_job.py bench <folder of job outputs> [<another folder> ...] [--out <folder>]
+                                 [--jobs 335-366] [--success-px 3]
                                  [--top 5 --min-agree 0 --keep 3 --cell-km 25]   # the cross-check
 
 With --cloud-free every job used is also scored without its matches on
@@ -493,7 +494,7 @@ def newest_per_scene(metas: List[Dict]) -> Dict[str, Optional[str]]:
 def batch(parent: str, jobs: str = '', success_px: float = 3.0, recompute: bool = False,
           all_jobs: bool = False, cross: Optional[Dict] = None, cloud_model_dir: Optional[str] = None,
           accuracy: Optional[Dict] = None, shard: Optional[Tuple[int, int]] = None,
-          cloudfree: Optional[Dict] = None) -> int:
+          cloudfree: Optional[Dict] = None, more: Optional[List[str]] = None) -> int:
     """Benchmark the finished jobs under parent; of several jobs on one scene
     only the newest counts (newest_per_scene) unless all_jobs. Each job used
     is cross-checked first (automatch_cross.cross_job with the settings in
@@ -502,10 +503,20 @@ def batch(parent: str, jobs: str = '', success_px: float = 3.0, recompute: bool 
     ({'subcell_px', 'keep'}), each job's matches are scored match by match
     against its truth (automatch_accuracy): ACCURACY_ALL / ACCURACY_SUMMARY.csv."""
     import automatch_cross as X
-    found, skipped = X.find_jobs(parent, X.parse_jobs(jobs))
+    found, skipped = [], {}
+    for folder in [parent] + [m for m in (more or []) if m]:      # e.g. the workstation's and the server's outputs
+        if not os.path.isdir(folder):
+            print(f'[Bench] {folder}: not a folder reachable from here; skipped')
+            continue
+        f1, s1 = X.find_jobs(folder, X.parse_jobs(jobs))
+        found += [d for d in f1 if d not in found]
+        skipped.update(s1)
+        if more:
+            print(f'[Bench] {len(f1)} finished job(s) under {folder}')
     for n, why in skipped.items():
         print(f'[Bench] {n}: skipped, {why}')
-    print(f'[Bench] {len(found)} finished job(s) under {parent}')
+    print(f'[Bench] {len(found)} finished job(s)' + (f' in {1 + len(more)} folders; results in {parent}' if more
+                                                     else f' under {parent}'))
     metas = {d: job_meta(d) for d in found}
     notes = {}
     np_ = os.path.join(parent, 'SCENE_NOTES.csv')
@@ -544,7 +555,8 @@ def batch(parent: str, jobs: str = '', success_px: float = 3.0, recompute: bool 
             jrows.append({'job': m['job'], 'scene': m['scene'], 'automatch': m['version'], 'code': m['code'],
                           'used': False, 'superseded_by': '', 'error': f'{type(e).__name__}: {e}'})
             continue
-        row.update({'automatch': m['version'], 'code': m['code'], 'used': True, 'superseded_by': ''})
+        row.update({'automatch': m['version'], 'code': m['code'], 'used': True, 'superseded_by': '',
+                    'folder': os.path.dirname(os.path.normpath(d))})
         note = notes.get(row['job']) or notes.get(row['scene'])
         if note is not None:
             if pd.notna(note.get('cloud_pct')):
@@ -686,7 +698,11 @@ def _write_bench(parent: str, jobs_df: pd.DataFrame, drows: list, xrows: list, a
 def main(argv: Optional[List[str]] = None) -> int:
     import automatch_cross as X
     ap = argparse.ArgumentParser(description='How each detector does on which kind of image, from finished jobs')
-    ap.add_argument('folder', help='a job output folder, or a folder of them (output/output359 ...)')
+    ap.add_argument('folder', nargs='+',
+                    help='a job output folder, or a folder of them (output/output359 ...); several may be given '
+                         '(the workstation\'s and the server\'s): one benchmark over all, written to the first '
+                         '(or --out)')
+    ap.add_argument('--out', default='', help='where the BENCH_*.csv go (default: the first folder)')
     ap.add_argument('--jobs', default='', help="only these job numbers, e.g. '335-366, 370'")
     ap.add_argument('--success-px', type=float, default=3.0, help='success: half the truth points within this (px)')
     ap.add_argument('--recompute', action='store_true', help='measure the scenes again (SCENE_INFO.json)')
@@ -737,9 +753,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                 continue
             out.append(base[i])
             i += 1
-        print(f'[Bench] jobs under {a.folder} over GPUs {gpus}: one worker per GPU', flush=True)
+        print(f'[Bench] jobs under {", ".join(a.folder)} over GPUs {gpus}: one worker per GPU', flush=True)
         rc = J.fan_out(os.path.abspath(__file__), out, gpus)
-        rc2 = finish_sharded(a.folder, a.success_px)
+        rc2 = finish_sharded(a.out or a.folder[0], a.success_px)
         return rc or rc2
     if a.device:
         DEVICE = J.use_gpu(a.device)
@@ -755,9 +771,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             over['cloud_device'] = DEVICE
         cloudfree = {'overrides': over, 'classes': a.cloud_free_classes,
                      'cross': {'top_n': 0 if a.no_cross else a.top, 'min_agree': a.min_agree, 'cell_km': a.cell_km}}
-    return batch(a.folder, a.jobs, a.success_px, a.recompute, a.all_jobs, cross,
+    out_dir = a.out or a.folder[0]
+    os.makedirs(out_dir, exist_ok=True)
+    return batch(out_dir, a.jobs, a.success_px, a.recompute, a.all_jobs, cross,
                  a.cloud_model_dir if a.cloud == 'omnicloudmask' else None, accuracy, J.parse_shard(a.shard),
-                 cloudfree)
+                 cloudfree, [f for f in a.folder if os.path.normpath(f) != os.path.normpath(out_dir)])
 
 
 if __name__ == '__main__':
