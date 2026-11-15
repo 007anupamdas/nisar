@@ -233,6 +233,41 @@ def thin(pts: pd.DataFrame, max_points: int) -> pd.DataFrame:
     return pts.loc[best.index].reset_index(drop=True)
 
 
+def final_of(rival_csv: str, crs: str, max_points: int = MAX_FINAL_POINTS) -> str:
+    """RIVAL_BEST_<...>.csv -> RIVAL_BEST_FINAL_<...>.csv beside it: the same
+    thinning (thin) for the best single configuration's file. '' when off,
+    the file is unreadable or it is a FINAL file already."""
+    import automatch_rival as R
+    name = os.path.basename(rival_csv)
+    if max_points <= 0 or '_FINAL_' in name or not name.startswith('RIVAL_BEST_'):
+        return ''
+    try:
+        p = R.read_rival_csv(rival_csv)
+    except Exception:
+        return ''
+    if p.empty:
+        return ''
+    pts = pd.DataFrame({'x1-map': p['ix'], 'y1-map': p['iy'], 'x2-map': p['rx'], 'y2-map': p['ry'],
+                        'E': p['ix'], 'N': p['iy'], 'dE': p['ix'] - p['rx'], 'dN': p['iy'] - p['ry']})
+    fin = thin(pts, max_points)
+    out = os.path.join(os.path.dirname(rival_csv), name.replace('RIVAL_BEST_', 'RIVAL_BEST_FINAL_', 1))
+    R.write_rival_csv(fin, crs, out)
+    print(f'[Cross] {name}: {len(pts)} points -> {len(fin)} best over the whole coverage -> {out}')
+    return out
+
+
+def best_finals(output_dir: str, crs: Optional[str] = None, max_points: Optional[int] = None) -> List[str]:
+    """final_of for every RIVAL_BEST_*.csv of a job folder."""
+    import glob as _glob
+    import automatch_truth as T
+    crs = crs or T.working_crs_of(output_dir)
+    n = _job_max_points(output_dir) if max_points is None else max_points
+    if not crs:
+        return []
+    return [o for o in (final_of(p, crs, n) for p in sorted(_glob.glob(os.path.join(output_dir, 'RIVAL_BEST_*.csv'))))
+            if o]
+
+
 def run(output_dir: str, top_n: int = 5, min_agree: int = 0, cell_km: float = 25.0,
         tol_m: Optional[float] = None, truth_csv: str = '', working_crs: Optional[str] = None,
         cfgs: Optional[List[Dict]] = None, quiet: bool = False, keep: int = KEEP_PER_CELL,
@@ -660,7 +695,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument('--jobs', default='', help="with --batch: only these job numbers, e.g. '335-363, 370'")
     ap.add_argument('--from-truth-points', action='store_true',
                     help='replay on output_dir/TRUTH_POINTS.csv + TRUTH_RANKING.csv only (no match files)')
+    ap.add_argument('--device', default='', help='accepted for symmetry with the other commands: the cross-check '
+                                                 'only reads the saved matches and needs no GPU (cpu is fine)')
     a = ap.parse_args(argv)
+    if str(a.device).strip().lower() == 'cpu':
+        os.environ['CUDA_VISIBLE_DEVICES'] = ''
     global SHARE
     SHARE = (a.share_local, a.share_server)
     if a.batch:
@@ -672,6 +711,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(t.to_string(index=False))
         t.to_csv(os.path.join(a.output_dir, 'CROSS_FROM_TRUTH_POINTS.csv'), index=False)
         return 0 if len(t) else 1
+    best_finals(a.output_dir, None, a.max_points)
     res = run(a.output_dir, a.top, a.min_agree, a.cell_km, a.tolerance_m, a.truth, keep=a.keep,
               max_points=_job_max_points(a.output_dir) if a.max_points is None else a.max_points)
     return 0 if res else 1

@@ -2779,6 +2779,15 @@ def test_cross_check(tmp):
           (350 < len(few) <= 500, gx == g0, int(((few['E'] < 10000) & (few['N'] < 10000)).sum()) < 60,
            float((few['dE'] > 1500).mean()) < 0.01, len(X.thin(dense.head(100), 500))),
           (True, True, True, True, 100))
+    import automatch_rival as R
+    bp = os.path.join(tmp, 'thin', 'RIVAL_BEST_SCENE_band1.csv')
+    R.write_rival_csv(dense.assign(**{'x1-map': 500000 + dense['E'], 'y1-map': 1600000 + dense['N'],
+                                      'x2-map': 500000 + dense['E'] - dense['dE'],
+                                      'y2-map': 1600000 + dense['N'] - dense['dN']}), 'EPSG:32643', bp)
+    fo = X.final_of(bp, 'EPSG:32643', 500)
+    check('cross thin: RIVAL_BEST gets its RIVAL_BEST_FINAL file the same way (and a FINAL file is not thinned again)',
+          (os.path.basename(fo), 350 < len(R.read_rival_csv(fo)) <= 500, X.final_of(fo, 'EPSG:32643', 500)),
+          ('RIVAL_BEST_FINAL_SCENE_band1.csv', True, ''))
     top, how = X.pick_top(cfgs, 5, 25000.0, 1000.0)
     names = [c['detector'] for c in top]
     check('cross: without truth, the consistently wrong detector is not among the top by agreement',

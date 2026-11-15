@@ -1325,6 +1325,8 @@ def refresh_after_compare(output_dir: str, res: Dict) -> List[str]:
             print(f'[Job] performance table not rewritten: {type(e).__name__}: {e}')
     for ch, b in (res.get('best') or {}).items():
         for dst in _glob.glob(os.path.join(output_dir, f'RIVAL_BEST_*_{ch}.csv')):
+            if '_FINAL_' in os.path.basename(dst):
+                continue
             shutil.copyfile(b['csv'], dst)
             written.append(dst)
             print(f"[Job] {os.path.basename(dst)} is now {b['detector']} + {b['matcher']} {b['ransac']} "
@@ -1338,6 +1340,11 @@ def refresh_after_compare(output_dir: str, res: Dict) -> List[str]:
         for ch, r in run_cross(job, output_dir, res.get('crs') or '').items():
             if r.get('csv'):
                 written.append(r['csv'])
+    try:
+        import automatch_cross as X
+        written += X.best_finals(output_dir, res.get('crs') or None)
+    except Exception as e:
+        print(f'[Job] RIVAL_BEST_FINAL not written: {type(e).__name__}: {e}')
     return written
 
 
@@ -1692,6 +1699,12 @@ def _finish_job(job: Dict, out_root: str, scene, manifest: List[Dict], t_job: fl
         print(f"[Job] best for {ch} by ground truth: {b['detector']} + {b['matcher']} {b['ransac']} "
               f"{b['sweep']} (truth RMSE {b['truth_rmse_m']:.1f} m) -> {dst}")
     cross = run_cross(job, out_root, scene.working_crs)
+    try:                                       # the best single configuration, thinned the same way
+        import automatch_cross as X
+        X.best_finals(out_root, scene.working_crs,
+                      int(500 if job.get('cross_max_points') is None else job['cross_max_points']))
+    except Exception as e:
+        print(f'[Job] RIVAL_BEST_FINAL not written: {type(e).__name__}: {e}')
     emit({'event': 'done', 'manifest': man_path, 'best': best_files, 'truth': truth_files, 'cross': cross,
           'minutes': round((time.time() - t_job) / 60.0, 2)})
     print(f'[Job] done in {(time.time() - t_job) / 60.0:.1f} min; manifest {man_path}')
