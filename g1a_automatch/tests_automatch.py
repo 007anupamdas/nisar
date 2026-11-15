@@ -4048,6 +4048,40 @@ def test_refsubset(tmp):
           [os.path.basename(p) for p in RS.pick(fp, RS.G1A_REGION, 1)], ['LC81500402016314LGN00_B8.tif'])
 
 
+def test_worker_cache_safety(tmp):
+    """Two GPU workers on one job: the pair folder is built by one at a time
+    (the other waits, then reads the cache), and a resume that reruns says
+    which settings changed."""
+    import threading
+    import time as _t
+    import automatch_engine as E
+    import automatch_job as J
+    d = os.path.join(tmp, 'pairs_lock')
+    os.makedirs(d)
+    order = []
+
+    def worker(name, hold):
+        with E._dir_lock(d, poll_s=0.05):
+            order.append(f'{name}+')
+            _t.sleep(hold)
+            order.append(f'{name}-')
+    a = threading.Thread(target=worker, args=('a', 0.4))
+    a.start()
+    _t.sleep(0.1)
+    b = threading.Thread(target=worker, args=('b', 0.0))
+    b.start()
+    a.join()
+    b.join()
+    check('workers: the second waits until the first has built the pairs; the lock is gone after',
+          (order, os.path.exists(os.path.join(d, '.automatch.lock'))), (['a+', 'a-', 'b+', 'b-'], False))
+    job = J.normalize({'input_path': '', 'max_expected_error_m': 25000})
+    kp = os.path.join(tmp, 'SWEEP_KEY.json')
+    with open(kp, 'w') as f:
+        json.dump(J._key_blob(job, 512, None), f)
+    why = J._key_diff(kp, J._key_blob(dict(job, max_expected_error_m=15000), 512, None))
+    check('resume: a rerun names the setting that changed', 'max_expected_error_m: 25000 -> 15000' in why, True)
+
+
 def test_stretch():
     """The contrast stretch before matching follows stretch_percentiles: at 90
     the brightest tenth saturates and the rest spreads over more grey levels."""
@@ -4838,6 +4872,7 @@ def main():
         test_refs(tmp)
         test_ref_hull_cache(tmp)
         test_refsubset(tmp)
+        test_worker_cache_safety(tmp)
         test_rival_parity(a.rival)
         test_engine_helpers()
         test_nisar_h5(tmp)

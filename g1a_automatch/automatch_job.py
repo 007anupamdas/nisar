@@ -1004,9 +1004,8 @@ _RESULT_NEUTRAL_KEYS = {'output_dir', 'temp_dir', 'resume', 'debug', 'rival_max_
                         'cross_top_n', 'cross_min_agree', 'cross_cell_km', 'cross_keep_per_cell'}
 
 
-def _sweep_key(job: Dict, win: int, nf: Optional[int]) -> str:
-    """Fingerprint of everything that shapes one sweep point's results, so
-    'resume' only reuses results produced with the same settings and input."""
+def _key_blob(job: Dict, win: int, nf: Optional[int]) -> Dict:
+    """What the resume fingerprint of one sweep point is made of."""
     blob = {k: v for k, v in job.items() if k not in _RESULT_NEUTRAL_KEYS}
     blob.update({'_window': win, '_num_features': nf, '_v': 1})
     try:
@@ -1014,7 +1013,28 @@ def _sweep_key(job: Dict, win: int, nf: Optional[int]) -> str:
         blob['_input'] = [st.st_size, int(st.st_mtime)]
     except OSError:
         pass
-    return hashlib.sha1(json.dumps(blob, sort_keys=True, default=str).encode()).hexdigest()[:16]
+    return json.loads(json.dumps(blob, sort_keys=True, default=str))
+
+
+def _sweep_key(job: Dict, win: int, nf: Optional[int]) -> str:
+    """Fingerprint of everything that shapes one sweep point's results, so
+    'resume' only reuses results produced with the same settings and input."""
+    return hashlib.sha1(json.dumps(_key_blob(job, win, nf), sort_keys=True).encode()).hexdigest()[:16]
+
+
+def _key_diff(path: str, now: Dict) -> str:
+    """Which settings differ from the finished run's (SWEEP_KEY*.json), for the log."""
+    try:
+        with open(path, encoding='utf-8') as f:
+            was = json.load(f)
+    except (OSError, ValueError):
+        return 'no record of the earlier settings (run before this version)'
+    keys = sorted(k for k in set(was) | set(now) if was.get(k) != now.get(k))
+    out = []
+    for k in keys[:6]:
+        a, b = json.dumps(was.get(k), default=str), json.dumps(now.get(k), default=str)
+        out.append(f'{k}: {a[:40]} -> {b[:40]}')
+    return '; '.join(out) + (f' and {len(keys) - 6} more' if len(keys) > 6 else '')
 
 
 def _best_score(record: Dict) -> Optional[float]:
@@ -1413,7 +1433,9 @@ def run_job(job: Dict) -> Dict:
             records = pd.read_csv(summary_csv).to_dict('records')
         else:
             if job['resume'] and os.path.exists(summary_csv):
-                print(f'[Job] {tag}: settings or input changed since the finished run -- running again')
+                why = _key_diff(os.path.join(out_dir, f'SWEEP_KEY{suffix}.json'), _key_blob(job, win, nf))
+                print(f'[Job] {tag}: settings or input changed since the finished run -- running again'
+                      + (f' ({why})' if why else ''))
             if os.path.exists(key_path):
                 os.remove(key_path)
             cfg = _config_for(job, win, nf, res, out_dir)
@@ -1424,6 +1446,8 @@ def run_job(job: Dict) -> Dict:
                 records = E.AutoMatchPipeline(cfg).run(job['input_path'], detectors)
                 with open(key_path, 'w') as fh:
                     fh.write(key)
+                with open(os.path.join(out_dir, f'SWEEP_KEY{suffix}.json'), 'w', encoding='utf-8') as fh:
+                    json.dump(_key_blob(job, win, nf), fh, indent=1, sort_keys=True, default=str)
             except Exception as e:
                 print(f'[Job] {tag} FAILED: {type(e).__name__}: {e}')
                 traceback.print_exc()

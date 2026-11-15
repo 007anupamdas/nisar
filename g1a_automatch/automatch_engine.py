@@ -1195,7 +1195,15 @@ def _hull_cache_put(key: str, value: str) -> None:
         tmp = f'{path}.{os.getpid()}.tmp'
         with open(tmp, 'w', encoding='utf-8') as f:
             json.dump(disk, f)
-        os.replace(tmp, path)
+        for attempt in range(20):          # Windows: the other worker may be reading it this instant
+            try:
+                os.replace(tmp, path)
+                break
+            except PermissionError:
+                time.sleep(0.2 + 0.1 * attempt)
+        else:
+            os.remove(tmp)
+            raise PermissionError(f'{path} stayed locked')
     except OSError as e:                   # a read-only home: the cache stays in memory for this run
         print(f'[RefFetch] reference hull cache not written ({type(e).__name__}: {e})')
 
@@ -1614,6 +1622,47 @@ class InputScene:
 # =============================================================================
 # PREPROCESSOR
 # =============================================================================
+class _dir_lock:
+    """with _dir_lock(folder): one process at a time in a folder (a lock file
+    made exclusively; others wait, polling). A lock older than stale_s (a run
+    that died) is taken over."""
+
+    def __init__(self, folder: str, stale_s: float = 3 * 3600.0, poll_s: float = 2.0):
+        self.path = os.path.join(folder, '.automatch.lock')
+        self.stale_s, self.poll_s, self.fd = stale_s, poll_s, None
+
+    def __enter__(self):
+        waited = False
+        while True:
+            try:
+                self.fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(self.fd, str(os.getpid()).encode())
+                return self
+            except FileExistsError:
+                try:
+                    if time.time() - os.path.getmtime(self.path) > self.stale_s:
+                        os.remove(self.path)
+                        continue
+                except OSError:
+                    continue
+                if not waited:
+                    print(f'[Cache] {os.path.dirname(self.path)} is being built by another worker -- waiting',
+                          flush=True)
+                    waited = True
+                time.sleep(self.poll_s)
+
+    def __exit__(self, *a):
+        try:
+            os.close(self.fd)
+        except OSError:
+            pass
+        try:
+            os.remove(self.path)
+        except OSError:
+            pass
+        return False
+
+
 def pair_cache_key(scene: 'InputScene', channel: str, reference_dir: str,
                    config: 'PipelineConfig') -> str:
     blob = json.dumps({
@@ -5484,6 +5533,10 @@ class AutoMatchPipeline:
         key = pair_cache_key(scene, channel, ref_dir, cfg_for_key)
         pre = DiskBasedPreprocessor(pair_dir, target_res, ref_band, cfg.reference_fill_values)
 
+        with _dir_lock(pair_dir):      # parallel GPU workers: one builds the pairs, the other then reads them
+            return self._load_or_build_pairs(cfg, scene, channel, ref_dir, tag, base_cache, pre, key)
+
+    def _load_or_build_pairs(self, cfg, scene, channel, ref_dir, tag, base_cache, pre, key):
         pairs = pre.load_existing_pairs(key) if (cfg.use_disk_cache and cfg.check_existing_pairs) else None
         if pairs is None:
             report('stage', stage='footprint', channel=channel)
