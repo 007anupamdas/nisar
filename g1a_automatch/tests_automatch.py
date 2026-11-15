@@ -2874,6 +2874,27 @@ def test_cross_check(tmp):
     check('cross thin: RIVAL_BEST gets its RIVAL_BEST_FINAL file the same way (and a FINAL file is not thinned again)',
           (os.path.basename(fo), 350 < len(R.read_rival_csv(fo)) <= 500, X.final_of(fo, 'EPSG:32643', 500)),
           ('RIVAL_BEST_FINAL_SCENE_band1.csv', True, ''))
+    import automatch_truth as T
+    jd = os.path.join(tmp, 'crashed_job')
+    os.makedirs(jd, exist_ok=True)
+    wkt = ('PROJCS["WGS 84 / Lambert Conformal Conic",GEOGCS["WGS 84",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,'
+           '298.257223563]],PRIMEM["Greenwich",0],UNIT["degree",0.0174532925199433]],PROJECTION["Lambert_Conformal_'
+           'Conic_2SP"],PARAMETER["latitude_of_origin",27],PARAMETER["central_meridian",62],PARAMETER["standard_'
+           'parallel_1",27.3],PARAMETER["standard_parallel_2",26.6],PARAMETER["false_easting",0],PARAMETER["false_'
+           'northing",0],UNIT["metre",1]]')
+    with open(os.path.join(jd, 'automatch.log'), 'w') as f:
+        f.write(f'[Job] x\n       working_crs: {wkt}[GPU 0] AUTOMATCH PIPELINE\n')
+    with open(os.path.join(jd, 'job_used.json'), 'w') as f:
+        json.dump({'input_path': '/maintenance/none/G1A_HS_x.tif', 'output_dir': '/maintenance/out/crashed_job'}, f)
+    check('working CRS: a job that ended before its manifest, input on the server: read from its log',
+          T.working_crs_of(jd), wkt)
+    os.remove(os.path.join(jd, 'automatch.log'))
+    try:
+        T.working_crs_of(jd)
+        said = ''
+    except ValueError as e:
+        said = str(e)
+    check('working CRS: nowhere to read it: says to give the share mapping', '--share-local' in said, True)
     top, how = X.pick_top(cfgs, 5, 25000.0, 1000.0)
     names = [c['detector'] for c in top]
     check('cross: without truth, the consistently wrong detector is not among the top by agreement',

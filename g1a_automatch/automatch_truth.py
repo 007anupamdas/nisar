@@ -783,20 +783,65 @@ def consensus_settings(output_dir: str) -> Optional[Dict]:
             'model': job['consensus_model'], 'surface_degree': job['consensus_surface']}
 
 
+def crs_from_log(output_dir: str) -> Optional[str]:
+    """The working CRS a job's log names ('working_crs: <WKT or EPSG>')."""
+    import re
+    try:
+        with open(os.path.join(output_dir, 'automatch.log'), encoding='utf-8', errors='replace') as f:
+            head = f.read(400000)
+    except OSError:
+        return None
+    for m in re.finditer(r'working_crs:\s*(\S.*)', head):
+        text = m.group(1).split('[GPU ')[0].strip()
+        # a relayed line can run on into the next: keep the balanced WKT
+        depth, end = 0, None
+        for i, ch in enumerate(text):
+            depth += ch == '['
+            if ch == ']':
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+        text = text[:end] if end else text.split()[0]
+        try:
+            from pyproj import CRS
+            CRS.from_user_input(text)
+            return text
+        except Exception:
+            continue
+    return None
+
+
 def working_crs_of(output_dir: str) -> Optional[str]:
-    man = os.path.join(output_dir, 'RUN_MANIFEST.csv')
-    if os.path.exists(man):
-        m = pd.read_csv(man)
+    """The working CRS of a job folder, from what the job left: its manifest
+    (also a GPU worker's, when the job ended before the merged one), its log,
+    and only then the input image (as this machine reaches it)."""
+    for man in [os.path.join(output_dir, 'RUN_MANIFEST.csv')] + sorted(
+            glob.glob(os.path.join(output_dir, 'RUN_MANIFEST_gpu*.csv'))):
+        try:
+            m = pd.read_csv(man)
+        except Exception:
+            continue
         if 'working_crs' in m.columns and m['working_crs'].notna().any():
             return str(m['working_crs'].dropna().iloc[0])
+    crs = crs_from_log(output_dir)
+    if crs:
+        return crs
     job = os.path.join(output_dir, 'job_used.json')
     if os.path.exists(job):
+        import automatch_cross as X
         import automatch_engine as E
         with open(job, encoding='utf-8') as f:
             j = json.load(f)
-        sc = E.InputScene(j['input_path'], E.PipelineConfig(nisar_band=j.get('nisar_band', 'auto'),
-                                                            nisar_frequency=j.get('nisar_frequency', 'A')))
-        return sc.working_crs
+        inp = j.get('input_path') or ''
+        for loc in (inp, X.local_path(inp, output_dir, j.get('output_dir') or ''), X._by_share(inp)):
+            if loc and os.path.exists(loc):
+                sc = E.InputScene(loc, E.PipelineConfig(nisar_band=j.get('nisar_band', 'auto'),
+                                                        nisar_frequency=j.get('nisar_frequency', 'A')))
+                return sc.working_crs
+        raise ValueError(f'the working CRS of {output_dir} is not in its manifest or log, and its input {inp} is '
+                         f'not reachable from here: give --share-local / --share-server (e.g. V:\\ and '
+                         f'/maintenance/)')
     return None
 
 

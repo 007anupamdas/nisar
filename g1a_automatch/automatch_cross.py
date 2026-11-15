@@ -711,7 +711,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(t.to_string(index=False))
         t.to_csv(os.path.join(a.output_dir, 'CROSS_FROM_TRUTH_POINTS.csv'), index=False)
         return 0 if len(t) else 1
-    best_finals(a.output_dir, None, a.max_points)
+    try:
+        best_finals(a.output_dir, None, a.max_points)
+    except ValueError as e:
+        print(f'[Cross] {e}')
+        return 2
     res = run(a.output_dir, a.top, a.min_agree, a.cell_km, a.tolerance_m, a.truth, keep=a.keep,
               max_points=_job_max_points(a.output_dir) if a.max_points is None else a.max_points)
     return 0 if res else 1
