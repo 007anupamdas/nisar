@@ -42,6 +42,14 @@ runs (--recompute redoes it).
     python automatch_job.py bench <folder of job outputs> [--jobs 335-366] [--success-px 3]
                                  [--top 5 --min-agree 0 --keep 3 --cell-km 25]   # the cross-check
 
+With --cloud-free every job used is also scored without its matches on
+cloud (automatch_cloudfilter: the cloud method by the job's sensor, results
+in <job>/CLOUDFREE/, read back when already there): BENCH_JOBS.csv gains
+cloudfree_* columns (share of matches rejected, best detector and RMSE),
+BENCH_DETECTORS.csv each detector's cloudfree_rmse_m / _px / _reached beside
+its unfiltered result, and BENCH_DETECTORS_CLOUDFREE.csv /
+BENCH_SUMMARY_CLOUDFREE.csv are the same tables from the filtered points.
+
 Every job used is cross-checked first (automatch_cross: the top detectors'
 agreement per cell), read back where done with the same settings; its
 reliability and RMSE go into BENCH_JOBS.csv and every row into CROSS_ALL.csv.
@@ -270,6 +278,33 @@ def _ocm_cloud(d: str, loc_in: str, scene: str, pixel_m, recompute: bool, model_
         return None
 
 
+def cloudfree_of(d: str, name: str, opts: Dict, recompute: bool = False) -> Tuple[Dict, pd.DataFrame]:
+    """(cloudfree_* columns of the job row, the detectors' best results from
+    the cloud-filtered points) of one job: <job>/CLOUDFREE read back when it
+    is there and newer than the job's ranking, else made (cloudfilter)."""
+    import automatch_cloudfilter as CF
+    free = os.path.join(d, 'CLOUDFREE')
+    sp, rp, jp = (os.path.join(free, 'CLOUDFREE_SUMMARY.csv'), os.path.join(free, 'TRUTH_RANKING.csv'),
+                  os.path.join(d, 'TRUTH_RANKING.csv'))
+    row = None
+    if (not recompute and os.path.exists(sp) and os.path.exists(rp) and os.path.exists(jp)
+            and os.path.getmtime(rp) >= os.path.getmtime(jp)):
+        try:
+            row = pd.read_csv(sp).iloc[0].to_dict()
+        except Exception:
+            row = None
+    if row is None:
+        row = CF.filter_job(d, overrides=opts.get('overrides'), classes=opts.get('classes'),
+                            dilate_px=opts.get('dilate_px'), cross=opts.get('cross'))
+    out = {'cloudfree_method': row.get('cloud_method'), 'cloudfree_cloud_pct': row.get('cloud_pct'),
+           'cloudfree_rejected_pct': row.get('rejected_pct'), 'cloudfree_best_detector': row.get('best_after'),
+           'cloudfree_best_rmse_m': row.get('rmse_after_m'), 'cloudfree_reached': row.get('reached_after')}
+    for k, v in row.items():
+        if str(k).startswith('cross_') and str(k).endswith('_rmse_m') and pd.notna(v):
+            out['cloudfree_cross_rmse_m'] = v
+    return out, detectors_of(free)
+
+
 def bench_job(d: str, recompute: bool = False, cloud_model_dir: Optional[str] = None) -> Tuple[Dict, pd.DataFrame]:
     """(job row, detector rows) for one finished job."""
     import automatch_cross as X
@@ -457,7 +492,8 @@ def newest_per_scene(metas: List[Dict]) -> Dict[str, Optional[str]]:
 
 def batch(parent: str, jobs: str = '', success_px: float = 3.0, recompute: bool = False,
           all_jobs: bool = False, cross: Optional[Dict] = None, cloud_model_dir: Optional[str] = None,
-          accuracy: Optional[Dict] = None, shard: Optional[Tuple[int, int]] = None) -> int:
+          accuracy: Optional[Dict] = None, shard: Optional[Tuple[int, int]] = None,
+          cloudfree: Optional[Dict] = None) -> int:
     """Benchmark the finished jobs under parent; of several jobs on one scene
     only the newest counts (newest_per_scene) unless all_jobs. Each job used
     is cross-checked first (automatch_cross.cross_job with the settings in
@@ -483,7 +519,7 @@ def batch(parent: str, jobs: str = '', success_px: float = 3.0, recompute: bool 
         except Exception as e:
             print(f'[Bench] SCENE_NOTES.csv unreadable: {type(e).__name__}: {e}')
     sup = {} if all_jobs else newest_per_scene(list(metas.values()))
-    jrows, drows, xrows, arows = [], [], [], []
+    jrows, drows, xrows, arows, crows = [], [], [], [], []
     part = f'_gpu{shard[0]}' if shard else ''
     for idx, d in enumerate(found):
         if shard and idx % shard[1] != shard[0]:          # a GPU worker: its share of the jobs
@@ -517,6 +553,22 @@ def batch(parent: str, jobs: str = '', success_px: float = 3.0, recompute: bool 
             for k in ('water_pct', 'notes'):
                 if k in note and pd.notna(note.get(k)):
                     row[k] = note[k]
+        if cloudfree is not None:
+            try:
+                cf_row, cf_det = cloudfree_of(d, row['job'], cloudfree, recompute)
+                row.update(cf_row)
+                if not cf_det.empty:
+                    px = row.get('pixel_m')
+                    cf_det = cf_det.assign(job=row['job'], rmse_px=(cf_det['truth_rmse_m'] / px) if px else np.nan)
+                    crows.append(cf_det.assign(sensor=row['sensor'], band=row['band'], cloud_pct=row.get('cloud_pct'),
+                                               error_km=row.get('error_km'), pixel_m=row.get('pixel_m')))
+                    if not det.empty:
+                        add = cf_det[['channel', 'detector', 'truth_rmse_m', 'rmse_px', 'truth_reached']].rename(
+                            columns={'truth_rmse_m': 'cloudfree_rmse_m', 'rmse_px': 'cloudfree_rmse_px',
+                                     'truth_reached': 'cloudfree_reached'})
+                        det = det.merge(add, how='left', on=['channel', 'detector'])
+            except Exception as e:
+                print(f"[Bench] {row['job']}: no cloud-free result ({type(e).__name__}: {e})")
         jrows.append(row)
         print(f"[Bench] {row['job']}: {row['sensor']} {row['band']}, error {row.get('error_km', '?')} km, "
               f"clouds {row.get('cloud_pct', '?')} %, best {row.get('best_detector', '-')} "
@@ -539,7 +591,8 @@ def batch(parent: str, jobs: str = '', success_px: float = 3.0, recompute: bool 
                     print(f"[Bench] {row['job']}: match accuracy failed ({type(e).__name__}: {e})")
     if shard:                                  # a GPU worker: its parts; the parent merges and summarises
         pd.DataFrame(jrows).to_csv(os.path.join(parent, f'BENCH_JOBS{part}.csv'), index=False)
-        for name, frames in (('BENCH_DETECTORS', drows), ('ACCURACY_ALL', arows)):
+        for name, frames in (('BENCH_DETECTORS', drows), ('ACCURACY_ALL', arows),
+                             ('BENCH_DETECTORS_CLOUDFREE', crows)):
             if frames:
                 pd.concat(frames, ignore_index=True).to_csv(os.path.join(parent, f'{name}{part}.csv'), index=False)
         if xrows:
@@ -549,7 +602,7 @@ def batch(parent: str, jobs: str = '', success_px: float = 3.0, recompute: bool 
     if not jrows:
         print(f'[Bench] no finished automatch job under {parent}')
         return 1
-    return _write_bench(parent, pd.DataFrame(jrows), drows, xrows, arows, success_px)
+    return _write_bench(parent, pd.DataFrame(jrows), drows, xrows, arows, success_px, crows)
 
 
 def finish_sharded(parent: str, success_px: float = 3.0) -> int:
@@ -559,7 +612,7 @@ def finish_sharded(parent: str, success_px: float = 3.0) -> int:
 
     def parts(name):
         out = []
-        for p in sorted(glob.glob(os.path.join(parent, f'{name}_gpu*.csv'))):
+        for p in sorted(glob.glob(os.path.join(parent, f'{name}_gpu[0-9]*.csv'))):
             try:
                 df = pd.read_csv(p)
             except pd.errors.EmptyDataError:          # a worker whose share held no usable job
@@ -574,11 +627,11 @@ def finish_sharded(parent: str, success_px: float = 3.0) -> int:
     jobs_df = pd.concat(jobs, ignore_index=True).sort_values('job', key=lambda s: s.astype(str))
     return _write_bench(parent, jobs_df, parts('BENCH_DETECTORS'),
                         pd.concat(parts('CROSS_ALL'), ignore_index=True).to_dict('records') if parts('CROSS_ALL')
-                        else [], parts('ACCURACY_ALL'), success_px)
+                        else [], parts('ACCURACY_ALL'), success_px, parts('BENCH_DETECTORS_CLOUDFREE'))
 
 
 def _write_bench(parent: str, jobs_df: pd.DataFrame, drows: list, xrows: list, arows: list,
-                 success_px: float) -> int:
+                 success_px: float, crows: Optional[list] = None) -> int:
     """BENCH_JOBS / BENCH_DETECTORS / BENCH_SUMMARY / CROSS_ALL / ACCURACY_* of a benchmark."""
     np_ = os.path.join(parent, 'SCENE_NOTES.csv')
     jobs_df.to_csv(os.path.join(parent, 'BENCH_JOBS.csv'), index=False)
@@ -595,9 +648,19 @@ def _write_bench(parent: str, jobs_df: pd.DataFrame, drows: list, xrows: list, a
         dets['error_class'] = [_class(v, ERROR_CLASSES) for v in dets['error_km']]
         keep = ['job', 'sensor', 'band', 'pixel_m', 'cloud_pct', 'cloud_class', 'error_km', 'error_class',
                 'detector', 'matcher', 'sweep', 'ransac', 'truth_rmse_m', 'rmse_px', 'truth_reached', 'truth_total',
-                'detector_rank', 'parallel_share', 'windows_parallel']
+                'detector_rank', 'parallel_share', 'windows_parallel', 'cloudfree_rmse_m', 'cloudfree_rmse_px',
+                'cloudfree_reached']
         dets = dets[[c for c in keep if c in dets.columns]]
         dets.to_csv(os.path.join(parent, 'BENCH_DETECTORS.csv'), index=False)
+        if crows:                               # the same tables from the cloud-filtered points
+            cf = pd.concat(crows, ignore_index=True)
+            cf['cloud_class'] = [_class(v, CLOUD_CLASSES) for v in cf['cloud_pct']]
+            cf['error_class'] = [_class(v, ERROR_CLASSES) for v in cf['error_km']]
+            cf = cf[[c for c in keep if c in cf.columns]]
+            cf.to_csv(os.path.join(parent, 'BENCH_DETECTORS_CLOUDFREE.csv'), index=False)
+            summarize(cf, success_px).to_csv(os.path.join(parent, 'BENCH_SUMMARY_CLOUDFREE.csv'), index=False)
+            print('[Bench] cloud-free: BENCH_DETECTORS_CLOUDFREE.csv, BENCH_SUMMARY_CLOUDFREE.csv '
+                  '(matches on cloud left out)')
         s = summarize(dets, success_px)
         s.to_csv(os.path.join(parent, 'BENCH_SUMMARY.csv'), index=False)
         print(f'[Bench] best detectors per sensor (success: half of the truth points within {success_px:g} px):')
@@ -652,6 +715,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help='with --accuracy: also the sub-cell variants (e.g. 256 512), made from the saved matches; '
                          'sizes made before stay in the results')
     ap.add_argument('--subcell-keep', type=int, default=10, help='matches kept per sub-cell')
+    ap.add_argument('--cloud-free', action='store_true',
+                    help='also score every job without its matches on cloud (cloudfilter; method by sensor)')
+    ap.add_argument('--cloud-free-method', default='', help='cloud method for --cloud-free (default: by sensor)')
+    ap.add_argument('--cloud-free-classes', type=int, nargs='+', default=None,
+                    help='classes rejected (default the job\'s, else 1 thick cloud; 2 thin, 3 shadow)')
     ap.add_argument('--shard', default='', help=argparse.SUPPRESS)      # a GPU worker: i/n of the jobs
     a = ap.parse_args(argv)
     global DEVICE
@@ -677,8 +745,16 @@ def main(argv: Optional[List[str]] = None) -> int:
                                      'cell_km': a.cell_km, 'tol_m': a.tolerance_m}
     accuracy = ({'subcell_px': [s for s in a.subcell_px if s > 0], 'keep': a.subcell_keep}
                 if (a.accuracy or a.subcell_px) else None)
+    cloudfree = None
+    if a.cloud_free:
+        over = {'cloud_method': a.cloud_free_method} if a.cloud_free_method else {}
+        if DEVICE:
+            over['cloud_device'] = DEVICE
+        cloudfree = {'overrides': over, 'classes': a.cloud_free_classes,
+                     'cross': {'top_n': 0 if a.no_cross else a.top, 'min_agree': a.min_agree, 'cell_km': a.cell_km}}
     return batch(a.folder, a.jobs, a.success_px, a.recompute, a.all_jobs, cross,
-                 a.cloud_model_dir if a.cloud == 'omnicloudmask' else None, accuracy, J.parse_shard(a.shard))
+                 a.cloud_model_dir if a.cloud == 'omnicloudmask' else None, accuracy, J.parse_shard(a.shard),
+                 cloudfree)
 
 
 if __name__ == '__main__':

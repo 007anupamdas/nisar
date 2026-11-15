@@ -377,7 +377,8 @@ def find_jobs(parent: str, jobs: Optional[set] = None) -> Tuple[List[str], Dict[
     one level below it (output/output359), optionally only those whose
     number (the last digits of the name) is in jobs."""
     cands = [parent] + sorted(os.path.join(parent, n) for n in os.listdir(parent)
-                              if os.path.isdir(os.path.join(parent, n)))
+                              if os.path.isdir(os.path.join(parent, n))
+                              and n not in ('CLOUDFREE', 'rival', '_cache', '_queue'))   # a job's own folders
     found, skipped = [], {}
     for d in cands:
         name = os.path.basename(os.path.normpath(d))

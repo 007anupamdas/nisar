@@ -594,11 +594,22 @@ def test_e2e_cloudfilter(tmp):
     xs = np.array([b.left + 0.25 * (b.right - b.left), b.left + 0.75 * (b.right - b.left), b.left - 5000.0])
     check('cloudfilter: points on cloud rejected, clear and outside kept',
           keep(xs, np.full(3, (b.top + b.bottom) / 2)).tolist(), [False, True, True])
+    cfg = {'cloud_method': 'auto', 'cloud_method_MV': 'auto', 'cloud_method_HS': 'auto', 'cloud_bands': []}
+    check('cloudfilter: MV without a chosen method gets OmniCloudMask on bands 5, 4, 6; HS keeps its tests; '
+          'a chosen method stays',
+          (CF.sensor_settings(cfg, 'MV').get('cloud_method_MV'), CF.sensor_settings(cfg, 'MV').get('cloud_bands'),
+           CF.sensor_settings(cfg, 'HS') == cfg, CF.sensor_settings(cfg, 'MV', {'cloud_method': 'vnir'}) == cfg,
+           CF.sensor_settings(dict(cfg, cloud_method_MV='csmask'), 'MV').get('cloud_method_MV')),
+          ('omnicloudmask', ['band5', 'band4', 'band6'], True, True, 'csmask'))
     before = os.path.getmtime(os.path.join(out, 'TRUTH_RANKING.csv'))
     row = CF.filter_job(out, mask_path=mp, classes=[1], dilate_px=0, cross={'top_n': 0})
     free = os.path.join(out, 'CLOUDFREE')
     rk = pd.read_csv(os.path.join(free, 'TRUTH_RANKING.csv')) if os.path.exists(
         os.path.join(free, 'TRUTH_RANKING.csv')) else pd.DataFrame()
+    import automatch_bench as B
+    cf_row, cf_det = B.cloudfree_of(out, 'out_truth', {})
+    check('bench --cloud-free: the job\'s CLOUDFREE result read back (rejected share, detectors ranked)',
+          (cf_row.get('cloudfree_rejected_pct') == row.get('rejected_pct'), len(cf_det) > 0), (True, True))
     check('cloudfilter e2e: about half the matches rejected, scored again in CLOUDFREE/, the job\'s own '
           'ranking untouched, the filter switched off afterwards',
           (20 < (row.get('rejected_pct') or 0) < 80, len(rk) > 0, os.path.exists(os.path.join(free, 'CLOUDFREE_SUMMARY.csv')),

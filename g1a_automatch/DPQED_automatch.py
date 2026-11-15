@@ -1046,6 +1046,12 @@ class BenchDialog(QtWidgets.QDialog):
         ha.addWidget(self.subcell_keep)
         f.addRow(ha)
         self.accuracy.toggled.connect(lambda on: [w.setEnabled(on) for w in (self.subcell, self.subcell_keep)])
+        self.cloud_free = QtWidgets.QCheckBox('cloud-free: also score every job without its matches on cloud')
+        self.cloud_free.setToolTip('The cloud mask of each job\'s input by its sensor (MV: OmniCloudMask on bands '
+                                   '5, 4, 6; HV VNIR, HS SWIR, ML infrared tests), results in <job>/CLOUDFREE/; '
+                                   'adds cloudfree_* columns and BENCH_*_CLOUDFREE.csv')
+        self.cloud_free.setChecked(str(settings.value('bench_cloud_free', 'false')).lower() == 'true')
+        f.addRow(self.cloud_free)
         self.subcell.setEnabled(False)
         self.subcell_keep.setEnabled(False)
         self.all_jobs = QtWidgets.QCheckBox('count every job (else only the newest job of each scene)')
@@ -1074,6 +1080,7 @@ class BenchDialog(QtWidgets.QDialog):
             return
         self.settings.setValue('bench_folder', self.folder.text())
         self.settings.setValue('bench_jobs', self.jobs.text())
+        self.settings.setValue('bench_cloud_free', 'true' if self.cloud_free.isChecked() else 'false')
         self.settings.setValue('pack/share_local', self.share_local.text().strip())
         self.settings.setValue('pack/share_server', self.share_server.text().strip())
         self.accept()
@@ -1088,6 +1095,8 @@ class BenchDialog(QtWidgets.QDialog):
             a += ['--recompute']
         if self.all_jobs.isChecked():
             a += ['--all-jobs']
+        if self.cloud_free.isChecked():
+            a += ['--cloud-free']
         if self.accuracy.isChecked():
             a += ['--accuracy']
             sizes = [s for s in parse_int_list(self.subcell.text(), 'sub-cells') if s > 0]

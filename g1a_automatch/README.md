@@ -185,6 +185,8 @@ python automatch_job.py cloudfilter <job folder | folder of jobs> [--jobs 335-36
 
 The cloud mask of the job's input is made with the job's own cloud settings
 (the method per sensor, radiance scale and unit; `--method` overrides), every
+the method goes by the sensor where the job chose none: MV OmniCloudMask on
+bands 5, 4, 6 (`--mv-bands`), HV VNIR, HS SWIR, ML infrared tests), every
 match whose input position lies on cloud is left out, and the job is scored
 again into `<job>/CLOUDFREE/` (the job's own files are not touched):
 `RIVAL_CROSS_<band>.csv` (the file for RIVAL), `TRUTH_RANKING.csv`,
@@ -192,6 +194,12 @@ again into `<job>/CLOUDFREE/` (the job's own files are not touched):
 `CLOUDFREE_SUMMARY.csv` (cloud %, share of matches rejected, best
 configuration and RMSE before and after). A folder of jobs gets
 `CLOUDFREE_ALL.csv`. The input image must be reachable from where it runs.
+
+The benchmark takes these in with `--cloud-free` (GUI: *cloud-free* in
+Benchmark & cross-check): each job is filtered (or its `CLOUDFREE/` read
+back), `BENCH_JOBS.csv` and `BENCH_DETECTORS.csv` gain `cloudfree_*` columns
+beside the unfiltered results, and `BENCH_DETECTORS_CLOUDFREE.csv` /
+`BENCH_SUMMARY_CLOUDFREE.csv` are the same tables from the filtered points.
 
 ## Errors of kilometres
 

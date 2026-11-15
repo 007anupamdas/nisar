@@ -3,14 +3,17 @@ Cloud masking after the fact: reject the match points of finished jobs that
 fall on cloud, and score again what is left.
 
     python automatch_job.py cloudfilter <job folder | folder of jobs>
-        [--jobs 335-366] [--method auto|vnir|omnicloudmask|csmask|ir|swir|spectf]
+        [--jobs 335-366] [--method vnir|omnicloudmask|csmask|ir|swir] [--mv-bands 5 4 6]
         [--classes 1] [--dilate 2] [--device cuda:0]
         [--share-local V:\\ --share-server /maintenance/]
         [--top 5 --min-agree 3 --cell-km 25]
 
 For each job, the cloud mask of its input image is made with the job's own
 cloud settings (method per sensor, radiance scale and unit, ...; --method
-overrides), as a job with cloud masking would have made it. Every match
+overrides, for every image), as a job with cloud masking would have made it.
+Where the job chose no method, it goes by the sensor: MV OmniCloudMask on
+bands 5, 4, 6 (--mv-bands), HV the VNIR tests, HS the SWIR tests, ML the
+infrared tests. Every match
 whose input-image position lies on a masked class (--classes, default thick
 cloud; grown by --dilate px) is then left out wherever the job's matches
 are read, and the job is scored again, without touching its own files:
@@ -43,6 +46,26 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
 
+# What a sensor gets when neither the job nor the command line chose a cloud
+# method for it: MV: OmniCloudMask on bands 5, 4, 6 (red, green, NIR). The
+# other sensors keep the physical tests of their kind (HV VNIR, HS SWIR, ML infrared).
+SENSOR_DEFAULTS: Dict[str, Dict] = {'MV': {'cloud_method_MV': 'omnicloudmask',
+                                           'cloud_bands': ['band5', 'band4', 'band6']}}
+
+
+def sensor_settings(cfg: Dict, sensor: str, overrides: Optional[Dict] = None) -> Dict:
+    """cfg with SENSOR_DEFAULTS of this sensor, unless a method was chosen
+    (the job's cloud_method / cloud_method_<sensor>, or an override)."""
+    chosen = any(str(v or 'auto').lower() != 'auto' for v in (
+        cfg.get('cloud_method'), cfg.get(f'cloud_method_{sensor}'), (overrides or {}).get('cloud_method')))
+    if chosen or sensor not in SENSOR_DEFAULTS:
+        return cfg
+    d = dict(SENSOR_DEFAULTS[sensor])
+    if cfg.get('cloud_bands'):
+        d.pop('cloud_bands', None)
+    return dict(cfg, **d)
+
+
 def job_input(job_dir: str, job: Dict) -> str:
     """The job's input image as this machine sees it ('' when unreachable)."""
     import automatch_cross as X
@@ -71,6 +94,7 @@ def cloud_mask_for(job_dir: str, job: Dict, overrides: Optional[Dict] = None) ->
     class _Scene:
         raster_path = inp
     sensor = C.sensor_for(inp)
+    cfg = sensor_settings(cfg, sensor, overrides)
     if C.needs_model(cfg, sensor, inp):
         probs = C.check(cfg)
         if probs:
@@ -219,6 +243,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument('folder', help='a job output folder, or a folder of them')
     ap.add_argument('--jobs', default='', help="only these job numbers, e.g. '335-366, 370'")
     ap.add_argument('--method', default='', help='cloud method for every image (default: the job\'s; auto: by sensor)')
+    ap.add_argument('--mv-bands', type=int, nargs=3, default=None, metavar=('RED', 'GREEN', 'NIR'),
+                    help='MV with OmniCloudMask: its three bands (default 5 4 6)')
     ap.add_argument('--classes', type=int, nargs='+', default=None, help='masked classes (default the job\'s, else 1)')
     ap.add_argument('--dilate', type=int, default=None, help='grow the mask by px (default the job\'s, else 2)')
     ap.add_argument('--device', default='', help='cpu / cuda / cuda:N for a cloud model')
@@ -232,6 +258,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     import automatch_job as J
     X.SHARE = (a.share_local, a.share_server)
     over = {}
+    if a.mv_bands:
+        SENSOR_DEFAULTS['MV']['cloud_bands'] = [f'band{b}' for b in a.mv_bands]
     if a.method:
         over['cloud_method'] = a.method
     if a.device:
