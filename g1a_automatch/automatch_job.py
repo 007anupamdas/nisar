@@ -56,7 +56,8 @@ CODE_FILES = ('automatch_engine.py', 'automatch_job.py', 'automatch_imcui.py', '
               'automatch_rival.py', 'automatch_truth.py', 'automatch_weights.py', 'automatch_gpuaas.py',
               'automatch_native.py', 'imw_configs.py', 'automatch_cross.py', 'automatch_bench.py',
               'automatch_cloud.py', 'automatch_accuracy.py', 'automatch_cloudsweep.py', 'automatch_cloudphys.py',
-              'automatch_tirauxcloud.py', 'automatch_reflect.py', 'automatch_cloudmodels.py', 'automatch_refsubset.py')
+              'automatch_tirauxcloud.py', 'automatch_reflect.py', 'automatch_cloudmodels.py', 'automatch_refsubset.py',
+              'automatch_cloudfilter.py')
 
 
 def code_fingerprint() -> str:
@@ -165,25 +166,88 @@ def fan_out(script: str, argv: List[str], gpus: List[int], extra=None) -> int:
     return max([p.wait() for _, p in procs] or [0])
 
 
+def _read_text(path: str) -> str:
+    try:
+        with open(path, encoding='utf-8') as f:
+            return f.read().strip()
+    except OSError:
+        return ''
+
+
 def parse_shard(text) -> Optional[Tuple[int, int]]:
     """'i/n' -> (i, n), else None."""
     m = re.fullmatch(r'\s*(\d+)\s*/\s*(\d+)\s*', str(text or ''))
     return (int(m.group(1)), int(m.group(2))) if m and int(m.group(2)) > 1 else None
 
 
+def _unit_name(channel: str, tag: str) -> str:
+    """File name of one detector's result at one channel (queue and resume)."""
+    return re.sub(r'[^A-Za-z0-9._+-]+', '_', f'{channel}__{tag}')[:150]
+
+
+def _unit_key(job: Dict, win: int, nf: Optional[int]) -> str:
+    """Resume fingerprint of one detector's result at a sweep point: the
+    sweep point's, without who ran it (the detector list, the GPU, the queue)."""
+    return _sweep_key({k: v for k, v in job.items() if k not in ('detectors', '_shard', '_queue')}, win, nf)
+
+
+def install_queue(E, job: Dict, out_dir: str, tag: str, win: int, nf: Optional[int]) -> None:
+    """A GPU worker's hooks for one sweep point: before each detector (per
+    channel) it claims it in the job's queue folder (a file made exclusively;
+    taken already = another GPU runs it), so a GPU that is free takes the next
+    one, whichever GPU the others are on and however long they take (or how
+    fast they fail, e.g. missing weights). Each result is kept in
+    <sweep>/_units/<channel>__<detector>.json with its fingerprint; with
+    resume, a finished ('ok') one is reused, whichever GPU made it."""
+    claims = os.path.join(job['_queue'], tag)
+    units = os.path.join(out_dir, '_units')
+    os.makedirs(claims, exist_ok=True)
+    os.makedirs(units, exist_ok=True)
+    key, shard = _unit_key(job, win, nf), job.get('_shard')
+
+    def claim(channel, dtag):
+        name = _unit_name(channel, dtag)
+        try:
+            fd = os.open(os.path.join(claims, name), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            return False
+        os.write(fd, str(shard).encode())
+        os.close(fd)
+        if job.get('resume'):
+            try:
+                with open(os.path.join(units, name + '.json'), encoding='utf-8') as f:
+                    saved = json.load(f)
+                if saved.get('key') == key and saved['record'].get('status') == 'ok':
+                    return saved['record']
+            except (OSError, ValueError, KeyError, AttributeError, TypeError):
+                pass
+        return True
+
+    def done(channel, dtag, rec):
+        path = os.path.join(units, _unit_name(channel, dtag) + '.json')
+        tmp = f'{path}.{os.getpid()}.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump({'key': key, 'gpu': shard, 'record': rec}, f, default=str)
+        os.replace(tmp, path)
+    E.CLAIM_HOOK, E.UNIT_DONE_HOOK = claim, done
+
+
 def run_sharded(job: Dict, gpus: List[int], out_root: str) -> List[Dict]:
-    """One worker process per GPU, each with its share of the detectors and
-    the device pinned (cloud mask, auto bands and preflight already done
-    here); their output is relayed with a [GPU n] prefix. Returns the merged
+    """One worker process per GPU, the device pinned (cloud mask, auto bands
+    and preflight already done here), all of them on one queue of the
+    detectors (install_queue): each GPU takes the next detector as soon as it
+    is free. Their output is relayed with a [GPU n] prefix. Returns the merged
     manifest rows of the workers (RUN_MANIFEST_gpu<n>.csv each)."""
-    shards = shard_detectors(list(job['detectors']), len(gpus))
+    dets = list(job['detectors'])
+    queue = os.path.join(out_root, '_queue', f'{time.strftime("%Y%m%d_%H%M%S")}_{os.getpid()}')
+    os.makedirs(queue, exist_ok=True)
+    print(f'[Job] {len(dets)} detector(s) on one queue for GPUs {", ".join(map(str, gpus))}: each GPU takes '
+          f'the next as soon as it is free', flush=True)
     procs, paths = [], []
-    for g, dets in zip(gpus, shards):
-        if not dets:
-            continue
+    for g in gpus:
         sub = {k: v for k, v in job.items() if not k.startswith('_') or k == '_channel_rasters'}
         sub.update(device=f'cuda:{g}', cloud_device=f'cuda:{g}' if job.get('cloud_device') else '',
-                   detectors=dets, _shard=g, _channel_rasters=job.get('_channel_rasters') or {},
+                   detectors=dets, _shard=g, _queue=queue, _channel_rasters=job.get('_channel_rasters') or {},
                    _window_prep=job.get('_window_prep') or 'none')
         jp = os.path.join(out_root, f'job_gpu{g}.json')
         with open(jp, 'w', encoding='utf-8') as f:
@@ -191,7 +255,6 @@ def run_sharded(job: Dict, gpus: List[int], out_root: str) -> List[Dict]:
         env = dict(os.environ)
         for k in ('CUDA_VISIBLE_DEVICES', 'AUTOMATCH_GPU'):
             env.pop(k, None)
-        print(f'[Job] GPU {g}: {len(dets)} detector(s): {", ".join(dets)}', flush=True)
         p = subprocess.Popen([sys.executable, os.path.abspath(__file__), 'run', jp], stdout=subprocess.PIPE,
                              stderr=subprocess.STDOUT, text=True, env=env, bufsize=1, encoding='utf-8',
                              errors='replace')
@@ -219,13 +282,24 @@ def run_sharded(job: Dict, gpus: List[int], out_root: str) -> List[Dict]:
     for t in threads:
         t.join()
     rows = []
+    claimed = [_read_text(os.path.join(dp, f)) for dp, _, fs in os.walk(queue) for f in fs]
+    ran = {g: claimed.count(str(g)) for g, _ in procs}
+    shutil.rmtree(queue, ignore_errors=True)
+    try:
+        os.rmdir(os.path.dirname(queue))
+    except OSError:
+        pass
+    print('[Job] detectors run per GPU: ' + ', '.join(f'GPU {g}: {n}' for g, n in ran.items()), flush=True)
     for (g, p), mp in zip(procs, paths):
         rc = p.wait()
         if rc != 0:
             print(f'[Job] GPU {g} worker ended with code {rc}', flush=True)
         if os.path.exists(mp):
             import pandas as pd
-            rows += pd.read_csv(mp).to_dict('records')
+            try:
+                rows += pd.read_csv(mp).to_dict('records')
+            except pd.errors.EmptyDataError:     # the other GPUs took every detector first
+                pass
         else:
             rows.append({'sweep': '', 'detector': f'(GPU {g} worker)', 'status': 'failed',
                          'error': f'no manifest from the GPU {g} worker (exit code {rc})'})
@@ -454,7 +528,7 @@ def normalize(job: Dict) -> Dict:
             _WARNED_KEYS.add(k)
             print(f'[Job] WARNING: {unknown_key_note(k)}', flush=True)
     out.update(copy.deepcopy({k: v for k, v in job.items() if k in DEFAULT_JOB}))
-    for k in ('_shard', '_channel_rasters', '_window_prep'):   # a GPU worker's share, handed down by its parent
+    for k in ('_shard', '_queue', '_channel_rasters', '_window_prep'):   # a GPU worker's, from its parent
         if job.get(k) is not None:
             out[k] = copy.deepcopy(job[k])
     if not out['temp_dir'] and out['output_dir']:
@@ -1473,8 +1547,8 @@ def run_job(job: Dict) -> Dict:
     shard = job.get('_shard')
     t_job = time.time()
     if gpus:
-        print(f'[Job] {len(detectors)} detectors over GPUs {gpus}: one worker per GPU, the same job folder',
-              flush=True)
+        print(f'[Job] {len(detectors)} detectors over GPUs {gpus}: one worker per GPU, the same job folder, '
+              f'one queue', flush=True)
         manifest = run_sharded(job, gpus, out_root)
         return _finish_job(job, out_root, scene, manifest, t_job)
     print(f'[Job] {scene.name}: {len(sweep)} sweep point(s), working resolution {res} m, '
@@ -1495,11 +1569,12 @@ def run_job(job: Dict) -> Dict:
             with open(key_path) as fh:
                 prev = fh.read().strip()
         t0 = time.time()
-        if job['resume'] and os.path.exists(summary_csv) and prev == key:
+        queued = bool(job.get('_queue'))           # a GPU worker on the shared queue: resume per detector
+        if not queued and job['resume'] and os.path.exists(summary_csv) and prev == key:
             print(f'[Job] {tag}: reusing finished results ({summary_csv})')
             records = pd.read_csv(summary_csv).to_dict('records')
         else:
-            if job['resume'] and os.path.exists(summary_csv):
+            if not queued and job['resume'] and os.path.exists(summary_csv):
                 why = _key_diff(os.path.join(out_dir, f'SWEEP_KEY{suffix}.json'), _key_blob(job, win, nf))
                 print(f'[Job] {tag}: settings or input changed since the finished run -- running again'
                       + (f' ({why})' if why else ''))
@@ -1510,6 +1585,8 @@ def run_job(job: Dict) -> Dict:
               f'({cfg.num_features / (win * win / 1e6):.0f} per megapixel)')
             try:
                 cfg.summary_name = f'POL_RUN_SUMMARY{suffix}.csv'
+                if queued:
+                    install_queue(E, job, out_dir, tag, win, nf)
                 records = E.AutoMatchPipeline(cfg).run(job['input_path'], detectors)
                 with open(key_path, 'w') as fh:
                     fh.write(key)
@@ -1519,6 +1596,8 @@ def run_job(job: Dict) -> Dict:
                 print(f'[Job] {tag} FAILED: {type(e).__name__}: {e}')
                 traceback.print_exc()
                 records = [{'status': 'failed', 'error': f'{type(e).__name__}: {e}'}]
+            finally:
+                E.CLAIM_HOOK = E.UNIT_DONE_HOOK = None
             E.safe_cuda_empty_cache()
         for rec in records:
             row = {'sweep': tag, 'window_size': win, 'num_features': nf or 'auto',
@@ -1652,6 +1731,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     sub.add_parser('cloudsweep', help='cloud mask benchmark: every combination of thresholds, band sets and '
                                       'bright-blob settings (options: python automatch_cloudsweep.py -h)'
                    ).add_argument('rest', nargs=argparse.REMAINDER)
+    sub.add_parser('cloudfilter', help='reject the match points of finished jobs that fall on cloud and score '
+                                       'them again (options: python automatch_cloudfilter.py -h)'
+                   ).add_argument('rest', nargs=argparse.REMAINDER)
     sub.add_parser('refsubset', help='copy the reference tiles inside a region (G1A: India and neighbours) to a '
                                      'local folder (options: python automatch_refsubset.py -h)'
                    ).add_argument('rest', nargs=argparse.REMAINDER)
@@ -1675,6 +1757,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     if argv and argv[0] == 'cloudsweep':
         import automatch_cloudsweep as CS
         return CS.main(list(argv[1:]))
+    if argv and argv[0] == 'cloudfilter':
+        import automatch_cloudfilter as CF
+        return CF.main(list(argv[1:]))
     if argv and argv[0] == 'refsubset':
         import automatch_refsubset as RS
         return RS.main(list(argv[1:]))

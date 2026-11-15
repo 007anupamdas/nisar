@@ -583,6 +583,9 @@ def match_accuracy(filtered_dir: str, field: Dict, radius_m: float = 5000.0,
             except Exception:
                 df = pd.DataFrame()
             x1, y1, x2, y2 = cols
+            if not df.empty and set(cols) <= set(df.columns):
+                import automatch_rival as R
+                df = R.apply_point_mask(df, x1, y1)
             if df.empty or not set(cols) <= set(df.columns):
                 misfits[path] = (len(df), np.zeros(0))
             else:

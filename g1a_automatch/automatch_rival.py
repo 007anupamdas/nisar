@@ -40,6 +40,19 @@ def _parse(name: str) -> Optional[Dict]:
     return E.MatchStatistics._parse_filename(name)
 
 
+# A post-hoc point filter (automatch_cloudfilter): f(E, N) -> bool array of the
+# matches to keep, by their input-image position; None keeps every match.
+POINT_MASK = None
+
+
+def apply_point_mask(df: pd.DataFrame, xcol: str = 'x1-map', ycol: str = 'y1-map') -> pd.DataFrame:
+    """df without the matches POINT_MASK rejects (all of df when unset)."""
+    if POINT_MASK is None or df.empty or xcol not in df.columns:
+        return df
+    keep = POINT_MASK(df[xcol].to_numpy(float), df[ycol].to_numpy(float))
+    return df[keep]
+
+
 def collect_points(filtered_dir: str, filenames: List[str]) -> pd.DataFrame:
     """Inlier correspondences of the given filtered CSVs, with provenance."""
     frames = []
@@ -50,6 +63,7 @@ def collect_points(filtered_dir: str, filenames: List[str]) -> pd.DataFrame:
         df = pd.read_csv(path)
         if 'inliers' in df.columns:
             df = df[df['inliers'].astype(str).str.lower().str.contains('true')]
+        df = apply_point_mask(df)
         if df.empty:
             continue
         p = _parse(name) or {}

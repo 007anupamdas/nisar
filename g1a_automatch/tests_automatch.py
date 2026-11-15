@@ -495,7 +495,7 @@ def test_e2e_truth(tmp):
 
 
 def test_e2e_multigpu(tmp):
-    """device 'cuda:0,1' (or 'all'): the detectors are dealt round the GPUs,
+    """device 'cuda:0,1' (or 'all'): the GPUs share one queue of the detectors,
     one worker process per GPU into the same job folder (here without CUDA
     the workers fall back to CPU, which tests the mechanics), their
     manifests merged, the best picked over both, the workers' output relayed
@@ -516,14 +516,95 @@ def test_e2e_multigpu(tmp):
         else pd.DataFrame()
     best = os.path.join(out, 'RIVAL_BEST_G1A_SYNTH_L1_band1.csv')
     pts = AR.read_rival_csv(best) if os.path.exists(best) else None
-    check('multi-GPU: two workers (sift on GPU 0, dog on GPU 1), one merged manifest, the best over both, '
-          'the workers\' lines relayed',
+    check('multi-GPU: two workers on one queue, each detector run once, one merged manifest, the best over '
+          'both, the workers\' lines relayed, the queue folder removed',
           (rc, sorted(glob.glob(os.path.join(out, 'RUN_MANIFEST_gpu*.csv'))) != [], len(man),
            sorted({str(d).split('/')[0].split('+')[0] for d in man['detector']}) if len(man) else [],
-           '[GPU 1]' in log and '[GPU 0]' in log, 'GPU 0: 1 detector(s): sift' in log,
+           '[GPU 1]' in log and '[GPU 0]' in log, 'on one queue for GPUs 0, 1' in log,
+           'detectors run per GPU: GPU 0: ' in log,
            pts is not None and abs(float((pts.ix - pts.rx).mean()) - dE) < 10.0,
-           sorted(os.path.basename(p) for p in glob.glob(os.path.join(out, 'win1024_nfauto', 'POL_RUN_SUMMARY*')))),
-          (0, True, 2, ['dog_hardnet', 'sift'], True, True, True, ['POL_RUN_SUMMARY_gpu0.csv', 'POL_RUN_SUMMARY_gpu1.csv']))
+           sorted(os.listdir(os.path.join(out, 'win1024_nfauto', '_units'))), os.path.exists(os.path.join(out, '_queue'))),
+          (0, True, 2, ['dog_hardnet', 'sift'], True, True, True, True,
+           ['band1__dog_hardnet.json', 'band1__sift.json'], False))
+    ok = sorted(str(d) for d in man.loc[man['status'] == 'ok', 'detector']) if len(man) else []
+    rc, log = _run_job({'input_path': data['input'], 'reference_dir': data['C1'], 'output_dir': out,
+                        'channels': ['band1'], 'detectors': ['sift', 'dog'], 'window_sizes': [1024],
+                        'max_expected_error_m': 10000, 'smnn_thresholds': [0.95], 'use_amp': False,
+                        'device': 'cuda:0,1', 'cross_top_n': 0, 'resume': True}, tmp, want_output=True,
+                       env={**os.environ, 'AUTOMATCH_CPU_OK': '1'})
+    man = pd.read_csv(os.path.join(out, 'RUN_MANIFEST.csv'))
+    rerun = [d for d in ('sift', 'dog_hardnet') if f'Running {d}' in log]
+    check('multi-GPU resume: each finished detector reused once, whichever GPU made it (a failed one, e.g. '
+          'no weights here, runs again)',
+          (rc, 'sift' in ok, log.count('reusing its finished result'), len(man),
+           sorted(set(rerun) | set(ok)), set(rerun) & set(ok)),
+          (0, True, len(ok), 2, ['dog_hardnet', 'sift'], set()))
+
+
+def test_gpu_queue(tmp):
+    """install_queue: a detector is claimed by one worker only; a finished
+    ('ok') result is reused on resume by whichever worker claims it next; a
+    failed one runs again; a changed setting runs again."""
+    import types
+    import automatch_job as J
+    q, out = os.path.join(tmp, 'gq', 'queue'), os.path.join(tmp, 'gq', 'win')
+    job = J.normalize({'input_path': os.path.join(tmp, 'nothing.tif'), 'output_dir': os.path.join(tmp, 'gq'),
+                       'detectors': ['sift', 'dog'], 'resume': True})
+    e0, e1 = types.SimpleNamespace(), types.SimpleNamespace()
+    J.install_queue(e0, dict(job, _queue=q, _shard=0), out, 'win1', 1024, None)
+    J.install_queue(e1, dict(job, _queue=q, _shard=1), out, 'win1', 1024, None)
+    got = (e0.CLAIM_HOOK('b1', 'sift'), e1.CLAIM_HOOK('b1', 'sift'), e1.CLAIM_HOOK('b1', 'dog'),
+           e0.CLAIM_HOOK('b1', 'dog'))
+    check('gpu queue: each detector claimed by one worker', got, (True, False, True, False))
+    e0.UNIT_DONE_HOOK('b1', 'sift', {'detector_tag': 'sift', 'status': 'ok', 'n': 3})
+    e1.UNIT_DONE_HOOK('b1', 'dog', {'detector_tag': 'dog', 'status': 'failed', 'error': 'model not available'})
+    q2 = os.path.join(tmp, 'gq', 'queue2')                      # the next run: a new queue
+    J.install_queue(e1, dict(job, _queue=q2, _shard=1), out, 'win1', 1024, None)
+    J.install_queue(e0, dict(job, _queue=q2, _shard=0), out, 'win1', 1024, None)
+    r_sift, r_dog = e1.CLAIM_HOOK('b1', 'sift'), e0.CLAIM_HOOK('b1', 'dog')
+    check('gpu queue resume: the ok result reused by the other GPU, the failed one runs again',
+          (isinstance(r_sift, dict) and r_sift.get('n'), r_dog), (3, True))
+    J.install_queue(e0, dict(job, _queue=os.path.join(tmp, 'gq', 'queue3'), _shard=0, smnn_thresholds=[0.8]),
+                    out, 'win1', 1024, None)
+    check('gpu queue resume: a changed setting runs it again', e0.CLAIM_HOOK('b1', 'sift'), True)
+
+
+def test_e2e_cloudfilter(tmp):
+    """cloudfilter on the finished truth job: matches on the masked half of
+    the image are left out and the job scored again into CLOUDFREE/, its own
+    files untouched."""
+    import numpy as np
+    import pandas as pd
+    import rasterio
+    import automatch_cloudfilter as CF
+    import automatch_rival as R
+    out = os.path.join(tmp, 'out_truth')
+    if not os.path.exists(os.path.join(out, 'TRUTH_RANKING.csv')):
+        print('SKIP  cloudfilter e2e: no finished truth job')
+        return
+    with rasterio.open(os.path.join(tmp, 'synth', 'G1A_SYNTH_L1.tif')) as src:
+        prof = dict(src.profile, count=1, dtype='uint8', nodata=255)
+        cls = np.zeros((src.height, src.width), np.uint8)
+        cls[:, :src.width // 2] = 1                      # the west half: cloud
+        b = src.bounds
+    mp = os.path.join(tmp, 'half_cloud.tif')
+    with rasterio.open(mp, 'w', **prof) as dst:
+        dst.write(cls, 1)
+    keep = CF.point_sampler(mp, [1], 0, None)
+    xs = np.array([b.left + 0.25 * (b.right - b.left), b.left + 0.75 * (b.right - b.left), b.left - 5000.0])
+    check('cloudfilter: points on cloud rejected, clear and outside kept',
+          keep(xs, np.full(3, (b.top + b.bottom) / 2)).tolist(), [False, True, True])
+    before = os.path.getmtime(os.path.join(out, 'TRUTH_RANKING.csv'))
+    row = CF.filter_job(out, mask_path=mp, classes=[1], dilate_px=0, cross={'top_n': 0})
+    free = os.path.join(out, 'CLOUDFREE')
+    rk = pd.read_csv(os.path.join(free, 'TRUTH_RANKING.csv')) if os.path.exists(
+        os.path.join(free, 'TRUTH_RANKING.csv')) else pd.DataFrame()
+    check('cloudfilter e2e: about half the matches rejected, scored again in CLOUDFREE/, the job\'s own '
+          'ranking untouched, the filter switched off afterwards',
+          (20 < (row.get('rejected_pct') or 0) < 80, len(rk) > 0, os.path.exists(os.path.join(free, 'CLOUDFREE_SUMMARY.csv')),
+           os.path.getmtime(os.path.join(out, 'TRUTH_RANKING.csv')) == before, R.POINT_MASK is None,
+           row.get('rmse_after_m') is not None),
+          (True, True, True, True, True, True))
 
 
 def test_pack(tmp):
@@ -847,12 +928,15 @@ def test_weights_and_failfast(tmp):
         except E.ModelLoadError as e:
             check('fail-fast: missing weights raise ModelLoadError', True)
             check('fail-fast: message names the folders searched', 'Looked for its weights in' in str(e))
+        n_first = len(calls)
         m2 = E.build_detector('loftr', cfg, {'pretrained': ['indoor_new']})
         try:
             m2.warmup()
         except E.ModelLoadError:
             pass
-        check('fail-fast: download tried once for the whole job, not per window', len(calls) - n_before, 1)
+        # kornia >= 0.9 tries its mirrors in turn: one round of them, then never again
+        check('fail-fast: download tried once for the whole job, not per window',
+              (n_first - n_before >= 1, len(calls) - n_first), (True, 0))
     finally:
         E._ORIG_LOAD_STATE_DICT = orig
         E._default_hub_dir = default_hub
@@ -1109,6 +1193,14 @@ def test_gui_cloud():
         mtabs = mres.findChild(G.QtWidgets.QTabWidget)
         check('gui: an ML cloud test (infrared tests, one mask, no threshold) shows its quicklook',
               (mtabs.count(), ' ir' in mtabs.tabText(0) and '@' not in mtabs.tabText(0)), (1, True))
+        w._on_event({'event': 'coarse', 'channel': 'band28', 'detector': 'imw-minima-roma', 'done': 3, 'total': 35,
+                     'gpu': 1})
+        f1, v1 = w.bar_step.format(), w.bar_step.value()
+        w._on_event({'event': 'stage', 'stage': 'coarse', 'channel': 'band28', 'detector': 'loftr', 'pair': 4,
+                     'gpu': 0})
+        check('gui: the coarse stage moves the progress bar, and the GPU of each update is shown',
+              (f1, v1, w.lbl_status.text()),
+              ('GPU 1: coarse offsets: imw-minima-roma  %v/%m', 3, 'GPU 0: band28: coarse loftr 4'))
     finally:
         w.close()
 
@@ -4706,6 +4798,13 @@ def test_sliced_matching():
         m = E.build_detector('sift', E.PipelineConfig(num_features=1500, use_amp=False))
         with th.inference_mode():
             l1, f1, l2, f2 = m.detect_and_describe(t1, t2)
+        pad = th.zeros(1, 3, 2, 3)
+        pad[0, 0] = th.tensor([[2.0, 0.0, 5.0], [0.0, 2.0, 6.0]])
+        lp, _ = E.BaseMatcher._filter_lafs_by_mask(pad, th.ones(3, 4), np.ones((16, 16), bool), check_window=False)
+        check('kornia >= 0.9: empty (padding) LAF slots are dropped', lp.shape[1], 1)
+        full = np.ones(n1.shape, bool)              # as a window does: kornia >= 0.9's padding slots go
+        l1, f1 = E.BaseMatcher._filter_lafs_by_mask(l1, f1, full, check_window=False)
+        l2, f2 = E.BaseMatcher._filter_lafs_by_mask(l2, f2, full, check_window=False)
         f1, f2, hw = f1.squeeze(0), f2.squeeze(0), th.tensor(t1.shape[2:])
         th.manual_seed(3)
         ref = KF.match_adalam(f1, f2, l1, l2, config=dict(m.adalam_config), hw1=hw, hw2=hw)
@@ -4908,6 +5007,7 @@ def main():
         test_gpuaas_args(tmp)
         test_version_skew_and_coarse(tmp)
         test_gpu_windows(tmp)
+        test_gpu_queue(tmp)
         test_jobs_312_317(tmp)
         test_jobs_318_323(tmp)
         test_coarse_outliers()
@@ -4945,6 +5045,7 @@ def main():
             test_e2e_distortion(tmp)
             test_e2e_missing_weights(tmp)
             test_e2e_truth(tmp)
+            test_e2e_cloudfilter(tmp)
             test_e2e_cloud(tmp)
             test_e2e_multigpu(tmp)
             test_pack(tmp)

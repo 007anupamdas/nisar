@@ -319,11 +319,23 @@ def find_weight_file(url: str, file_name: Optional[str] = None,
     fname = file_name or os.path.basename(urlparse(url).path)
     folders = ([model_dir] if model_dir else []) + [os.path.join(h, 'checkpoints')
                                                     for h in weight_search_dirs()]
-    for folder in folders:
-        path = os.path.join(folder, fname)
-        if os.path.isfile(path):
-            return fname, path, folders
+    names = [fname] + [n for n in [os.path.basename(urlparse(url).path)] + WEIGHT_ALIASES.get(fname, [])
+                       if n and n != fname]
+    for name in names:
+        for folder in folders:
+            path = os.path.join(folder, name)
+            if os.path.isfile(path):
+                return fname, path, folders
     return fname, None, folders
+
+
+# kornia >= 0.9 caches some weights under the name of its HuggingFace mirror;
+# files fetched earlier (by kornia 0.8 / prefetch_weights) keep the old name
+WEIGHT_ALIASES: Dict[str, List[str]] = {'HardNetPP.pth': ['HardNet++.pth'],
+                                        'sold2_wireframe.pth': ['sold2_wireframe.tar']}
+for _new, _old in list(WEIGHT_ALIASES.items()):
+    for _o in _old:
+        WEIGHT_ALIASES.setdefault(_o, []).append(_new)
 
 
 # While automatch_weights traces a model, it installs a hook here that sees
@@ -357,6 +369,28 @@ def _load_state_dict_any_cache(url, model_dir=None, map_location=None, progress=
 th.hub.load_state_dict_from_url = _load_state_dict_any_cache
 
 
+def _route_kornia_downloads() -> None:
+    """kornia >= 0.9 fetches a checkpoint itself (kornia.core.download) into
+    torch-hub's folder before torch.hub.load_state_dict_from_url reads it, so
+    a file kept in another weights folder was downloaded again, or, offline,
+    given up on after its retries, and the weights checker never saw the
+    request. Its fetch step is turned off here: every request reaches the
+    loader above, which finds the file in any weights folder (old names too)
+    and downloads only what is nowhere. kornia still tries its mirrors in turn."""
+    try:
+        import kornia.core.download as KD
+    except Exception:
+        return
+    if callable(getattr(KD, '_prefetch_to_cache', None)) and not getattr(KD._prefetch_to_cache, 'automatch', False):
+        def _no_prefetch(url, kwargs, timeout=None):
+            return False
+        _no_prefetch.automatch = True
+        KD._prefetch_to_cache = _no_prefetch
+
+
+_route_kornia_downloads()
+
+
 class ModelLoadError(RuntimeError):
     """A detector's network could not be built (typically: its weights are not
     on this machine and cannot be downloaded). Stops that detector."""
@@ -375,6 +409,13 @@ MODEL_LABELS: List[str] = []
 # dqe_job.py installs a callable here; the engine calls report() at coarse
 # milestones and once per window. Keep the payload JSON-serialisable.
 PROGRESS_HOOK: Optional[Callable[[Dict], None]] = None
+
+# A GPU worker of a multi-GPU job installs these, so the GPUs share one queue
+# of detectors instead of fixed shares: CLAIM_HOOK(channel, tag) -> True (run
+# it here), False (another GPU took it) or a dict (its finished record, kept
+# from an earlier run); UNIT_DONE_HOOK(channel, tag, record) when one ends.
+CLAIM_HOOK: Optional[Callable] = None
+UNIT_DONE_HOOK: Optional[Callable] = None
 
 
 def report(event: str, **fields):
@@ -2633,6 +2674,9 @@ class BaseMatcher(ABC):
                     & mask_t[y0, x1]
                     & mask_t[y1, x0]
                     & mask_t[y1, x1])
+        # kornia >= 0.9 pads the slots no detection filled with all-zero LAFs
+        # (and zero descriptors), which match each other at distance 0
+        keep = keep & (lafs[0].reshape(lafs.shape[1], -1).abs().sum(1) > 0)
 
         if keep.sum() == 0:
             return None, None
@@ -5570,12 +5614,23 @@ class AutoMatchPipeline:
         panel_coarse = None
         if cfg.coarse_shared and not matcher_free and disk_pairs:
             cache = os.path.join(self.scene.cache_dir(cfg.temp_dir), f'{pol}_to{s1_ref_tag}', 'COARSE_SHARED.json')
-            panel_coarse = self._shared_coarse(pol, disk_pairs, detector_types, aligner, cache,
-                                               os.path.join(pol_out_dir, 'COARSE_SHARED.csv'))
+            os.makedirs(os.path.dirname(cache), exist_ok=True)
+            with _dir_lock(os.path.dirname(cache)):     # GPU workers: one measures, the others read it
+                panel_coarse = self._shared_coarse(pol, disk_pairs, detector_types, aligner, cache,
+                                                   os.path.join(pol_out_dir, 'COARSE_SHARED.csv'))
 
         run_records = []
         for matcher in self._iter_matchers(detector_types):
             tag = matcher.get_filename_prefix()
+            if CLAIM_HOOK is not None:
+                got = CLAIM_HOOK(pol, tag)
+                if isinstance(got, dict):
+                    print(f'[{pol}] {tag}: reusing its finished result')
+                    run_records.append(got)
+                    report('detector_done', channel=pol, detector=tag, status=got.get('status'))
+                    continue
+                if not got:
+                    continue                 # another GPU runs it
             print('-' * 80)
             print(f'[{pol}] Running {tag}')
             report('detector', channel=pol, detector=tag)
@@ -5596,12 +5651,13 @@ class AutoMatchPipeline:
                 if panel_coarse is not None:
                     ests = copy.deepcopy(panel_coarse)
                 else:
-                    for pair in disk_pairs:
+                    for k_pair, pair in enumerate(disk_pairs):
                         pid = pair['pair_id']
                         if matcher_free and pid in shared_coarse:
                             ests[pid] = shared_coarse[pid]
                         else:
                             report('stage', stage='coarse', channel=pol, detector=tag, pair=pid)
+                            report('coarse', channel=pol, detector=tag, done=k_pair, total=len(disk_pairs))
                             ests[pid] = aligner.estimate(pair, None if matcher_free else matcher)
                             if matcher_free:
                                 shared_coarse[pid] = ests[pid]
@@ -5705,6 +5761,11 @@ class AutoMatchPipeline:
                 safe_cuda_empty_cache()
                 gc.collect()
             run_records.append(rec)
+            if UNIT_DONE_HOOK is not None:
+                try:
+                    UNIT_DONE_HOOK(pol, tag, rec)
+                except Exception as e:
+                    print(f'[{pol}] {tag}: could not save its result for resume ({type(e).__name__}: {e})')
             report('detector_done', channel=pol, detector=tag, status=rec['status'])
 
         if cfg.cleanup_after_pair and disk_pairs:
@@ -5806,8 +5867,9 @@ class AutoMatchPipeline:
                     m.selected_matchers()
                     m.warmup()
                     got = per_detector.setdefault(tag, {})
-                    for pair in pairs:
+                    for k_pair, pair in enumerate(pairs):
                         report('stage', stage='coarse', channel=pol, detector=tag, pair=pair['pair_id'])
+                        report('coarse', channel=pol, detector=tag, done=k_pair, total=len(pairs))
                         got[pair['pair_id']] = aligner.estimate(pair, m)
                     n = sum(1 for e in got.values() if str(e['method']).startswith('matcher'))
                     print(f'[Coarse] panel {tag}: matcher offsets on {n} of {len(pairs)} pairs')

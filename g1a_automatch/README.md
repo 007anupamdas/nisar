@@ -37,10 +37,11 @@ NISAR↔S1 production scripts in the repo root are separate and untouched.
 ## Install (workstation, 16 GB GPU)
 
 ```bash
-conda create -n automatch python=3.11
+conda create -n automatch python=3.12        # imcui needs Python below 3.13; kornia 0.9 needs 3.11+
 conda activate automatch
-pip install torch --index-url https://download.pytorch.org/whl/cu121   # match your CUDA
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121   # match your CUDA
 pip install -r requirements.txt
+pip install "kornia==0.9.1"                  # 0.8.3 and 0.9.1 both pass the tests
 # optional, for SuperPoint/SuperGlue/RoMa/DKM/eLoFTR/ASpanFormer:
 pip install -e /path/to/image-matching-webui
 ```
@@ -171,6 +172,26 @@ reference, in the working CRS (the input's projected CRS, or the UTM zone of
 its centre when the input is in lon/lat, the same rule RIVAL uses). DX/DY =
 In − Ref. In RIVAL: load the input raster and the reference folder, then
 *Load CSV*; RIVAL recomputes RMSE and CE90 itself.
+
+### Cloud masking a finished job (cloudfilter)
+
+A job that ran without cloud masking need not be matched again:
+
+```bash
+python automatch_job.py cloudfilter <job folder | folder of jobs> [--jobs 335-366]
+    [--method auto|vnir|ir|swir|omnicloudmask|csmask] [--classes 1] [--dilate 2] [--device cuda:0]
+    [--share-local V:\ --share-server /maintenance/] [--top 5 --min-agree 3]
+```
+
+The cloud mask of the job's input is made with the job's own cloud settings
+(the method per sensor, radiance scale and unit; `--method` overrides), every
+match whose input position lies on cloud is left out, and the job is scored
+again into `<job>/CLOUDFREE/` (the job's own files are not touched):
+`RIVAL_CROSS_<band>.csv` (the file for RIVAL), `TRUTH_RANKING.csv`,
+`TRUTH_BY_DETECTOR_MATCHER.csv`, the mask and its quicklook, and
+`CLOUDFREE_SUMMARY.csv` (cloud %, share of matches rejected, best
+configuration and RMSE before and after). A folder of jobs gets
+`CLOUDFREE_ALL.csv`. The input image must be reachable from where it runs.
 
 ## Errors of kilometres
 
@@ -533,9 +554,15 @@ matches are parallel; random matches give about 0 %.
 - **One run over both GPUs:** set the device to *all GPUs* (Output & run;
   jobs: `device: all`, or `cuda:0,1`). The job does preflight and the
   cloud mask once, then starts one worker process per GPU, each pinned to
-  its GPU with its share of the detectors (dealt round, so heavy and light
-  ones spread: 28 detectors become 14 and 14). Both write into the same
-  job folder (`POL_RUN_SUMMARY_gpu<n>.csv`, `RUN_MANIFEST_gpu<n>.csv`);
+  its GPU. The workers share one queue of the detectors: a GPU takes the
+  next detector as soon as it has finished (or skipped) one, so a GPU is
+  never idle while detectors remain, e.g. when some fail in seconds for
+  missing weights or some take much longer than others. The log ends with
+  `detectors run per GPU: GPU 0: n, GPU 1: m`. Each finished detector is
+  kept in `<sweep>/_units/<band>__<detector>.json`; with resume, a finished
+  one is reused whichever GPU made it, and a failed one runs again. Both
+  write into the same job folder (`POL_RUN_SUMMARY_gpu<n>.csv`,
+  `RUN_MANIFEST_gpu<n>.csv`);
   the parent merges them into `RUN_MANIFEST.csv` and picks the best, runs
   the truth comparison and the cross-check as usual. Worker lines show as
   `[GPU n]` in the log. A job with one detector runs on the first GPU.

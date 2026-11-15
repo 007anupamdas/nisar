@@ -2984,13 +2984,15 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         elif kind == 'sweep':
             self.bar_sweep.setValue(ev['done'])
             self.lbl_status.setText(f"Sweep point {ev['point']}")
-        elif kind in ('window', 'preprocess', 'h5_read') and ev.get('total'):
+        elif kind in ('window', 'preprocess', 'h5_read', 'coarse') and ev.get('total'):
             self.bar_step.setMaximum(int(ev['total']))
             self.bar_step.setValue(int(ev['done']))
-            label = ev.get('matcher') or kind
-            self.bar_step.setFormat(f'{label}  %v/%m')
+            label = ev.get('matcher') or (f"coarse offsets: {ev.get('detector', '')}" if kind == 'coarse' else kind)
+            gpu = f"GPU {ev['gpu']}: " if ev.get('gpu') is not None else ''
+            self.bar_step.setFormat(f'{gpu}{label}  %v/%m')
         elif kind == 'stage':
-            self.lbl_status.setText(f"{ev.get('channel', '')}: {ev['stage']} "
+            gpu = f"GPU {ev['gpu']}: " if ev.get('gpu') is not None else ''
+            self.lbl_status.setText(f"{gpu}{ev.get('channel', '')}: {ev['stage']} "
                                     f"{ev.get('detector', '')} {ev.get('pair', '')}".strip())
         elif kind == 'detector':
             self.lbl_status.setText(f"{ev['channel']}: running {ev['detector']}")

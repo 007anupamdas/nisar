@@ -198,9 +198,12 @@ def cross_check(top: List[Dict], cell_m: float, tol_m: float, min_agree: int,
 
 def run(output_dir: str, top_n: int = 5, min_agree: int = 0, cell_km: float = 25.0,
         tol_m: Optional[float] = None, truth_csv: str = '', working_crs: Optional[str] = None,
-        cfgs: Optional[List[Dict]] = None, quiet: bool = False, keep: int = KEEP_PER_CELL) -> Dict[str, Dict]:
+        cfgs: Optional[List[Dict]] = None, quiet: bool = False, keep: int = KEEP_PER_CELL,
+        out_dir: Optional[str] = None, ranking_csv: Optional[str] = None) -> Dict[str, Dict]:
     """Cross-check every channel of an output folder; returns per channel
-    {'csv', 'summary', 'configs', 'cells', 'points', 'truth_rmse_m'}."""
+    {'csv', 'summary', 'configs', 'cells', 'points', 'truth_rmse_m'}.
+    out_dir: where its files go (default output_dir); ranking_csv: the truth
+    ranking to pick the top configurations by (default output_dir's)."""
     import automatch_rival as R
     import automatch_truth as T
     if top_n < 2:
@@ -217,7 +220,9 @@ def run(output_dir: str, top_n: int = 5, min_agree: int = 0, cell_km: float = 25
     tol = float(tol_m or 0.0)
     cell_m = float(cell_km) * 1000.0
     cfgs = cfgs if cfgs is not None else _configs(output_dir)
-    rank_path = os.path.join(output_dir, 'TRUTH_RANKING.csv')
+    out_dir = out_dir or output_dir
+    os.makedirs(out_dir, exist_ok=True)
+    rank_path = ranking_csv or os.path.join(output_dir, 'TRUTH_RANKING.csv')
     ranking = pd.read_csv(rank_path) if os.path.exists(rank_path) else None
     truth_csv = truth_csv or job_truth_csv(output_dir)
     truth = T.truth_in_crs(T.load_truth(truth_csv), crs) if truth_csv else None
@@ -247,7 +252,7 @@ def run(output_dir: str, top_n: int = 5, min_agree: int = 0, cell_km: float = 25
         if len(pts):
             res['mean_dE_m'] = float(pts['dE'].mean())
             res['mean_dN_m'] = float(pts['dN'].mean())
-            path = os.path.join(output_dir, f'RIVAL_CROSS_{ch}.csv')
+            path = os.path.join(out_dir, f'RIVAL_CROSS_{ch}.csv')
             R.write_rival_csv(pts, crs, path, path[:-4] + '_detail.csv')
             res['csv'] = path
             if truth is not None:
@@ -255,7 +260,7 @@ def run(output_dir: str, top_n: int = 5, min_agree: int = 0, cell_km: float = 25
                                       truth, 5000.0)
                 res.update({'truth_rmse_m': s['truth_rmse_m'], 'truth_reached': s['truth_reached'],
                             'truth_total': s['truth_total']})
-        cells.to_csv(os.path.join(output_dir, f'CROSS_CELLS_{ch}.csv'), index=False)
+        cells.to_csv(os.path.join(out_dir, f'CROSS_CELLS_{ch}.csv'), index=False)
         summary_rows.append(res)
         out[ch] = res
         if not quiet:
@@ -268,7 +273,7 @@ def run(output_dir: str, top_n: int = 5, min_agree: int = 0, cell_km: float = 25
             for c in top:
                 print(f"         {c['detector']} + {c['matcher']} {c['ransac']} ({c['sweep']})")
     if summary_rows:
-        pd.DataFrame(summary_rows).to_csv(os.path.join(output_dir, 'CROSS_SUMMARY.csv'), index=False)
+        pd.DataFrame(summary_rows).to_csv(os.path.join(out_dir, 'CROSS_SUMMARY.csv'), index=False)
     return out
 
 
