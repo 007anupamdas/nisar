@@ -595,15 +595,20 @@ def _job_max_points(d: str) -> int:
 
 def cross_job(d: str, job: str, top_n: int = 5, min_agree: int = 0, cell_km: float = 25.0,
               tol_m: Optional[float] = None, truth_csv: str = '', recompute: bool = False,
-              keep: int = KEEP_PER_CELL) -> List[Dict]:
+              keep: int = KEEP_PER_CELL, max_points: Optional[int] = None) -> List[Dict]:
     """One finished job: the cross-check on its match files and its replay at
     the truth points, each read back when made with the same settings. Rows
     as in CROSS_ALL.csv."""
     import glob as _glob
     rows: List[Dict] = []
     print(f'[Cross] ===== {job}')
+    n_final = _job_max_points(d) if max_points is None else int(max_points)
     want = {'top_n': top_n, 'min_agree': min_agree, 'keep': keep, 'cell_km': cell_km, 'tolerance_m': tol_m,
-            'truth_csv': truth_csv or ''}
+            'truth_csv': truth_csv or '', 'max_points': n_final}
+    try:                                       # the best single configuration, thinned the same way
+        best_finals(d, None, n_final)
+    except Exception as e:
+        print(f'[Cross] {job}: RIVAL_BEST_FINAL not written ({type(e).__name__}: {e})')
     if not recompute and _reusable(d, 'matches', want, 'CROSS_SUMMARY.csv', ['TRUTH_RANKING.csv',
                                                                               'RUN_MANIFEST.csv']):
         for r in pd.read_csv(os.path.join(d, 'CROSS_SUMMARY.csv')).to_dict('records'):
@@ -613,7 +618,7 @@ def cross_job(d: str, job: str, top_n: int = 5, min_agree: int = 0, cell_km: flo
         try:
             tcsv = truth_csv or job_truth_csv(d)
             print(f'[Cross] {job}: ground truth ' + (tcsv if tcsv else 'none found in its settings'))
-            res = run(d, top_n, min_agree, cell_km, tol_m, tcsv, keep=keep, max_points=_job_max_points(d))
+            res = run(d, top_n, min_agree, cell_km, tol_m, tcsv, keep=keep, max_points=n_final)
             for ch, r in res.items():
                 rows.append({'job': job, 'mode': 'matches', 'reused': False,
                              **{k: v for k, v in r.items() if k != 'channel'}, 'channel': ch})
@@ -646,7 +651,7 @@ def cross_job(d: str, job: str, top_n: int = 5, min_agree: int = 0, cell_km: flo
 
 def batch(parent: str, top_n: int = 5, min_agree: int = 0, cell_km: float = 25.0,
           tol_m: Optional[float] = None, truth_csv: str = '', jobs: str = '', recompute: bool = False,
-          keep: int = KEEP_PER_CELL) -> int:
+          keep: int = KEEP_PER_CELL, max_points: Optional[int] = None) -> int:
     """Every finished automatch job in parent or one level below it
     (output/output359), or only the numbers in jobs ('335-363, 370'): the
     full cross-check when its match files are there, and the replay on
@@ -661,7 +666,8 @@ def batch(parent: str, top_n: int = 5, min_agree: int = 0, cell_km: float = 25.0
     print(f'[Cross] {len(found)} finished job(s) to check under {parent}')
     rows = []
     for d in found:
-        rows += cross_job(d, os.path.relpath(d, parent), top_n, min_agree, cell_km, tol_m, truth_csv, recompute, keep)
+        rows += cross_job(d, os.path.relpath(d, parent), top_n, min_agree, cell_km, tol_m, truth_csv, recompute, keep,
+                          max_points)
     if rows:
         out = os.path.join(parent, 'CROSS_ALL.csv')
         pd.DataFrame(rows).to_csv(out, index=False)
@@ -704,7 +710,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     SHARE = (a.share_local, a.share_server)
     if a.batch:
         return batch(a.output_dir, a.top, a.min_agree, a.cell_km, a.tolerance_m, a.truth, a.jobs, a.recompute,
-                     a.keep)
+                     a.keep, a.max_points)
     if a.from_truth_points:
         t = from_truth_points(os.path.join(a.output_dir, 'TRUTH_POINTS.csv'),
                               os.path.join(a.output_dir, 'TRUTH_RANKING.csv'), a.top, a.min_agree, a.tolerance_m)

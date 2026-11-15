@@ -173,7 +173,8 @@ class RunWindow(QtWidgets.QMainWindow):
     def refresh(self, *_):
         s = self.current_sensor()
         if s in self.presets:
-            self.summary.setText(f'<b>{s} preset</b><br>' + P.describe(self.presets[s]).replace('\n', '<br>'))
+            self.summary.setText(f'<b>{s} preset</b> ({P.BASIS})<br>'
+                                 + P.describe(self.presets[s]).replace('\n', '<br>'))
         else:
             self.summary.setText('Sensor not known from the file name (G1A_MV_ / HV / HS / ML): choose it under Sensor.')
 

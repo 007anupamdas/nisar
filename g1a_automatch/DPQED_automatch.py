@@ -997,14 +997,22 @@ class BenchDialog(QtWidgets.QDialog):
         self.tol.setRange(0, 100000)
         self.tol.setSuffix(' m')
         self.tol.setSpecialValueText('auto (1.5 x RANSAC threshold)')
+        self.max_points = QtWidgets.QSpinBox()
+        self.max_points.setRange(0, 100000)
+        self.max_points.setSingleStep(50)
+        self.max_points.setSpecialValueText('off')
+        self.max_points.setValue(int(settings.value('bench_max_points', 500) or 0))
+        self.max_points.setToolTip('RIVAL_FINAL_<band>.csv and RIVAL_BEST_FINAL_*.csv of every job: at most this many '
+                                   'points, the best of each cell of a fine grid over the whole coverage (the files '
+                                   'to load in RIVAL)')
         hl = QtWidgets.QHBoxLayout()
         for lab, wdg in (('top', self.top), ('agreeing', self.agree), ('keep', self.keep), ('cell', self.cell),
-                         ('tolerance', self.tol)):
+                         ('tolerance', self.tol), ('points for RIVAL', self.max_points)):
             hl.addWidget(QtWidgets.QLabel(lab))
             hl.addWidget(wdg)
         f.addRow('Cross-check', hl)
         self.cross_on.toggled.connect(lambda on: [w.setEnabled(on) for w in (self.top, self.agree, self.keep,
-                                                                            self.cell, self.tol)])
+                                                                            self.cell, self.tol, self.max_points)])
         self.share_local = QtWidgets.QLineEdit(settings.value('pack/share_local', 'V:\\'))
         self.share_server = QtWidgets.QLineEdit(settings.value('pack/share_server', '/maintenance/'))
         row = QtWidgets.QHBoxLayout()
@@ -1080,6 +1088,7 @@ class BenchDialog(QtWidgets.QDialog):
             return
         self.settings.setValue('bench_folder', self.folder.text())
         self.settings.setValue('bench_jobs', self.jobs.text())
+        self.settings.setValue('bench_max_points', self.max_points.value())
         self.settings.setValue('bench_cloud_free', 'true' if self.cloud_free.isChecked() else 'false')
         self.settings.setValue('pack/share_local', self.share_local.text().strip())
         self.settings.setValue('pack/share_server', self.share_server.text().strip())
@@ -1110,7 +1119,8 @@ class BenchDialog(QtWidgets.QDialog):
                 a += ['--cloud-model-dir', os.path.join(self.weights, 'omnicloudmask')]
         if self.cross_on.isChecked():
             a += ['--top', str(self.top.value()), '--min-agree', str(self.agree.value()), '--keep',
-                  str(self.keep.value()), '--cell-km', f'{self.cell.value():g}']
+                  str(self.keep.value()), '--cell-km', f'{self.cell.value():g}', '--max-points',
+                  str(self.max_points.value())]
             if self.tol.value() > 0:
                 a += ['--tolerance-m', f'{self.tol.value():g}']
         else:

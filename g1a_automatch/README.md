@@ -108,7 +108,9 @@ the window for every setting, sweeps and the benchmark.
 All: keypoints auto, MAGSAC and LMedS, 512 px sub-cells, cross-check top 5
 with 3 agreeing, 500 points for RIVAL, all GPUs, resume; with a truth file
 the search range and the band come from it. The presets live in
-`automatch_presets.py`; **Presets file…** writes `automatch_presets.json`
+`automatch_presets.py` and are provisional: they change as the results of
+more finished jobs come in (the window shows what they rest on);
+**Presets file…** writes `automatch_presets.json`
 to edit (per sensor, key by key) when a new benchmark says otherwise.
 
 ## Hyperspectral cubes: which band (auto_bands)
@@ -495,6 +497,10 @@ Preflight lists which band gets which file, and `TRUTH_*` outputs carry the
 band's own points. A file without a band suffix applies to every band.
 
 ## Cross-check between detectors (RIVAL_CROSS)
+
+In the GUI these settings are in *Benchmark & cross-check…* (top, agreeing,
+keep, cell, tolerance, *points for RIVAL*, the share mapping for jobs on the
+server); the folder may be one job or a folder of jobs.
 
 **The file for RIVAL is `RIVAL_FINAL_<band>.csv`**: at most `cross_max_points`
 (500; *points for RIVAL* in the GUI, `--max-points`) of the cross-checked

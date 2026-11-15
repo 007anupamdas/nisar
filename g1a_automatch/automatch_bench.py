@@ -696,6 +696,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument('--cell-km', type=float, default=25.0, help='cross-check: cell size')
     ap.add_argument('--tolerance-m', type=float, default=None, help='cross-check: tolerance (default 1.5 x RANSAC '
                                                                     'threshold)')
+    ap.add_argument('--max-points', type=int, default=None,
+                    help='cross-check: RIVAL_FINAL / RIVAL_BEST_FINAL hold at most this many points over the whole '
+                         'coverage (default each job\'s, else 500; 0: off)')
     ap.add_argument('--no-cross', action='store_true', help='skip the cross-check')
     ap.add_argument('--cloud', choices=('quick', 'omnicloudmask'), default='quick',
                     help='cloud estimate: quick (brightness heuristic) or omnicloudmask (the cloud mask of each '
@@ -742,7 +745,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         DEVICE = J.use_gpu(a.device)
     X.SHARE = (a.share_local, a.share_server)
     cross = None if a.no_cross else {'top_n': a.top, 'min_agree': a.min_agree, 'keep': a.keep,
-                                     'cell_km': a.cell_km, 'tol_m': a.tolerance_m}
+                                     'cell_km': a.cell_km, 'tol_m': a.tolerance_m, 'max_points': a.max_points}
     accuracy = ({'subcell_px': [s for s in a.subcell_px if s > 0], 'keep': a.subcell_keep}
                 if (a.accuracy or a.subcell_px) else None)
     cloudfree = None

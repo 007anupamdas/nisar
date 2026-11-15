@@ -23,6 +23,10 @@ from typing import Dict, List, Optional, Tuple
 HERE = os.path.dirname(os.path.abspath(__file__))
 PRESETS_FILE = os.path.join(HERE, 'automatch_presets.json')
 
+# What the presets rest on, shown in the run window. They are provisional:
+# updated here as the logs and rankings of finished jobs come in.
+BASIS = 'provisional, as of 2026-11-15: MV 2 jobs, HV 2-11 jobs per detector, HS 3 jobs, ML none yet'
+
 # For every sensor
 COMMON: Dict = {
     'num_features': [None],                  # keypoints per window: auto
