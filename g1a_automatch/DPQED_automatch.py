@@ -2567,6 +2567,11 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             b = QtWidgets.QPushButton(label)
             b.clicked.connect(slot)
             row.addWidget(b)
+        self.btn_queue_back = QtWidgets.QPushButton('Save to queue')
+        self.btn_queue_back.setToolTip('Put the run being edited back in the queue with the settings as they are now')
+        self.btn_queue_back.clicked.connect(self.queue_run)
+        self.btn_queue_back.setVisible(False)
+        row.addWidget(self.btn_queue_back)
         f.addRow(row)
 
     # ── job <-> widgets ──────────────────────────────────────────────────────
@@ -3497,6 +3502,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
                  'not_before': nb}
         pos = getattr(self, '_editing_queued', None)
         self._editing_queued = None
+        self.btn_queue_back.setVisible(False)
         if pos is not None and 0 <= pos <= len(self._run_queue):
             self._run_queue.insert(pos, entry)
         else:
@@ -3579,8 +3585,9 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         del self._run_queue[i]
         self._editing_queued = i
         self._queue_changed()
-        self.lbl_status.setText(f'Editing queued run {e["name"]}: change the settings, then Queue run to put it '
-                                f'back (position {i + 1}).')
+        self.btn_queue_back.setVisible(True)
+        self.lbl_status.setText(f'Editing queued run {e["name"]}: change the settings, then "Save to queue" '
+                                f'(or Queue run) puts it back at position {i + 1}.')
 
     def _queue_remove(self):
         i = self.queue_list.currentRow()

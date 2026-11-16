@@ -2652,6 +2652,8 @@ def test_auto_bands(tmp):
 
 
 def test_shared_coarse(tmp):
+    import glob
+    import time as _time
     """Job 342 (G1A HS): 18 detectors whose coarse matcher found nothing put
     34 of 55 pairs on a phase-correlation guess 60-110 km off. One coarse
     offset per channel, measured by a panel and given to every detector."""
@@ -2756,6 +2758,29 @@ def test_shared_coarse(tmp):
         with contextlib.redirect_stdout(io.StringIO()):
             pipe._shared_coarse('band3', pairs, dets, FakeAligner(), cache)
         check('coarse shared: other coarse settings measure again', len(calls), 2 * len(pairs))
+        # two GPU workers: the panel is shared between them, each measures what it claimed
+        import threading
+        calls.clear()
+        os.remove(cache)
+        for f in glob.glob(os.path.join(tmp, 'coarse', 'COARSE_PANEL_*.json')) + glob.glob(
+                os.path.join(tmp, 'coarse', '.coarse_*.claim')):
+            os.remove(f)
+        pipe2 = P.__new__(P)
+        pipe2.config = pipe.config
+        res = {}
+
+        def worker(name, pp):                    # no stdout redirect in a thread: it is process-wide
+            res[name] = pp._shared_coarse('band3', pairs, dets, FakeAligner(), cache)
+        with contextlib.redirect_stdout(io.StringIO()):
+            t1 = threading.Thread(target=worker, args=('a', pipe))
+            t1.start()
+            _time.sleep(0.05)
+            t2 = threading.Thread(target=worker, args=('b', pipe2))
+            t2.start()
+            t1.join()
+            t2.join()
+        check('coarse shared, two workers: each panel detector measured once in all, both get the same result',
+              (len(calls), off(res['a']), off(res['b'])), (2 * len(pairs), 0, 0))
         E.iter_variants = lambda d, c, params=None: iter([FakeMatcher('loftr')])
         with contextlib.redirect_stdout(io.StringIO()):
             none = pipe._shared_coarse('band3', pairs, ['loftr'], FakeAligner(), os.path.join(tmp, 'c2.json'))

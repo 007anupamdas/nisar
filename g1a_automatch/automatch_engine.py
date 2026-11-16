@@ -58,6 +58,7 @@ import itertools
 import json
 import math
 import shutil
+import threading
 import time
 import warnings
 import sys
@@ -5651,9 +5652,8 @@ class AutoMatchPipeline:
         if cfg.coarse_shared and not matcher_free and disk_pairs:
             cache = os.path.join(self.scene.cache_dir(cfg.temp_dir), f'{pol}_to{s1_ref_tag}', 'COARSE_SHARED.json')
             os.makedirs(os.path.dirname(cache), exist_ok=True)
-            with _dir_lock(os.path.dirname(cache)):     # GPU workers: one measures, the others read it
-                panel_coarse = self._shared_coarse(pol, disk_pairs, detector_types, aligner, cache,
-                                                   os.path.join(pol_out_dir, 'COARSE_SHARED.csv'))
+            panel_coarse = self._shared_coarse(pol, disk_pairs, detector_types, aligner, cache,
+                                               os.path.join(pol_out_dir, 'COARSE_SHARED.csv'))
 
         run_records = []
         for matcher in self._iter_matchers(detector_types):
@@ -5892,34 +5892,7 @@ class AutoMatchPipeline:
         if ests is None:
             print('-' * 80)
             print(f'[Coarse] {pol}: one coarse offset per pair for every detector, measured by {panel}')
-            per_detector: Dict[str, Dict[int, Dict]] = {}
-            for d in panel:
-                m = None
-                try:
-                    m = next(iter(iter_variants(d, cfg)), None)
-                    if m is None:
-                        continue
-                    tag = m.get_filename_prefix()
-                    m.selected_matchers()
-                    m.warmup()
-                    got = per_detector.setdefault(tag, {})
-                    for k_pair, pair in enumerate(pairs):
-                        report('stage', stage='coarse', channel=pol, detector=tag, pair=pair['pair_id'])
-                        report('coarse', channel=pol, detector=tag, done=k_pair, total=len(pairs))
-                        got[pair['pair_id']] = aligner.estimate(pair, m)
-                    n = sum(1 for e in got.values() if str(e['method']).startswith('matcher'))
-                    print(f'[Coarse] panel {tag}: matcher offsets on {n} of {len(pairs)} pairs')
-                except ModelLoadError as e:
-                    print(f'[Coarse] panel {d}: not available ({e}); next')
-                except Exception as e:
-                    print(f'[Coarse] panel {d}: {type(e).__name__}: {e}; next')
-                finally:
-                    unload = getattr(m, 'unload_model', None)
-                    if callable(unload):
-                        unload()
-                    del m
-                    safe_cuda_empty_cache()
-                    gc.collect()
+            per_detector = self._measure_panel(pol, panel, pairs, aligner, os.path.dirname(cache_path), key)
             if not per_detector:
                 print(f'[Coarse] {pol}: no panel detector could be built; each detector measures its own')
                 return None
@@ -5950,6 +5923,115 @@ class AutoMatchPipeline:
                            **{k: v for k, v in ests[p['pair_id']].items() if k != 'field'}}
                           for p in pairs]).to_csv(csv_path, index=False)
         return ests
+
+    def _measure_panel(self, pol: str, panel: List[str], pairs: List[Dict], aligner, folder: str, key: str
+                       ) -> Dict[str, Dict[int, Dict]]:
+        """The panel detectors' coarse offsets, {tag: {pair_id: estimate}}:
+        shared between the GPU workers of a job. Each detector is claimed in
+        folder (a file made exclusively, the claimant's pid inside), measured
+        by whoever claimed it, and its result written as
+        COARSE_PANEL_<detector>.json; a worker whose claims are done waits
+        for the others' results (and takes over a claim whose process died).
+        Everything is keyed, so results of other settings are ignored."""
+        cfg = self.config
+        want = {d: os.path.join(folder, f'COARSE_PANEL_{d}.json') for d in panel}
+
+        def result_of(d):
+            try:
+                with open(want[d], encoding='utf-8') as f:
+                    saved = json.load(f)
+                if saved.get('key') == key:
+                    return saved
+            except (OSError, ValueError):
+                pass
+            return None
+
+        def claim(d):
+            path = os.path.join(folder, f'.coarse_{d}.claim')
+            for _ in range(2):
+                try:
+                    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                    os.write(fd, f'{os.getpid()} {key}'.encode())
+                    os.close(fd)
+                    return True
+                except FileExistsError:
+                    try:
+                        with open(path, encoding='utf-8', errors='replace') as f:
+                            owner, _, k = f.read().strip().partition(' ')
+                        if k != key or (owner.isdigit() and not _pid_alive(int(owner))):
+                            os.remove(path)          # another run's claim, or a stopped worker's: take it
+                            continue
+                    except OSError:
+                        pass
+                    return False
+            return False
+
+        def measure(d):
+            m, out = None, {'key': key, 'tag': d, 'ests': {}}
+            try:
+                m = next(iter(iter_variants(d, cfg)), None)
+                if m is None:
+                    out['error'] = 'no variant'
+                else:
+                    tag = m.get_filename_prefix()
+                    out['tag'] = tag
+                    m.selected_matchers()
+                    m.warmup()
+                    got = {}
+                    for k_pair, pair in enumerate(pairs):
+                        report('stage', stage='coarse', channel=pol, detector=tag, pair=pair['pair_id'])
+                        report('coarse', channel=pol, detector=tag, done=k_pair, total=len(pairs))
+                        got[pair['pair_id']] = aligner.estimate(pair, m)
+                    n = sum(1 for e in got.values() if str(e['method']).startswith('matcher'))
+                    print(f'[Coarse] panel {tag}: matcher offsets on {n} of {len(pairs)} pairs')
+                    out['ests'] = {str(k): v for k, v in got.items()}
+            except ModelLoadError as e:
+                out['error'] = f'not available ({e})'
+                print(f'[Coarse] panel {d}: not available ({e}); next')
+            except Exception as e:
+                out['error'] = f'{type(e).__name__}: {e}'
+                print(f'[Coarse] panel {d}: {type(e).__name__}: {e}; next')
+            finally:
+                unload = getattr(m, 'unload_model', None)
+                if callable(unload):
+                    unload()
+                del m
+                safe_cuda_empty_cache()
+                gc.collect()
+            tmp = f'{want[d]}.{os.getpid()}.{threading.get_ident()}.tmp'
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(out, f, default=lambda o: o.tolist() if hasattr(o, 'tolist') else str(o))
+            os.replace(tmp, want[d])
+            try:
+                os.remove(os.path.join(folder, f'.coarse_{d}.claim'))   # done: the result file speaks now
+            except OSError:
+                pass
+
+        os.makedirs(folder, exist_ok=True)
+        for d in panel:
+            if result_of(d) is None and claim(d):
+                measure(d)
+        waited = False
+        while True:
+            missing = [d for d in panel if result_of(d) is None]
+            if not missing:
+                break
+            took = [d for d in missing if claim(d)]     # a claim whose worker died: measure it here
+            for d in took:
+                measure(d)
+            if took:
+                continue
+            if not waited:
+                print(f'[Coarse] {pol}: panel detector(s) {", ".join(missing)} being measured by the other GPU '
+                      f'-- waiting for the result', flush=True)
+                waited = True
+            time.sleep(2.0)
+        per_detector: Dict[str, Dict[int, Dict]] = {}
+        for d in panel:
+            saved = result_of(d)
+            if saved and saved.get('ests'):
+                per_detector[saved.get('tag') or d] = {int(k): v for k, v in saved['ests'].items()}
+        return per_detector
 
     @staticmethod
     def _centre(p: Dict) -> Tuple[float, float]:
