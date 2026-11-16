@@ -113,6 +113,21 @@ more finished jobs come in (the window shows what they rest on);
 **Presets file…** writes `automatch_presets.json`
 to edit (per sensor, key by key) when a new benchmark says otherwise.
 
+## Finishing a job from the workstation (server output)
+
+A job that ended on the server with detectors skipped (weights missing
+there) or that crashed at its end (older code) is completed here, without
+matching the rest again: Tools → **Finish a job…** (or
+`python automatch_job.py finish V:\ICIGDev\GPUPOC\output\output1066
+--share-local V:\ --share-server /maintenance/ [--device all] [--rerun
+missing|failed|all]`). Every finished detector is reused from the job's
+summaries (its server paths mapped onto the folder as seen here), the
+skipped ones run again on this machine's weights, and the truth comparison,
+the cross-check, `RIVAL_FINAL` and `RIVAL_BEST_FINAL` are made afresh with
+the current code. The server's own settings file is kept as
+`job_used_server.json`. The benchmark's `BENCH_SUMMARY.csv` also shows each
+detector's median minutes per pass, to weigh its result against its cost.
+
 ## Hyperspectral cubes: which band (auto_bands)
 
 The good bands of a G1A HS/HV cube change from image to image. In one, the

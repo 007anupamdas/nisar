@@ -541,6 +541,41 @@ def test_e2e_multigpu(tmp):
           (0, True, len(ok), 2, ['dog_hardnet', 'sift'], set()))
 
 
+def test_finish(tmp):
+    """finish: a job folder whose run skipped a detector (missing weights):
+    the finished detector is reused from the summary, the skipped one runs
+    again, and the end of the job (truth, cross, RIVAL files) is redone;
+    the server's job file is kept."""
+    import glob
+    import pandas as pd
+    import synthetic_data as S
+    import automatch_job as J
+    data = os.path.join(tmp, 'synth')
+    if not os.path.exists(os.path.join(data, 'G1A_SYNTH_L1.tif')):
+        S.make_all(data, 4013.0, -2487.0)
+    out = os.path.join(tmp, 'out_finish')
+    _run_job({'input_path': os.path.join(data, 'G1A_SYNTH_L1.tif'), 'reference_dir': os.path.join(data, 'C1'),
+              'output_dir': out, 'channels': ['band1'], 'detectors': ['sift', 'dog'], 'window_sizes': [1024],
+              'max_expected_error_m': 10000, 'smnn_thresholds': [0.95], 'use_amp': False, 'cross_top_n': 0},
+             tmp, want_output=True)
+    man = pd.read_csv(os.path.join(out, 'RUN_MANIFEST.csv'))
+    if not (man['status'] == 'failed').any():
+        print('SKIP  finish: every detector ran here (weights cached); nothing to finish')
+        return
+    import subprocess
+    r = subprocess.run([sys.executable, os.path.join(HERE, 'automatch_job.py'), 'finish', out, '--device', 'cpu'],
+                       capture_output=True, text=True, cwd=tmp, env={**os.environ, 'AUTOMATCH_CPU_OK': '1'})
+    code, log = r.returncode, r.stdout + r.stderr
+    del J
+    man2 = pd.read_csv(os.path.join(out, 'RUN_MANIFEST.csv'))
+    check('finish: the finished detector reused, the skipped one run again, the job ended again (RIVAL_BEST_FINAL), '
+          'the first job file kept',
+          (code, 'sift: reusing its finished result' in log, 'Running dog_hardnet' in log, len(man2),
+           glob.glob(os.path.join(out, 'RIVAL_BEST_FINAL_*.csv')) != [],
+           os.path.exists(os.path.join(out, 'job_used_server.json')), os.path.exists(os.path.join(out, '_queue'))),
+          (0, True, True, 2, True, True, False))
+
+
 def test_gpu_queue(tmp):
     """install_queue: a detector is claimed by one worker only; a finished
     ('ok') result is reused on resume by whichever worker claims it next; a
@@ -983,6 +1018,7 @@ def test_gui_cross():
               (w.btn_benchmark.text().replace('&&', '&'), hasattr(w, 'btn_cross_check')), ('Benchmark & cross-check…', False))
         dlg = w.bench_dialog(run=False)
         dlg.folder.setText(tempfile.mkdtemp())
+        dlg.out.setText(os.path.join(tempfile.mkdtemp(), 'bench_results'))
         dlg.top.setValue(4)
         dlg.keep.setValue(2)
         a = dlg.args()
@@ -1118,7 +1154,7 @@ def test_gui_cloud():
         tools = [a.text().replace('&&', '&') for a in w.menuBar().actions()[0].menu().actions()]
         check('gui: the analysis tools in their own row and in the Tools menu; the version in the title',
               (w.btn_cloud_sweep.parentWidget() is not None, tools, G.AUTOMATCH_VERSION in w.windowTitle()),
-              (True, ['Benchmark & cross-check…', 'Cloud mask test…', 'Cloud sweep…'], True))
+              (True, ['Benchmark & cross-check…', 'Finish a job…', 'Cloud mask test…', 'Cloud sweep…'], True))
         w.in_path.setText(img)
         w.cloud_conf.setValue(0.8)
         w.cloud_bands.setText('band3, band2, band6')
@@ -1413,6 +1449,16 @@ def test_gui_queue():
         app.processEvents()
         check('gui queue: a run with a later start time waits, even with the GPU free',
               (len(started), len(w._run_queue), w.proc is None), (2, 1, True))
+        w.queue_list.setCurrentRow(0)
+        w._queue_edit()
+        in_form = (w.out_path.text(), len(w._run_queue), w.use_not_before.isChecked())
+        w.windows.setText('768')
+        e2 = w.queue_run()                       # still not before +3 h: waits
+        with open(e2['path'], encoding='utf-8') as f:
+            win = json.load(f)['window_sizes']
+        check('gui queue: Edit loads a queued run into the window (its folder, start time) and Queue run puts the '
+              'changed run back in its place',
+              (in_form, win, len(w._run_queue), len(started)), ((out['c'], 0, True), [768], 1, 2))
         w._run_queue[0]['not_before'] = '2000-01-01 00:00'
         w._maybe_start_queued()
         check('gui queue: it starts once due', (len(started), w._run_queue), (3, []))
@@ -3277,9 +3323,12 @@ def test_bench(tmp):
     try:
         dlg = w.bench_dialog(run=False)
         dlg.folder.setText(parent)
+        dlg.out.setText(os.path.join(tmp, 'bench_results'))
         dlg.jobs.setText('360-370')
         a = dlg.args()
-        check('bench gui: the dialog builds the command', (a[:2], a[a.index('--jobs') + 1]), (['bench', parent], '360-370'))
+        check('bench gui: the dialog builds the command (the tables into the results folder, not a job folder)',
+              (a[:2], a[a.index('--jobs') + 1], a[a.index('--out') + 1]),
+              (['bench', parent], '360-370', os.path.join(tmp, 'bench_results')))
         res = G.BenchResultDialog(parent, w)
         res.group.setCurrentText('sensor: HV')
         check('bench gui: jobs (superseded ones listed too) and the per-group detector table are shown',
@@ -4354,6 +4403,13 @@ def test_worker_cache_safety(tmp):
     b.join()
     check('workers: the second waits until the first has built the pairs; the lock is gone after',
           (order, os.path.exists(os.path.join(d, '.automatch.lock'))), (['a+', 'a-', 'b+', 'b-'], False))
+    with open(os.path.join(d, '.automatch.lock'), 'w') as f:
+        f.write('999999')                      # a run that was stopped: its process is gone
+    t0 = _t.time()
+    with E._dir_lock(d, poll_s=0.05):
+        took = _t.time() - t0
+    check('workers: a lock left by a stopped run (its process gone) is taken over at once, not after 3 h',
+          took < 2.0, True)
     job = J.normalize({'input_path': '', 'max_expected_error_m': 25000})
     kp = os.path.join(tmp, 'SWEEP_KEY.json')
     with open(kp, 'w') as f:
@@ -5177,6 +5233,7 @@ def main():
         test_version_skew_and_coarse(tmp)
         test_gpu_windows(tmp)
         test_gpu_queue(tmp)
+        test_finish(tmp)
         test_presets(tmp)
         test_jobs_312_317(tmp)
         test_jobs_318_323(tmp)

@@ -204,6 +204,8 @@ def install_queue(E, job: Dict, out_dir: str, tag: str, win: int, nf: Optional[i
     os.makedirs(claims, exist_ok=True)
     os.makedirs(units, exist_ok=True)
     key, shard = _unit_key(job, win, nf), job.get('_shard')
+    reuse = job.get('_reuse') or ''             # finish mode: the finished records of an earlier run, any code
+    earlier = _summary_records(out_dir, job) if reuse else {}
 
     def claim(channel, dtag):
         name = _unit_name(channel, dtag)
@@ -221,6 +223,11 @@ def install_queue(E, job: Dict, out_dir: str, tag: str, win: int, nf: Optional[i
                     return saved['record']
             except (OSError, ValueError, KeyError, AttributeError, TypeError):
                 pass
+        rec = earlier.get((str(channel), str(dtag)))
+        if rec is not None:
+            err = str(rec.get('error') or '')
+            if rec.get('status') == 'ok' or (reuse == 'missing' and 'model not available' not in err):
+                return rec                   # finished, or failed for a reason weights will not change
         return True
 
     def done(channel, dtag, rec):
@@ -230,6 +237,71 @@ def install_queue(E, job: Dict, out_dir: str, tag: str, win: int, nf: Optional[i
             json.dump({'key': key, 'gpu': shard, 'record': rec}, f, default=str)
         os.replace(tmp, path)
     E.CLAIM_HOOK, E.UNIT_DONE_HOOK = claim, done
+
+
+def _summary_records(out_dir: str, job: Dict) -> Dict[Tuple[str, str], Dict]:
+    """{(channel, detector tag): record} of a sweep point's earlier run(s):
+    POL_RUN_SUMMARY*.csv (a job's or its GPU workers'), its paths as this
+    machine sees them (the server's output folder mapped onto this one)."""
+    import glob as _glob
+    import pandas as pd
+    srv = str(job.get('_server_output_dir') or '').replace('\\', '/').rstrip('/')
+    loc = str(job.get('output_dir') or '').rstrip('/\\')
+    out: Dict[Tuple[str, str], Dict] = {}
+    for p in sorted(_glob.glob(os.path.join(out_dir, 'POL_RUN_SUMMARY*.csv'))):
+        try:
+            rows = pd.read_csv(p).to_dict('records')
+        except Exception:
+            continue
+        for r in rows:
+            rec = {}
+            for k, v in r.items():
+                if isinstance(v, float) and math.isnan(v):
+                    v = None if k not in ('error',) else ''
+                if isinstance(v, str) and srv and v.replace('\\', '/').startswith(srv + '/'):
+                    v = os.path.join(loc, *[x for x in v.replace('\\', '/')[len(srv) + 1:].split('/') if x])
+                rec[k] = v
+            key = (str(rec.get('nisar_pol')), str(rec.get('detector_tag')))
+            if key not in out or rec.get('status') == 'ok':
+                out[key] = rec
+    return out
+
+
+def finish_spec(job_dir: str, share: Tuple[str, str] = ('', ''), device: str = '', rerun: str = 'missing') -> Dict:
+    """The job of a finished (or crashed) job folder, to run again here with
+    what it has: its settings from job_used.json, every path through the
+    share mapping (a server folder opened from the workstation), its
+    finished detectors reused, the others (rerun 'missing': those whose
+    weights were missing; 'failed': every failed one; 'all': everything)
+    run again, then the truth comparison, the cross-check and the RIVAL
+    files made afresh. The server's job file is kept as job_used_server.json."""
+    import automatch_cross as X
+    X.SHARE = tuple(share) if share else X.SHARE
+    with open(os.path.join(job_dir, 'job_used.json'), encoding='utf-8') as f:
+        job = json.load(f)
+    kept = os.path.join(job_dir, 'job_used_server.json')
+    if not os.path.exists(kept):
+        shutil.copyfile(os.path.join(job_dir, 'job_used.json'), kept)
+    server_out = job.get('output_dir') or ''
+
+    def here(p):
+        if not isinstance(p, str) or not p:
+            return p
+        for loc in (p, X.local_path(p, job_dir, server_out), X._by_share(p)):
+            if loc and os.path.exists(loc):
+                return loc
+        return X._by_share(p)
+    for k in ('input_path', 'reference_dir', 'truth_csv', 'weights_cache_dir', 'manual_gcp_csv', 'cloud_mask_from',
+              'cloud_spectf_vnir', 'cloud_spectf_weights', 'cloud_tiraux_checkpoint', 'cloud_model_dir'):
+        if job.get(k):
+            job[k] = here(job[k])
+    job['cloud_vis_clear'] = [here(p) for p in (job.get('cloud_vis_clear') or [])]
+    job.update(output_dir=job_dir, temp_dir=os.path.join(job_dir, '_cache'), resume=True,
+               _reuse={'missing': 'missing', 'failed': 'failed', 'all': ''}.get(rerun, 'missing'),
+               _server_output_dir=server_out)
+    if device:
+        job['device'] = device
+    return job
 
 
 def run_sharded(job: Dict, gpus: List[int], out_root: str) -> List[Dict]:
@@ -245,7 +317,8 @@ def run_sharded(job: Dict, gpus: List[int], out_root: str) -> List[Dict]:
           f'the next as soon as it is free', flush=True)
     procs, paths = [], []
     for g in gpus:
-        sub = {k: v for k, v in job.items() if not k.startswith('_') or k == '_channel_rasters'}
+        sub = {k: v for k, v in job.items() if not k.startswith('_') or k in (
+            '_channel_rasters', '_reuse', '_server_output_dir')}
         sub.update(device=f'cuda:{g}', cloud_device=f'cuda:{g}' if job.get('cloud_device') else '',
                    detectors=dets, _shard=g, _queue=queue, _channel_rasters=job.get('_channel_rasters') or {},
                    _window_prep=job.get('_window_prep') or 'none')
@@ -529,7 +602,7 @@ def normalize(job: Dict) -> Dict:
             _WARNED_KEYS.add(k)
             print(f'[Job] WARNING: {unknown_key_note(k)}', flush=True)
     out.update(copy.deepcopy({k: v for k, v in job.items() if k in DEFAULT_JOB}))
-    for k in ('_shard', '_queue', '_channel_rasters', '_window_prep'):   # a GPU worker's, from its parent
+    for k in ('_shard', '_queue', '_channel_rasters', '_window_prep', '_reuse', '_server_output_dir'):
         if job.get(k) is not None:
             out[k] = copy.deepcopy(job[k])
     if not out['temp_dir'] and out['output_dir']:
@@ -1567,6 +1640,11 @@ def run_job(job: Dict) -> Dict:
     manifest = []
     rival_dir = os.path.join(out_root, 'rival')
     suffix = f'_gpu{shard}' if shard is not None else ''
+    own_queue = ''
+    if job.get('_reuse') and not job.get('_queue'):     # finish mode on one GPU: resume per detector
+        own_queue = os.path.join(out_root, '_queue', f'{time.strftime("%Y%m%d_%H%M%S")}_{os.getpid()}')
+        os.makedirs(own_queue, exist_ok=True)
+        job = dict(job, _queue=own_queue)
     for k, (win, nf) in enumerate(sweep):
         tag = f'win{win}_nf{nf or "auto"}'
         out_dir = os.path.join(out_root, tag)
@@ -1642,6 +1720,12 @@ def run_job(job: Dict) -> Dict:
                       'detector': row['detector'], 'status': row['status'], 'error': row['error']})
             manifest.append(row)
 
+    if own_queue:
+        shutil.rmtree(own_queue, ignore_errors=True)
+        try:
+            os.rmdir(os.path.dirname(own_queue))
+        except OSError:
+            pass
     if shard is not None:                      # a worker: its manifest only; the parent finishes the job
         man_path = os.path.join(out_root, f'RUN_MANIFEST_gpu{shard}.csv')
         pd.DataFrame(manifest).to_csv(man_path, index=False)
@@ -1747,6 +1831,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     sub.add_parser('cloudsweep', help='cloud mask benchmark: every combination of thresholds, band sets and '
                                       'bright-blob settings (options: python automatch_cloudsweep.py -h)'
                    ).add_argument('rest', nargs=argparse.REMAINDER)
+    fin = sub.add_parser('finish', help='a finished or crashed job folder (also a server one, through the share '
+                                        'mapping): rerun the detectors it skipped, reuse the rest, and redo the '
+                                        'truth comparison, the cross-check and the RIVAL files')
+    fin.add_argument('job_dir')
+    fin.add_argument('--share-local', default='', help="where the server's share is mounted here, e.g. V:\\")
+    fin.add_argument('--share-server', default='', help='the same share on the server, e.g. /maintenance/')
+    fin.add_argument('--device', default='', help="auto | cuda:N | all | cpu (default: the job's)")
+    fin.add_argument('--rerun', choices=('missing', 'failed', 'all'), default='missing',
+                     help='missing: the detectors whose weights were missing (default); failed: every failed '
+                          'one; all: every detector')
     sub.add_parser('cloudfilter', help='reject the match points of finished jobs that fall on cloud and score '
                                        'them again (options: python automatch_cloudfilter.py -h)'
                    ).add_argument('rest', nargs=argparse.REMAINDER)
@@ -1773,6 +1867,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     if argv and argv[0] == 'cloudsweep':
         import automatch_cloudsweep as CS
         return CS.main(list(argv[1:]))
+    if argv and argv[0] == 'finish':
+        a = ap.parse_args(argv)
+        job = finish_spec(a.job_dir, (a.share_local, a.share_server), a.device, a.rerun)
+        print(f'[Job] finishing {a.job_dir}: rerun {a.rerun}, the rest reused', flush=True)
+        run_job(job)
+        return 0
     if argv and argv[0] == 'cloudfilter':
         import automatch_cloudfilter as CF
         return CF.main(list(argv[1:]))

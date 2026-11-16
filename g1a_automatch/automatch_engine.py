@@ -1675,6 +1675,22 @@ class InputScene:
 # =============================================================================
 # PREPROCESSOR
 # =============================================================================
+def _pid_alive(pid: int) -> bool:
+    """Whether a process with this id exists (a lock file's owner)."""
+    try:
+        if os.name == 'nt':
+            import ctypes
+            h = ctypes.windll.kernel32.OpenProcess(0x1000, False, int(pid))   # PROCESS_QUERY_LIMITED_INFORMATION
+            if not h:
+                return False
+            ctypes.windll.kernel32.CloseHandle(h)
+            return True
+        os.kill(int(pid), 0)
+        return True
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
 class _dir_lock:
     """with _dir_lock(folder): one process at a time in a folder (a lock file
     made exclusively; others wait, polling). A lock older than stale_s (a run
@@ -1693,7 +1709,13 @@ class _dir_lock:
                 return self
             except FileExistsError:
                 try:
-                    if time.time() - os.path.getmtime(self.path) > self.stale_s:
+                    owner = ''
+                    with open(self.path, encoding='utf-8', errors='replace') as f:
+                        owner = f.read().strip()
+                    dead = owner.isdigit() and not _pid_alive(int(owner))   # a stopped job's lock
+                    if dead or time.time() - os.path.getmtime(self.path) > self.stale_s:
+                        print(f'[Cache] lock of a {"stopped" if dead else "stale"} run removed: {self.path}',
+                              flush=True)
                         os.remove(self.path)
                         continue
                 except OSError:

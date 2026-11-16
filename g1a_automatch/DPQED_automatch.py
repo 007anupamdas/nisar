@@ -946,6 +946,68 @@ def csv_table(path, cols=None, where=None):
     return t
 
 
+class FinishDialog(QtWidgets.QDialog):
+    """Finish a job folder (automatch_job finish): a server job opened from
+    here through the share mapping, or a local one. The detectors it skipped
+    (missing weights on the server) run again here, the rest are reused, and
+    the truth comparison, the cross-check and the RIVAL files are made afresh
+    with the current code."""
+
+    def __init__(self, settings, job, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('Finish a job')
+        self.settings = settings
+        f = QtWidgets.QFormLayout(self)
+        self.folder = PathRow('dir')
+        self.folder.setText(settings.value('finish_folder', '') or '')
+        self.folder.setToolTip("The job's output folder, e.g. V:\\ICIGDev\\GPUPOC\\output\\output1066")
+        f.addRow('Job folder', self.folder)
+        self.share_local = QtWidgets.QLineEdit(settings.value('pack/share_local', 'V:\\'))
+        self.share_server = QtWidgets.QLineEdit(settings.value('pack/share_server', '/maintenance/'))
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(self.share_local)
+        row.addWidget(QtWidgets.QLabel('here  =  on the server'))
+        row.addWidget(self.share_server)
+        f.addRow('Share mapping', row)
+        self.rerun = QtWidgets.QComboBox()
+        self.rerun.addItems(['the detectors whose weights were missing', 'every failed detector', 'every detector'])
+        f.addRow('Run again', self.rerun)
+        self.device = DeviceCombo()
+        self.device.setValue(job.get('device') or 'auto')
+        f.addRow('Device', self.device)
+        note = QtWidgets.QLabel('Reused: every finished detector of the job. Then the truth comparison, the '
+                                'cross-check, RIVAL_FINAL and RIVAL_BEST_FINAL are made afresh. The job\'s own '
+                                'settings file is kept as job_used_server.json.')
+        note.setWordWrap(True)
+        f.addRow(note)
+        bb = QtWidgets.QDialogButtonBox()
+        bb.addButton('Finish job', QtWidgets.QDialogButtonBox.ButtonRole.AcceptRole
+                     if QT_API != 'PyQt5' else QtWidgets.QDialogButtonBox.AcceptRole)
+        bb.addButton(QtWidgets.QDialogButtonBox.StandardButton.Cancel if QT_API != 'PyQt5'
+                     else QtWidgets.QDialogButtonBox.Cancel)
+        bb.accepted.connect(self._ok)
+        bb.rejected.connect(self.reject)
+        f.addRow(bb)
+
+    def _ok(self):
+        d = self.folder.text().strip()
+        if not os.path.isfile(os.path.join(d, 'job_used.json')):
+            QtWidgets.QMessageBox.warning(self, 'Finish a job', 'Choose a job output folder (it holds job_used.json).')
+            return
+        self.settings.setValue('finish_folder', d)
+        self.settings.setValue('pack/share_local', self.share_local.text().strip())
+        self.settings.setValue('pack/share_server', self.share_server.text().strip())
+        self.accept()
+
+    def args(self):
+        a = ['finish', self.folder.text().strip(), '--rerun', ('missing', 'failed', 'all')[self.rerun.currentIndex()]]
+        if self.share_local.text().strip() and self.share_server.text().strip():
+            a += ['--share-local', self.share_local.text().strip(), '--share-server', self.share_server.text().strip()]
+        if self.device.value() != 'auto':
+            a += ['--device', self.device.value()]
+        return a
+
+
 class BenchDialog(QtWidgets.QDialog):
     """Benchmark finished jobs (automatch_bench): which detector does best on
     which kind of image (sensor, clouds, error level)."""
@@ -970,6 +1032,11 @@ class BenchDialog(QtWidgets.QDialog):
                                'D:\\g1a\\automatch; the server\'s V:\\ICIGDev\\GPUPOC\\output): one benchmark over '
                                'all of them, its tables in the first')
         f.addRow('Job output folder(s)', self.folder)
+        self.out = PathRow('dir')
+        self.out.setText(settings.value('bench_out', '') or '')
+        self.out.setToolTip('Where BENCH_*.csv, CROSS_ALL.csv and the cloud-free tables go; the job folders are '
+                            'only read (each job\'s own cross-check files are written into its folder)')
+        f.addRow('Results folder', self.out)
         self.jobs = QtWidgets.QLineEdit(settings.value('bench_jobs', '') or '')
         self.jobs.setPlaceholderText('all finished automatch jobs (or e.g. 335-366, 370)')
         f.addRow('Jobs', self.jobs)
@@ -1088,6 +1155,9 @@ class BenchDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.warning(self, 'Benchmark', 'Choose existing folder(s)'
                                           + (': not found: ' + '; '.join(missing) if missing else '.'))
             return
+        if not self.out.text().strip():
+            QtWidgets.QMessageBox.warning(self, 'Benchmark', 'Choose the results folder (where the tables go).')
+            return
         try:
             import automatch_cross as X
             X.parse_jobs(self.jobs.text())
@@ -1098,13 +1168,14 @@ class BenchDialog(QtWidgets.QDialog):
         self.settings.setValue('bench_folder', self.folder.text())
         self.settings.setValue('bench_jobs', self.jobs.text())
         self.settings.setValue('bench_max_points', self.max_points.value())
+        self.settings.setValue('bench_out', self.out.text().strip())
         self.settings.setValue('bench_cloud_free', 'true' if self.cloud_free.isChecked() else 'false')
         self.settings.setValue('pack/share_local', self.share_local.text().strip())
         self.settings.setValue('pack/share_server', self.share_server.text().strip())
         self.accept()
 
     def args(self):
-        a = ['bench'] + self.folders() + ['--success-px', f'{self.success.value():g}']
+        a = ['bench'] + self.folders() + ['--out', self.out.text().strip(), '--success-px', f'{self.success.value():g}']
         if self.jobs.text().strip():
             a += ['--jobs', self.jobs.text().strip()]
         if self.share_local.text().strip() and self.share_server.text().strip():
@@ -1975,8 +2046,8 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         job_tools = (('Load job…', self.load_job_dialog), ('Save job…', self.save_job_dialog),
                      ('Preflight', self.preflight), ('Run', self.run_job), ('Queue run', self.queue_run),
                      ('Stop', self.stop), ('Open output', self.open_output), ('Pack for server…', self.pack_dialog))
-        analysis = (('Benchmark & cross-check…', self.bench_dialog), ('Cloud mask test…', self.cloud_dialog),
-                    ('Cloud sweep…', self.cloud_sweep_dialog))
+        analysis = (('Benchmark & cross-check…', self.bench_dialog), ('Finish a job…', self.finish_dialog),
+                    ('Cloud mask test…', self.cloud_dialog), ('Cloud sweep…', self.cloud_sweep_dialog))
         menu = self.menuBar().addMenu('Tools')
         for row_items, title in ((job_tools, ''), (analysis, 'Analysis:')):
             btns = QtWidgets.QHBoxLayout()
@@ -2492,7 +2563,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.not_before.setDisplayFormat('yyyy-MM-dd HH:mm')
         row.addWidget(self.not_before)
         row.addStretch(1)
-        for label, slot in (('Up', self._queue_up), ('Remove', self._queue_remove)):
+        for label, slot in (('Up', self._queue_up), ('Edit', self._queue_edit), ('Remove', self._queue_remove)):
             b = QtWidgets.QPushButton(label)
             b.clicked.connect(slot)
             row.addWidget(b)
@@ -3195,6 +3266,25 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             parts.append(f'{w} px: {n:,}' + (f' (capped; {want:,} at this density)' if want > cap else ''))
         self.lbl_kp.setText('auto gives ' + ' · '.join(parts) if parts else '')
 
+    def finish_dialog(self, *_, run=True):
+        """Finish a job folder (also a server one) from a dialog; run=False returns it unshown (tests)."""
+        try:
+            job = self.get_job()
+        except ValueError:
+            job = dict(DEFAULT_JOB)
+        job['device'] = self.device.value()
+        dlg = FinishDialog(self.settings, job, self)
+        dlg.accepted.connect(lambda: self._start_finish(dlg))
+        if run:
+            dlg.show()
+            self._last_finish_dialog = dlg
+        return dlg
+
+    def _start_finish(self, dlg):
+        args = dlg.args()
+        self.log.appendPlainText('--- ' + ' '.join(args))
+        self._start(args, 'run')
+
     def bench_dialog(self, *_, run=True):
         """Benchmark finished jobs from a dialog; run=False returns it unshown (tests)."""
         try:
@@ -3255,7 +3345,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self._start(args, 'cloud')
 
     def _start_bench(self, dlg):
-        self._bench_dir = (dlg.folders() or [''])[0]
+        self._bench_dir = dlg.out.text().strip() or (dlg.folders() or [''])[0]
         args = dlg.args()
         self.log.appendPlainText('--- ' + ' '.join(args))
         self._start(args, 'bench')
@@ -3405,7 +3495,12 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         nb = self.not_before.dateTime().toString('yyyy-MM-dd HH:mm') if self.use_not_before.isChecked() else ''
         entry = {'path': snap, 'output': out, 'name': os.path.basename(str(job['input_path']).rstrip('/\\')),
                  'not_before': nb}
-        self._run_queue.append(entry)
+        pos = getattr(self, '_editing_queued', None)
+        self._editing_queued = None
+        if pos is not None and 0 <= pos <= len(self._run_queue):
+            self._run_queue.insert(pos, entry)
+        else:
+            self._run_queue.append(entry)
         self._queue_changed()
         self.lbl_status.setText(f'Queued: {entry["name"]} -> {out}' + (f' (not before {nb})' if nb else ''))
         self._maybe_start_queued()
@@ -3461,6 +3556,31 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             q[i - 1], q[i] = q[i], q[i - 1]
             self._queue_changed()
             self.queue_list.setCurrentRow(i - 1)
+
+    def _queue_edit(self):
+        """Load a queued run's settings into the window to change them; Queue
+        run then puts the changed run back in its place."""
+        i = self.queue_list.currentRow()
+        if not (0 <= i < len(self._run_queue)):
+            return
+        e = self._run_queue[i]
+        try:
+            with open(e['path'], encoding='utf-8') as f:
+                job = json.load(f)
+        except (OSError, ValueError) as ex:
+            QtWidgets.QMessageBox.warning(self, 'Edit queued run', f'{e["path"]} could not be read: {ex}')
+            return
+        self.set_job(job)
+        if e.get('not_before'):
+            self.use_not_before.setChecked(True)
+            self.not_before.setDateTime(QtCore.QDateTime.fromString(e['not_before'], 'yyyy-MM-dd HH:mm'))
+        else:
+            self.use_not_before.setChecked(False)
+        del self._run_queue[i]
+        self._editing_queued = i
+        self._queue_changed()
+        self.lbl_status.setText(f'Editing queued run {e["name"]}: change the settings, then Queue run to put it '
+                                f'back (position {i + 1}).')
 
     def _queue_remove(self):
         i = self.queue_list.currentRow()

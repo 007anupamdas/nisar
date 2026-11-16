@@ -388,7 +388,11 @@ def bench_job(d: str, recompute: bool = False, cloud_model_dir: Optional[str] = 
         try:
             perf = pd.read_csv(pp)
             if 'parallel_share' in perf.columns:
-                perf = perf[['sweep', 'detector', 'matcher', 'parallel_share', 'windows_parallel']]
+                cols = ['sweep', 'detector', 'matcher', 'parallel_share', 'windows_parallel']
+                if 'detector_seconds' in perf.columns:
+                    perf = perf.assign(minutes=perf['detector_seconds'] / 60.0)
+                    cols.append('minutes')
+                perf = perf[cols]
                 det = det.merge(perf.astype({'sweep': str, 'detector': str, 'matcher': str}), how='left',
                                 on=['sweep', 'detector', 'matcher'])
         except Exception:
@@ -437,7 +441,9 @@ def summarize(dets: pd.DataFrame, success_px: float = 3.0) -> pd.DataFrame:
             for det, h in g.groupby('detector'):
                 ok = h[h['truth_reached'] >= h['truth_total'] / 2.0]
                 par = h['parallel_share'] if 'parallel_share' in h.columns else pd.Series(dtype=float)
+                mins = h['minutes'] if 'minutes' in h.columns else pd.Series(dtype=float)
                 rows.append({'group_by': gname, 'group': gval, 'detector': det, 'jobs': int(h['job'].nunique()),
+                             'median_minutes': round(float(mins.median()), 1) if mins.notna().any() else None,
                              'median_parallel_share': (round(float(par.median()), 3) if par.notna().any() else None),
                              'success_rate': round(float(h['success'].mean()), 3),
                              'median_rmse_px': round(float(ok['rmse_px'].median()), 2) if len(ok) else None,
@@ -660,7 +666,7 @@ def _write_bench(parent: str, jobs_df: pd.DataFrame, drows: list, xrows: list, a
         dets['error_class'] = [_class(v, ERROR_CLASSES) for v in dets['error_km']]
         keep = ['job', 'sensor', 'band', 'pixel_m', 'cloud_pct', 'cloud_class', 'error_km', 'error_class',
                 'detector', 'matcher', 'sweep', 'ransac', 'truth_rmse_m', 'rmse_px', 'truth_reached', 'truth_total',
-                'detector_rank', 'parallel_share', 'windows_parallel', 'cloudfree_rmse_m', 'cloudfree_rmse_px',
+                'detector_rank', 'parallel_share', 'windows_parallel', 'minutes', 'cloudfree_rmse_m', 'cloudfree_rmse_px',
                 'cloudfree_reached']
         dets = dets[[c for c in keep if c in dets.columns]]
         dets.to_csv(os.path.join(parent, 'BENCH_DETECTORS.csv'), index=False)
@@ -680,7 +686,8 @@ def _write_bench(parent: str, jobs_df: pd.DataFrame, drows: list, xrows: list, a
             print(f'  {sensor}:')
             for r in g.head(8).itertuples():
                 print(f'         {r.detector:<28} success {100 * r.success_rate:5.1f} % of {r.jobs} job(s), '
-                      f'median {r.median_rmse_px} px, first {r.times_first}x')
+                      f'median {r.median_rmse_px} px, first {r.times_first}x'
+                      + (f', {r.median_minutes} min per pass' if r.median_minutes is not None else ''))
     if arows:
         import automatch_accuracy as A
         acc = pd.concat(arows, ignore_index=True)
