@@ -76,12 +76,16 @@ class RunWindow(QtWidgets.QMainWindow):
         f = QtWidgets.QFormLayout()
         v.addLayout(f)
         self.input = PathRow(False, 'Input image', 'Images (*.tif *.tiff *.h5);;All files (*)')
-        self.reference = PathRow(True, 'Reference folder')
+        self.reference = PathRow(True, 'Reference folder (L8)')
+        self.reference_c1 = PathRow(True, 'C1 reference folder (Indian region)')
         self.output = PathRow(True, 'Output folder')
         self.truth = PathRow(False, 'Ground truth (optional)', 'CSV (*.csv);;All files (*)')
         self.weights = PathRow(True, 'Weights folder (optional)')
         f.addRow('Input image', self.input)
-        f.addRow('Reference folder', self.reference)
+        f.addRow('Reference folder (L8)', self.reference)
+        f.addRow('C1 references (India)', self.reference_c1)
+        self.reference_c1.setToolTip('Optional: with a scene centre in the Indian region (68-98 E, 6-38 N) the job '
+                                     'uses these references instead of the L8 ones')
         f.addRow('Output folder', self.output)
         f.addRow('Ground truth (optional)', self.truth)
         f.addRow('Weights folder (optional)', self.weights)
@@ -161,8 +165,8 @@ class RunWindow(QtWidgets.QMainWindow):
         self.btn_presets.clicked.connect(self.presets_file)
         self.input.edit.textChanged.connect(self.refresh)
         self.sensor.currentIndexChanged.connect(self.refresh)
-        for key, row in (('input', self.input), ('reference', self.reference), ('output', self.output),
-                         ('truth', self.truth), ('weights', self.weights)):
+        for key, row in (('input', self.input), ('reference', self.reference), ('reference_c1', self.reference_c1),
+                         ('output', self.output), ('truth', self.truth), ('weights', self.weights)):
             row.edit.setText(self.settings.value(key, '') or '')
         self.device.setCurrentText(self.settings.value('device', 'all') or 'all')
         self.cloud.setChecked(str(self.settings.value('cloud', 'true')).lower() == 'true')
@@ -199,7 +203,9 @@ class RunWindow(QtWidgets.QMainWindow):
             if not row.text():
                 raise ValueError(f'set the {label}')
         crisp = self.crispest.isChecked()
-        job, _ = P.job_for(s, self.input.text(), self.reference.text(), self.output.text(), self.truth.text(),
+        ref, why = P.reference_for(self.input.text(), self.reference.text(), self.reference_c1.text())
+        self.log.appendPlainText(f'--- references: {why}: {ref}')
+        job, _ = P.job_for(s, self.input.text(), ref, self.output.text(), self.truth.text(),
                            [] if crisp else P.parse_bands(self.bands.text()),
                            None if self.truth.text() else self.max_err.value(),
                            self.device.currentText(), self.cloud.isChecked(), self.weights.text(), self.presets,
@@ -219,8 +225,8 @@ class RunWindow(QtWidgets.QMainWindow):
         path = os.path.join(job['output_dir'], 'job_preset.json')
         with open(path, 'w', encoding='utf-8') as f:
             json.dump(job, f, indent=2)
-        for key, row in (('input', self.input), ('reference', self.reference), ('output', self.output),
-                         ('truth', self.truth), ('weights', self.weights)):
+        for key, row in (('input', self.input), ('reference', self.reference), ('reference_c1', self.reference_c1),
+                         ('output', self.output), ('truth', self.truth), ('weights', self.weights)):
             self.settings.setValue(key, row.text())
         self.settings.setValue('device', self.device.currentText())
         self.settings.setValue('cloud', 'true' if self.cloud.isChecked() else 'false')

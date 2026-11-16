@@ -25,7 +25,7 @@ PRESETS_FILE = os.path.join(HERE, 'automatch_presets.json')
 
 # What the presets rest on, shown in the run window. They are provisional:
 # updated here as the logs and rankings of finished jobs come in.
-BASIS = 'provisional, as of 2026-11-15: MV 2 jobs, HV 2-11 jobs per detector, HS 3 jobs, ML none yet'
+BASIS = 'provisional, as of 2026-11-16: MV 4 jobs, HV 2-11 jobs per detector, HS 3 jobs, ML and C3 none yet'
 
 # For every sensor
 COMMON: Dict = {
@@ -60,6 +60,11 @@ SENSORS: Dict[str, Dict] = {
            'window_sizes': [512], 'band_hint': 'near 1250, 1650 or 2200 nm (e.g. band28), not 1380 / 1900 nm',
            'note': 'HyS-SWIR: 512 px windows; clouds by the SWIR tests. RoMa / MINIMA-RoMa reached 16 of 16 truth '
                    'points.'},
+    'C3': {'detectors': ['loftr', 'disk', 'imw-rdd-nn', 'imw-aspanformer', 'imw-aliked-lg'],
+           'window_sizes': [1024], 'band_hint': 'the MX band you benchmarked (PAN: band1)',
+           'cloud_method_MV': 'omnicloudmask',
+           'note': 'Cartosat-3 (MX / PAN): no benchmark yet; the detectors that did best on G1A MV as a start. '
+                   'References: C1 over India, L8 elsewhere (the run window chooses by the scene centre).'},
     'ML': {'detectors': ['imw-minima-roma', 'imw-roma', 'imw-eloftr', 'imw-topicfm', 'imw-lanet-nn'],
            'window_sizes': [512], 'band_hint': 'not band1 (7.35 um) or band6 (13.25 um)',
            'note': 'MX-LWIR: no benchmark yet, the HS list as a start; gradient window preparation (thermal against '
@@ -80,10 +85,85 @@ def load(path: Optional[str] = None) -> Dict[str, Dict]:
     return out
 
 
+INDIA_REGION = (68.0, 6.0, 98.0, 38.0)          # lon_min, lat_min, lon_max, lat_max: where the C1 references apply
+META_SENSORS = {'MX-VNIR': 'MV', 'HYS-VNIR': 'HV', 'HYS-SWIR': 'HS', 'MX-LWIR': 'ML', 'MX': 'C3', 'PAN': 'C3',
+                'CARTOSAT-3': 'C3', 'C3': 'C3'}
+
+
 def sensor_of(path: str) -> str:
-    """MV / HV / HS / ML from a G1A file name ('' when it does not say)."""
+    """MV / HV / HS / ML / C3 of an input: from its G1A file name, else from
+    the product's metadata beside it (BAND_META.txt: Sensor / SatID; a
+    Cartosat-3 product -> C3); '' when neither says."""
     m = re.search(r'G1A_([A-Z]{2})_', os.path.basename(path or ''))
-    return m.group(1) if m else ''
+    if m:
+        return m.group(1)
+    if re.search(r'(^|[_\-/\\])C3[A-Z]{2}', os.path.basename(path or '').upper()):
+        return 'C3'
+    meta = product_meta(path)
+    for key in ('Sensor', 'SensorName', 'SatID', 'SatelliteID', 'Satellite', 'Mission'):
+        v = str(meta.get(key, '')).strip().upper()
+        if v in META_SENSORS:
+            return META_SENSORS[v]
+        if v in ('MV', 'HV', 'HS', 'ML'):
+            return v
+    return ''
+
+
+def product_meta(path: str) -> Dict[str, str]:
+    """BAND_META.txt (or *_metaFile.txt) of the product folder an input lies
+    in, as key: value ({} when there is none)."""
+    folder = os.path.dirname(os.path.abspath(path)) if path else ''
+    if not folder or not os.path.isdir(folder):
+        return {}
+    import glob
+    cands = [os.path.join(folder, 'BAND_META.txt')] + sorted(glob.glob(os.path.join(folder, '*meta*.txt'))) + sorted(
+        glob.glob(os.path.join(folder, '*META*.txt')))
+    for p in cands:
+        if os.path.isfile(p):
+            try:
+                import automatch_target as TG
+                return TG.read_band_meta(p)
+            except Exception:
+                continue
+    return {}
+
+
+def scene_centre(path: str) -> Optional[Tuple[float, float]]:
+    """(lon, lat) of the input's centre: from its metadata, else its raster bounds."""
+    meta = product_meta(path)
+    for lon_k, lat_k in (('StripCenterLon', 'StripCenterLat'), ('StripCentreLon', 'StripCentreLat'),
+                         ('SceneCenterLon', 'SceneCenterLat'), ('ProdCenterLon', 'ProdCenterLat')):
+        try:
+            return float(meta[lon_k]), float(meta[lat_k])
+        except (KeyError, ValueError):
+            pass
+    try:
+        import rasterio as rio
+        from pyproj import CRS, Transformer
+        with rio.open(path) as src:
+            b, crs = src.bounds, src.crs
+        x, y = (b.left + b.right) / 2.0, (b.top + b.bottom) / 2.0
+        if crs is None:
+            return None
+        if CRS.from_user_input(crs).is_geographic:
+            return x, y
+        return Transformer.from_crs(crs, CRS.from_epsg(4326), always_xy=True).transform(x, y)
+    except Exception:
+        return None
+
+
+def reference_for(path: str, ref_l8: str, ref_c1: str = '', region=INDIA_REGION) -> Tuple[str, str]:
+    """(reference folder, why): the C1 references when the scene centre lies
+    in the Indian region and a C1 folder is given, else the L8 ones."""
+    if not ref_c1:
+        return ref_l8, 'L8 (no C1 folder given)'
+    c = scene_centre(path)
+    if c is None:
+        return ref_l8, 'L8 (scene centre unknown)'
+    lon, lat = c
+    if region[0] <= lon <= region[2] and region[1] <= lat <= region[3]:
+        return ref_c1, f'C1 (scene centre {lon:.2f}, {lat:.2f} in the Indian region)'
+    return ref_l8, f'L8 (scene centre {lon:.2f}, {lat:.2f} outside the Indian region)'
 
 
 def parse_bands(text: str) -> List[str]:

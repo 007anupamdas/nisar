@@ -58,7 +58,7 @@ CODE_FILES = ('automatch_engine.py', 'automatch_job.py', 'automatch_imcui.py', '
               'automatch_cloud.py', 'automatch_accuracy.py', 'automatch_cloudsweep.py', 'automatch_cloudphys.py',
               'automatch_tirauxcloud.py', 'automatch_reflect.py', 'automatch_cloudmodels.py', 'automatch_refsubset.py',
               'automatch_cloudfilter.py', 'automatch_presets.py',
-              'automatch_report.py')
+              'automatch_report.py', 'automatch_target.py')
 
 
 def code_fingerprint() -> str:
@@ -1837,6 +1837,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     sub.add_parser('cloudsweep', help='cloud mask benchmark: every combination of thresholds, band sets and '
                                       'bright-blob settings (options: python automatch_cloudsweep.py -h)'
                    ).add_argument('rest', nargs=argparse.REMAINDER)
+    tg = sub.add_parser('target', help='targeting accuracy of a product against its intended track (BAND_META + '
+                                       'range file; options: python automatch_target.py -h)')
+    tg.add_argument('rest', nargs=argparse.REMAINDER)
     rp = sub.add_parser('report', help='shapefile, look-vector plot and RIVAL statistics of a finished job\'s '
                                        'final points (REPORT/)')
     rp.add_argument('job_dir')
@@ -1877,6 +1880,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     if argv and argv[0] == 'cloudsweep':
         import automatch_cloudsweep as CS
         return CS.main(list(argv[1:]))
+    if argv and argv[0] == 'target':
+        import automatch_target as TG
+        return TG.main(list(argv[1:]))
     if argv and argv[0] == 'report':
         import automatch_report as RP
         a = ap.parse_args(argv)

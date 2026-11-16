@@ -653,6 +653,70 @@ def test_e2e_cloudfilter(tmp):
           (True, True, True, True, True, True))
 
 
+def test_target(tmp):
+    """Targeting (the port of DPQED_targeting): a synthetic BAND_META and
+    range file whose intended track lies a known distance from the acquired
+    scene give that along / across error; outputs CSV, PNG, shapefiles."""
+    import contextlib
+    import glob
+    import io
+    import automatch_presets as P
+    import automatch_target as TG
+    from pyproj import CRS, Transformer
+    prod = os.path.join(tmp, 'tgt', '268568631')
+    os.makedirs(prod, exist_ok=True)
+    # a descending scene over India, 60 x 40 km, heading south; the intended track 300 m east, 200 m behind
+    lon0, lat0 = 81.0, 20.0                   # a UTM zone's centre: no grid convergence to tilt the test's edges
+    to_m = Transformer.from_crs(CRS.from_epsg(4326), CRS.from_user_input(TG.local_crs(lon0, lat0)), always_xy=True)
+    to_ll = Transformer.from_crs(CRS.from_user_input(TG.local_crs(lon0, lat0)), CRS.from_epsg(4326), always_xy=True)
+    x0, y0 = to_m.transform(lon0, lat0)
+    ul, ur, ll, lr = [to_ll.transform(x0 + dx, y0 + dy) for dx, dy in
+                      ((-20000, 30000), (20000, 30000), (-20000, -30000), (20000, -30000))]
+    meta = {'Sensor': 'MV', 'SatID': 'G1A', 'ImagingMode': 'DSC', 'ProductCode': 'SPLC00GTD', 'DateOfPass': '12-NOV-2026',
+            'ImagingOrbitNo': '1234', 'SegmentNumber': '7', 'SceneNumber': '3', 'SourceOfOrbit': '1',
+            'SourceOfAttitude': '7', 'SceneCenterRoll': '0.1', 'SceneCenterPitch': '0.2', 'SceneCenterYaw': '0.3',
+            'ImageULLon': ul[0], 'ImageULLat': ul[1], 'ImageURLon': ur[0], 'ImageURLat': ur[1],
+            'ImageLLLon': ll[0], 'ImageLLLat': ll[1], 'ImageLRLon': lr[0], 'ImageLRLat': lr[1],
+            'StripCenterLon': lon0, 'StripCenterLat': lat0,
+            'StripStartTime': '12-NOV-2026T05:10:00.000000', 'SceneCenterTime': '05:10:05:000',
+            'StripEndTime': '12-NOV-2026T05:10:10.000000'}
+    with open(os.path.join(prod, 'BAND_META.txt'), 'w') as f:
+        f.write('\n'.join(f'{k}={v}' for k, v in meta.items()) + '\n')
+    rv = os.path.join(tmp, 'tgt', 'RV')
+    os.makedirs(rv, exist_ok=True)
+    lines = []
+    for sec in range(0, 21):                      # 05:09:50 .. 05:10:10: the intended centre line, offset
+        t = 50 + sec                             # seconds after 05:09:00
+        frac = (t - 60.0) / 10.0                 # 0 at scene start (top edge), 1 at its end (bottom edge)
+        y = y0 + 30000 - 60000 * frac + 200.0    # 200 m "behind" (north of) the acquired for a southbound pass
+        x = x0 + 300.0
+        lon, lat = to_ll.transform(x, y)
+        lons, lats = to_ll.transform(x - 20000, y)
+        lone, late = to_ll.transform(x + 20000, y)
+        hh, mm, ss = 5, 9 + (t // 60), t % 60
+        lines.append(f'2026 11 12 {hh} {mm} {ss} 0.0 {lat:.8f} {lon:.8f} {lats:.8f} {lons:.8f} {late:.8f} {lone:.8f} '
+                     f'{lat:.8f} {lon:.8f} 0 0')
+    with open(os.path.join(rv, 'RangeVariationOf_12NOV2026_MX-VNIR_101600'), 'w') as f:
+        f.write('\n'.join(lines) + '\n')
+    with contextlib.redirect_stdout(io.StringIO()):
+        rows = TG.run('268568631', os.path.join(tmp, 'tgt'), rv, os.path.join(tmp, 'tgt', 'out'))
+    r = rows[0]
+    outs = sorted(os.path.basename(p) for p in glob.glob(os.path.join(tmp, 'tgt', 'out', 'TARGET_*')))
+    check('target: along / across from the intended track (300 m east = across, 200 m behind = along), the outputs',
+          (abs(float(r['AlongTrack']) - 200.0) < 5.0, abs(abs(float(r['AcrossTrack'])) - 300.0) < 5.0, r['Sensor'],
+           r['Mode'], r['ID'], any(n.endswith('.png') for n in outs), any(n.endswith('_prod_line.shp') for n in outs),
+           any(n.endswith('_range_point.shp') for n in outs), os.path.exists(os.path.join(tmp, 'tgt', 'out', 'TARGET_ALL.csv'))),
+          (True, True, 'MV', 'DSC', '268568631', True, True, True, True))
+    # the sensor from the product's metadata when the file name does not say; the reference rule
+    tif = os.path.join(prod, 'scene.tif')
+    with open(tif, 'wb') as f:
+        f.write(b'')
+    check('presets: the sensor from BAND_META beside the input; C1 references inside India, L8 outside',
+          (P.sensor_of(tif), P.reference_for(tif, '/l8', '/c1')[0], P.reference_for(tif, '/l8', '')[0],
+           P.reference_for('/x/G1A_HS_x.tif', '/l8', '/c1')[0], P.sensor_of('/x/C3MX660000100DP.tif')),
+          ('MV', '/c1', '/l8', '/l8', 'C3'))
+
+
 def test_report(tmp):
     """report: shapefile (readable by the reference-index reader), look-vector
     plot and RIVAL's statistics of a job's final points."""
@@ -1094,8 +1158,8 @@ def test_presets(tmp):
     import automatch_presets as P
     pre = P.load('')
     bad = {s: J.unknown_keys({k: v for k, v in p.items() if k not in P.INFO_KEYS}) for s, p in pre.items()}
-    check('presets: MV / HV / HS / ML, every key a job setting', (sorted(pre), [v for v in bad.values() if v]),
-          (['HS', 'HV', 'ML', 'MV'], []))
+    check('presets: MV / HV / HS / ML (+ C3), every key a job setting', (sorted(pre), [v for v in bad.values() if v]),
+          (['C3', 'HS', 'HV', 'ML', 'MV'], []))
     job, note = P.job_for('HS', '/d/G1A_HS_x.tif', '/ref', '/out', '/t/pts_band28.csv', presets=pre)
     n = J.normalize(job)
     check('presets: an HS job: its detectors and window, truth decides range and band, all GPUs, cross-check 3 of 5',
@@ -1210,7 +1274,8 @@ def test_gui_cloud():
         tools = [a.text().replace('&&', '&') for a in w.menuBar().actions()[0].menu().actions()]
         check('gui: the analysis tools in their own row and in the Tools menu; the version in the title',
               (w.btn_cloud_sweep.parentWidget() is not None, tools, G.AUTOMATCH_VERSION in w.windowTitle()),
-              (True, ['Benchmark & cross-check…', 'Finish a job…', 'Report…', 'Cloud mask test…', 'Cloud sweep…'], True))
+              (True, ['Benchmark & cross-check…', 'Finish a job…', 'Report…', 'Targeting…', 'Cloud mask test…',
+                      'Cloud sweep…'], True))
         w.in_path.setText(img)
         w.cloud_conf.setValue(0.8)
         w.cloud_bands.setText('band3, band2, band6')
@@ -5316,6 +5381,7 @@ def main():
         test_gpu_queue(tmp)
         test_finish(tmp)
         test_report(tmp)
+        test_target(tmp)
         test_presets(tmp)
         test_jobs_312_317(tmp)
         test_jobs_318_323(tmp)

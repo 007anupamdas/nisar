@@ -1008,6 +1008,59 @@ class FinishDialog(QtWidgets.QDialog):
         return a
 
 
+class TargetDialog(QtWidgets.QDialog):
+    """Targeting accuracy (automatch_target): a product folder, its
+    BAND_META.txt or a request ID, the range files folder, the output."""
+
+    def __init__(self, settings, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('Targeting accuracy')
+        self.settings = settings
+        f = QtWidgets.QFormLayout(self)
+        self.what = QtWidgets.QLineEdit(settings.value('target_what', '') or '')
+        self.what.setPlaceholderText('request ID (e.g. 268568631), or a product folder / BAND_META.txt')
+        f.addRow('Product / request ID', self.what)
+        self.root = PathRow('dir')
+        self.root.setText(settings.value('target_root', 'X:/DPS/G1A') or '')
+        f.addRow('Products root (for a request ID)', self.root)
+        self.rv = PathRow('dir')
+        self.rv.setText(settings.value('target_rv', 'T:/PRODG1A/RV') or '')
+        f.addRow('Range files (intended tracks)', self.rv)
+        self.out = PathRow('dir')
+        self.out.setText(settings.value('target_out', '') or '')
+        self.out.setToolTip('TARGET_<...>.csv / .png / shapefiles and TARGET_ALL.csv go here (empty: beside the '
+                            'product\'s BAND_META.txt)')
+        f.addRow('Output folder', self.out)
+        self.all_scenes = QtWidgets.QCheckBox('a request ID: also its further scenes (ID21, ID31, ...)')
+        f.addRow(self.all_scenes)
+        bb = QtWidgets.QDialogButtonBox()
+        bb.addButton('Run', QtWidgets.QDialogButtonBox.ButtonRole.AcceptRole
+                     if QT_API != 'PyQt5' else QtWidgets.QDialogButtonBox.AcceptRole)
+        bb.addButton(QtWidgets.QDialogButtonBox.StandardButton.Cancel if QT_API != 'PyQt5'
+                     else QtWidgets.QDialogButtonBox.Cancel)
+        bb.accepted.connect(self._ok)
+        bb.rejected.connect(self.reject)
+        f.addRow(bb)
+
+    def _ok(self):
+        if not self.what.text().strip():
+            QtWidgets.QMessageBox.warning(self, 'Targeting', 'Give a request ID, a product folder or a BAND_META.txt.')
+            return
+        for k, w in (('target_what', self.what), ('target_root', self.root), ('target_rv', self.rv),
+                     ('target_out', self.out)):
+            self.settings.setValue(k, w.text().strip())
+        self.accept()
+
+    def args(self):
+        a = ['target', self.what.text().strip(), '--root', self.root.text().strip() or 'X:/DPS/G1A',
+             '--rv', self.rv.text().strip() or 'T:/PRODG1A/RV']
+        if self.out.text().strip():
+            a += ['--out', self.out.text().strip()]
+        if self.all_scenes.isChecked():
+            a.append('--all-scenes')
+        return a
+
+
 class BenchDialog(QtWidgets.QDialog):
     """Benchmark finished jobs (automatch_bench): which detector does best on
     which kind of image (sensor, clouds, error level)."""
@@ -2047,8 +2100,8 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
                      ('Preflight', self.preflight), ('Run', self.run_job), ('Queue run', self.queue_run),
                      ('Stop', self.stop), ('Open output', self.open_output), ('Pack for server…', self.pack_dialog))
         analysis = (('Benchmark & cross-check…', self.bench_dialog), ('Finish a job…', self.finish_dialog),
-                    ('Report…', self.report_dialog), ('Cloud mask test…', self.cloud_dialog),
-                    ('Cloud sweep…', self.cloud_sweep_dialog))
+                    ('Report…', self.report_dialog), ('Targeting…', self.target_dialog),
+                    ('Cloud mask test…', self.cloud_dialog), ('Cloud sweep…', self.cloud_sweep_dialog))
         menu = self.menuBar().addMenu('Tools')
         for row_items, title in ((job_tools, ''), (analysis, 'Analysis:')):
             btns = QtWidgets.QHBoxLayout()
@@ -2964,10 +3017,10 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.proc_buffer = ''
         self._events = []
         self.proc.start(sys.executable, [JOB_SCRIPT] + args)
-        busy = kind in ('run', 'preflight', 'pack', 'bench', 'cloud', 'cloudsweep', 'report')
+        busy = kind in ('run', 'preflight', 'pack', 'bench', 'cloud', 'cloudsweep', 'report', 'target')
         self.btn_run.setEnabled(not busy)
         self.btn_preflight.setEnabled(not busy)
-        self.btn_stop.setEnabled(kind in ('run', 'pack', 'bench', 'cloud', 'cloudsweep', 'report'))
+        self.btn_stop.setEnabled(kind in ('run', 'pack', 'bench', 'cloud', 'cloudsweep', 'report', 'target'))
         self.lbl_status.setText(f'{kind} …')
         return True
 
@@ -3043,6 +3096,12 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             self._show_preflight(ev)
         elif kind == 'pack':
             self._pack_finished(code)
+        elif kind == 'target':
+            self.lbl_status.setText('Targeting done — see Log (TARGET_*.csv / .png / shapefiles'
+                                    + (f' in {self._target_out}' if getattr(self, '_target_out', '') else '') + ')'
+                                    if code == 0 else 'Targeting: not computed — see Log.')
+            if code == 0 and getattr(self, '_target_out', ''):
+                self._open_path(self._target_out)
         elif kind == 'report':
             rd = os.path.join(getattr(self, '_report_dir', ''), 'REPORT')
             if code == 0 and os.path.isdir(rd):
@@ -3288,6 +3347,21 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             n = max(1000, min(want, cap))
             parts.append(f'{w} px: {n:,}' + (f' (capped; {want:,} at this density)' if want > cap else ''))
         self.lbl_kp.setText('auto gives ' + ' · '.join(parts) if parts else '')
+
+    def target_dialog(self, *_, run=True):
+        """Targeting accuracy of a product (automatch_target); run=False returns the dialog unshown (tests)."""
+        dlg = TargetDialog(self.settings, self)
+        dlg.accepted.connect(lambda: self._start_target(dlg))
+        if run:
+            dlg.show()
+            self._last_target_dialog = dlg
+        return dlg
+
+    def _start_target(self, dlg):
+        args = dlg.args()
+        self._target_out = dlg.out.text().strip()
+        self.log.appendPlainText('--- ' + ' '.join(args))
+        self._start(args, 'target')
 
     def report_dialog(self, *_, folder=''):
         """Shapefile, look-vector plot and RIVAL statistics of a finished job's final points (REPORT/)."""

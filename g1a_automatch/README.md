@@ -117,6 +117,32 @@ more finished jobs come in (the window shows what they rest on);
 **Presets file…** writes `automatch_presets.json`
 to edit (per sensor, key by key) when a new benchmark says otherwise.
 
+## Targeting accuracy (DPQED_targeting, as a tool here)
+
+Tools → **Targeting…**, or `python automatch_job.py target <request ID |
+product folder | BAND_META.txt> [--root X:/DPS/G1A] [--rv T:/PRODG1A/RV]
+[--out ...] [--all-scenes]`: the port of `DPQED_targeting.py` (the g1a
+repository) without GDAL or geopandas. From the product's `BAND_META.txt`
+(corners, strip times, orbit / strip / scene, sensor, mode) and the day's
+range file in the RV folder (named with the date, the sensor's long name and
+`101600`) it interpolates the intended track at the scene's start, centre
+and end and gives the along / across-track targeting error in the local UTM,
+with `TARGET_<suffix>.csv` (the same columns as before), the plot and the
+shapefiles (acquired line and points, intended lines and points), plus
+`TARGET_ALL.csv` gathering the rows. One change from the script: the
+acquired centre line is the pair of edge mid-points that runs along the
+intended track (rather than always the left / right edges turned by the
+imaging mode), computed in metres.
+
+## Other sensors (C3) and the two reference sets
+
+The sensor of an input comes from its G1A file name, else from the product's
+`BAND_META.txt` beside it (`Sensor` / `SatID`; a Cartosat-3 product → the
+`C3` preset, a placeholder until it is benchmarked). The run window takes
+two reference folders: **L8**, and optionally **C1 (India)**; with a scene
+centre in the Indian region (68–98 °E, 6–38 °N, from the metadata or the
+raster) the C1 references are used, else the L8 ones; the log says which.
+
 ## Report: shapefile, look vectors, RIVAL statistics
 
 Every job ends with `REPORT/`: for each final RIVAL file
