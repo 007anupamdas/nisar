@@ -1290,9 +1290,14 @@ def test_gui_cloud():
         mtabs = mres.findChild(G.QtWidgets.QTabWidget)
         check('gui: an ML cloud test (infrared tests, one mask, no threshold) shows its quicklook',
               (mtabs.count(), ' ir' in mtabs.tabText(0) and '@' not in mtabs.tabText(0)), (1, True))
+        w._on_event({'event': 'job', 'sweep': [[512, None]], 'gpus': [0, 1], 'detectors': ['a', 'b']})
         w._on_event({'event': 'coarse', 'channel': 'band28', 'detector': 'imw-minima-roma', 'done': 3, 'total': 35,
                      'gpu': 1})
-        f1, v1 = w.bar_step.format(), w.bar_step.value()
+        w._on_event({'event': 'window', 'detector': 'loftr', 'matcher': 'internal', 'done': 7, 'total': 96, 'gpu': 0})
+        f1, v1 = w.bar_step2.format(), w.bar_step2.value()
+        check('gui: two GPUs: a bar each under the sweep bar, each showing its own GPU\'s progress',
+              (w.bar_step2.isHidden(), w.bar_step.value(), w.bar_step.format()),
+              (False, 7, 'GPU 0: loftr internal  %v/%m'))
         w._on_event({'event': 'stage', 'stage': 'coarse', 'channel': 'band28', 'detector': 'loftr', 'pair': 4,
                      'gpu': 0})
         check('gui: the coarse stage moves the progress bar, and the GPU of each update is shown',

@@ -2002,8 +2002,13 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.bar_sweep.setFormat('sweep %v / %m')
         self.bar_step = QtWidgets.QProgressBar()
         self.bar_step.setFormat('%p%')
+        self.bar_step2 = QtWidgets.QProgressBar()      # the second GPU of a two-GPU run
+        self.bar_step2.setFormat('%p%')
+        self.bar_step2.setVisible(False)
+        self._gpu_bars = {}
         bl.addWidget(self.bar_sweep)
         bl.addWidget(self.bar_step)
+        bl.addWidget(self.bar_step2)
 
         self.results = QtWidgets.QTableWidget(0, len(RESULT_COLS))
         self.results.setHorizontalHeaderLabels(RESULT_COLS)
@@ -3019,21 +3024,36 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         if kind == 'job':
             self.bar_sweep.setMaximum(max(1, len(ev.get('sweep', []))))
             self.bar_sweep.setValue(0)
+            gpus = [g for g in (ev.get('gpus') or [])][:2]
+            self._gpu_bars = {g: b for g, b in zip(gpus, (self.bar_step, self.bar_step2))}
+            self.bar_step2.setVisible(len(gpus) > 1)
+            for g, b in self._gpu_bars.items():
+                b.setValue(0)
+                b.setFormat(f'GPU {g}: waiting')
         elif kind == 'sweep':
-            self.bar_sweep.setValue(ev['done'])
-            self.lbl_status.setText(f"Sweep point {ev['point']}")
+            if ev.get('gpu') is None:          # a GPU worker's own sweep counts are shown on its bar
+                self.bar_sweep.setValue(ev['done'])
+                self.lbl_status.setText(f"Sweep point {ev['point']}")
         elif kind in ('window', 'preprocess', 'h5_read', 'coarse') and ev.get('total'):
-            self.bar_step.setMaximum(int(ev['total']))
-            self.bar_step.setValue(int(ev['done']))
+            bar = self._bar_for(ev)
+            bar.setMaximum(int(ev['total']))
+            bar.setValue(int(ev['done']))
             label = ev.get('matcher') or (f"coarse offsets: {ev.get('detector', '')}" if kind == 'coarse' else kind)
             gpu = f"GPU {ev['gpu']}: " if ev.get('gpu') is not None else ''
-            self.bar_step.setFormat(f'{gpu}{label}  %v/%m')
+            if kind == 'window' and ev.get('detector'):
+                label = f"{ev['detector']} {label}"
+            bar.setFormat(f'{gpu}{label}  %v/%m')
         elif kind == 'stage':
             gpu = f"GPU {ev['gpu']}: " if ev.get('gpu') is not None else ''
             self.lbl_status.setText(f"{gpu}{ev.get('channel', '')}: {ev['stage']} "
                                     f"{ev.get('detector', '')} {ev.get('pair', '')}".strip())
         elif kind == 'detector':
-            self.lbl_status.setText(f"{ev['channel']}: running {ev['detector']}")
+            gpu = f"GPU {ev['gpu']}: " if ev.get('gpu') is not None else ''
+            self.lbl_status.setText(f"{gpu}{ev['channel']}: running {ev['detector']}")
+            if ev.get('gpu') is not None:
+                bar = self._bar_for(ev)
+                bar.setValue(0)
+                bar.setFormat(f"{gpu}{ev['detector']}: starting")
         elif kind == 'result':
             self._add_result(ev)
         elif kind == 'truth_result':
@@ -3044,6 +3064,17 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             self.bar_step.setMaximum(int(ev['total']))
             self.bar_step.setValue(int(ev['done']))
             self.bar_step.setFormat(f"weights: {ev['detector']}  %v/%m")
+
+    def _bar_for(self, ev):
+        """The progress bar of the GPU an event comes from: in a two-GPU run
+        one bar each (under the sweep bar), else the one step bar."""
+        g = ev.get('gpu')
+        if g is None or not self._gpu_bars:
+            return self.bar_step
+        if g not in self._gpu_bars and len(self._gpu_bars) < 2:
+            self._gpu_bars[g] = self.bar_step2
+            self.bar_step2.setVisible(True)
+        return self._gpu_bars.get(g, self.bar_step)
 
     def _add_result(self, ev):
         r = self.results.rowCount()
@@ -3339,6 +3370,9 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.results.setRowCount(0)
         self.bar_sweep.setValue(0)
         self.bar_step.setValue(0)
+        self.bar_step2.setValue(0)
+        self.bar_step2.setVisible(False)
+        self._gpu_bars = {}
         self.log.appendPlainText(f'--- run {path}')
         return True
 
