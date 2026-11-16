@@ -570,7 +570,8 @@ class PipelineConfig:
     #   'constant' within tolerance of the most common error (the original rule)
     #   'none'     every chip with enough RANSAC inliers is kept
     consensus_model: str = 'surface'
-    consensus_surface_degree: str = 'auto'   # 'auto' | 'affine' | 'bilinear' | 'quadratic'
+    consensus_surface_degree: str = 'auto'   # auto: a plane (a trend across the scene), higher only when it cannot
+                                              # follow the field | affine | bilinear | quadratic | biquadratic
 
     # ── Large-offset handling (coarse-to-fine) ──────────────────────────────
     # Expected worst-case geolocation error. Reference candidates, and the
@@ -4824,30 +4825,55 @@ class ChipConsensusSelector:
         x, y = np.asarray(x, float), np.asarray(y, float)
         a, c = np.asarray(a, float), np.asarray(c, float)
         n = len(x)
+        terms = ChipConsensusSelector.SURFACE_TERMS
         if degree == 'auto':
-            degree = ('biquadratic' if n >= 18 else 'quadratic' if n >= 12 else 'bilinear' if n >= 8
-                      else 'affine' if n >= 5 else None)
-        if degree is None or n < ChipConsensusSelector.SURFACE_TERMS[degree] + 2:
+            # G1A's distortion is a trend: the error grows from one side of the
+            # scene to the other (along and across), so a plane is the model;
+            # a higher degree only when the plane cannot follow the field
+            # (bilinear, quadratic, then biquadratic, with enough chips): with
+            # many chips a high degree bends to wrong clusters when nothing
+            # stops it starting from the plane
+            candidates = [d for d, need in (('affine', 5), ('bilinear', 8), ('quadratic', 12), ('biquadratic', 18))
+                          if n >= need]
+        else:
+            candidates = [degree] if degree else []
+        candidates = [d for d in candidates if n >= terms[d] + 2]
+        if not candidates:
             return None
         u = (x - x.mean()) / max(np.ptp(x) / 2.0, 1e-9)
         v = (y - y.mean()) / max(np.ptp(y) / 2.0, 1e-9)
-        A = ChipConsensusSelector._surface_design(u, v, degree)
-        k = A.shape[1]
-        keep = np.ones(n, dtype=bool)
-        thr = tol
-        fa = fc = None
-        for _ in range(iters):
-            if keep.sum() < k:
-                return None
-            ca = np.linalg.lstsq(A[keep], a[keep], rcond=None)[0]
-            cc = np.linalg.lstsq(A[keep], c[keep], rcond=None)[0]
-            fa, fc = A @ ca, A @ cc
-            r = np.maximum(np.abs(a - fa), np.abs(c - fc))
-            thr = max(tol, k_sigma * 1.4826 * float(np.median(r[keep])))
-            new = r <= thr
-            if np.array_equal(new, keep):
+
+        def fit(deg):
+            A = ChipConsensusSelector._surface_design(u, v, deg)
+            k = A.shape[1]
+            keep = np.ones(n, dtype=bool)
+            thr, fa, fc = tol, None, None
+            for _ in range(iters):
+                if keep.sum() < k:
+                    return None
+                ca = np.linalg.lstsq(A[keep], a[keep], rcond=None)[0]
+                cc = np.linalg.lstsq(A[keep], c[keep], rcond=None)[0]
+                fa, fc = A @ ca, A @ cc
+                r = np.maximum(np.abs(a - fa), np.abs(c - fc))
+                thr = max(tol, k_sigma * 1.4826 * float(np.median(r[keep])))
+                new = r <= thr
+                if np.array_equal(new, keep):
+                    break
+                keep = new
+            return keep, fa, fc, deg, thr
+        best = None
+        for deg in candidates:
+            got = fit(deg)
+            if got is None:
+                continue
+            if best is None or got[4] < best[4]:
+                best = got
+            if got[4] <= 3.0 * tol:          # this degree follows the field: the simplest that does
+                best = got
                 break
-            keep = new
+        if best is None:
+            return None
+        keep, fa, fc, degree, thr = best
         if thr > 3.0 * tol:
             # The surface cannot follow the field closely (its tolerance had to
             # grow), so a wrong chip could hide inside it: judge the chips

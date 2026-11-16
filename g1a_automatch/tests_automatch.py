@@ -917,6 +917,12 @@ def test_distortion_helpers():
     keep, _, _, deg, _ = C._surface_keep(X, Y, a, c, tol=150.0)
     check('surface: every good chip kept, both wrong chips rejected',
           (int(keep.sum()), bool(keep[7]), bool(keep[18])), (23, False, False))
+    a2, c2 = 6400 + 0.0024 * Y + rng.normal(0, 30, 25), 27000 + 0.068 * X + rng.normal(0, 30, 25)
+    a2[3] += 5000
+    keep2, _, _, deg2, _ = C._surface_keep(X, Y, a2, c2, tol=150.0)
+    check('surface auto: a trend across the scene (low on one side, high on the other) is a plane; higher degrees '
+          'only where a plane cannot follow (the curved field above)',
+          (deg2, bool(keep2[3]), int(keep2.sum()), deg != 'affine'), ('affine', False, 24, True))
     for forced in ('affine', 'bilinear', 'quadratic'):
         keep, *_ = C._surface_keep(X, Y, a, c, tol=150.0, degree=forced)
         check(f'surface ({forced}, cannot fit the curvature): wrong chips still rejected',
