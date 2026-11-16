@@ -2895,6 +2895,15 @@ def test_cross_check(tmp):
     except ValueError as e:
         said = str(e)
     check('working CRS: nowhere to read it: says to give the share mapping', '--share-local' in said, True)
+    with open(os.path.join(jd, 'automatch.log'), 'w') as f:
+        f.write('[Job] matching ...\n')
+    st_run = X.job_state(jd)
+    with open(os.path.join(jd, 'TRUTH_RANKING.csv'), 'w') as f:
+        f.write('rank\n1\n')
+    with open(os.path.join(jd, 'automatch.log'), 'a') as f:
+        f.write('Traceback (most recent call last):\nTypeError: stat: path should be string\n')
+    check('job state: still writing its log = running; ended in an error after its ranking = usable (job 1066)',
+          (st_run, X.job_state(jd)), ('running', 'finished'))
     top, how = X.pick_top(cfgs, 5, 25000.0, 1000.0)
     names = [c['detector'] for c in top]
     check('cross: without truth, the consistently wrong detector is not among the top by agreement',

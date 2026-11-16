@@ -32,6 +32,8 @@ from __future__ import annotations
 
 import argparse
 import math
+import time
+import glob
 import os
 import re
 import sys
@@ -438,6 +440,9 @@ def parse_jobs(text: str) -> Optional[set]:
     return out
 
 
+STALE_S = 6 * 3600.0               # a log untouched this long: the job is not running any more
+
+
 def job_state(d: str) -> str:
     """'finished' (an automatch run that ended: job_used.json, RUN_MANIFEST.csv
     and '[Job] done' at the end of automatch.log), 'compare' (a compare
@@ -446,14 +451,24 @@ def job_state(d: str) -> str:
     has = lambda n: os.path.exists(os.path.join(d, n))
     if has('job_used.json') and (has('automatch.log') or has('RUN_MANIFEST.csv')):
         done = has('RUN_MANIFEST.csv')
-        if done and has('automatch.log'):
+        tail = b''
+        if has('automatch.log'):
             try:
                 with open(os.path.join(d, 'automatch.log'), 'rb') as f:
                     f.seek(max(0, os.path.getsize(os.path.join(d, 'automatch.log')) - 8192))
-                    done = b'[Job] done' in f.read()
+                    tail = f.read()
             except OSError:
                 pass
-        return 'finished' if done else 'running'
+            done = done and b'[Job] done' in tail
+        if done:
+            return 'finished'
+        # ended with an error after matching (e.g. job 1066: the end-of-job truth step):
+        # its matches and ranking are there, so it can be benchmarked and cross-checked
+        stopped = b'Traceback (most recent call last)' in tail or (
+            has('automatch.log') and time.time() - os.path.getmtime(os.path.join(d, 'automatch.log')) > STALE_S)
+        if stopped and (has('TRUTH_RANKING.csv') or glob.glob(os.path.join(d, 'RUN_MANIFEST_gpu*.csv'))):
+            return 'finished'
+        return 'running'
     if has('TRUTH_RANKING.csv') and has('TRUTH_POINTS.csv'):
         return 'compare'
     return ''
