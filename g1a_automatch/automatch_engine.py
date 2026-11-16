@@ -3726,7 +3726,7 @@ class DISKMatcher(DiskBasedMatcher):
 
 class DeDoDeMatcher(DiskBasedMatcher):
 
-    def __init__(self, config: PipelineConfig, detector_weights: str = 'L-C4', descriptor_weights: str = 'G-C4'):
+    def __init__(self, config: PipelineConfig, detector_weights: str = 'L-C4', descriptor_weights: str = 'B-C4'):
         super().__init__(config)
         self.detector_weights = detector_weights
         self.descriptor_weights = descriptor_weights
@@ -5208,9 +5208,11 @@ DETECTOR_PARAMS: Dict[str, List[ParamSpec]] = {
                   'L-C4' if 'L-C4' in _DEDODE_DET else _DEDODE_DET[0], _DEDODE_DET,
                   label='Detector weights', help='names read from the installed kornia'),
         ParamSpec('descriptor_weights', 'choice',
-                  'G-C4' if 'G-C4' in _DEDODE_DESC else _DEDODE_DESC[0], _DEDODE_DESC,
+                  'B-C4' if 'B-C4' in _DEDODE_DESC else _DEDODE_DESC[0], _DEDODE_DESC,
                   label='Descriptor weights',
-                  help='names read from the installed kornia; G-* load a 1.2 GB DINOv2-L backbone'),
+                  help='names read from the installed kornia; G-* load a 1.2 GB DINOv2-L backbone and took '
+                       '2-3 x as long as B-* on G1A MV (job 1068: 70-94 min against 30-38 min per pass) '
+                       'without a better result'),
     ] + LGM_PARAMS + ADA_PARAMS + GENERIC_PARAMS,
     'aliked': [
         ParamSpec('model_name', 'choice', 'aliked-n16',
