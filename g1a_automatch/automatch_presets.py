@@ -35,7 +35,9 @@ COMMON: Dict = {
     'coarse_method': 'auto',
     'max_error_from_truth': True,            # with a truth file: the search range from it
     'channels_from_truth': True,             # ... and the band from its name (pts_band28.csv)
-    'cross_top_n': 5, 'cross_min_agree': 3, 'cross_max_points': 500,
+    'top_n': 5,                              # the first N detectors of the sensor's list run (ranked best first)
+    'agree': 3,                              # the error is where at least this many of them agree (cross-check)
+    'cross_max_points': 500,
     'cloud_mask': 'on', 'cloud_mask_classes': [1],
     'stretch_percentiles': [1, 99], 'window_prep': 'auto',
     'device': 'all', 'resume': True,
@@ -44,7 +46,7 @@ COMMON: Dict = {
 # Per sensor: what differs. The band(s) are the user's, per run (band_hint: a
 # suggestion shown beside the field). 'note' and 'band_hint' are shown in the
 # GUI, not sent to the job.
-INFO_KEYS = ('note', 'band_hint')
+INFO_KEYS = ('note', 'band_hint', 'top_n', 'agree')    # read by the window, not job settings themselves
 SENSORS: Dict[str, Dict] = {
     'MV': {'detectors': ['imw-eloftr', 'imw-xoftr', 'imw-xfeat-dense', 'imw-rdd-nn', 'imw-darkfeat-nn'],
            'window_sizes': [1024], 'band_hint': 'band3 (650 nm)',
@@ -102,7 +104,7 @@ def truth_band(truth_csv: str) -> str:
 def job_for(sensor: str, input_path: str, reference_dir: str, output_dir: str, truth_csv: str = '',
             bands: Optional[List[str]] = None, max_error_km: Optional[float] = None, device: str = '',
             cloud: Optional[bool] = None, weights_dir: str = '', presets: Optional[Dict] = None,
-            crispest: int = 0) -> Tuple[Dict, str]:
+            crispest: int = 0, top_n: Optional[int] = None, agree: Optional[int] = None) -> Tuple[Dict, str]:
     """(job, note): the sensor's preset with this run's paths and the few
     things chosen in the window (search range without truth, device, clouds
     on / off) and the band(s): the user's; else, when asked, the crispest N;
@@ -113,6 +115,13 @@ def job_for(sensor: str, input_path: str, reference_dir: str, output_dir: str, t
     job = copy.deepcopy(presets[sensor])
     note = job.pop('note', '')
     job.pop('band_hint', None)
+    n = int(top_n or job.pop('top_n', 5) or 5)
+    k = int(agree or job.pop('agree', 3) or 3)
+    job.pop('top_n', None)
+    job.pop('agree', None)
+    job['detectors'] = list(job.get('detectors') or [])[:n]       # the sensor's list is ranked, best first
+    job['cross_top_n'] = min(n, len(job['detectors'])) if job['detectors'] else n
+    job['cross_min_agree'] = max(1, min(k, job['cross_top_n']))
     job.update(input_path=input_path, reference_dir=reference_dir, output_dir=output_dir)
     if truth_csv:
         job['truth_csv'] = truth_csv
@@ -140,12 +149,12 @@ def describe(p: Dict) -> str:
     bands = 'yours' + (f" (suggested: {p['band_hint']})" if p.get('band_hint') else '')
     cloud = 'off' if p.get('cloud_mask') in (None, '', 'none') else 'on'
     return '\n'.join([
-        f"Detectors: {', '.join(p.get('detectors') or [])}",
+        f"Detectors (ranked; the first {p.get('top_n', 5)} run, the error where {p.get('agree', 3)} agree): "
+        f"{', '.join(p.get('detectors') or [])}",
         f"Window: {', '.join(str(w) for w in p.get('window_sizes') or [])} px    Band(s): {bands}    "
         f"RANSAC: {', '.join(p.get('ransac_methods') or [])}    Sub-cells: "
         f"{', '.join(str(s) for s in p.get('subcell_px') or []) or 'off'}",
-        f"Cross-check: top {p.get('cross_top_n')}, {p.get('cross_min_agree')} agreeing, "
-        f"{p.get('cross_max_points')} points for RIVAL    Clouds: {cloud}",
+        f"Points for RIVAL: {p.get('cross_max_points')}    Clouds: {cloud}",
         p.get('note', '')])
 
 

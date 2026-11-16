@@ -6033,19 +6033,28 @@ class AutoMatchPipeline:
             except OSError:
                 pass
 
+        def take(d):
+            """Claim d and measure it, unless its result appeared meanwhile."""
+            if result_of(d) is not None or not claim(d):
+                return False
+            if result_of(d) is not None:          # finished by the other worker between the check and the claim
+                try:
+                    os.remove(os.path.join(folder, f'.coarse_{d}.claim'))
+                except OSError:
+                    pass
+                return False
+            measure(d)
+            return True
+
         os.makedirs(folder, exist_ok=True)
         for d in panel:
-            if result_of(d) is None and claim(d):
-                measure(d)
+            take(d)
         waited = False
         while True:
             missing = [d for d in panel if result_of(d) is None]
             if not missing:
                 break
-            took = [d for d in missing if claim(d)]     # a claim whose worker died: measure it here
-            for d in took:
-                measure(d)
-            if took:
+            if any(take(d) for d in missing):          # a claim whose worker died: measured here
                 continue
             if not waited:
                 print(f'[Coarse] {pol}: panel detector(s) {", ".join(missing)} being measured by the other GPU '

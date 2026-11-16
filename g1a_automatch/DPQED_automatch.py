@@ -2047,7 +2047,8 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
                      ('Preflight', self.preflight), ('Run', self.run_job), ('Queue run', self.queue_run),
                      ('Stop', self.stop), ('Open output', self.open_output), ('Pack for server…', self.pack_dialog))
         analysis = (('Benchmark & cross-check…', self.bench_dialog), ('Finish a job…', self.finish_dialog),
-                    ('Cloud mask test…', self.cloud_dialog), ('Cloud sweep…', self.cloud_sweep_dialog))
+                    ('Report…', self.report_dialog), ('Cloud mask test…', self.cloud_dialog),
+                    ('Cloud sweep…', self.cloud_sweep_dialog))
         menu = self.menuBar().addMenu('Tools')
         for row_items, title in ((job_tools, ''), (analysis, 'Analysis:')):
             btns = QtWidgets.QHBoxLayout()
@@ -2071,6 +2072,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         bl.addWidget(self.lbl_status)
         self.bar_sweep = QtWidgets.QProgressBar()
         self.bar_sweep.setFormat('sweep %v / %m')
+        self._det_done, self._det_total = 0, 0
         self.bar_step = QtWidgets.QProgressBar()
         self.bar_step.setFormat('%p%')
         self.bar_step2 = QtWidgets.QProgressBar()      # the second GPU of a two-GPU run
@@ -2962,10 +2964,10 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.proc_buffer = ''
         self._events = []
         self.proc.start(sys.executable, [JOB_SCRIPT] + args)
-        busy = kind in ('run', 'preflight', 'pack', 'bench', 'cloud', 'cloudsweep')
+        busy = kind in ('run', 'preflight', 'pack', 'bench', 'cloud', 'cloudsweep', 'report')
         self.btn_run.setEnabled(not busy)
         self.btn_preflight.setEnabled(not busy)
-        self.btn_stop.setEnabled(kind in ('run', 'pack', 'bench', 'cloud', 'cloudsweep'))
+        self.btn_stop.setEnabled(kind in ('run', 'pack', 'bench', 'cloud', 'cloudsweep', 'report'))
         self.lbl_status.setText(f'{kind} …')
         return True
 
@@ -3041,6 +3043,13 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             self._show_preflight(ev)
         elif kind == 'pack':
             self._pack_finished(code)
+        elif kind == 'report':
+            rd = os.path.join(getattr(self, '_report_dir', ''), 'REPORT')
+            if code == 0 and os.path.isdir(rd):
+                self.lbl_status.setText(f'Report written in {rd} (shapefiles, look-vector plots, REPORT_STATS.csv)')
+                self._open_path(rd)
+            else:
+                self.lbl_status.setText('Report: no RIVAL file found — see Log.')
         elif kind == 'bench':
             folder = getattr(self, '_bench_dir', '')
             if code == 0 and os.path.exists(os.path.join(folder, 'BENCH_JOBS.csv')):
@@ -3101,6 +3110,10 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             self.bar_sweep.setMaximum(max(1, len(ev.get('sweep', []))))
             self.bar_sweep.setValue(0)
             gpus = [g for g in (ev.get('gpus') or [])][:2]
+            self._det_done = 0
+            self._det_total = len(ev.get('detectors') or []) * max(1, len(ev.get('sweep') or [])) * max(
+                1, len(ev.get('channels') or []))
+            self.bar_sweep.setFormat(f'sweep %v / %m   detectors 0 / {self._det_total}')
             self._gpu_bars = {g: b for g, b in zip(gpus, (self.bar_step, self.bar_step2))}
             self.bar_step2.setVisible(len(gpus) > 1)
             for g, b in self._gpu_bars.items():
@@ -3118,6 +3131,8 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             gpu = f"GPU {ev['gpu']}: " if ev.get('gpu') is not None else ''
             if kind == 'window' and ev.get('detector'):
                 label = f"{ev['detector']} {label}"
+            if kind == 'window' and ev.get('pair') is not None:
+                label += f"  pair {ev['pair']}, window"
             bar.setFormat(f'{gpu}{label}  %v/%m')
         elif kind == 'stage':
             gpu = f"GPU {ev['gpu']}: " if ev.get('gpu') is not None else ''
@@ -3130,6 +3145,9 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
                 bar = self._bar_for(ev)
                 bar.setValue(0)
                 bar.setFormat(f"{gpu}{ev['detector']}: starting")
+        elif kind == 'detector_done':
+            self._det_done += 1
+            self.bar_sweep.setFormat(f'sweep %v / %m   detectors {self._det_done} / {self._det_total}')
         elif kind == 'result':
             self._add_result(ev)
         elif kind == 'truth_result':
@@ -3270,6 +3288,18 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             n = max(1000, min(want, cap))
             parts.append(f'{w} px: {n:,}' + (f' (capped; {want:,} at this density)' if want > cap else ''))
         self.lbl_kp.setText('auto gives ' + ' · '.join(parts) if parts else '')
+
+    def report_dialog(self, *_, folder=''):
+        """Shapefile, look-vector plot and RIVAL statistics of a finished job's final points (REPORT/)."""
+        d = folder or QtWidgets.QFileDialog.getExistingDirectory(
+            self, 'Job folder to report (shapefile, look vectors, statistics of its RIVAL_FINAL points)',
+            self.settings.value('finish_folder', '') or self.out_path.text() or '')
+        if not d:
+            return
+        self.settings.setValue('finish_folder', d)
+        self._report_dir = d
+        self.log.appendPlainText(f'--- report {d}')
+        self._start(['report', d], 'report')
 
     def finish_dialog(self, *_, run=True):
         """Finish a job folder (also a server one) from a dialog; run=False returns it unshown (tests)."""

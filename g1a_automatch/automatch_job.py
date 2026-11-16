@@ -57,7 +57,8 @@ CODE_FILES = ('automatch_engine.py', 'automatch_job.py', 'automatch_imcui.py', '
               'automatch_native.py', 'imw_configs.py', 'automatch_cross.py', 'automatch_bench.py',
               'automatch_cloud.py', 'automatch_accuracy.py', 'automatch_cloudsweep.py', 'automatch_cloudphys.py',
               'automatch_tirauxcloud.py', 'automatch_reflect.py', 'automatch_cloudmodels.py', 'automatch_refsubset.py',
-              'automatch_cloudfilter.py', 'automatch_presets.py')
+              'automatch_cloudfilter.py', 'automatch_presets.py',
+              'automatch_report.py')
 
 
 def code_fingerprint() -> str:
@@ -1789,6 +1790,11 @@ def _finish_job(job: Dict, out_root: str, scene, manifest: List[Dict], t_job: fl
                       int(500 if job.get('cross_max_points') is None else job['cross_max_points']))
     except Exception as e:
         print(f'[Job] RIVAL_BEST_FINAL not written: {type(e).__name__}: {e}')
+    try:                                       # shapefile, look vectors and RIVAL's statistics of the final points
+        import automatch_report as RP
+        RP.report(out_root)
+    except Exception as e:
+        print(f'[Job] REPORT not written: {type(e).__name__}: {e}')
     emit({'event': 'done', 'manifest': man_path, 'best': best_files, 'truth': truth_files, 'cross': cross,
           'minutes': round((time.time() - t_job) / 60.0, 2)})
     print(f'[Job] done in {(time.time() - t_job) / 60.0:.1f} min; manifest {man_path}')
@@ -1831,6 +1837,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     sub.add_parser('cloudsweep', help='cloud mask benchmark: every combination of thresholds, band sets and '
                                       'bright-blob settings (options: python automatch_cloudsweep.py -h)'
                    ).add_argument('rest', nargs=argparse.REMAINDER)
+    rp = sub.add_parser('report', help='shapefile, look-vector plot and RIVAL statistics of a finished job\'s '
+                                       'final points (REPORT/)')
+    rp.add_argument('job_dir')
+    rp.add_argument('--all', action='store_true', help='every RIVAL_*.csv, not only the FINAL ones')
     fin = sub.add_parser('finish', help='a finished or crashed job folder (also a server one, through the share '
                                         'mapping): rerun the detectors it skipped, reuse the rest, and redo the '
                                         'truth comparison, the cross-check and the RIVAL files')
@@ -1867,6 +1877,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     if argv and argv[0] == 'cloudsweep':
         import automatch_cloudsweep as CS
         return CS.main(list(argv[1:]))
+    if argv and argv[0] == 'report':
+        import automatch_report as RP
+        a = ap.parse_args(argv)
+        return 0 if RP.report(a.job_dir, a.all) else 1
     if argv and argv[0] == 'finish':
         a = ap.parse_args(argv)
         job = finish_spec(a.job_dir, (a.share_local, a.share_server), a.device, a.rerun)

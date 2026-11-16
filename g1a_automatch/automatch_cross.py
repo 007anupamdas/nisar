@@ -739,6 +739,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
     res = run(a.output_dir, a.top, a.min_agree, a.cell_km, a.tolerance_m, a.truth, keep=a.keep,
               max_points=_job_max_points(a.output_dir) if a.max_points is None else a.max_points)
+    try:
+        import automatch_report as RP
+        RP.report(a.output_dir)
+    except Exception as e:
+        print(f'[Cross] REPORT not written: {type(e).__name__}: {e}')
     return 0 if res else 1
 
 

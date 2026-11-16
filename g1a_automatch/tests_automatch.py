@@ -653,6 +653,50 @@ def test_e2e_cloudfilter(tmp):
           (True, True, True, True, True, True))
 
 
+def test_report(tmp):
+    """report: shapefile (readable by the reference-index reader), look-vector
+    plot and RIVAL's statistics of a job's final points."""
+    import math
+    import numpy as np
+    import pandas as pd
+    import automatch_refs as refs
+    import automatch_report as RP
+    import automatch_rival as R
+    out = os.path.join(tmp, 'report_job')
+    os.makedirs(out, exist_ok=True)
+    rng = np.random.default_rng(4)
+    n = 40
+    E = 500000 + rng.uniform(0, 50000, n)
+    N = 1600000 + rng.uniform(0, 50000, n)
+    dE, dN = 1000.0 + rng.normal(0, 30, n), -500.0 + rng.normal(0, 30, n)
+    pts = pd.DataFrame({'x1-map': E, 'y1-map': N, 'x2-map': E - dE, 'y2-map': N - dN})
+    csv = os.path.join(out, 'RIVAL_FINAL_band3.csv')
+    R.write_rival_csv(pts, 'EPSG:32643', csv)
+    R.write_rival_csv(pts.head(5), 'EPSG:32643', os.path.join(out, 'RIVAL_CROSS_band3.csv'))
+    rows = RP.report(out, quiet=True)
+    shp = os.path.join(out, 'REPORT', 'RIVAL_FINAL_band3.shp')
+    import struct
+    with open(shp, 'rb') as f:
+        head = f.read(100)
+        shape_type, xmin = struct.unpack('<i', head[32:36])[0], struct.unpack('<d', head[36:44])[0]
+        feats = []
+        while True:
+            rec = f.read(8)
+            if len(rec) < 8:
+                break
+            _, ln = struct.unpack('>ii', rec)
+            feats.append(f.read(ln * 2))
+    _, dbf = refs._read_dbf(shp[:-4] + '.dbf')
+    st = pd.read_csv(os.path.join(out, 'REPORT', 'REPORT_STATS.csv'))
+    check('report: FINAL files only; the shapefile holds every point with its errors; the plot and stats are written',
+          (len(rows), (shape_type, len(feats), len(dbf), abs(float(dbf[0]['DX_ERR']) - (dE[0])) < 0.01),
+           os.path.exists(os.path.join(out, 'REPORT', 'RIVAL_FINAL_band3_vectors.png')),
+           int(st['n'].iloc[0]), abs(float(st['mean_dx_m'].iloc[0]) - 1000.0) < 20,
+           abs(float(st['ce90_m'].iloc[0]) - 2.146 * math.sqrt((1000.0 ** 2 + 500.0 ** 2) / 2)) < 60),
+          (1, (1, n, n, True), True, n, True, True))
+    check('report: --all takes the other RIVAL files too', len(RP.report(out, all_files=True, quiet=True)), 2)
+
+
 def test_pack(tmp):
     """pack: only the references the scene can need, with their index; paths
     rewritten for the server; the bundle runs through the GPU-service entry."""
@@ -1056,8 +1100,11 @@ def test_presets(tmp):
     n = J.normalize(job)
     check('presets: an HS job: its detectors and window, truth decides range and band, all GPUs, cross-check 3 of 5',
           (n['detectors'][:2], n['window_sizes'], n['max_error_from_truth'], n['channels_from_truth'], n['device'],
-           n['cross_top_n'], n['cross_min_agree'], 'note' in job, bool(note)),
-          (['imw-minima-roma', 'imw-roma'], [512], True, True, 'all', 5, 3, False, True))
+           n['cross_top_n'], n['cross_min_agree'], 'note' in job, bool(note), 'top_n' in job),
+          (['imw-minima-roma', 'imw-roma'], [512], True, True, 'all', 5, 3, False, True, False))
+    j3, _ = P.job_for('HS', '/d/G1A_HS_x.tif', '/ref', '/out', '/t/pts_band28.csv', presets=pre, top_n=3, agree=2)
+    check('presets: top X detectors run, the error from top Y agreeing',
+          (len(j3['detectors']), j3['cross_top_n'], j3['cross_min_agree']), (3, 3, 2))
     job, _ = P.job_for('MV', '/d/G1A_MV_x.tif', '/ref', '/out', bands=P.parse_bands('4, band6'), max_error_km=30,
                        device='cpu', cloud=False, presets=pre)
     check('presets: bands, range, device and clouds chosen in the window win; MV clouds are OmniCloudMask on 5, 4, 6',
@@ -1105,13 +1152,16 @@ def test_gui_run(tmp):
     w.input.edit.setText('/data/scene.tif')
     unknown = w.summary.text()
     w.sensor.setCurrentText('MV')
-    check('run window: the preset of the file\'s sensor is shown; unknown asks; choosing a sensor sets it',
-          ('HS preset' in shown and 'imw-minima-roma' in shown, 'choose it' in unknown, 'MV preset' in w.summary.text()),
-          (True, True, True))
+    check('run window: the preset of the file\'s sensor is shown; unknown asks; choosing a sensor sets it; '
+          'top X / top Y fields follow the sensor',
+          ('HS preset' in shown and 'imw-minima-roma' in shown, 'choose it' in unknown, 'MV preset' in w.summary.text(),
+           w.top_n.value(), w.agree.value()), (True, True, True, 5, 3))
+    w.top_n.setValue(2)
+    w.agree.setValue(2)
     data = os.path.join(tmp, 'synth')
     if not os.path.exists(os.path.join(data, 'G1A_SYNTH_L1.tif')):
         S.make_all(data, 4013.0, -2487.0)
-    w.presets['MV'].update(detectors=['sift'])
+    w.presets['MV'].update(detectors=['sift', 'dog', 'disk'])
     w.bands.setText('1')
     w.input.edit.setText(os.path.join(data, 'G1A_SYNTH_L1.tif'))
     w.reference.edit.setText(os.path.join(data, 'C1'))
@@ -1122,10 +1172,10 @@ def test_gui_run(tmp):
     w.start('preflight')
     ok = w.proc is not None and w.proc.waitForFinished(180000)
     app.processEvents()
-    check('run window: the job carries the paths and choices; Check runs the preflight and reports',
-          (job['detectors'], job['device'], job['cloud_mask'], job['max_expected_error_m'], ok,
+    check('run window: the job carries the paths and choices (top 2, 2 agreeing); Check runs the preflight and reports',
+          (job['detectors'], job['device'], job['cloud_mask'], job['max_expected_error_m'], ok, job['cross_min_agree'],
            os.path.exists(os.path.join(tmp, 'out_runwin', 'job_preset.json')), w.stage.text()),
-          (['sift'], 'cpu', 'none', 25000.0, True, True, 'check passed: ready to run'))
+          (['sift', 'dog'], 'cpu', 'none', 25000.0, True, 2, True, 'check passed: ready to run'))
     w.close()
 
 
@@ -1160,7 +1210,7 @@ def test_gui_cloud():
         tools = [a.text().replace('&&', '&') for a in w.menuBar().actions()[0].menu().actions()]
         check('gui: the analysis tools in their own row and in the Tools menu; the version in the title',
               (w.btn_cloud_sweep.parentWidget() is not None, tools, G.AUTOMATCH_VERSION in w.windowTitle()),
-              (True, ['Benchmark & cross-check…', 'Finish a job…', 'Cloud mask test…', 'Cloud sweep…'], True))
+              (True, ['Benchmark & cross-check…', 'Finish a job…', 'Report…', 'Cloud mask test…', 'Cloud sweep…'], True))
         w.in_path.setText(img)
         w.cloud_conf.setValue(0.8)
         w.cloud_bands.setText('band3, band2, band6')
@@ -5265,6 +5315,7 @@ def main():
         test_gpu_windows(tmp)
         test_gpu_queue(tmp)
         test_finish(tmp)
+        test_report(tmp)
         test_presets(tmp)
         test_jobs_312_317(tmp)
         test_jobs_318_323(tmp)

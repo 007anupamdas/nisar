@@ -105,13 +105,32 @@ the window for every setting, sweeps and the benchmark.
 | Band | yours (suggested band3) | yours | yours (near 1250 / 1650 / 2200 nm) | yours (not band1 / band6) |
 | Clouds | OmniCloudMask, bands 5, 4, 6 | VNIR tests | SWIR tests | infrared tests |
 
-All: keypoints auto, MAGSAC and LMedS, 512 px sub-cells, cross-check top 5
-with 3 agreeing, 500 points for RIVAL, all GPUs, resume; with a truth file
+Each sensor's list is ranked, best first: **Detectors: top X** runs the
+first X of it (5), and **error from top Y** (3) is how many of them must
+agree on an offset for it to count (the cross-check's `RIVAL_FINAL`). Both
+are per sensor, in the presets, and can be changed for a run. All: keypoints
+auto, MAGSAC and LMedS, 512 px sub-cells, 500 points for RIVAL, all GPUs,
+resume; with a truth file
 the search range and the band come from it. The presets live in
 `automatch_presets.py` and are provisional: they change as the results of
 more finished jobs come in (the window shows what they rest on);
 **Presets file…** writes `automatch_presets.json`
 to edit (per sensor, key by key) when a new benchmark says otherwise.
+
+## Report: shapefile, look vectors, RIVAL statistics
+
+Every job ends with `REPORT/`: for each final RIVAL file
+(`RIVAL_FINAL_<band>.csv`, `RIVAL_BEST_FINAL_*.csv`) a point shapefile (WGS 84,
+the errors as attributes), a look-vector plot (`<name>_vectors.png`: an
+arrow per point from input to reference position, coloured by length) and
+`REPORT_STATS.csv` with RIVAL's statistics (n, mean / median / std of the
+errors, RMSE about zero, CE90, largest error). For a finished job: Tools →
+**Report…**, or `python automatch_job.py report <job folder> [--all]`
+(`--all`: every RIVAL file of the folder). `cross` and `finish` make it too.
+
+The progress bars name the pair and window being matched
+(`GPU 1: loftr internal  pair 3, window 12/96`) and the sweep bar counts the
+detectors done (`detectors 8 / 28`).
 
 ## Finishing a job from the workstation (server output)
 

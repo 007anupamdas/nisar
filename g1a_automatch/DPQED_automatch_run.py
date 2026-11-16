@@ -106,13 +106,20 @@ class RunWindow(QtWidgets.QMainWindow):
         self.device = QtWidgets.QComboBox()
         self.device.addItems(DEVICES)
         self.device.setToolTip('all: every GPU of this machine, sharing one queue of the detectors')
+        self.top_n = QtWidgets.QSpinBox()
+        self.top_n.setRange(1, 40)
+        self.top_n.setToolTip('How many of the sensor\'s ranked detectors run (the first N of its list)')
+        self.agree = QtWidgets.QSpinBox()
+        self.agree.setRange(1, 40)
+        self.agree.setToolTip('The error is taken where at least this many of them agree (cross-check); '
+                              'the points they agree on go to RIVAL_FINAL')
         self.cloud = QtWidgets.QCheckBox('mask clouds')
         self.cloud.setChecked(True)
         self.cloud.setToolTip('By the sensor: MV OmniCloudMask on bands 5, 4, 6 (needs it installed); HV VNIR, '
                               'HS SWIR, ML infrared tests')
         h = QtWidgets.QHBoxLayout()
         for label, wid in (('Sensor', self.sensor), ('Band(s)', self.bands), ('Max error (no truth)', self.max_err),
-                           ('Device', self.device)):
+                           ('Detectors: top', self.top_n), ('error from top', self.agree), ('Device', self.device)):
             h.addWidget(QtWidgets.QLabel(label))
             h.addWidget(wid)
             if wid is self.bands:
@@ -173,6 +180,11 @@ class RunWindow(QtWidgets.QMainWindow):
     def refresh(self, *_):
         s = self.current_sensor()
         if s in self.presets:
+            p = self.presets[s]
+            if s != getattr(self, '_shown_sensor', None):     # the sensor's own numbers, until changed here
+                self.top_n.setValue(int(p.get('top_n', 5) or 5))
+                self.agree.setValue(int(p.get('agree', 3) or 3))
+                self._shown_sensor = s
             self.summary.setText(f'<b>{s} preset</b> ({P.BASIS})<br>'
                                  + P.describe(self.presets[s]).replace('\n', '<br>'))
         else:
@@ -191,7 +203,7 @@ class RunWindow(QtWidgets.QMainWindow):
                            [] if crisp else P.parse_bands(self.bands.text()),
                            None if self.truth.text() else self.max_err.value(),
                            self.device.currentText(), self.cloud.isChecked(), self.weights.text(), self.presets,
-                           crispest=1 if crisp else 0)
+                           crispest=1 if crisp else 0, top_n=self.top_n.value(), agree=self.agree.value())
         return job
 
     # ── running ──────────────────────────────────────────────────────────────
