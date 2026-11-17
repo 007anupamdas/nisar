@@ -282,6 +282,9 @@ class RunWindow(QtWidgets.QMainWindow):
         if kind in ('window', 'coarse', 'preprocess', 'h5_read') and ev.get('total'):
             self.bar.setRange(0, int(ev['total']))
             self.bar.setValue(int(ev.get('done') or 0))
+            if kind == 'window':
+                where = f" pair {ev.get('pair_no')}/{ev['pairs']}," if ev.get('pairs') else ''
+                self.bar.setFormat(f"{gpu}{ev.get('detector', '')}{where} window %v/%m")
         if kind == 'detector':
             self.stage.setText(f"{gpu}{ev.get('channel')}: {ev.get('detector')}")
         elif kind == 'stage':

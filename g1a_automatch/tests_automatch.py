@@ -774,7 +774,20 @@ def test_interior_and_final(tmp):
           'its memory to the larger',
           (o_big[0], o_small[0], e0.CLAIM_HOOK('b1', 'imw-sp-lg-kt0p2'), e0.CLAIM_HOOK('b1', 'disk_depth'),
            J.gpu_need_gb('imw-rdd-nn-kt0p2', 2048)),
-          ('imw-gim-dkm', 'imw-xfeat-lg', False, True, 12.8))
+          ('imw-gim-dkm', 'imw-xfeat-lg', False, True, 16.0))
+    J.install_queue(e0, dict(job, _queue=os.path.join(tmp, 'gq2', 'q2'), _shard=0, _gpu_mem={'0': 16.0, '1': 20.0}),
+                    os.path.join(tmp, 'gq2', 'w2'), 'w2', 2048, None)
+    old_file = J.GPU_PEAKS_FILE
+    J.GPU_PEAKS_FILE = os.path.join(tmp, 'gpu_peaks.json')
+    try:
+        refused = e0.CLAIM_HOOK('b1', 'imw-rdd-nn-kt0p2')
+        J.learn_gpu_peak('imw-xfeat-lg', 1024, 15.2)
+        J.learn_gpu_peak('imw-xfeat-lg', 1024, 3.0)               # a lower peak does not lower it
+        learned = J.gpu_need_gb('imw-xfeat-lg', 1024)
+    finally:
+        J.GPU_PEAKS_FILE = old_file
+    check('gpu: rdd-nn at 2048 px (16 GB seen on the A4000) left to the larger GPU; a peak seen here is learned',
+          (refused, learned), (False, 15.2))
 
 
 def test_report(tmp):
@@ -1537,11 +1550,12 @@ def test_gui_cloud():
         w._on_event({'event': 'job', 'sweep': [[512, None]], 'gpus': [0, 1], 'detectors': ['a', 'b']})
         w._on_event({'event': 'coarse', 'channel': 'band28', 'detector': 'imw-minima-roma', 'done': 3, 'total': 35,
                      'gpu': 1})
-        w._on_event({'event': 'window', 'detector': 'loftr', 'matcher': 'internal', 'done': 7, 'total': 96, 'gpu': 0})
+        w._on_event({'event': 'window', 'detector': 'loftr', 'matcher': 'internal', 'done': 7, 'total': 96, 'gpu': 0,
+                     'pair': 31, 'pair_no': 17, 'pairs': 30})
         f1, v1 = w.bar_step2.format(), w.bar_step2.value()
         check('gui: two GPUs: a bar each under the sweep bar, each showing its own GPU\'s progress',
               (w.bar_step2.isHidden(), w.bar_step.value(), w.bar_step.format()),
-              (False, 7, 'GPU 0: loftr internal  %v/%m'))
+              (False, 7, 'GPU 0: loftr internal  pair 17/30, window  %v/%m'))
         w._on_event({'event': 'stage', 'stage': 'coarse', 'channel': 'band28', 'detector': 'loftr', 'pair': 4,
                      'gpu': 0})
         check('gui: the coarse stage moves the progress bar, and the GPU of each update is shown',

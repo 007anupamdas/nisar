@@ -428,6 +428,7 @@ PROGRESS_HOOK: Optional[Callable[[Dict], None]] = None
 # it here), False (another GPU took it) or a dict (its finished record, kept
 # from an earlier run); UNIT_DONE_HOOK(channel, tag, record) when one ends.
 CLAIM_HOOK: Optional[Callable] = None
+PAIR_POS: List[int] = [0, 0]          # [k, n]: the pair being matched is the k-th of n (progress only)
 UNIT_DONE_HOOK: Optional[Callable] = None
 
 
@@ -3210,7 +3211,8 @@ class DiskBasedMatcher(BaseMatcher):
                 if (idx + 1) % 20 == 0:
                     safe_cuda_empty_cache()
                 report('window', detector=self.get_filename_prefix(), matcher=label,
-                       pair=metadata.get('pair_id'), done=idx + 1, total=len(windows))
+                       pair=metadata.get('pair_id'), pair_no=PAIR_POS[0] or None, pairs=PAIR_POS[1] or None,
+                       done=idx + 1, total=len(windows))
 
         if n_err > 3 and not self.config.debug_mode:
             print(f'[{label}] {n_err} windows failed in pair {metadata.get("pair_id")} '
@@ -5724,8 +5726,9 @@ class AutoMatchPipeline:
                             if matcher_free:
                                 shared_coarse[pid] = ests[pid]
                     self._settle_coarse(disk_pairs, ests, cfg, tag)
-                for pair in disk_pairs:
+                for k_pair, pair in enumerate(disk_pairs):
                     pid = pair['pair_id']
+                    PAIR_POS[:] = [k_pair + 1, len(disk_pairs)]      # for the progress: pair k of n
                     est = ests[pid]
                     print(f'[Coarse] {tag} pair {pid}: dE={est["dx"]:.1f} m dN={est["dy"]:.1f} m '
                           f'({est["method"]}, support={est.get("support")}, peak={est.get("peak")}) '

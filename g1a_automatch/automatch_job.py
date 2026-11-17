@@ -133,7 +133,7 @@ def gpu_memory_gb() -> Dict[int, float]:
 # 1068 and 1069 (A4000 16 GB / A4500 20 GB; 2048 px often matched in 1024 px
 # tiles). Used to give the heavy ones to the larger GPU; 6 GB when unknown.
 GPU_NEED_GB = {
-    'imw-sp-lg': (14.5, 4.1), 'imw-gim-dkm': (12.9, 7.4), 'imw-rdd-dense': (11.5, 7.9), 'imw-rdd-nn': (8.2, 12.8),
+    'imw-sp-lg': (14.5, 4.1), 'imw-gim-dkm': (12.9, 7.4), 'imw-rdd-dense': (11.5, 7.9), 'imw-rdd-nn': (8.2, 16.0),
     'imw-d2net-nn': (7.6, 14.3), 'imw-dkm': (7.4, 7.4), 'imw-topicfm': (7.2, 7.3), 'imw-rord-nn': (6.8, 8.4),
     'dedode': (6.6, 14.2), 'imw-aspanformer': (6.4, 7.3), 'imw-eloftr': (6.4, 6.0), 'imw-minima-loftr': (6.3, 11.7),
     'imw-liftfeat-nn': (5.9, 7.5), 'imw-r2d2-nn': (5.5, 5.7), 'loftr': (5.4, 7.7), 'imw-roma': (5.4, 5.5),
@@ -144,13 +144,55 @@ GPU_NEED_GB = {
     'imw-sp-nn': (1.4, 3.1), 'imw-lanet-nn': (1.4, 9.4), 'imw-sp-sg': (1.2, 3.1), 'imw-omniglue': (1.0, 1.0)}
 
 
-def gpu_need_gb(detector: str, window: int) -> float:
-    """Expected peak GPU memory of a detector (or a variant tag) at a window size."""
+# Peaks seen on this machine, learned after each detector (the larger of the
+# table's and the learned value counts): ~/.automatch/gpu_peaks.json
+GPU_PEAKS_FILE = os.path.join(os.path.expanduser('~'), '.automatch', 'gpu_peaks.json')
+
+
+def _gpu_family(detector: str) -> str:
     d = re.sub(r'[-_](kt0p2|fm1|fsp1).*$', '', str(detector))
-    fam = next((k for k in sorted(GPU_NEED_GB, key=len, reverse=True) if d == k or d.startswith(k + '_')
-                or d.startswith(k + '-')), d)
+    return next((k for k in sorted(GPU_NEED_GB, key=len, reverse=True) if d == k or d.startswith(k + '_')
+                 or d.startswith(k + '-')), d)
+
+
+def _learned_peaks() -> Dict[str, float]:
+    try:
+        with open(GPU_PEAKS_FILE, encoding='utf-8') as f:
+            return {str(k): float(v) for k, v in json.load(f).items()}
+    except (OSError, ValueError, TypeError, AttributeError):
+        return {}
+
+
+def learn_gpu_peak(detector: str, window: int, peak_gb) -> None:
+    """Remember a detector's peak GPU memory at a window size (the largest seen)."""
+    try:
+        peak = float(peak_gb)
+    except (TypeError, ValueError):
+        return
+    if not peak > 0:
+        return
+    key = f'{_gpu_family(detector)}@{1024 if int(window or 1024) <= 1024 else 2048}'
+    peaks = _learned_peaks()
+    if peaks.get(key, 0.0) >= peak:
+        return
+    peaks[key] = round(peak, 2)
+    try:
+        os.makedirs(os.path.dirname(GPU_PEAKS_FILE), exist_ok=True)
+        tmp = f'{GPU_PEAKS_FILE}.{os.getpid()}.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(peaks, f, indent=1, sort_keys=True)
+        os.replace(tmp, GPU_PEAKS_FILE)
+    except OSError:
+        pass
+
+
+def gpu_need_gb(detector: str, window: int) -> float:
+    """Expected peak GPU memory of a detector (or a variant tag) at a window
+    size: the table's, or the largest seen on this machine if higher."""
+    fam = _gpu_family(detector)
     a, b = GPU_NEED_GB.get(fam, (6.0, 6.0))
-    return a if int(window or 1024) <= 1024 else b
+    w = 1024 if int(window or 1024) <= 1024 else 2048
+    return max(a if w == 1024 else b, _learned_peaks().get(f'{fam}@{w}', 0.0))
 
 
 def gpu_order(detectors: List[str], window: int, own_gb: float, all_gb: List[float]) -> List[str]:
@@ -285,6 +327,8 @@ def install_queue(E, job: Dict, out_dir: str, tag: str, win: int, nf: Optional[i
         return True
 
     def done(channel, dtag, rec):
+        if rec.get('status') == 'ok':
+            learn_gpu_peak(dtag, win, rec.get('gpu_peak_gb'))
         path = os.path.join(units, _unit_name(channel, dtag) + '.json')
         tmp = f'{path}.{os.getpid()}.tmp'
         with open(tmp, 'w', encoding='utf-8') as f:

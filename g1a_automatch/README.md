@@ -186,7 +186,11 @@ near 0.
 GPU's worker takes the heaviest detectors first (peak memory per detector
 and window from jobs 1068 / 1069, `GPU_NEED_GB`), the smaller one the
 lightest first and leaves to the larger any detector needing more than 85 %
-of its own memory.
+of its own memory. Each detector's peak is also learned on the machine
+(`~/.automatch/gpu_peaks.json`, the largest seen per detector and window
+size), so a detector that once filled a GPU (imw-rdd-nn: 16 GB on the A4000
+at 2048 px) goes to the larger one next time. The progress bars read
+`GPU 0: loftr internal  pair 17/30, window 12/96`.
 
 ## Report: shapefile, look vectors, RIVAL statistics
 

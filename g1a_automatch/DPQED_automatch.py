@@ -3265,7 +3265,9 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             gpu = f"GPU {ev['gpu']}: " if ev.get('gpu') is not None else ''
             if kind == 'window' and ev.get('detector'):
                 label = f"{ev['detector']} {label}"
-            if kind == 'window' and ev.get('pair') is not None:
+            if kind == 'window' and ev.get('pairs'):
+                label += f"  pair {ev.get('pair_no')}/{ev['pairs']}, window"
+            elif kind == 'window' and ev.get('pair') is not None:
                 label += f"  pair {ev['pair']}, window"
             bar.setFormat(f'{gpu}{label}  %v/%m')
         elif kind == 'stage':
