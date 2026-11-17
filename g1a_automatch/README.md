@@ -150,6 +150,44 @@ two reference folders: **L8**, and optionally **C1 (India)**; with a scene
 centre in the Indian region (68–98 °E, 6–38 °N, from the metadata or the
 raster) the C1 references are used, else the L8 ones; the log says which.
 
+## Matches inside water and featureless blobs; the final points
+
+**Interior filter.** A match in the middle of a lake, a river, the sea or a
+uniform blob (snow, cloud top, smooth shadow) is a coincidence even when
+detectors agree; shore lines and ridge lines are where good matches are.
+`automatch_interior` marks, on the matched band, the pixels farther than
+`interior_edge_px` (4 input pixels) from any textured pixel (local standard
+deviation above 3 x the image's noise). New jobs leave such matches out
+everywhere (`interior_filter`, on by default; `INTERIOR_MASK_<band>.tif`
+in the job folder). For finished jobs, workstation or server: Tools →
+**Filter points…**, or `python automatch_job.py filter <job | folder of jobs>
+[--jobs 1064-1069] [--no-cloud] [--no-interior] [--edge-px 4] --share-local V:\
+--share-server /maintenance/` — cloud and interior masks, the job scored again
+into `<job>/FILTERED/` (ranking, cross-check, RIVAL_FINAL, REPORT,
+FILTERED_SUMMARY.csv; FILTERED_ALL.csv for a folder of jobs).
+
+**Final points.** `RIVAL_FINAL_<band>.csv` is now one point per sub-tile of
+a grid of `final_points` (24) tiles over the whole scene (the image's extent,
+read through the share mapping; else the matches' extent): of the
+cross-checked points in a tile (several detectors agree, cloud and interiors
+out), the one closest to the offset they agree on. A tile with none fails,
+and `FINAL_TILES_<band>.csv` says why (outside the image, or no agreed
+matches: water, cloud, featureless). `RIVAL_BEST_FINAL` is picked the same way
+from the best single configuration. The many-point set is now
+`RIVAL_DENSE_<band>.csv` (`cross_max_points`, 500). `cross --final-points N`
+redoes it for a finished job.
+
+**Against the manual points.** `REPORT/REPORT_STATS.csv` has the manual
+points' own statistics (the truth file: n, mean dE / dN, RMSE, CE90) as a
+row, and each final file's difference to them (`*_vs_manual_m`): the goal is
+near 0.
+
+**GPU memory.** With two GPUs, the job reads each GPU's memory: the larger
+GPU's worker takes the heaviest detectors first (peak memory per detector
+and window from jobs 1068 / 1069, `GPU_NEED_GB`), the smaller one the
+lightest first and leaves to the larger any detector needing more than 85 %
+of its own memory.
+
 ## Report: shapefile, look vectors, RIVAL statistics
 
 Every job ends with `REPORT/`: for each final RIVAL file

@@ -1008,6 +1008,77 @@ class FinishDialog(QtWidgets.QDialog):
         return a
 
 
+class FilterDialog(QtWidgets.QDialog):
+    """Filter finished jobs (automatch_job filter): matches on cloud and
+    inside featureless areas (water bodies, uniform blobs) left out, the job
+    scored again into <job>/FILTERED/, with RIVAL_FINAL and the report."""
+
+    def __init__(self, settings, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('Filter points of finished jobs')
+        self.settings = settings
+        f = QtWidgets.QFormLayout(self)
+        self.folder = PathRow('dir')
+        self.folder.setText(settings.value('filter_folder', '') or '')
+        self.folder.setToolTip('A job folder or a folder of jobs (workstation or, through the share mapping, server)')
+        f.addRow('Job folder(s)', self.folder)
+        self.jobs = QtWidgets.QLineEdit(settings.value('filter_jobs', '') or '')
+        self.jobs.setPlaceholderText("all, or e.g. 1064-1069")
+        f.addRow('Jobs', self.jobs)
+        self.share_local = QtWidgets.QLineEdit(settings.value('pack/share_local', 'V:\\'))
+        self.share_server = QtWidgets.QLineEdit(settings.value('pack/share_server', '/maintenance/'))
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(self.share_local)
+        row.addWidget(QtWidgets.QLabel('here  =  on the server'))
+        row.addWidget(self.share_server)
+        f.addRow('Share mapping', row)
+        self.cloud = QtWidgets.QCheckBox('cloud (the sensor\'s cloud method)')
+        self.cloud.setChecked(True)
+        self.interior = QtWidgets.QCheckBox('inside featureless areas (water, uniform blobs; their edges kept)')
+        self.interior.setChecked(True)
+        f.addRow(self.cloud)
+        f.addRow(self.interior)
+        self.edge = QtWidgets.QDoubleSpinBox()
+        self.edge.setRange(1, 50)
+        self.edge.setValue(4)
+        self.edge.setSuffix(' px')
+        self.edge.setToolTip('A match is inside when no textured pixel lies within this distance (input pixels)')
+        f.addRow('Edge distance', self.edge)
+        bb = QtWidgets.QDialogButtonBox()
+        bb.addButton('Filter', QtWidgets.QDialogButtonBox.ButtonRole.AcceptRole
+                     if QT_API != 'PyQt5' else QtWidgets.QDialogButtonBox.AcceptRole)
+        bb.addButton(QtWidgets.QDialogButtonBox.StandardButton.Cancel if QT_API != 'PyQt5'
+                     else QtWidgets.QDialogButtonBox.Cancel)
+        bb.accepted.connect(self._ok)
+        bb.rejected.connect(self.reject)
+        f.addRow(bb)
+
+    def _ok(self):
+        if not os.path.isdir(self.folder.text().strip()):
+            QtWidgets.QMessageBox.warning(self, 'Filter', 'Choose an existing job folder or folder of jobs.')
+            return
+        if not (self.cloud.isChecked() or self.interior.isChecked()):
+            QtWidgets.QMessageBox.warning(self, 'Filter', 'Tick at least one filter.')
+            return
+        self.settings.setValue('filter_folder', self.folder.text().strip())
+        self.settings.setValue('filter_jobs', self.jobs.text().strip())
+        self.settings.setValue('pack/share_local', self.share_local.text().strip())
+        self.settings.setValue('pack/share_server', self.share_server.text().strip())
+        self.accept()
+
+    def args(self):
+        a = ['filter', self.folder.text().strip(), '--edge-px', f'{self.edge.value():g}']
+        if self.jobs.text().strip():
+            a += ['--jobs', self.jobs.text().strip()]
+        if not self.cloud.isChecked():
+            a.append('--no-cloud')
+        if not self.interior.isChecked():
+            a.append('--no-interior')
+        if self.share_local.text().strip() and self.share_server.text().strip():
+            a += ['--share-local', self.share_local.text().strip(), '--share-server', self.share_server.text().strip()]
+        return a
+
+
 class TargetDialog(QtWidgets.QDialog):
     """Targeting accuracy (automatch_target): a product folder, its
     BAND_META.txt or a request ID, the range files folder, the output."""
@@ -2100,7 +2171,8 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
                      ('Preflight', self.preflight), ('Run', self.run_job), ('Queue run', self.queue_run),
                      ('Stop', self.stop), ('Open output', self.open_output), ('Pack for server…', self.pack_dialog))
         analysis = (('Benchmark & cross-check…', self.bench_dialog), ('Finish a job…', self.finish_dialog),
-                    ('Report…', self.report_dialog), ('Targeting…', self.target_dialog),
+                    ('Report…', self.report_dialog), ('Filter points…', self.filter_dialog),
+                    ('Targeting…', self.target_dialog),
                     ('Cloud mask test…', self.cloud_dialog), ('Cloud sweep…', self.cloud_sweep_dialog))
         menu = self.menuBar().addMenu('Tools')
         for row_items, title in ((job_tools, ''), (analysis, 'Analysis:')):
@@ -3017,10 +3089,10 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.proc_buffer = ''
         self._events = []
         self.proc.start(sys.executable, [JOB_SCRIPT] + args)
-        busy = kind in ('run', 'preflight', 'pack', 'bench', 'cloud', 'cloudsweep', 'report', 'target')
+        busy = kind in ('run', 'preflight', 'pack', 'bench', 'cloud', 'cloudsweep', 'report', 'target', 'filter')
         self.btn_run.setEnabled(not busy)
         self.btn_preflight.setEnabled(not busy)
-        self.btn_stop.setEnabled(kind in ('run', 'pack', 'bench', 'cloud', 'cloudsweep', 'report', 'target'))
+        self.btn_stop.setEnabled(kind in ('run', 'pack', 'bench', 'cloud', 'cloudsweep', 'report', 'target', 'filter'))
         self.lbl_status.setText(f'{kind} …')
         return True
 
@@ -3096,6 +3168,9 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             self._show_preflight(ev)
         elif kind == 'pack':
             self._pack_finished(code)
+        elif kind == 'filter':
+            self.lbl_status.setText('Filter done: each job\'s FILTERED/ (RIVAL_FINAL, REPORT) — see Log.'
+                                    if code == 0 else 'Filter: not done — see Log.')
         elif kind == 'target':
             self.lbl_status.setText('Targeting done — see Log (TARGET_*.csv / .png / shapefiles'
                                     + (f' in {self._target_out}' if getattr(self, '_target_out', '') else '') + ')'
@@ -3347,6 +3422,19 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             n = max(1000, min(want, cap))
             parts.append(f'{w} px: {n:,}' + (f' (capped; {want:,} at this density)' if want > cap else ''))
         self.lbl_kp.setText('auto gives ' + ' · '.join(parts) if parts else '')
+
+    def filter_dialog(self, *_, run=True):
+        """Filter finished jobs' points (cloud, featureless interiors); run=False returns it unshown (tests)."""
+        dlg = FilterDialog(self.settings, self)
+        dlg.accepted.connect(lambda: self._start_simple(dlg.args(), 'filter'))
+        if run:
+            dlg.show()
+            self._last_filter_dialog = dlg
+        return dlg
+
+    def _start_simple(self, args, kind):
+        self.log.appendPlainText('--- ' + ' '.join(args))
+        self._start(args, kind)
 
     def target_dialog(self, *_, run=True):
         """Targeting accuracy of a product (automatch_target); run=False returns the dialog unshown (tests)."""

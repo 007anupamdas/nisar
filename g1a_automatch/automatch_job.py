@@ -58,7 +58,7 @@ CODE_FILES = ('automatch_engine.py', 'automatch_job.py', 'automatch_imcui.py', '
               'automatch_cloud.py', 'automatch_accuracy.py', 'automatch_cloudsweep.py', 'automatch_cloudphys.py',
               'automatch_tirauxcloud.py', 'automatch_reflect.py', 'automatch_cloudmodels.py', 'automatch_refsubset.py',
               'automatch_cloudfilter.py', 'automatch_presets.py',
-              'automatch_report.py', 'automatch_target.py')
+              'automatch_report.py', 'automatch_target.py', 'automatch_interior.py')
 
 
 def code_fingerprint() -> str:
@@ -111,6 +111,54 @@ def visible_gpus() -> List[int]:
         return [int(x) for x in r.stdout.split() if x.strip().isdigit()] if r.returncode == 0 else []
     except Exception:
         return []
+
+
+def gpu_memory_gb() -> Dict[int, float]:
+    """{GPU index: total memory (GB)} as nvidia-smi reports it ({} without)."""
+    try:
+        r = subprocess.run(['nvidia-smi', '--query-gpu=index,memory.total', '--format=csv,noheader,nounits'],
+                           capture_output=True, text=True, timeout=5,
+                           creationflags=0x08000000 if os.name == 'nt' else 0)
+        out = {}
+        for line in r.stdout.splitlines():
+            p = [x.strip() for x in line.split(',')]
+            if len(p) == 2 and p[0].isdigit():
+                out[int(p[0])] = float(p[1]) / 1024.0
+        return out if r.returncode == 0 else {}
+    except Exception:
+        return {}
+
+
+# Peak GPU memory (GB) per detector family at 1024 / 2048 px windows, from jobs
+# 1068 and 1069 (A4000 16 GB / A4500 20 GB; 2048 px often matched in 1024 px
+# tiles). Used to give the heavy ones to the larger GPU; 6 GB when unknown.
+GPU_NEED_GB = {
+    'imw-sp-lg': (14.5, 4.1), 'imw-gim-dkm': (12.9, 7.4), 'imw-rdd-dense': (11.5, 7.9), 'imw-rdd-nn': (8.2, 12.8),
+    'imw-d2net-nn': (7.6, 14.3), 'imw-dkm': (7.4, 7.4), 'imw-topicfm': (7.2, 7.3), 'imw-rord-nn': (6.8, 8.4),
+    'dedode': (6.6, 14.2), 'imw-aspanformer': (6.4, 7.3), 'imw-eloftr': (6.4, 6.0), 'imw-minima-loftr': (6.3, 11.7),
+    'imw-liftfeat-nn': (5.9, 7.5), 'imw-r2d2-nn': (5.5, 5.7), 'loftr': (5.4, 7.7), 'imw-roma': (5.4, 5.5),
+    'imw-gim-roma': (5.4, 5.5), 'imw-xoftr': (5.4, 5.0), 'imw-minima-roma': (5.4, 5.5), 'keynet': (5.3, 14.2),
+    'dog': (5.3, 14.1), 'gftt': (5.2, 9.6), 'hessian': (5.2, 14.2), 'sift': (5.1, 14.3), 'imw-dad-roma': (4.7, 4.8),
+    'imw-aliked-lg': (4.1, 9.4), 'imw-ripe-nn': (3.8, 9.4), 'disk': (3.0, 9.9), 'imw-sfd2-nn': (2.7, 7.5),
+    'imw-xfeat-dense': (2.6, 7.3), 'imw-darkfeat-nn': (2.2, 6.0), 'imw-xfeat-lg': (2.1, 4.3), 'imw-alike-nn': (1.9, 5.3),
+    'imw-sp-nn': (1.4, 3.1), 'imw-lanet-nn': (1.4, 9.4), 'imw-sp-sg': (1.2, 3.1), 'imw-omniglue': (1.0, 1.0)}
+
+
+def gpu_need_gb(detector: str, window: int) -> float:
+    """Expected peak GPU memory of a detector (or a variant tag) at a window size."""
+    d = re.sub(r'[-_](kt0p2|fm1|fsp1).*$', '', str(detector))
+    fam = next((k for k in sorted(GPU_NEED_GB, key=len, reverse=True) if d == k or d.startswith(k + '_')
+                or d.startswith(k + '-')), d)
+    a, b = GPU_NEED_GB.get(fam, (6.0, 6.0))
+    return a if int(window or 1024) <= 1024 else b
+
+
+def gpu_order(detectors: List[str], window: int, own_gb: float, all_gb: List[float]) -> List[str]:
+    """The order a GPU worker goes through the queue: the largest GPU of the
+    job takes the heaviest detectors first, the others the lightest first,
+    so the heavy ones end on the GPU with the most memory."""
+    largest = own_gb >= max(all_gb or [own_gb]) - 0.5
+    return sorted(detectors, key=lambda d: gpu_need_gb(d, window), reverse=largest)
 
 
 def gpus_of(device: str) -> List[int]:
@@ -189,7 +237,7 @@ def _unit_name(channel: str, tag: str) -> str:
 def _unit_key(job: Dict, win: int, nf: Optional[int]) -> str:
     """Resume fingerprint of one detector's result at a sweep point: the
     sweep point's, without who ran it (the detector list, the GPU, the queue)."""
-    return _sweep_key({k: v for k, v in job.items() if k not in ('detectors', '_shard', '_queue')}, win, nf)
+    return _sweep_key({k: v for k, v in job.items() if k not in ('detectors', '_shard', '_queue', '_gpu_mem')}, win, nf)
 
 
 def install_queue(E, job: Dict, out_dir: str, tag: str, win: int, nf: Optional[int]) -> None:
@@ -205,11 +253,16 @@ def install_queue(E, job: Dict, out_dir: str, tag: str, win: int, nf: Optional[i
     os.makedirs(claims, exist_ok=True)
     os.makedirs(units, exist_ok=True)
     key, shard = _unit_key(job, win, nf), job.get('_shard')
+    mem = {int(k): float(v) for k, v in (job.get('_gpu_mem') or {}).items()}
+    own = mem.get(int(shard), 0.0) if shard is not None else 0.0
+    bigger = own > 0 and any(v > own + 0.5 for v in mem.values())
     reuse = job.get('_reuse') or ''             # finish mode: the finished records of an earlier run, any code
     earlier = _summary_records(out_dir, job) if reuse else {}
 
     def claim(channel, dtag):
         name = _unit_name(channel, dtag)
+        if bigger and gpu_need_gb(dtag, win) > 0.85 * own:
+            return False                     # too heavy for this GPU: the larger one takes it
         try:
             fd = os.open(os.path.join(claims, name), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except FileExistsError:
@@ -312,6 +365,10 @@ def run_sharded(job: Dict, gpus: List[int], out_root: str) -> List[Dict]:
     is free. Their output is relayed with a [GPU n] prefix. Returns the merged
     manifest rows of the workers (RUN_MANIFEST_gpu<n>.csv each)."""
     dets = list(job['detectors'])
+    mem = gpu_memory_gb()
+    if mem:
+        print('[Job] GPU memory: ' + ', '.join(f'GPU {g}: {mem.get(g, 0):.0f} GB' for g in gpus)
+              + ' -- the heavy detectors go to the larger GPU first', flush=True)
     queue = os.path.join(out_root, '_queue', f'{time.strftime("%Y%m%d_%H%M%S")}_{os.getpid()}')
     os.makedirs(queue, exist_ok=True)
     print(f'[Job] {len(dets)} detector(s) on one queue for GPUs {", ".join(map(str, gpus))}: each GPU takes '
@@ -320,6 +377,7 @@ def run_sharded(job: Dict, gpus: List[int], out_root: str) -> List[Dict]:
     for g in gpus:
         sub = {k: v for k, v in job.items() if not k.startswith('_') or k in (
             '_channel_rasters', '_reuse', '_server_output_dir')}
+        sub['_gpu_mem'] = {str(k): v for k, v in mem.items() if k in gpus}
         sub.update(device=f'cuda:{g}', cloud_device=f'cuda:{g}' if job.get('cloud_device') else '',
                    detectors=dets, _shard=g, _queue=queue, _channel_rasters=job.get('_channel_rasters') or {},
                    _window_prep=job.get('_window_prep') or 'none')
@@ -545,7 +603,12 @@ DEFAULT_JOB: Dict = {
     'cross_min_agree': 0,        # how many must agree in a cell; 0 = more than half
     'cross_cell_km': 25.0,       # cell size of the comparison
     'cross_keep_per_cell': 3,    # of those agreeing in a cell, the least distorted kept
-    'cross_max_points': 500,     # RIVAL_FINAL_<channel>.csv: the best points over the whole coverage (0: off)
+    'cross_max_points': 500,     # RIVAL_DENSE_<channel>.csv: this many agreed points over what has matches (0: off)
+    'final_points': 24,          # RIVAL_FINAL_<channel>.csv: one best point per sub-tile of a grid of this many
+                                 # over the scene; a tile on water / cloud / featureless ground fails (FINAL_TILES_*)
+    'interior_filter': True,     # leave out matches inside featureless areas (water bodies, uniform blobs);
+                                 # their edges kept (automatch_interior)
+    'interior_edge_px': 4.0,     # ... farther than this from any textured pixel (input pixels)
 
     # RIVAL export
     'rival_max_points_per_chip': 200,   # 0 = all inliers
@@ -603,7 +666,7 @@ def normalize(job: Dict) -> Dict:
             _WARNED_KEYS.add(k)
             print(f'[Job] WARNING: {unknown_key_note(k)}', flush=True)
     out.update(copy.deepcopy({k: v for k, v in job.items() if k in DEFAULT_JOB}))
-    for k in ('_shard', '_queue', '_channel_rasters', '_window_prep', '_reuse', '_server_output_dir'):
+    for k in ('_shard', '_queue', '_channel_rasters', '_window_prep', '_reuse', '_server_output_dir', '_gpu_mem'):
         if job.get(k) is not None:
             out[k] = copy.deepcopy(job[k])
     if not out['temp_dir'] and out['output_dir']:
@@ -1215,7 +1278,9 @@ _RESULT_NEUTRAL_KEYS = {'output_dir', 'temp_dir', 'resume', 'debug', 'rival_max_
                         'device', 'cloud_device',        # the same results on either GPU: resume across them
                         'save_match_images', 'weights_cache_dir', 'truth_csv', 'truth_radius_m',
                         'cross_top_n', 'cross_min_agree', 'cross_cell_km', 'cross_keep_per_cell',
-                        'cross_max_points'}
+                        'cross_max_points', 'final_points', 'interior_filter', 'interior_edge_px'}
+# (the interior filter only leaves matches out when they are read: a finished
+# sweep point is reused and its matches read again through the filter)
 
 
 def _key_blob(job: Dict, win: int, nf: Optional[int]) -> Dict:
@@ -1368,7 +1433,8 @@ def run_cross(job: Dict, out_root: str, working_crs: str) -> Dict:
         res = X.run(out_root, int(job['cross_top_n']), int(job.get('cross_min_agree') or 0),
                     float(job.get('cross_cell_km') or 25.0), truth_csv=job.get('truth_csv') or '',
                     working_crs=working_crs, keep=int(job.get('cross_keep_per_cell') or 3),
-                    max_points=int(500 if job.get('cross_max_points') is None else job['cross_max_points']))
+                    max_points=int(500 if job.get('cross_max_points') is None else job['cross_max_points']),
+                    final_points=int(job.get('final_points') or 0))
         if res:      # the batch cross-check reads this back instead of computing it again
             X._remember(out_root, 'matches', {'top_n': int(job['cross_top_n']),
                                               'min_agree': int(job.get('cross_min_agree') or 0),
@@ -1570,6 +1636,30 @@ def prepare_cloud_mask(job: Dict, scene, out_root: str) -> Dict[str, List]:
     return rasters
 
 
+def set_interior_filter(job: Dict, scene, out_root: str) -> None:
+    """Leave out, wherever matches are read (exports, truth, cross-check),
+    those inside featureless areas of the input band (automatch_interior):
+    the mask is made once per job (INTERIOR_MASK_<band>.tif), the GPU
+    workers read it."""
+    import automatch_cloudfilter as CF
+    import automatch_interior as IM
+    import automatch_rival as R
+    band = (list(job.get('channels') or []) or list(scene.channels) or ['band1'])[0]
+    path = os.path.join(out_root, f'INTERIOR_MASK_{band}.tif')
+    try:
+        src = getattr(scene, 'raster_path', None) or job['input_path']
+        if not (os.path.exists(path) and os.path.getmtime(path) >= os.path.getmtime(src)) or job.get('_shard') is None:
+            o = IM.options(job)
+            o['edge_px'] = float(job.get('interior_edge_px') or o['edge_px'])
+            info = IM.interior_mask(src, IM.band_number(band), path, o['edge_px'], o['win_px'], o['k_noise'],
+                                    o['max_side'])
+            print(f"[Job] featureless interiors: {info['interior_pct']} % of {band} (farther than {o['edge_px']:g} px "
+                  f"from texture); matches there are left out -> {path}", flush=True)
+        R.POINT_MASK = CF.point_sampler(path, [1], 0, scene.working_crs)
+    except Exception as e:
+        print(f'[Job] interior filter not set ({type(e).__name__}: {e}); every match kept', flush=True)
+
+
 def run_job(job: Dict) -> Dict:
     job = expand_selection(normalize(job))
     gpus = [] if job.get('_shard') is not None else gpus_of(job['device'])
@@ -1621,6 +1711,8 @@ def run_job(job: Dict) -> Dict:
     if cloud_on(job):
         job = dict(job, _channel_rasters=prepare_cloud_mask(job, scene, out_root))
     job = dict(job, _window_prep=window_prep_for(job, scene))
+    if job.get('interior_filter') and scene.kind == 'raster':
+        set_interior_filter(job, scene, out_root)
     if job['_window_prep'] != 'none':
         print(f"[Job] window preparation: {job['_window_prep']} (both windows of a pair, after the stretch)")
     res = job['target_resolution'] or scene.native_res or 10.0
@@ -1674,9 +1766,13 @@ def run_job(job: Dict) -> Dict:
               f'({cfg.num_features / (win * win / 1e6):.0f} per megapixel)')
             try:
                 cfg.summary_name = f'POL_RUN_SUMMARY{suffix}.csv'
+                run_dets = detectors
                 if queued:
                     install_queue(E, job, out_dir, tag, win, nf)
-                records = E.AutoMatchPipeline(cfg).run(job['input_path'], detectors)
+                    mem = {int(k): float(v) for k, v in (job.get('_gpu_mem') or {}).items()}
+                    if mem and job.get('_shard') is not None:
+                        run_dets = gpu_order(list(detectors), win, mem.get(int(job['_shard']), 0.0), list(mem.values()))
+                records = E.AutoMatchPipeline(cfg).run(job['input_path'], run_dets)
                 with open(key_path, 'w') as fh:
                     fh.write(key)
                 with open(os.path.join(out_dir, f'SWEEP_KEY{suffix}.json'), 'w', encoding='utf-8') as fh:
@@ -1786,8 +1882,7 @@ def _finish_job(job: Dict, out_root: str, scene, manifest: List[Dict], t_job: fl
     cross = run_cross(job, out_root, scene.working_crs)
     try:                                       # the best single configuration, thinned the same way
         import automatch_cross as X
-        X.best_finals(out_root, scene.working_crs,
-                      int(500 if job.get('cross_max_points') is None else job['cross_max_points']))
+        X.best_finals(out_root, scene.working_crs, int(job.get('final_points') or 0))
     except Exception as e:
         print(f'[Job] RIVAL_BEST_FINAL not written: {type(e).__name__}: {e}')
     try:                                       # shapefile, look vectors and RIVAL's statistics of the final points
@@ -1837,6 +1932,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     sub.add_parser('cloudsweep', help='cloud mask benchmark: every combination of thresholds, band sets and '
                                       'bright-blob settings (options: python automatch_cloudsweep.py -h)'
                    ).add_argument('rest', nargs=argparse.REMAINDER)
+    flt = sub.add_parser('filter', help='finished jobs (also server ones, through the share mapping): leave out '
+                                        'the matches on cloud and inside featureless areas, score again into '
+                                        'FILTERED/ (options: python automatch_cloudfilter.py -h)')
+    flt.add_argument('rest', nargs=argparse.REMAINDER)
     tg = sub.add_parser('target', help='targeting accuracy of a product against its intended track (BAND_META + '
                                        'range file; options: python automatch_target.py -h)')
     tg.add_argument('rest', nargs=argparse.REMAINDER)
@@ -1880,6 +1979,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     if argv and argv[0] == 'cloudsweep':
         import automatch_cloudsweep as CS
         return CS.main(list(argv[1:]))
+    if argv and argv[0] == 'filter':
+        import automatch_cloudfilter as CF
+        return CF.main(list(argv[1:]), kinds=('cloud', 'interior'))
     if argv and argv[0] == 'target':
         import automatch_target as TG
         return TG.main(list(argv[1:]))

@@ -717,6 +717,66 @@ def test_target(tmp):
           ('MV', '/c1', '/l8', '/l8', 'C3'))
 
 
+def test_interior_and_final(tmp):
+    """Featureless interiors (a lake in textured land): matches in its middle
+    rejected, on its shore and on land kept. The final pick: one point per
+    sub-tile over the whole scene, tiles with nothing (sea) failing. GPU
+    routing: the heavy detectors to the larger GPU."""
+    import numpy as np
+    import pandas as pd
+    import rasterio
+    from rasterio.transform import from_origin
+    import automatch_cloudfilter as CF
+    import automatch_cross as X
+    import automatch_interior as IM
+    import automatch_job as J
+    rng = np.random.default_rng(7)
+    n = 600
+    img = (1000 + 300 * rng.random((n, n))).astype(np.float32)          # textured land
+    yy, xx = np.mgrid[0:n, 0:n]
+    lake = (xx - 300) ** 2 + (yy - 300) ** 2 < 120 ** 2
+    img[lake] = 200 + rng.normal(0, 2, int(lake.sum()))                 # a lake: flat, sensor noise only
+    path = os.path.join(tmp, 'lake.tif')
+    with rasterio.open(path, 'w', driver='GTiff', height=n, width=n, count=1, dtype='float32', crs='EPSG:32644',
+                       transform=from_origin(500000, 2000000, 30, 30)) as d:
+        d.write(img, 1)
+    info = IM.interior_mask(path, 1, os.path.join(tmp, 'lake_mask.tif'))
+    keep = CF.point_sampler(info['mask'], [1], 0, 'EPSG:32644')
+    E = 500000 + 30 * np.array([300.5, 300.5 + 118, 50.5, 300.5 + 100])
+    N = 2000000 - 30 * np.array([300.5, 300.5, 50.5, 300.5])
+    check('interior: the lake\'s middle rejected; its shore, the land kept (and 20 px inside the shore: inside)',
+          keep(E, N).tolist(), [False, True, True, False])
+    # final pick: matches on the left fifth only (the rest sea), a 24-tile grid over the scene
+    m = 2000
+    pe = rng.uniform(0, 100000, m)
+    pn = rng.uniform(0, 300000, m)
+    pts = pd.DataFrame({'E': pe, 'N': pn, 'dE': 500 + rng.normal(0, 20, m), 'dN': -300 + rng.normal(0, 20, m),
+                        'cross_detector': rng.choice(['a', 'b', 'c'], m)})
+    pts.loc[::40, 'dE'] += 2000                                        # a few wrong ones
+    pts = pts.assign(**{'x1-map': pts['E'], 'y1-map': pts['N'], 'x2-map': pts['E'] - pts['dE'],
+                        'y2-map': pts['N'] - pts['dN']})
+    fin, tiles = X.final_grid(pts, (0.0, 0.0, 500000.0, 300000.0), 24, None)
+    ok = tiles[tiles['status'] == 'ok']
+    check('final: one best point per tile with matches, the sea tiles fail with the reason, no wrong point picked',
+          (len(tiles) >= 24, len(fin) == len(ok), len(ok) < len(tiles) / 2,
+           bool(tiles.loc[tiles['status'] != 'ok', 'status'].str.contains('no agreed matches').all()),
+           float((fin['dE'] - 500).abs().max()) < 60), (True, True, True, True, True))
+    # GPU routing
+    o_big = J.gpu_order(['imw-xfeat-lg', 'imw-gim-dkm', 'disk'], 1024, 20.0, [16.0, 20.0])
+    o_small = J.gpu_order(['imw-xfeat-lg', 'imw-gim-dkm', 'disk'], 1024, 16.0, [16.0, 20.0])
+    import types
+    e0 = types.SimpleNamespace()
+    job = J.normalize({'input_path': os.path.join(tmp, 'x.tif'), 'output_dir': os.path.join(tmp, 'gq2'),
+                       'detectors': ['sift']})
+    J.install_queue(e0, dict(job, _queue=os.path.join(tmp, 'gq2', 'q'), _shard=0, _gpu_mem={'0': 16.0, '1': 20.0}),
+                    os.path.join(tmp, 'gq2', 'w'), 'w', 1024, None)
+    check('gpu: the larger GPU takes the heaviest first, the smaller the lightest first and leaves the ones near '
+          'its memory to the larger',
+          (o_big[0], o_small[0], e0.CLAIM_HOOK('b1', 'imw-sp-lg-kt0p2'), e0.CLAIM_HOOK('b1', 'disk_depth'),
+           J.gpu_need_gb('imw-rdd-nn-kt0p2', 2048)),
+          ('imw-gim-dkm', 'imw-xfeat-lg', False, True, 12.8))
+
+
 def test_report(tmp):
     """report: shapefile (readable by the reference-index reader), look-vector
     plot and RIVAL's statistics of a job's final points."""
@@ -759,6 +819,13 @@ def test_report(tmp):
            abs(float(st['ce90_m'].iloc[0]) - 2.146 * math.sqrt((1000.0 ** 2 + 500.0 ** 2) / 2)) < 60),
           (1, (1, n, n, True), True, n, True, True))
     check('report: --all takes the other RIVAL files too', len(RP.report(out, all_files=True, quiet=True)), 2)
+    tcsv = os.path.join(tmp, 'manual_pts.csv')
+    pd.DataFrame({'In_X': [1, 2, 3], 'In_Y': [1, 2, 3], 'Ref_X': [0, 0, 0], 'Ref_Y': [0, 0, 0],
+                  'DX_Err': [990.0, 1010.0, 1000.0], 'DY_Err': [-510.0, -490.0, -500.0]}).to_csv(tcsv, index=False)
+    rows = RP.report(out, quiet=True, truth_csv=tcsv)
+    check('report: the manual points\' statistics as a row, each file\'s difference to them near 0 here',
+          (rows[-1]['file'].startswith('MANUAL'), rows[-1]['n'], abs(rows[0]['mean_dx_vs_manual_m']) < 20,
+           abs(rows[0]['ce90_vs_manual_m']) < 60), (True, 3, True, True))
 
 
 def test_pack(tmp):
@@ -1294,7 +1361,7 @@ def test_gui_cloud():
         tools = [a.text().replace('&&', '&') for a in w.menuBar().actions()[0].menu().actions()]
         check('gui: the analysis tools in their own row and in the Tools menu; the version in the title',
               (w.btn_cloud_sweep.parentWidget() is not None, tools, G.AUTOMATCH_VERSION in w.windowTitle()),
-              (True, ['Benchmark & cross-check…', 'Finish a job…', 'Report…', 'Targeting…', 'Cloud mask test…',
+              (True, ['Benchmark & cross-check…', 'Finish a job…', 'Report…', 'Filter points…', 'Targeting…', 'Cloud mask test…',
                       'Cloud sweep…'], True))
         w.in_path.setText(img)
         w.cloud_conf.setValue(0.8)
@@ -2550,7 +2617,7 @@ def test_gpu_windows(tmp):
 
 def _glob_rival_best(folder):
     import glob as _glob
-    return _glob.glob(os.path.join(folder, 'RIVAL_BEST_*_band1.csv'))
+    return [p for p in _glob.glob(os.path.join(folder, 'RIVAL_BEST_*_band1.csv')) if '_FINAL_' not in p]
 
 
 def test_jobs_312_317(tmp):
@@ -5401,6 +5468,7 @@ def main():
         test_gpu_queue(tmp)
         test_finish(tmp)
         test_report(tmp)
+        test_interior_and_final(tmp)
         test_target(tmp)
         test_presets(tmp)
         test_jobs_312_317(tmp)

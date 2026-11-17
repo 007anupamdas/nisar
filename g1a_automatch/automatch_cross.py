@@ -48,7 +48,8 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
 MAX_POINTS_PER_CELL = 200      # per configuration and cell, in the RIVAL file
-MAX_FINAL_POINTS = 500         # RIVAL_FINAL_<channel>.csv: the best points, spread over the image (0: off)
+MAX_FINAL_POINTS = 500         # RIVAL_DENSE_<channel>.csv: up to this many, spread over what has matches (0: off)
+FINAL_POINTS = 24              # RIVAL_FINAL_<channel>.csv: one best point per sub-tile of a grid over the scene
 KEEP_PER_CELL = 3              # agreeing configurations kept per cell: the least distorted there
 OUTLIER_K = 3.0                # points further than this many x the cell's own scatter are dropped
 RELIABLE_SHARE = 0.15          # share of cells that must pass for a job to count as reliable
@@ -235,13 +236,129 @@ def thin(pts: pd.DataFrame, max_points: int) -> pd.DataFrame:
     return pts.loc[best.index].reset_index(drop=True)
 
 
-def final_of(rival_csv: str, crs: str, max_points: int = MAX_FINAL_POINTS) -> str:
+def scene_extent(output_dir: str, crs: str, fallback: Optional[pd.DataFrame] = None):
+    """((xmin, ymin, xmax, ymax) of the input image in the working CRS,
+    covered(x0, y0, x1, y1) -> share of that box on valid image or None,
+    source) -- the image as this machine reaches it (share mapping), else
+    the extent of fallback's points (no coverage test then)."""
+    import json
+    try:
+        with open(os.path.join(output_dir, 'job_used.json'), encoding='utf-8') as f:
+            job = json.load(f)
+    except (OSError, ValueError):
+        job = {}
+    inp = job.get('input_path') or ''
+    for loc in (inp, local_path(inp, output_dir, job.get('output_dir') or ''), _by_share(inp)):
+        if loc and os.path.isfile(loc):
+            try:
+                import rasterio as rio
+                from pyproj import CRS, Transformer
+                from rasterio.enums import Resampling
+                with rio.open(loc) as src:
+                    s = max(1.0, max(src.width, src.height) / 512.0)
+                    h, w = max(1, int(src.height / s)), max(1, int(src.width / s))
+                    a = src.read(1, out_shape=(h, w), resampling=Resampling.nearest)
+                    nod = src.nodatavals[0] if src.nodatavals else None
+                    tr = src.transform * src.transform.scale(src.width / float(w), src.height / float(h))
+                    rcrs = src.crs
+                valid = np.isfinite(a) & (a != 0) & ((a != nod) if nod is not None else True)
+                to_w = Transformer.from_crs(rcrs, CRS.from_user_input(crs), always_xy=True)
+                to_r = Transformer.from_crs(CRS.from_user_input(crs), rcrs, always_xy=True)
+                rows, cols = np.nonzero(valid)
+                if not len(rows):
+                    break
+                xs, ys = tr * (cols + 0.5, rows + 0.5)
+                X, Y = to_w.transform(np.asarray(xs), np.asarray(ys))
+                inv = ~tr
+
+                def covered(x0, y0, x1, y1):
+                    gx, gy = np.meshgrid(np.linspace(x0, x1, 9), np.linspace(y0, y1, 9))
+                    rx, ry = to_r.transform(gx.ravel(), gy.ravel())
+                    c, r = inv * (np.asarray(rx), np.asarray(ry))
+                    r, c = np.floor(r).astype(int), np.floor(c).astype(int)
+                    ok = (r >= 0) & (r < h) & (c >= 0) & (c < w)
+                    hit = np.zeros(len(r), bool)
+                    hit[ok] = valid[r[ok], c[ok]]
+                    return float(hit.mean())
+                return (float(np.min(X)), float(np.min(Y)), float(np.max(X)), float(np.max(Y))), covered, 'image'
+            except Exception:
+                break
+    if fallback is not None and len(fallback):
+        return ((float(fallback['E'].min()), float(fallback['N'].min()), float(fallback['E'].max()),
+                 float(fallback['N'].max())), None, 'matches (the image is not reachable here)')
+    return None, None, ''
+
+
+def final_grid(pts: pd.DataFrame, extent, n_points: int, covered=None) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """(one point per sub-tile, the tiles): the scene's extent cut into a
+    grid of about n_points tiles of its shape; in each tile, of the points
+    there (the cross-checked ones: several detectors agree on them, cloud and
+    featureless interiors left out when the filter is on), the one closest
+    to the offset they agree on (their median) -- the most accurate one the
+    matches can tell. A tile without such points fails, with the reason
+    (outside the image, or nothing agreed there: water, cloud, featureless)."""
+    if extent is None or n_points <= 0:
+        return pts.iloc[0:0], pd.DataFrame()
+    x0, y0, x1, y1 = extent
+    W, H = max(x1 - x0, 1.0), max(y1 - y0, 1.0)
+    nx = max(1, int(round(math.sqrt(n_points * W / H))))
+    ny = max(1, int(math.ceil(n_points / float(nx))))
+    tw, th = W / nx, H / ny
+    E = pts['E'].to_numpy(float) if len(pts) else np.zeros(0)
+    N = pts['N'].to_numpy(float) if len(pts) else np.zeros(0)
+    ti = np.clip(np.floor((E - x0) / tw).astype(int), 0, nx - 1) if len(pts) else E.astype(int)
+    tj = np.clip(np.floor((N - y0) / th).astype(int), 0, ny - 1) if len(pts) else N.astype(int)
+    chosen, rows = [], []
+    for j in range(ny - 1, -1, -1):             # north to south, west to east: tile 1 is the top left
+        for i in range(nx):
+            box = (x0 + i * tw, y0 + j * th, x0 + (i + 1) * tw, y0 + (j + 1) * th)
+            row = {'tile': len(rows) + 1, 'col': i + 1, 'row': ny - j, 'E_min': box[0], 'N_min': box[1],
+                   'E_max': box[2], 'N_max': box[3]}
+            share = covered(*box) if covered is not None else None
+            row['image_share'] = None if share is None else round(share, 2)
+            sel = pts[(ti == i) & (tj == j)] if len(pts) else pts
+            if not len(sel):
+                row['status'] = ('outside the image' if share is not None and share < 0.1
+                                 else 'no agreed matches (water, cloud or featureless?)')
+                rows.append(row)
+                continue
+            mde, mdn = float(sel['dE'].median()), float(sel['dN'].median())
+            d = np.hypot(sel['dE'] - mde, sel['dN'] - mdn)
+            best = sel.loc[d.idxmin()]
+            row.update({'status': 'ok', 'candidates': int(len(sel)),
+                        'detectors': int(sel['cross_detector'].nunique()) if 'cross_detector' in sel.columns else None,
+                        'tile_median_dE_m': round(mde, 2), 'tile_median_dN_m': round(mdn, 2),
+                        'tile_scatter_m': round(float(1.4826 * np.median(d)), 2),
+                        'point_dE_m': round(float(best['dE']), 2), 'point_dN_m': round(float(best['dN']), 2),
+                        'point_off_median_m': round(float(d.min()), 2)})
+            rows.append(row)
+            chosen.append(sel.loc[[d.idxmin()]].assign(tile=row['tile']))
+    fin = pd.concat(chosen, ignore_index=True) if chosen else pts.iloc[0:0]
+    return fin, pd.DataFrame(rows)
+
+
+def _job_setting(d: str, key: str, default):
+    try:
+        import json
+        with open(os.path.join(d, 'job_used.json'), encoding='utf-8') as f:
+            v = json.load(f).get(key)
+        return default if v is None else type(default)(v)
+    except (OSError, ValueError, TypeError):
+        return default
+
+
+def _job_final_points(d: str) -> int:
+    """The job's final_points (job_used.json), else FINAL_POINTS."""
+    return _job_setting(d, 'final_points', FINAL_POINTS)
+
+
+def final_of(rival_csv: str, crs: str, final_points: int = FINAL_POINTS, output_dir: str = '') -> str:
     """RIVAL_BEST_<...>.csv -> RIVAL_BEST_FINAL_<...>.csv beside it: the same
-    thinning (thin) for the best single configuration's file. '' when off,
-    the file is unreadable or it is a FINAL file already."""
+    per-tile pick (final_grid) for the best single configuration's file. ''
+    when off, the file is unreadable or it is a FINAL file already."""
     import automatch_rival as R
     name = os.path.basename(rival_csv)
-    if max_points <= 0 or '_FINAL_' in name or not name.startswith('RIVAL_BEST_'):
+    if final_points <= 0 or '_FINAL_' in name or not name.startswith('RIVAL_BEST_'):
         return ''
     try:
         p = R.read_rival_csv(rival_csv)
@@ -251,30 +368,34 @@ def final_of(rival_csv: str, crs: str, max_points: int = MAX_FINAL_POINTS) -> st
         return ''
     pts = pd.DataFrame({'x1-map': p['ix'], 'y1-map': p['iy'], 'x2-map': p['rx'], 'y2-map': p['ry'],
                         'E': p['ix'], 'N': p['iy'], 'dE': p['ix'] - p['rx'], 'dN': p['iy'] - p['ry']})
-    fin = thin(pts, max_points)
+    import automatch_rival as R2
+    pts = R2.apply_point_mask(pts)                  # the interior / cloud filter, when on
+    extent, covered, _ = scene_extent(output_dir or os.path.dirname(rival_csv), crs, pts)
+    fin, tiles = final_grid(pts, extent, final_points, covered)
     out = os.path.join(os.path.dirname(rival_csv), name.replace('RIVAL_BEST_', 'RIVAL_BEST_FINAL_', 1))
     R.write_rival_csv(fin, crs, out)
-    print(f'[Cross] {name}: {len(pts)} points -> {len(fin)} best over the whole coverage -> {out}')
+    ok = int((tiles['status'] == 'ok').sum()) if len(tiles) else 0
+    print(f'[Cross] {name}: {len(pts)} points -> {len(fin)} best, one per sub-tile ({ok} of {len(tiles)} tiles) -> {out}')
     return out
 
 
-def best_finals(output_dir: str, crs: Optional[str] = None, max_points: Optional[int] = None) -> List[str]:
+def best_finals(output_dir: str, crs: Optional[str] = None, final_points: Optional[int] = None) -> List[str]:
     """final_of for every RIVAL_BEST_*.csv of a job folder."""
     import glob as _glob
     import automatch_truth as T
     crs = crs or T.working_crs_of(output_dir)
-    n = _job_max_points(output_dir) if max_points is None else max_points
+    n = _job_final_points(output_dir) if final_points is None else final_points
     if not crs:
         return []
-    return [o for o in (final_of(p, crs, n) for p in sorted(_glob.glob(os.path.join(output_dir, 'RIVAL_BEST_*.csv'))))
-            if o]
+    return [o for o in (final_of(p, crs, n, output_dir)
+                        for p in sorted(_glob.glob(os.path.join(output_dir, 'RIVAL_BEST_*.csv')))) if o]
 
 
 def run(output_dir: str, top_n: int = 5, min_agree: int = 0, cell_km: float = 25.0,
         tol_m: Optional[float] = None, truth_csv: str = '', working_crs: Optional[str] = None,
         cfgs: Optional[List[Dict]] = None, quiet: bool = False, keep: int = KEEP_PER_CELL,
         out_dir: Optional[str] = None, ranking_csv: Optional[str] = None,
-        max_points: int = MAX_FINAL_POINTS) -> Dict[str, Dict]:
+        max_points: int = MAX_FINAL_POINTS, final_points: Optional[int] = None) -> Dict[str, Dict]:
     """Cross-check every channel of an output folder; returns per channel
     {'csv', 'summary', 'configs', 'cells', 'points', 'truth_rmse_m'}.
     out_dir: where its files go (default output_dir); ranking_csv: the truth
@@ -302,6 +423,7 @@ def run(output_dir: str, top_n: int = 5, min_agree: int = 0, cell_km: float = 25
     truth_csv = truth_csv or job_truth_csv(output_dir)
     truth = T.truth_in_crs(T.load_truth(truth_csv), crs) if truth_csv else None
     need = min_agree if min_agree > 0 else max(2, top_n // 2 + 1)
+    final_points = _job_final_points(output_dir) if final_points is None else int(final_points)
     out: Dict[str, Dict] = {}
     summary_rows = []
     for ch in sorted({c['channel'] for c in cfgs}):
@@ -330,12 +452,21 @@ def run(output_dir: str, top_n: int = 5, min_agree: int = 0, cell_km: float = 25
             path = os.path.join(out_dir, f'RIVAL_CROSS_{ch}.csv')
             R.write_rival_csv(pts, crs, path, path[:-4] + '_detail.csv')
             res['csv'] = path
-            if max_points > 0:             # the file for RIVAL: few, the best, over the whole coverage
-                fin = thin(pts, max_points)
+            if max_points > 0:             # many, spread over what has matches
+                dense = thin(pts, max_points)
+                dpath = os.path.join(out_dir, f'RIVAL_DENSE_{ch}.csv')
+                R.write_rival_csv(dense, crs, dpath, dpath[:-4] + '_detail.csv')
+                res.update({'dense_csv': dpath, 'dense_points': int(len(dense))})
+            if final_points > 0:           # the file for RIVAL: one best point per sub-tile of the scene
+                extent, covered, src = scene_extent(output_dir, crs, pts)
+                fin, tiles = final_grid(pts, extent, final_points, covered)
                 fpath = os.path.join(out_dir, f'RIVAL_FINAL_{ch}.csv')
                 R.write_rival_csv(fin, crs, fpath, fpath[:-4] + '_detail.csv')
-                res.update({'final_csv': fpath, 'final_points': int(len(fin))})
-                if truth is not None:
+                tiles.to_csv(os.path.join(out_dir, f'FINAL_TILES_{ch}.csv'), index=False)
+                n_ok = int((tiles['status'] == 'ok').sum()) if len(tiles) else 0
+                res.update({'final_csv': fpath, 'final_points': int(len(fin)), 'final_tiles': int(len(tiles)),
+                            'final_tiles_ok': n_ok, 'final_extent_from': src})
+                if truth is not None and len(fin):
                     s, _ = T.score_config({'points': fin.assign(chip=fin['source_file'])[
                         ['E', 'N', 'dE', 'dN', 'chip']]}, truth, 5000.0)
                     res.update({'final_truth_rmse_m': s['truth_rmse_m'], 'final_truth_reached': s['truth_reached']})
@@ -355,7 +486,9 @@ def run(output_dir: str, top_n: int = 5, min_agree: int = 0, cell_km: float = 25
                 msg += f"; truth RMSE {res['truth_rmse_m']:.0f} m at {res['truth_reached']}/{res['truth_total']}"
             print(msg + (f" -> {res['csv']}" if res.get('csv') else ''))
             if res.get('final_csv'):
-                print(f"[Cross] {ch}: for RIVAL: {res['final_points']} best points over the whole coverage"
+                print(f"[Cross] {ch}: for RIVAL: {res['final_points']} best points, one per sub-tile "
+                      f"({res['final_tiles_ok']} of {res['final_tiles']} tiles have one; FINAL_TILES_{ch}.csv says "
+                      f"why the others failed)"
                       + (f" (truth RMSE {res['final_truth_rmse_m']:.0f} m at {res['final_truth_reached']}/"
                          f"{res['truth_total']})" if res.get('final_truth_rmse_m') is not None else '')
                       + f" -> {res['final_csv']}")
@@ -610,7 +743,8 @@ def _job_max_points(d: str) -> int:
 
 def cross_job(d: str, job: str, top_n: int = 5, min_agree: int = 0, cell_km: float = 25.0,
               tol_m: Optional[float] = None, truth_csv: str = '', recompute: bool = False,
-              keep: int = KEEP_PER_CELL, max_points: Optional[int] = None) -> List[Dict]:
+              keep: int = KEEP_PER_CELL, max_points: Optional[int] = None,
+              final_points: Optional[int] = None) -> List[Dict]:
     """One finished job: the cross-check on its match files and its replay at
     the truth points, each read back when made with the same settings. Rows
     as in CROSS_ALL.csv."""
@@ -618,10 +752,11 @@ def cross_job(d: str, job: str, top_n: int = 5, min_agree: int = 0, cell_km: flo
     rows: List[Dict] = []
     print(f'[Cross] ===== {job}')
     n_final = _job_max_points(d) if max_points is None else int(max_points)
+    n_tiles = _job_final_points(d) if final_points is None else int(final_points)
     want = {'top_n': top_n, 'min_agree': min_agree, 'keep': keep, 'cell_km': cell_km, 'tolerance_m': tol_m,
-            'truth_csv': truth_csv or '', 'max_points': n_final}
-    try:                                       # the best single configuration, thinned the same way
-        best_finals(d, None, n_final)
+            'truth_csv': truth_csv or '', 'max_points': n_final, 'final_points': n_tiles, 'v': 2}
+    try:                                       # the best single configuration, picked the same way
+        best_finals(d, None, n_tiles)
     except Exception as e:
         print(f'[Cross] {job}: RIVAL_BEST_FINAL not written ({type(e).__name__}: {e})')
     if not recompute and _reusable(d, 'matches', want, 'CROSS_SUMMARY.csv', ['TRUTH_RANKING.csv',
@@ -633,7 +768,7 @@ def cross_job(d: str, job: str, top_n: int = 5, min_agree: int = 0, cell_km: flo
         try:
             tcsv = truth_csv or job_truth_csv(d)
             print(f'[Cross] {job}: ground truth ' + (tcsv if tcsv else 'none found in its settings'))
-            res = run(d, top_n, min_agree, cell_km, tol_m, tcsv, keep=keep, max_points=n_final)
+            res = run(d, top_n, min_agree, cell_km, tol_m, tcsv, keep=keep, max_points=n_final, final_points=n_tiles)
             for ch, r in res.items():
                 rows.append({'job': job, 'mode': 'matches', 'reused': False,
                              **{k: v for k, v in r.items() if k != 'channel'}, 'channel': ch})
@@ -666,7 +801,7 @@ def cross_job(d: str, job: str, top_n: int = 5, min_agree: int = 0, cell_km: flo
 
 def batch(parent: str, top_n: int = 5, min_agree: int = 0, cell_km: float = 25.0,
           tol_m: Optional[float] = None, truth_csv: str = '', jobs: str = '', recompute: bool = False,
-          keep: int = KEEP_PER_CELL, max_points: Optional[int] = None) -> int:
+          keep: int = KEEP_PER_CELL, max_points: Optional[int] = None, final_points: Optional[int] = None) -> int:
     """Every finished automatch job in parent or one level below it
     (output/output359), or only the numbers in jobs ('335-363, 370'): the
     full cross-check when its match files are there, and the replay on
@@ -682,7 +817,7 @@ def batch(parent: str, top_n: int = 5, min_agree: int = 0, cell_km: float = 25.0
     rows = []
     for d in found:
         rows += cross_job(d, os.path.relpath(d, parent), top_n, min_agree, cell_km, tol_m, truth_csv, recompute, keep,
-                          max_points)
+                          max_points, final_points)
     if rows:
         out = os.path.join(parent, 'CROSS_ALL.csv')
         pd.DataFrame(rows).to_csv(out, index=False)
@@ -697,6 +832,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument('output_dir')
     ap.add_argument('--top', type=int, default=5, help='configurations compared, one per detector (default 5)')
     ap.add_argument('--min-agree', type=int, default=0, help='how many must agree in a cell (default: more than half)')
+    ap.add_argument('--final-points', type=int, default=None,
+                    help=f'RIVAL_FINAL / RIVAL_BEST_FINAL: one best point per sub-tile of a grid of about this many '
+                         f'over the scene (default the job\'s final_points, else {FINAL_POINTS})')
     ap.add_argument('--max-points', type=int, default=None,
                     help=f'RIVAL_FINAL_<channel>.csv: at most this many best points over the whole coverage '
                          f'(default the job\'s, else {MAX_FINAL_POINTS}; 0: off)')
@@ -725,7 +863,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     SHARE = (a.share_local, a.share_server)
     if a.batch:
         return batch(a.output_dir, a.top, a.min_agree, a.cell_km, a.tolerance_m, a.truth, a.jobs, a.recompute,
-                     a.keep, a.max_points)
+                     a.keep, a.max_points, a.final_points)
     if a.from_truth_points:
         t = from_truth_points(os.path.join(a.output_dir, 'TRUTH_POINTS.csv'),
                               os.path.join(a.output_dir, 'TRUTH_RANKING.csv'), a.top, a.min_agree, a.tolerance_m)
@@ -733,12 +871,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         t.to_csv(os.path.join(a.output_dir, 'CROSS_FROM_TRUTH_POINTS.csv'), index=False)
         return 0 if len(t) else 1
     try:
-        best_finals(a.output_dir, None, a.max_points)
+        best_finals(a.output_dir, None, a.final_points)
     except ValueError as e:
         print(f'[Cross] {e}')
         return 2
     res = run(a.output_dir, a.top, a.min_agree, a.cell_km, a.tolerance_m, a.truth, keep=a.keep,
-              max_points=_job_max_points(a.output_dir) if a.max_points is None else a.max_points)
+              max_points=_job_max_points(a.output_dir) if a.max_points is None else a.max_points,
+              final_points=a.final_points)
     try:
         import automatch_report as RP
         RP.report(a.output_dir)

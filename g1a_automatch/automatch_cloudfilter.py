@@ -28,6 +28,14 @@ are read, and the job is scored again, without touching its own files:
 
 Without ground truth only the cross-check is redone. The mask is kept in
 CLOUDFREE/ and reused while the input and the cloud settings are the same.
+
+    python automatch_job.py filter <job folder | folder of jobs> [--no-cloud] [--no-interior]
+        [--edge-px 4] (and the options above)
+
+does the same with two masks: cloud, and the interior of featureless areas
+(automatch_interior: the middle of water bodies and uniform blobs, their
+edges kept), into <job>/FILTERED/ (FILTERED_SUMMARY.csv, FILTERED_ALL.csv),
+and ends with the report (REPORT/: shapefiles, look vectors, statistics).
 """
 from __future__ import annotations
 
@@ -76,9 +84,9 @@ def job_input(job_dir: str, job: Dict) -> str:
     return ''
 
 
-def cloud_mask_for(job_dir: str, job: Dict, overrides: Optional[Dict] = None) -> Dict:
+def cloud_mask_for(job_dir: str, job: Dict, overrides: Optional[Dict] = None, out: str = '') -> Dict:
     """CLOUD_INFO of the job's input (automatch_cloud.prepare) in
-    <job>/CLOUDFREE/; raises when the input cannot be read here."""
+    <job>/CLOUDFREE/ (or out); raises when the input cannot be read here."""
     import automatch_cloud as C
     import automatch_job as J
     inp = job_input(job_dir, job)
@@ -89,7 +97,7 @@ def cloud_mask_for(job_dir: str, job: Dict, overrides: Optional[Dict] = None) ->
         raise ValueError('cloud masking is for raster inputs (NISAR is radar)')
     cfg = dict(J.normalize({k: v for k, v in job.items() if k in J.DEFAULT_JOB}), cloud_mask='on',
                **(overrides or {}))
-    out = os.path.join(job_dir, 'CLOUDFREE')
+    out = out or os.path.join(job_dir, 'CLOUDFREE')
 
     class _Scene:
         raster_path = inp
@@ -152,28 +160,71 @@ def _best(ranking_csv: str) -> Dict:
         return {}
 
 
+def interior_mask_for(job_dir: str, job: Dict, out: str, opts: Optional[Dict] = None) -> Dict:
+    """The interior mask (automatch_interior) of the band the job matched,
+    in out; raises when the input cannot be read here."""
+    import automatch_bench as B
+    import automatch_interior as IM
+    inp = job_input(job_dir, job)
+    if not inp:
+        raise FileNotFoundError(f"input {job.get('input_path')!r} not reachable from here (set --share-local / "
+                                f"--share-server)")
+    if os.path.isdir(inp) or inp.lower().endswith(('.h5', '.hdf5')):
+        raise ValueError('the interior filter is for raster inputs')
+    band = B._band_run(job_dir, job)
+    o = dict(IM.options(job), **(opts or {}))
+    info = IM.interior_mask(inp, IM.band_number(band), os.path.join(out, f'INTERIOR_MASK_{band}.tif'),
+                            o['edge_px'], o['win_px'], o['k_noise'], o['max_side'])
+    return dict(info, band=band)
+
+
 def filter_job(job_dir: str, overrides: Optional[Dict] = None, classes=None, dilate_px: Optional[int] = None,
-               cross: Optional[Dict] = None, mask_path: str = '') -> Dict:
-    """Cloud-filter one finished job (module docstring); its CLOUDFREE_SUMMARY row."""
+               cross: Optional[Dict] = None, mask_path: str = '', kinds=('cloud',), out_name: str = '',
+               interior_opts: Optional[Dict] = None, interior_mask_path: str = '') -> Dict:
+    """Filter one finished job (module docstring): kinds 'cloud' and / or
+    'interior'; into <job>/CLOUDFREE (cloud only) or <job>/FILTERED; its
+    <folder>_SUMMARY row."""
     import automatch_cross as X
     import automatch_rival as R
     import automatch_truth as T
+    kinds = tuple(kinds)
     name = os.path.basename(os.path.normpath(job_dir))
     with open(os.path.join(job_dir, 'job_used.json'), encoding='utf-8') as f:
         job = json.load(f)
-    out = os.path.join(job_dir, 'CLOUDFREE')
+    out_name = out_name or ('CLOUDFREE' if kinds == ('cloud',) else 'FILTERED')
+    out = os.path.join(job_dir, out_name)
     os.makedirs(out, exist_ok=True)
     classes = [int(c) for c in (classes or job.get('cloud_mask_classes') or [1])]
     dilate_px = int(job.get('cloud_dilate_px') or 2) if dilate_px is None else int(dilate_px)
-    row: Dict = {'job': name, 'classes': ' '.join(str(c) for c in classes), 'dilate_px': dilate_px}
-    if mask_path:
-        info = {'mask': mask_path, 'cloud_pct': None, 'model': 'given'}
-    else:
-        info = cloud_mask_for(job_dir, job, overrides)
-    row.update({'sensor': info.get('sensor'), 'cloud_pct': info.get('cloud_pct'), 'thick_pct': info.get('thick_pct'),
-                'cloud_method': info.get('model'), 'mask': info.get('mask')})
+    row: Dict = {'job': name, 'filters': '+'.join(kinds)}
     crs = T.working_crs_of(job_dir)
-    keep = point_sampler(info['mask'], classes, dilate_px, crs)
+    samplers = []
+    if 'cloud' in kinds:
+        if mask_path:
+            info = {'mask': mask_path, 'cloud_pct': None, 'model': 'given'}
+        else:
+            info = cloud_mask_for(job_dir, job, overrides, out)
+        row.update({'classes': ' '.join(str(c) for c in classes), 'dilate_px': dilate_px,
+                    'sensor': info.get('sensor'), 'cloud_pct': info.get('cloud_pct'),
+                    'thick_pct': info.get('thick_pct'), 'cloud_method': info.get('model'), 'mask': info.get('mask')})
+        samplers.append(('cloud', point_sampler(info['mask'], classes, dilate_px, crs)))
+    if 'interior' in kinds:
+        if interior_mask_path:
+            ii = {'mask': interior_mask_path, 'interior_pct': None}
+        else:
+            ii = interior_mask_for(job_dir, job, out, interior_opts)
+        row.update({'interior_pct': ii.get('interior_pct'), 'interior_mask': ii.get('mask'),
+                    'interior_edge_px': ii.get('edge_px')})
+        samplers.append(('interior', point_sampler(ii['mask'], [1], 0, crs)))
+
+    def keep(E, N):
+        ok = np.ones(len(np.asarray(E)), bool)
+        for _, s in samplers:
+            ok &= s(E, N)
+        keep.stats['seen'] += len(ok)
+        keep.stats['rejected'] += int((~ok).sum())
+        return ok
+    keep.stats = {'seen': 0, 'rejected': 0}
     truth_csv = X.job_truth_csv(job_dir)
     before = _best(os.path.join(job_dir, 'TRUTH_RANKING.csv'))
     R.POINT_MASK = keep
@@ -198,16 +249,25 @@ def filter_job(job_dir: str, overrides: Optional[Dict] = None, classes=None, dil
                     row[f'cross_{ch}_rmse_m'] = round(float(r['truth_rmse_m']), 1)
     finally:
         R.POINT_MASK = None
+    try:
+        import automatch_report as RP
+        RP.report(out, quiet=True, truth_csv=truth_csv)
+    except Exception as e:
+        print(f'[Filter] {name}: REPORT not written ({type(e).__name__}: {e})')
     after = _best(os.path.join(out, 'TRUTH_RANKING.csv')) if truth_csv else {}
     seen = keep.stats['seen']
+    for kind, s in samplers:
+        row[f'{kind}_rejected_pct'] = round(100.0 * s.stats['rejected'] / s.stats['seen'], 2) if s.stats['seen'] else None
     row.update({'matches_checked': seen, 'rejected_pct': round(100.0 * keep.stats['rejected'] / seen, 2) if seen else None,
                 'best_before': before.get('config'), 'rmse_before_m': before.get('rmse_m'),
                 'reached_before': before.get('reached'), 'best_after': after.get('config'),
                 'rmse_after_m': after.get('rmse_m'), 'reached_after': after.get('reached'),
                 'truth': bool(truth_csv)})
-    pd.DataFrame([row]).to_csv(os.path.join(out, 'CLOUDFREE_SUMMARY.csv'), index=False)
-    print(f"[CloudFilter] {name}: {row.get('cloud_pct')} % cloud ({row.get('cloud_method')}); "
-          f"{row['rejected_pct']} % of the matches rejected"
+    pd.DataFrame([row]).to_csv(os.path.join(out, f'{out_name}_SUMMARY.csv'), index=False)
+    print(f"[Filter] {name}: " + '; '.join(
+              ([f"{row.get('cloud_pct')} % cloud ({row.get('cloud_method')})"] if 'cloud' in kinds else [])
+              + ([f"{row.get('interior_pct')} % featureless interior"] if 'interior' in kinds else []))
+          + f"; {row['rejected_pct']} % of the matches rejected"
           + (f"; best {before.get('rmse_m')} m ({before.get('reached')}) -> {after.get('rmse_m')} m "
              f"({after.get('reached')}): {after.get('config')}" if truth_csv else '; no ground truth: cross-check only')
           + f' -> {out}', flush=True)
@@ -216,7 +276,9 @@ def filter_job(job_dir: str, overrides: Optional[Dict] = None, classes=None, dil
 
 def batch(folder: str, jobs: str = '', **kw) -> pd.DataFrame:
     """filter_job for one job folder, or every finished job under folder
-    (CLOUDFREE_ALL.csv there)."""
+    (CLOUDFREE_ALL.csv / FILTERED_ALL.csv there)."""
+    kinds = tuple(kw.get('kinds') or ('cloud',))
+    all_name = ('CLOUDFREE' if kinds == ('cloud',) else 'FILTERED') + '_ALL.csv'
     import automatch_cross as X
     if os.path.exists(os.path.join(folder, 'job_used.json')):
         try:
@@ -234,13 +296,14 @@ def batch(folder: str, jobs: str = '', **kw) -> pd.DataFrame:
             print(f'[CloudFilter] {os.path.basename(d)}: skipped ({type(e).__name__}: {e})', flush=True)
             rows.append({'job': os.path.basename(d), 'error': f'{type(e).__name__}: {e}'})
     df = pd.DataFrame(rows)
-    df.to_csv(os.path.join(folder, 'CLOUDFREE_ALL.csv'), index=False)
-    print(f'[CloudFilter] {len(rows)} job(s); CLOUDFREE_ALL.csv in {folder}', flush=True)
+    df.to_csv(os.path.join(folder, all_name), index=False)
+    print(f'[Filter] {len(rows)} job(s); {all_name} in {folder}', flush=True)
     return df
 
 
-def main(argv: Optional[List[str]] = None) -> int:
-    ap = argparse.ArgumentParser(description='Reject the match points of finished jobs that fall on cloud')
+def main(argv: Optional[List[str]] = None, kinds=('cloud',)) -> int:
+    ap = argparse.ArgumentParser(description='Reject the match points of finished jobs that fall on cloud'
+                                 + (' or inside featureless areas' if 'interior' in kinds else ''))
     ap.add_argument('folder', help='a job output folder, or a folder of them')
     ap.add_argument('--jobs', default='', help="only these job numbers, e.g. '335-366, 370'")
     ap.add_argument('--method', default='', help='cloud method for every image (default: the job\'s; auto: by sensor)')
@@ -254,7 +317,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument('--top', type=int, default=5, help='cross-check: configurations compared (0: off)')
     ap.add_argument('--min-agree', type=int, default=3, help='cross-check: how many must agree')
     ap.add_argument('--cell-km', type=float, default=25.0)
+    if 'interior' in kinds:
+        ap.add_argument('--no-cloud', action='store_true', help='only the interior filter')
+        ap.add_argument('--no-interior', action='store_true', help='only the cloud filter')
+        ap.add_argument('--edge-px', type=float, default=None,
+                        help='interior: farther than this from any textured pixel (input pixels, default 4)')
     a = ap.parse_args(argv)
+    if 'interior' in kinds:
+        kinds = tuple(k for k in ('cloud', 'interior') if not getattr(a, f'no_{k}'))
+        if not kinds:
+            ap.error('--no-cloud and --no-interior leave nothing to filter')
     import automatch_cross as X
     import automatch_job as J
     X.SHARE = (a.share_local, a.share_server)
@@ -265,8 +337,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         over['cloud_method'] = a.method
     if a.device:
         over['cloud_device'] = J.use_gpu(a.device)
+    io = {'edge_px': a.edge_px} if getattr(a, 'edge_px', None) is not None else None
     batch(a.folder, a.jobs, overrides=over, classes=a.classes, dilate_px=a.dilate,
-          cross={'top_n': a.top, 'min_agree': a.min_agree, 'cell_km': a.cell_km})
+          cross={'top_n': a.top, 'min_agree': a.min_agree, 'cell_km': a.cell_km}, kinds=kinds,
+          interior_opts=io)
     return 0
 
 

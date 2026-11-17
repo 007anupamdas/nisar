@@ -161,6 +161,24 @@ def plot_vectors(points: List[Dict], png: str, title: str = '', st: Optional[Dic
     return png
 
 
+def manual_stats(truth_csv: str) -> Dict:
+    """RIVAL's statistics of the manual points (the ground-truth file):
+    their DX_Err / DY_Err (In - Ref, m), else In - Ref of their coordinates."""
+    import pandas as pd
+    t = pd.read_csv(truth_csv, encoding='utf-8-sig')
+    cols = {c.lower().replace(' ', '_'): c for c in t.columns}
+    if 'dx_err' in cols and 'dy_err' in cols:
+        dx, dy = t[cols['dx_err']].astype(float), t[cols['dy_err']].astype(float)
+    else:
+        dx = t[cols['in_x']].astype(float) - t[cols['ref_x']].astype(float)
+        dy = t[cols['in_y']].astype(float) - t[cols['ref_y']].astype(float)
+    pts = [{'DX_Err': float(a), 'DY_Err': float(b)} for a, b in zip(dx, dy)]
+    return stats(pts)
+
+
+COMPARE = ('mean_dx_m', 'mean_dy_m', 'rmse_x_m', 'rmse_y_m', 'rmse_m', 'ce90_m')
+
+
 def report_file(csv_path: str, out_dir: str) -> Dict:
     """Shapefile, look-vector plot and statistics of one RIVAL CSV."""
     os.makedirs(out_dir, exist_ok=True)
@@ -172,9 +190,12 @@ def report_file(csv_path: str, out_dir: str) -> Dict:
     return {'file': os.path.basename(csv_path), **st, 'shapefile': shp, 'vectors_png': png}
 
 
-def report(job_dir: str, all_files: bool = False, quiet: bool = False) -> List[Dict]:
+def report(job_dir: str, all_files: bool = False, quiet: bool = False, truth_csv: str = '') -> List[Dict]:
     """REPORT/ of a job folder: every RIVAL_FINAL_* and RIVAL_BEST_FINAL_*
-    (all_files: every RIVAL_*.csv but the _detail ones); REPORT_STATS.csv."""
+    (all_files: every RIVAL_*.csv but the _detail ones); REPORT_STATS.csv,
+    with the manual points' statistics (the job's ground truth, or
+    truth_csv) as a row of their own and each file's difference to them
+    (<stat>_vs_manual: file minus manual; the goal is near 0)."""
     import pandas as pd
     if os.path.isfile(job_dir):
         files, out = [job_dir], os.path.join(os.path.dirname(job_dir), 'REPORT')
@@ -189,15 +210,38 @@ def report(job_dir: str, all_files: bool = False, quiet: bool = False) -> List[D
         except Exception as e:
             print(f'[Report] {os.path.basename(p)}: {type(e).__name__}: {e}')
             rows.append({'file': os.path.basename(p), 'error': f'{type(e).__name__}: {e}'})
+    if not truth_csv and os.path.isdir(job_dir):
+        try:
+            import automatch_cross as X
+            truth_csv = X.job_truth_csv(job_dir) or X.job_truth_csv(os.path.dirname(os.path.normpath(job_dir)))
+        except Exception:
+            truth_csv = ''
+    manual = None
+    if truth_csv and os.path.exists(truth_csv):
+        try:
+            manual = manual_stats(truth_csv)
+        except Exception as e:
+            print(f'[Report] manual points {os.path.basename(truth_csv)} unreadable: {type(e).__name__}: {e}')
+    if manual and rows:
+        for r in rows:
+            for k in COMPARE:
+                if r.get(k) is not None and manual.get(k) is not None:
+                    r[f'{k.replace("_m", "")}_vs_manual_m'] = round(float(r[k]) - float(manual[k]), 3)
+        rows.append({'file': f'MANUAL ({os.path.basename(truth_csv)})', **manual})
     if rows:
+        os.makedirs(out, exist_ok=True)
         pd.DataFrame(rows).to_csv(os.path.join(out, 'REPORT_STATS.csv'), index=False)
         if not quiet:
             for r in rows:
-                if 'n' in r:
+                if 'n' in r and not str(r['file']).startswith('MANUAL'):
                     print(f"[Report] {r['file']}: {r['n']} points, mean dE {r.get('mean_dx_m')} m dN "
                           f"{r.get('mean_dy_m')} m, RMSE E {r['rmse_x_m']} N {r['rmse_y_m']} m, CE90 {r['ce90_m']} m"
                           f" -> {os.path.basename(r['shapefile'])}, {os.path.basename(r['vectors_png'])}")
-            print(f'[Report] {len(rows)} file(s): shapefiles, look-vector plots and REPORT_STATS.csv in {out}')
+            if manual:
+                print(f"[Report] manual points: {manual['n']}, mean dE {manual.get('mean_dx_m')} m dN "
+                      f"{manual.get('mean_dy_m')} m, RMSE E {manual['rmse_x_m']} N {manual['rmse_y_m']} m, CE90 "
+                      f"{manual['ce90_m']} m (each file's difference to these: *_vs_manual_m)")
+            print(f'[Report] {len(rows)} row(s): shapefiles, look-vector plots and REPORT_STATS.csv in {out}')
     elif not quiet:
         print(f'[Report] no RIVAL CSV in {job_dir}')
     return rows
