@@ -102,6 +102,30 @@ CLASS_NAMES = {0: 'clear', 1: 'thick cloud', 2: 'thin cloud', 3: 'cloud shadow'}
 MASK_VERSION = 3                      # 2: confidence threshold, brightness check, quicklook; 3: bright blobs
 
 
+
+def read_bands(src, bands, dtype=np.float64) -> List[np.ndarray]:
+    """Several bands of an open raster in one read. A pixel-interleaved
+    multiband GeoTIFF (a 256-band HS cube) stores all bands of a pixel
+    together, so every single-band read goes through the whole file: four
+    separate reads of a cube on a network share took minutes; one read of
+    the four takes one pass. Says so in the log for large cubes."""
+    import time as _t
+    bands = [int(b) for b in bands]
+    if not bands:
+        return []
+    interleave = str((src.profile or {}).get('interleave') or '').lower()
+    big = src.count > 16 and interleave == 'pixel'
+    t0 = _t.time()
+    if big:
+        print(f'[Cloud] reading {len(bands)} of {src.count} bands (pixel-interleaved: one pass through the '
+              f'whole file) ...', flush=True)
+    uniq = sorted(set(bands))
+    arr = src.read(uniq)
+    if big:
+        print(f'[Cloud] read in {_t.time() - t0:.0f} s', flush=True)
+    pos = {b: i for i, b in enumerate(uniq)}
+    return [arr[pos[b]].astype(dtype) for b in bands]
+
 def band_wavelengths(path: str, sensor: str) -> Optional[List[float]]:
     """Centre wavelength (nm) of every band: from the band descriptions when
     they state one, else SENSOR_BANDS_NM (a range is spread evenly over the
@@ -323,7 +347,7 @@ def compute(path: str, bands: List[int], out_dir: str, model_dir: str = '', devi
     with rio.open(path) as src:
         prof = src.profile.copy()
         nd = src.nodata if src.nodata is not None else 0
-        arr = np.stack([src.read(b).astype(np.float32) for b in bands])
+        arr = np.stack(read_bands(src, bands, np.float32))
         px = pixel_m(src.transform, src.crs, src.height)
     valid = np.all(np.isfinite(arr) & (arr != nd), axis=0)
     cls = classify((predictor or predict)(np.where(valid, arr, nd), float(nd), model_dir, device), min_conf)
@@ -737,14 +761,14 @@ def load_phys(path: str, method: str, sensor: str, scale: float = 0.001, clear_p
         px = pixel_m(src.transform, src.crs, src.height)
         if method in ('ir', 'tiraux'):
             um = P.ml_band_centres(path)
-            raw = {u: src.read(i + 1).astype(np.float64) for i, u in enumerate(um)}
+            raw = dict(zip(um, read_bands(src, [i + 1 for i in range(len(um))])))
         else:
             wl = band_wavelengths(path, sensor) or band_wavelengths(path, 'HS')
             idx = P.nearest_bands(wl or [], [1250.0, 1380.0, 1650.0, 2200.0], 40.0)
             if 1250.0 not in idx or 1380.0 not in idx:
                 raise ValueError(f'{os.path.basename(path)}: SWIR tests need bands near 1250 and 1380 nm '
                                  f'(found {sorted(idx)})')
-            raw = {int(w): src.read(b).astype(np.float64) for w, b in idx.items()}
+            raw = dict(zip([int(w) for w in idx], read_bands(src, list(idx.values()))))
     valid = np.all(np.stack([np.isfinite(a) & (a != nd) for a in raw.values()]), axis=0)
     if method == 'swir':                       # banding is not cloud (thermal ML is left as it is)
         raw = {k: P.destripe(a, valid) for k, a in raw.items()}

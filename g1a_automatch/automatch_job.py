@@ -1786,6 +1786,8 @@ def run_job(job: Dict) -> Dict:
         gpus = []
     if gpus:                                   # the parent: preflight, cloud mask, then one worker per GPU
         job = dict(job, device=f'cuda:{gpus[0]}')
+        print(f'[Device] GPUs {", ".join(map(str, gpus))}: the preparation (cloud mask, bands, featureless areas) '
+              f'here on GPU {gpus[0]}, then one matching worker per GPU', flush=True)
     device = use_gpu(job['device'])            # before anything loads torch
     if job.get('cloud_device'):
         job['cloud_device'] = use_gpu(job['cloud_device'])

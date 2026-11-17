@@ -282,7 +282,8 @@ def read_reflectance(path: str, bands: List[Tuple[int, float]], scale: float = 0
     import automatch_cloudphys as P
     with rio.open(path) as src:
         nd = src.nodata if src.nodata is not None else 0
-        raw = np.stack([src.read(b).astype(np.float64) for b, _ in bands])
+        import automatch_cloud as _C
+        raw = np.stack(_C.read_bands(src, [b for b, _ in bands]))
         shape = (src.height, src.width)
     valid = np.all(np.isfinite(raw) & (raw != nd), axis=0)
     raw = np.stack([P.destripe(r, valid) for r in raw])          # banding is not cloud

@@ -450,7 +450,8 @@ def read_vnir(path: str, wl: Sequence[Optional[float]]) -> Tuple[Dict[str, np.nd
     sel = vnir_bands(wl)
     with rio.open(path) as src:
         nd = src.nodata if src.nodata is not None else 0
-        raw = {k: src.read(b).astype(np.float64) for k, (b, _) in sel.items()}
+        import automatch_cloud as _C
+        raw = dict(zip(list(sel), _C.read_bands(src, [b for b, _ in sel.values()])))
     valid = np.all(np.stack([np.isfinite(a) & (a != nd) for a in raw.values()]), axis=0)
     return {k: destripe(raw[k], valid) / solar_e0(sel[k][1]) for k in raw}, valid, sel
 
