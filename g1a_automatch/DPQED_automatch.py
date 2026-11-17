@@ -2424,13 +2424,37 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.cross_max.setRange(0, 100000)
         self.cross_max.setSingleStep(100)
         self.cross_max.setValue(500)
-        self.cross_max.setToolTip('RIVAL_FINAL_<band>.csv, the file for RIVAL: at most this many of the cross-checked '
-                                  'points, the best of each cell of a fine grid over the whole coverage (0: off)')
-        hl.addWidget(QtWidgets.QLabel('points for RIVAL'))
+        self.cross_max.setToolTip('RIVAL_DENSE_<band>.csv: at most this many of the cross-checked points, spread '
+                                  'over what has matches (0: off)')
+        hl.addWidget(QtWidgets.QLabel('dense points'))
         hl.addWidget(self.cross_max)
         hl.addWidget(QtWidgets.QLabel('per cell of'))
         hl.addWidget(self.cross_cell)
         f.addRow('Cross-check top detectors', hl)
+        self.final_points = QtWidgets.QSpinBox()
+        self.final_points.setRange(0, 1000)
+        self.final_points.setValue(24)
+        self.final_points.setToolTip('RIVAL_FINAL_<band>.csv, the file for RIVAL: one best agreed point per sub-tile '
+                                     'of a grid of about this many over the whole scene; tiles on water, cloud or '
+                                     'featureless ground fail (FINAL_TILES_<band>.csv says why). 0: off')
+        self.interior_on = QtWidgets.QCheckBox('leave out matches inside featureless areas (water, uniform blobs)')
+        self.interior_on.setChecked(True)
+        self.interior_on.setToolTip('The middle of a lake, river, the sea or a uniform blob has nothing to match on; '
+                                    'shore and ridge lines are kept')
+        self.interior_edge = QtWidgets.QDoubleSpinBox()
+        self.interior_edge.setRange(1.0, 50.0)
+        self.interior_edge.setValue(4.0)
+        self.interior_edge.setSuffix(' px')
+        self.interior_edge.setToolTip('A match is inside when no textured pixel lies within this distance (input '
+                                      'pixels): larger keeps more of the shore, smaller rejects more')
+        self.interior_on.toggled.connect(self.interior_edge.setEnabled)
+        hf = QtWidgets.QHBoxLayout()
+        hf.addWidget(self.final_points)
+        hf.addWidget(self.interior_on)
+        hf.addWidget(QtWidgets.QLabel('edge distance'))
+        hf.addWidget(self.interior_edge)
+        hf.addStretch(1)
+        f.addRow('Final points (one per sub-tile)', hf)
 
     def _build_algo_tab(self):
         w = QtWidgets.QWidget()
@@ -2722,6 +2746,9 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.cross_cell.setValue(float(j.get('cross_cell_km') or 25.0))
         self.cross_keep.setValue(int(j.get('cross_keep_per_cell') or 3))
         self.cross_max.setValue(int(500 if j.get('cross_max_points') is None else j['cross_max_points']))
+        self.final_points.setValue(int(24 if j.get('final_points') is None else j['final_points']))
+        self.interior_on.setChecked(bool(True if j.get('interior_filter') is None else j['interior_filter']))
+        self.interior_edge.setValue(float(j.get('interior_edge_px') or 4.0))
         self.channels.set_checked(list(j['channels'] or []))
         self.detector_params = {k: {p: list(v) for p, v in d.items()}
                                 for k, d in (j.get('detector_params') or {}).items()}
@@ -2834,6 +2861,9 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             'cross_cell_km': self.cross_cell.value(),
             'cross_keep_per_cell': self.cross_keep.value(),
             'cross_max_points': self.cross_max.value(),
+            'final_points': self.final_points.value(),
+            'interior_filter': self.interior_on.isChecked(),
+            'interior_edge_px': self.interior_edge.value(),
             'detectors': dets,
             'matchers': matchers,
             'detector_params': {k: v for k, v in self.detector_params.items() if v},

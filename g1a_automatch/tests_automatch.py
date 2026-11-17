@@ -1867,6 +1867,14 @@ def test_gui_dialog():
         w.cloud_from.setText('')
         w.coarse_shared.setChecked(False)
         w.coarse_dets.setText('imw-topicfm, loftr')
+        w.interior_edge.setValue(7.0)
+        w.final_points.setValue(30)
+        gj = w.get_job()
+        w.set_job(dict(gj, interior_filter=False, interior_edge_px=5.5, final_points=12))
+        check('gui: final points, the featureless filter and its edge distance reach the job and come back',
+              (gj['interior_filter'], gj['interior_edge_px'], gj['final_points'], w.interior_on.isChecked(),
+               w.interior_edge.value(), w.interior_edge.isEnabled(), w.final_points.value()),
+              (True, 7.0, 30, False, 5.5, False, 12))
         check('gui: shared coarse fields reach the job', (w.get_job()['coarse_shared'], w.get_job()['coarse_detectors']),
               (False, ['imw-topicfm', 'loftr']))
         w.coarse_shared.setChecked(True)
