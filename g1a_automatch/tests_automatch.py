@@ -726,6 +726,38 @@ def test_target(tmp):
           ('MV', '/c1', '/l8', '/l8', 'C3'))
 
 
+def test_consistent_points(tmp):
+    """64 px cells (in a 512 px window): a cell counts only where the top
+    detectors agree; its best keypoint is kept, with how many agree and their
+    spread; the final pick per tile prefers the most agreeing, tightest one."""
+    import numpy as np
+    import pandas as pd
+    import automatch_cross as X
+    rng = np.random.default_rng(3)
+
+    def cfg(det, off_fn, n=4000):
+        E = rng.uniform(0, 46080, n)                  # 1024 px at 45 m: 16 x 16 cells of 64 px (2880 m)
+        N = rng.uniform(0, 46080, n)
+        dE, dN = np.array([off_fn(e, nn) for e, nn in zip(E, N)]).T
+        dE, dN = dE + rng.normal(0, 15, n), dN + rng.normal(0, 15, n)
+        return {'detector': det, 'matcher': 'm', 'ransac': 'magsac45', 'sweep': 'win512',
+                'points': pd.DataFrame({'E': E, 'N': N, 'dE': dE, 'dN': dN, 'x1-map': E, 'y1-map': N,
+                                        'x2-map': E - dE, 'y2-map': N - dN, 'source_file': det})}
+    good = lambda e, n: (500.0, -300.0)
+    top = [cfg('a', good), cfg('b', good), cfg('c', good),
+           cfg('d', lambda e, n: (500.0, -300.0) if e < 23040 else (4000.0, 2000.0)),    # wrong on the east half
+           cfg('e', lambda e, n: (9000.0, 9000.0))]                                        # wrong everywhere
+    pts, cells = X.consistent_points(top, 64 * 45.0, 67.5, 3)
+    fin, tiles = X.final_grid(pts, (0.0, 0.0, 46080.0, 46080.0), 4, None)
+    check('consistent: one best keypoint per 64 px cell where 3+ of the top 5 agree, the agreeing count and their '
+          'spread carried; none of the wrong ones; the final pick takes the most agreeing, tightest',
+          (180 < len(pts) <= 256, bool((np.hypot(pts['dE'] - 500, pts['dN'] + 300) < 60).all()),
+           int(pts['n_agree'].min()) >= 3, bool(pts['agree_spread_m'].notna().all()),
+           int(pts.groupby(['_ci', '_cj']).size().max()) if '_ci' in pts.columns else 1,
+           len(fin), bool((tiles['point_detectors_agreeing'] >= 3).all())),
+          (True, True, True, True, 1, 4, True))
+
+
 def test_extract_bands(tmp):
     """A big pixel-interleaved cube: the matched band extracted once into the
     cache (one pass), used instead of the cube, reused while unchanged."""
@@ -1402,11 +1434,13 @@ def test_gui_run(tmp):
           (w.gpu_bars[0].isHidden(), w.gpu_bars[1].isHidden(), w.gpu_bars[1].format(), w.gpu_bars[1].value(),
            w.bar.format()),
           (False, False, 'GPU 1: loftr pair 3/29, window %v/%m', 5, 'detectors 1 / 3'))
+    w.cell_px.setValue(32)
     jf = w.job('fastest', 'fastest')
-    check('run window: run all 3: each preset into its subfolder, one shared cache, its own top X / Y, refined points',
+    check('run window: run all 3: each preset into its subfolder, one shared cache, its own top X / Y, refined points, '
+          'agreement cells',
           (os.path.basename(jf['output_dir']), jf['temp_dir'] == os.path.join(tmp, 'out_runwin', '_cache'),
-           jf['cross_top_n'], jf['final_points'], [m.replace(' ', '_') for m in G.P.MODES]),
-          ('fastest', True, 3, 24, ['fastest', 'accurate', 'most_accurate']))
+           jf['cross_top_n'], jf['final_points'], jf['cross_cell_px'], [m.replace(' ', '_') for m in G.P.MODES]),
+          ('fastest', True, 3, 24, 32, ['fastest', 'accurate', 'most_accurate']))
     check('run window: the job carries the paths and choices (top 2, 2 agreeing); Check runs the preflight and reports',
           (job['detectors'], job['device'], job['cloud_mask'], job['max_expected_error_m'], ok, job['cross_min_agree'],
            os.path.exists(os.path.join(tmp, 'out_runwin', 'job_preset.json')), w.stage.text()),
@@ -5563,6 +5597,7 @@ def main():
         test_report(tmp)
         test_interior_and_final(tmp)
         test_extract_bands(tmp)
+        test_consistent_points(tmp)
         test_target(tmp)
         test_presets(tmp)
         test_jobs_312_317(tmp)

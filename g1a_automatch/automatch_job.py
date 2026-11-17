@@ -775,6 +775,9 @@ DEFAULT_JOB: Dict = {
     'cross_cell_km': 25.0,       # cell size of the comparison
     'cross_keep_per_cell': 3,    # of those agreeing in a cell, the least distorted kept
     'cross_max_points': 500,     # RIVAL_DENSE_<channel>.csv: this many agreed points over what has matches (0: off)
+    'cross_cell_px': 64,         # RIVAL_CONSISTENT_<channel>.csv: cells of this many working px (8 x 8 in a 512 px
+                                 # window) where the top detectors must agree; the best keypoint of each is kept,
+                                 # and RIVAL_FINAL / RIVAL_BEST_FINAL pick only among these (0: off)
     'final_points': 24,          # RIVAL_FINAL_<channel>.csv: one best point per sub-tile of a grid of this many
                                  # over the scene; a tile on water / cloud / featureless ground fails (FINAL_TILES_*)
     'interior_filter': True,     # leave out matches inside featureless areas (water bodies, uniform blobs);
@@ -1449,7 +1452,7 @@ _RESULT_NEUTRAL_KEYS = {'output_dir', 'temp_dir', 'resume', 'debug', 'rival_max_
                         'device', 'cloud_device',        # the same results on either GPU: resume across them
                         'save_match_images', 'weights_cache_dir', 'truth_csv', 'truth_radius_m',
                         'cross_top_n', 'cross_min_agree', 'cross_cell_km', 'cross_keep_per_cell',
-                        'cross_max_points', 'final_points', 'interior_filter', 'interior_edge_px'}
+                        'cross_max_points', 'final_points', 'interior_filter', 'interior_edge_px', 'cross_cell_px'}
 # (the interior filter only leaves matches out when they are read: a finished
 # sweep point is reused and its matches read again through the filter)
 

@@ -157,6 +157,14 @@ class RunWindow(QtWidgets.QMainWindow):
         self.final_points.setToolTip('Refined points for RIVAL (RIVAL_FINAL): one best agreed point per sub-tile of a '
                                      'grid of about this many over the whole scene; tiles on water, cloud or '
                                      'featureless ground fail (FINAL_TILES_*.csv says why)')
+        self.cell_px = QtWidgets.QSpinBox()
+        self.cell_px.setRange(0, 4096)
+        self.cell_px.setValue(64)
+        self.cell_px.setSuffix(' px')
+        self.cell_px.setToolTip('Agreement cells: in cells of this many pixels (8 x 8 in a 512 px window) a point '
+                                'counts only where the top detectors agree (error from top Y), the best keypoint of '
+                                'each is kept; the refined points are picked among these, the most agreeing and '
+                                'tightest first. 0: off')
         self.cloud = QtWidgets.QCheckBox('mask clouds')
         self.cloud.setChecked(True)
         self.cloud.setToolTip('By the sensor: MV OmniCloudMask on bands 5, 4, 6 (needs it installed); HV VNIR, '
@@ -164,7 +172,8 @@ class RunWindow(QtWidgets.QMainWindow):
         h = QtWidgets.QHBoxLayout()
         for label, wid in (('Sensor', self.sensor), ('Preset', self.mode), ('Band(s)', self.bands), ('Max error (no truth)', self.max_err),
                            ('Detectors: top', self.top_n), ('error from top', self.agree),
-                           ('Refined points', self.final_points), ('Device', self.device)):
+                           ('Agreement cells', self.cell_px), ('Refined points', self.final_points),
+                           ('Device', self.device)):
             h.addWidget(QtWidgets.QLabel(label))
             h.addWidget(wid)
             if wid is self.bands:
@@ -268,6 +277,7 @@ class RunWindow(QtWidgets.QMainWindow):
                            crispest=1 if crisp else 0,
                            top_n=None if mode else self.top_n.value(), agree=None if mode else self.agree.value(),
                            mode=mode or self.mode.currentText(), final_points=self.final_points.value(),
+                           cell_px=self.cell_px.value(),
                            temp_dir=os.path.join(self.output.text(), '_cache'))
         return job
 

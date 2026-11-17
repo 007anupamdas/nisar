@@ -38,6 +38,7 @@ COMMON: Dict = {
     'top_n': 5,                              # the first N detectors of the sensor's list run (ranked best first)
     'agree': 3,                              # the error is where at least this many of them agree (cross-check)
     'cross_max_points': 500,
+    'cross_cell_px': 64,                     # agreement cells: the best keypoint where the top detectors agree
     'cloud_mask': 'on', 'cloud_mask_classes': [1],
     'stretch_percentiles': [1, 99], 'window_prep': 'auto',
     'device': 'all', 'resume': True,
@@ -208,7 +209,8 @@ def job_for(sensor: str, input_path: str, reference_dir: str, output_dir: str, t
             bands: Optional[List[str]] = None, max_error_km: Optional[float] = None, device: str = '',
             cloud: Optional[bool] = None, weights_dir: str = '', presets: Optional[Dict] = None,
             crispest: int = 0, top_n: Optional[int] = None, agree: Optional[int] = None,
-            mode: str = 'accurate', final_points: Optional[int] = None, temp_dir: str = '') -> Tuple[Dict, str]:
+            mode: str = 'accurate', final_points: Optional[int] = None, temp_dir: str = '',
+            cell_px: Optional[int] = None) -> Tuple[Dict, str]:
     """(job, note): the sensor's preset with this run's paths and the few
     things chosen in the window (search range without truth, device, clouds
     on / off) and the band(s): the user's; else, when asked, the crispest N;
@@ -255,6 +257,8 @@ def job_for(sensor: str, input_path: str, reference_dir: str, output_dir: str, t
         job['weights_cache_dir'] = weights_dir
     if final_points is not None:
         job['final_points'] = int(final_points)
+    if cell_px is not None:
+        job['cross_cell_px'] = int(cell_px)
     if temp_dir:
         job['temp_dir'] = temp_dir
     return job, note

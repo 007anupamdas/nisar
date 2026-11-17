@@ -177,6 +177,18 @@ from the best single configuration. The many-point set is now
 `RIVAL_DENSE_<band>.csv` (`cross_max_points`, 500). `cross --final-points N`
 redoes it for a finished job.
 
+**Agreement cells.** Within the windows (e.g. 512 px), the scene is cut into
+cells of `cross_cell_px` (64) working pixels, 8 x 8 per window. A cell counts
+only where at least Y of the top X detectors agree on the offset (within the
+cross-check tolerance); its best keypoint (closest to the agreed offset) is
+kept, with how many detectors agree there and how far apart they are
+(`n_agree`, `agree_spread_m`): `RIVAL_CONSISTENT_<band>.csv`,
+`CONSISTENT_CELLS_<band>.csv`. `RIVAL_FINAL` picks only among these, per
+sub-tile the most agreeing and tightest point (FINAL_TILES gives both
+numbers), and `RIVAL_BEST_FINAL` keeps only the best detector's points in
+such cells that agree with them. GUI and run window: *agreement cells* (px);
+`cross --cell-px`.
+
 **Against the manual points.** `REPORT/REPORT_STATS.csv` has the manual
 points' own statistics (the truth file: n, mean dE / dN, RMSE, CE90) as a
 row, and each final file's difference to them (`*_vs_manual_m`): the goal is

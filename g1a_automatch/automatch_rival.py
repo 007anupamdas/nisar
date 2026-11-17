@@ -32,7 +32,7 @@ RIVAL_HEADER = ["In_X", "In_Y", "Ref_X", "Ref_Y", "DX_Err", "DY_Err",
                 "Row", "In_Lon", "In_Lat", "Ref_Lon", "Ref_Lat"]
 DETAIL_EXTRA = ["channel", "reference", "detector", "matcher", "match_parameter",
                 "ransac_method", "ransac_threshold", "ransac_confidence",
-                "pair_id", "scan", "pix", "source_file"]
+                "pair_id", "scan", "pix", "source_file", "n_agree", "agree_spread_m", "off_agreed_m"]
 
 
 def _parse(name: str) -> Optional[Dict]:
