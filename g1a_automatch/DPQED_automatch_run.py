@@ -92,6 +92,13 @@ class RunWindow(QtWidgets.QMainWindow):
         self.sensor = QtWidgets.QComboBox()
         self.sensor.addItems(['from the file name'] + list(self.presets))
         self.sensor.setToolTip('The preset used. From the file name: G1A_MV_ / G1A_HV_ / G1A_HS_ / G1A_ML_')
+        self.mode = QtWidgets.QComboBox()
+        self.mode.addItems(list(P.MODES))
+        self.mode.setToolTip('accurate: the sensor\'s ranked detectors, MAGSAC + LMedS, 512 px sub-cells, 3 of 5 '
+                             'agreeing. fastest: its fast detectors (1-3 min per pass), MAGSAC, no sub-cells, 2 of 3 '
+                             'agreeing: about a fifth of the time')
+        self.mode.setCurrentText(self.settings.value('mode', 'accurate') or 'accurate')
+        self.mode.currentIndexChanged.connect(lambda *_: (setattr(self, '_shown_sensor', None), self.refresh()))
         self.bands = QtWidgets.QLineEdit()
         self.bands.setPlaceholderText('e.g. 28 or 28, 50')
         self.bands.setMaximumWidth(160)
@@ -122,7 +129,7 @@ class RunWindow(QtWidgets.QMainWindow):
         self.cloud.setToolTip('By the sensor: MV OmniCloudMask on bands 5, 4, 6 (needs it installed); HV VNIR, '
                               'HS SWIR, ML infrared tests')
         h = QtWidgets.QHBoxLayout()
-        for label, wid in (('Sensor', self.sensor), ('Band(s)', self.bands), ('Max error (no truth)', self.max_err),
+        for label, wid in (('Sensor', self.sensor), ('Preset', self.mode), ('Band(s)', self.bands), ('Max error (no truth)', self.max_err),
                            ('Detectors: top', self.top_n), ('error from top', self.agree), ('Device', self.device)):
             h.addWidget(QtWidgets.QLabel(label))
             h.addWidget(wid)
@@ -184,13 +191,15 @@ class RunWindow(QtWidgets.QMainWindow):
     def refresh(self, *_):
         s = self.current_sensor()
         if s in self.presets:
-            p = self.presets[s]
-            if s != getattr(self, '_shown_sensor', None):     # the sensor's own numbers, until changed here
+            m = self.mode.currentText()
+            p = dict(self.presets[s], **P.MODES[m])
+            if m == 'fastest' and p.get('fast_detectors'):
+                p['detectors'] = p['fast_detectors']
+            if s != getattr(self, '_shown_sensor', None):     # the preset's own numbers, until changed here
                 self.top_n.setValue(int(p.get('top_n', 5) or 5))
                 self.agree.setValue(int(p.get('agree', 3) or 3))
                 self._shown_sensor = s
-            self.summary.setText(f'<b>{s} preset</b> ({P.BASIS})<br>'
-                                 + P.describe(self.presets[s]).replace('\n', '<br>'))
+            self.summary.setText(f'<b>{s} preset, {m}</b> ({P.BASIS})<br>' + P.describe(p).replace('\n', '<br>'))
         else:
             self.summary.setText('Sensor not known from the file name (G1A_MV_ / HV / HS / ML): choose it under Sensor.')
 
@@ -209,7 +218,8 @@ class RunWindow(QtWidgets.QMainWindow):
                            [] if crisp else P.parse_bands(self.bands.text()),
                            None if self.truth.text() else self.max_err.value(),
                            self.device.currentText(), self.cloud.isChecked(), self.weights.text(), self.presets,
-                           crispest=1 if crisp else 0, top_n=self.top_n.value(), agree=self.agree.value())
+                           crispest=1 if crisp else 0, top_n=self.top_n.value(), agree=self.agree.value(),
+                           mode=self.mode.currentText())
         return job
 
     # ── running ──────────────────────────────────────────────────────────────
@@ -229,6 +239,7 @@ class RunWindow(QtWidgets.QMainWindow):
                          ('output', self.output), ('truth', self.truth), ('weights', self.weights)):
             self.settings.setValue(key, row.text())
         self.settings.setValue('device', self.device.currentText())
+        self.settings.setValue('mode', self.mode.currentText())
         self.settings.setValue('cloud', 'true' if self.cloud.isChecked() else 'false')
         self.settings.setValue('max_err', self.max_err.value())
         self.log.appendPlainText(f'--- {kind}: {self.current_sensor()} preset, settings in {path}')

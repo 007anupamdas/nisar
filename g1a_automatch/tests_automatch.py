@@ -1167,6 +1167,15 @@ def test_presets(tmp):
            n['cross_top_n'], n['cross_min_agree'], 'note' in job, bool(note), 'top_n' in job),
           (['imw-minima-roma', 'imw-roma'], [512], True, True, 'all', 5, 3, False, True, False))
     j3, _ = P.job_for('HS', '/d/G1A_HS_x.tif', '/ref', '/out', '/t/pts_band28.csv', presets=pre, top_n=3, agree=2)
+    jf, _ = P.job_for('MV', '/d/G1A_MV_x.tif', '/ref', '/out', '/t/pts_band4.csv', presets=pre, mode='fastest')
+    ja, _ = P.job_for('MV', '/d/G1A_MV_x.tif', '/ref', '/out', '/t/pts_band4.csv', presets=pre, mode='accurate')
+    check('presets: accurate (ranked list, MAGSAC + LMedS, sub-cells, 3 of 5) and fastest (fast list, MAGSAC, '
+          'no sub-cells, 2 of 3)',
+          (ja['detectors'][0], ja['ransac_methods'], ja['subcell_px'], ja['cross_top_n'], ja['cross_min_agree'],
+           jf['detectors'], jf['ransac_methods'], jf['subcell_px'], jf['cross_top_n'], jf['cross_min_agree'],
+           'fast_detectors' in jf),
+          ('disk', ['magsac', 'lmeds'], [512], 5, 3, ['loftr', 'imw-xfeat-lg', 'imw-aliked-lg'], ['magsac'], [], 3, 2,
+           False))
     check('presets: top X detectors run, the error from top Y agreeing',
           (len(j3['detectors']), j3['cross_top_n'], j3['cross_min_agree']), (3, 3, 2))
     job, _ = P.job_for('MV', '/d/G1A_MV_x.tif', '/ref', '/out', bands=P.parse_bands('4, band6'), max_error_km=30,
@@ -1225,6 +1234,13 @@ def test_gui_run(tmp):
     data = os.path.join(tmp, 'synth')
     if not os.path.exists(os.path.join(data, 'G1A_SYNTH_L1.tif')):
         S.make_all(data, 4013.0, -2487.0)
+    w.mode.setCurrentText('fastest')
+    fast_txt = w.summary.text()
+    w.mode.setCurrentText('accurate')
+    check('run window: the fastest preset shows its fast list and 3 / 2', ('fastest' in fast_txt and 'imw-xfeat-lg' in
+          fast_txt, w.top_n.value(), w.agree.value()), (True, 5, 3))
+    w.top_n.setValue(2)
+    w.agree.setValue(2)
     w.presets['MV'].update(detectors=['sift', 'dog', 'disk'])
     w.bands.setText('1')
     w.input.edit.setText(os.path.join(data, 'G1A_SYNTH_L1.tif'))
