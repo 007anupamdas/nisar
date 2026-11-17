@@ -163,7 +163,15 @@ from PyQt5.QtCore import QVariant
 # Both views are now set from an explicit ground rectangle -- see
 # REF_VIEW_WIDTH_M below for why. The old fixed zoom scales are gone with the
 # last zoomScale() call that used them.
-left_view_width = 5000       # ground width of the input view, metres
+left_view_width = 5000       # ground width of the input view, metres (fallback)
+# Selecting a row zooms both canvases to the input's own resolution, not a
+# fixed ground width: ROW_VIEW_ZOOM screen pixels per input pixel (10 = 10x
+# magnified from 1:1). A fixed 5 km was 26 pixels of a 191 m HS scene -- a
+# few blurry blocks -- and 860 pixels of a 5.8 m LISS-4 one. Clamped to
+# ROW_VIEW_MIN_M .. ROW_VIEW_MAX_M of ground.
+ROW_VIEW_ZOOM  = 10.0
+ROW_VIEW_MIN_M = 200.0
+ROW_VIEW_MAX_M = 200000.0
 NORM_GAMMA  = 0.5         # gamma exponent for sqrt stretch (0.5 = square root)
 
 # The range the gamma is applied over is read from the raster, per band: NISAR
@@ -405,7 +413,7 @@ EXPORT_STATS = True
 # output folder is remembered.
 EXPORT_SUFFIX = "_rival"
 # Each kind of export gets its own subfolder of the output folder.
-EXPORT_SUBDIRS = {"csv": "csv", "shp": "shp", "stats": "stats"}
+EXPORT_SUBDIRS = {"csv": "csv", "shp": "shp", "stats": "stats", "plots": "plots"}
 
 # 'Load Input' takes a scene FOLDER. Of its many rasters (*_Height.tif,
 # *_SatEle.tif, ...) the scene is the one named *GTD_*_1.tif or *ITD_*_1.tif
@@ -1369,7 +1377,8 @@ def export_paths(folder, input_path, name_from="folder", band=""):
         name = f"{name}_{band}"
     sub = lambda k: os.path.join(folder, EXPORT_SUBDIRS[k], name)
     return {"csv": sub("csv") + ".csv", "shp": sub("shp") + ".shp",
-            "stats": sub("stats") + "_stats.csv"}
+            "stats": sub("stats") + "_stats.csv",
+            "plots": sub("plots") + "_vectors.png"}
 
 
 def pick_scene_tifs(names, pattern=INPUT_SCENE_PATTERN):
@@ -1403,6 +1412,21 @@ def parse_band_choice(text, band_count):
     if not bands or len(bands) > 3 or any(b < 1 or b > band_count for b in bands):
         return None
     return bands
+
+
+def row_view_width(pixel_m, canvas_px, zoom=None, lo=None, hi=None):
+    """Ground width (m) for a row's view: canvas_px screen pixels at `zoom`
+    screen pixels per input pixel of pixel_m metres, clamped; None if unknown."""
+    zoom = ROW_VIEW_ZOOM if zoom is None else zoom
+    lo = ROW_VIEW_MIN_M if lo is None else lo
+    hi = ROW_VIEW_MAX_M if hi is None else hi
+    try:
+        w = float(pixel_m) * float(canvas_px) / float(zoom)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+    if not w > 0 or w != w:
+        return None
+    return min(max(w, lo), hi)
 
 
 def default_rgb(band_count):
@@ -1461,6 +1485,138 @@ def stats_path_for(export_path):
         return os.path.join(os.path.dirname(parent), EXPORT_SUBDIRS["stats"], stem)
     return os.path.join(parent, stem)
 
+
+
+# ── LOOK-VECTOR PLOT (ported from the matcher's automatch_report) ─────────────
+TITLE_KEYS = {          # BAND_META.txt keys, then the special products' XML tags
+    "sat":     ("SatID", "SatelliteID", "Satellite", "Mission", "SATID"),
+    "sensor":  ("Sensor", "SENSORNAME"),
+    "session": ("SessionNumber", "SessionNo", "Session", "SESSION_NUMBER"),
+    "strip":   ("StripNumber", "StripNo", "StripId", "STRIPID"),
+}
+
+
+def scene_title(input_path):
+    """'Satellite - Sensor - Session - Strip' from the product metadata beside
+    the input: BAND_META.txt (key = value lines) or <tif stem>_META.xml (special
+    products, a tag per value). '' when neither gives anything."""
+    if not input_path:
+        return ""
+    folder = os.path.dirname(os.path.abspath(input_path))
+    stem = os.path.splitext(os.path.basename(input_path))[0]
+    vals = {}
+    meta = os.path.join(folder, "BAND_META.txt")
+    xml = os.path.join(folder, stem + "_META.xml")
+    try:
+        if os.path.isfile(xml):
+            import xml.etree.ElementTree as ET
+            root = ET.parse(xml).getroot()
+            for el in root.iter():
+                if el.text and el.text.strip() and el.tag not in vals:
+                    vals[el.tag] = el.text.strip()
+        elif os.path.isfile(meta):
+            with open(meta, encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    if "=" in line:
+                        k, v = line.split("=", 1)
+                        vals.setdefault(k.strip(), v.strip())
+    except Exception:
+        return ""
+    parts = []
+    for field in ("sat", "sensor", "session", "strip"):
+        v = next((vals[k] for k in TITLE_KEYS[field]
+                  if vals.get(k) and vals[k] not in ("-9999", "-9999.")), "")
+        if v:
+            parts.append(v)
+    return " - ".join(parts)
+
+
+def plot_look_vectors(rows, png, title="", st=None, extent=None, background=None):
+    """Look vectors: an arrow per point from its input position towards its
+    reference position (the error), coloured by length, over the scene.
+
+    rows: export_rows() records (in_x/in_y in the working CRS, m; dx/dy In -
+    Ref, m). extent (E0, E1, N0, N1) m: the scene's; background (rgb(a)
+    array, extent) laid under it. The figure takes the scene's shape -- a long
+    HS strip gives a long figure -- with the colour scale along its longer
+    edge and the statistics (st, error_summary) beyond it. Rendered with the
+    Agg canvas directly, never pyplot, so QGIS's own GUI backend is untouched.
+    """
+    import numpy as np
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    x = np.asarray([r["in_x"] for r in rows], float) / 1000.0
+    y = np.asarray([r["in_y"] for r in rows], float) / 1000.0
+    dx = np.asarray([r["dx"] for r in rows], float)
+    dy = np.asarray([r["dy"] for r in rows], float)
+    d = np.hypot(dx, dy)
+    if extent:
+        e0, e1, n0, n1 = [v / 1000.0 for v in extent]
+    elif len(x):
+        pad = max(np.ptp(x), np.ptp(y), 1.0) * 0.05
+        e0, e1, n0, n1 = x.min() - pad, x.max() + pad, y.min() - pad, y.max() + pad
+    else:
+        e0, e1, n0, n1 = 0.0, 1.0, 0.0, 1.0
+    W, H = max(e1 - e0, 1e-3), max(n1 - n0, 1e-3)
+    wide = W >= H
+    L = 15.0                     # the map, inches along its long side
+    if wide:
+        mw, mh = L, max(2.0, L * H / W)
+        left, right, top, bottom = 0.9, 0.4, 0.8, 2.5
+        fw, fh = left + mw + right, top + mh + bottom
+        ax_r = (left / fw, bottom / fh, mw / fw, mh / fh)
+        cax_r = ((left + 0.15 * mw) / fw, 1.45 / fh, 0.6 * mw / fw, 0.22 / fh)
+        key_xy = ((left + 0.80 * mw) / fw, 1.55 / fh)
+        stat_xy, stat_ha, stat_va = (0.5, 0.15 / fh), "center", "bottom"
+    else:
+        mh, mw = L, max(2.0, L * W / H)
+        left, top, bottom = 0.9, 0.8, 0.8
+        fw, fh = left + mw + 0.3 + 0.25 + 1.1 + 4.6, top + mh + bottom
+        ax_r = (left / fw, bottom / fh, mw / fw, mh / fh)
+        cax_r = ((left + mw + 0.3) / fw, (bottom + 0.15 * mh) / fh, 0.25 / fw, 0.7 * mh / fh)
+        key_xy = ((left + mw + 0.3) / fw, (bottom + 0.08 * mh) / fh)
+        stat_xy, stat_ha, stat_va = ((left + mw + 1.7) / fw, 0.5), "left", "center"
+    fig = Figure(figsize=(fw, fh))
+    FigureCanvasAgg(fig)
+    ax = fig.add_axes(ax_r)
+    cax = fig.add_axes(cax_r)
+    if background is not None:
+        img, ext = background
+        ax.imshow(img, extent=[v / 1000.0 for v in ext], origin="upper", zorder=0,
+                  interpolation="bilinear")
+    dmax = max(float(d.max()) if len(d) else 0.0, 1.0)
+    scale = (dmax / 1000.0) / (0.06 * max(W, H))   # longest arrow: 6% of the long side
+    if len(x):
+        q = ax.quiver(x, y, -dx / 1000.0, -dy / 1000.0, d, angles="xy", scale_units="xy",
+                      scale=scale, units="inches", width=0.035, cmap="viridis", zorder=3)
+        ax.scatter(x, y, s=8, c="k", zorder=4)
+        cb = fig.colorbar(q, cax=cax, orientation="horizontal" if wide else "vertical")
+        cb.set_label("error of each point (m)")
+        ref = float(10 ** np.floor(np.log10(dmax)))
+        ax.quiverkey(q, key_xy[0], key_xy[1], ref / 1000.0, f"arrow: {ref:g} m",
+                     labelpos="E", coordinates="figure", color="k")
+    else:
+        cax.set_visible(False)
+    ax.set_xlim(e0, e1)
+    ax.set_ylim(n0, n1)
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xlabel("E (km)")
+    ax.set_ylabel("N (km)")
+    ax.grid(True, alpha=0.25)
+    name = os.path.splitext(os.path.basename(png))[0].replace("_vectors", "")
+    ax.set_title(title or name, fontsize=14, fontweight="bold")
+    if st and st.get("n"):
+        txt = (f"{name}:  n {st['n']}    "
+               f"mean dE {st['mean_x']:.1f} m, dN {st['mean_y']:.1f} m    "
+               f"RMSE E {st['rmse_x']:.1f} m, N {st['rmse_y']:.1f} m    "
+               f"CE90 {st['ce90']:.1f} m"
+               + ("" if st.get("circular", True) else " (axes unequal)")
+               + f"    largest {st.get('max_r', 0):.1f} m")
+        if not wide:
+            txt = txt.replace("    ", "\n").replace(":  ", ":\n")
+        fig.text(*stat_xy, txt, ha=stat_ha, va=stat_va, fontsize=10, family="monospace")
+    fig.savefig(png, dpi=150)
+    return png
 
 # ── END PURE HELPERS ──────────────────────────────────────────────────────────
 
@@ -1848,7 +2004,7 @@ class DragMapTool(QgsMapTool):
         # over it. Decided on the press: update_data runs on press, move AND
         # release, so anything later would already have overwritten the row.
         point = self.toMapCoordinates(e.pos())
-        if self.is_left_map and self.parent.select_gcp_at(point):
+        if self.parent.select_gcp_at(point, on_input=self.is_left_map):
             self.dragging = False
             return
         # Which row this pick belongs to -- starting one if it is a new point --
@@ -2868,9 +3024,9 @@ class QCDashboard(QMainWindow):
             pt.x() - hw, pt.y() - hh, pt.x() + hw, pt.y() + hh))
         self.canvas_left.refresh()
 
-    def show_ref_at(self, pt, colour):
+    def show_ref_at(self, pt, colour, width_m=None):
         """Put the reference canvas over a working-CRS point and mark it."""
-        rect = self._ref_view_rect(pt)
+        rect = self._ref_view_rect(pt, width_m)
         self.canvas_right.setExtent(rect)
         self.canvas_right.refresh()
         self.draw_marker(self._to_ref_canvas(pt), self.canvas_right, colour)
@@ -3796,6 +3952,25 @@ class QCDashboard(QMainWindow):
         self.markers[key] = [cross]
         canvas.refresh()
 
+    def _input_pixel_m(self):
+        """The input raster's pixel size in working-CRS metres, or None."""
+        lyr = getattr(self, "input_tif_layer", None)
+        try:
+            if lyr is None or not lyr.isValid() or lyr.width() <= 0:
+                return None
+            return self._extent_in_input_canvas(lyr).width() / float(lyr.width())
+        except Exception:
+            return None
+
+    def _row_view_width(self):
+        """Ground width for a selected row's views (row_view_width), metres."""
+        try:
+            px = self.canvas_left.size().width()
+        except Exception:
+            px = None
+        w = row_view_width(self._input_pixel_m(), px)
+        return w if w else left_view_width
+
     def sync_view_to_row(self):
         """Snap both canvases to selected row — left and right at fixed per-canvas zoom."""
         row = self.table.currentRow()
@@ -3828,7 +4003,7 @@ class QCDashboard(QMainWindow):
                 canvas_size = self.canvas_left.size()
                 aspect = canvas_size.width() / max(canvas_size.height(), 1)
                 
-                width_m = left_view_width
+                width_m = self._row_view_width()
                 height_m = width_m / aspect
                 rect = QgsRectangle(
                 ix - width_m / 2,
@@ -3846,13 +4021,15 @@ class QCDashboard(QMainWindow):
                 
                 
 
+            # the reference at the same ground width, so both show one scale
+            ref_w = self._row_view_width()
             if rx != 0.0 or ry != 0.0:
-                self.show_ref_at(QgsPointXY(rx, ry), MARKER_COLOR_REF)
+                self.show_ref_at(QgsPointXY(rx, ry), MARKER_COLOR_REF, ref_w)
             elif ix != 0.0 or iy != 0.0:
                 # no reference pick on this row yet: sit where the errors
                 # measured so far say the feature should be, not on the input
                 guess, _, _ = self.predicted_reference_point(QgsPointXY(ix, iy))
-                self.show_ref_at(guess, MARKER_COLOR_INPUT)
+                self.show_ref_at(guess, MARKER_COLOR_INPUT, ref_w)
 
         except Exception as e:
             print(f"[SYNC ROW] {e}")
@@ -3975,8 +4152,12 @@ class QCDashboard(QMainWindow):
                 print(f"[GCP] row {n}: {e}")
         self.canvas_left.refresh()
 
-    def select_gcp_at(self, point):
-        """Select the table row of a GCP clicked on the input canvas.
+    def select_gcp_at(self, point, on_input=True):
+        """Select the table row of a GCP clicked on either canvas.
+
+        On the input canvas the rows' input picks are hit-tested; on the
+        reference canvas their reference picks. Selecting the row centres and
+        zooms both canvases on it (sync_view_to_row).
 
         Clicking a point already recorded is far more often "take me to that
         one" than "put a second pick on top of it": the measurement lives in the
@@ -3991,8 +4172,12 @@ class QCDashboard(QMainWindow):
         if not GCP_CLICK_SELECTS_ROW or not GCP_SHOW_ALL_INPUT:
             return False
         try:
-            radius = self.canvas_left.mapUnitsPerPixel() * GCP_PICK_RADIUS_PX
-            rows = [(self._cell_text(r, 0), self._cell_text(r, 1))
+            canvas = self.canvas_left if on_input else self.canvas_right
+            radius = canvas.mapUnitsPerPixel() * GCP_PICK_RADIUS_PX
+            if not on_input:
+                point = self._from_ref_canvas(point)
+            cx, cy = (0, 1) if on_input else (2, 3)
+            rows = [(self._cell_text(r, cx), self._cell_text(r, cy))
                     for r in range(self.table.rowCount())]
             current = self.table.currentRow() + 1       # gcp_points is 1-based
             hit = nearest_gcp([p for p in gcp_points(rows) if p[0] != current],
@@ -4003,7 +4188,8 @@ class QCDashboard(QMainWindow):
         if not hit:
             return False
         n, x, y = hit
-        print(f"[GCP] {n} selected at ({x:.3f}, {y:.3f})")
+        print(f"[GCP] {n} selected on the {'input' if on_input else 'reference'} "
+              f"at ({x:.3f}, {y:.3f})")
         self.table.setCurrentCell(n - 1, 0)
         return True
 
@@ -4522,11 +4708,12 @@ class QCDashboard(QMainWindow):
                 "No fully marked rows. A row needs both an input and a "
                 "reference pick before it describes an error.")
             return
-        targets = self._export_targets(("csv", "shp"), "Export")
+        targets = self._export_targets(("csv", "shp", "plots"), "Export")
         if not targets:
             return
         self.save_csv(path=targets["csv"])
         self.save_shapefile(path=targets["shp"])
+        self.write_vector_plot(targets["plots"])
 
     def _export_targets(self, kinds, title):
         """{kind: path} for each kind (and 'stats') in the output folder, or None.
@@ -4558,6 +4745,108 @@ class QCDashboard(QMainWindow):
             if answer != QMessageBox.Yes:
                 return None
         return {k: targets[k] for k in wanted}
+
+    def _canvas_background(self, max_px=2000):
+        """(rgba array, (E0, E1, N0, N1)) of the WHOLE input scene rendered as
+        the input canvas draws it -- the bands and stretch on screen -- in the
+        working CRS, about max_px on its long side; or None.
+
+        Rendered off-screen with the canvas's layer and CRS, so the visible
+        view is not disturbed and the plot sees exactly what was marked on."""
+        lyr = getattr(self, "input_tif_layer", None)
+        if lyr is None or not lyr.isValid():
+            return None
+        try:
+            from qgis.core import QgsMapSettings, QgsMapRendererSequentialJob
+            from PyQt5.QtCore import QSize
+            from PyQt5.QtGui import QImage
+            e = self._extent_in_input_canvas(lyr)
+            k = max(e.width(), e.height()) / float(max_px)
+            w, h = max(1, int(e.width() / k)), max(1, int(e.height() / k))
+            ms = QgsMapSettings()
+            ms.setLayers([lyr])
+            ms.setDestinationCrs(self.proj_crs)
+            ms.setOutputSize(QSize(w, h))
+            ms.setExtent(e)
+            ms.setBackgroundColor(QColor(0, 0, 0, 0))
+            job = QgsMapRendererSequentialJob(ms)
+            job.start()
+            job.waitForFinished()
+            img = job.renderedImage().convertToFormat(QImage.Format_RGBA8888)
+            iw, ih = img.width(), img.height()
+            ptr = img.constBits()
+            ptr.setsize(getattr(img, "sizeInBytes", img.byteCount)())
+            a = np.frombuffer(ptr, np.uint8).reshape(ih, img.bytesPerLine())
+            a = a[:, :iw * 4].reshape(ih, iw, 4).copy()
+            v = ms.visibleExtent()          # the canvas fits the extent to w x h
+            return a, (v.xMinimum(), v.xMaximum(), v.yMinimum(), v.yMaximum())
+        except Exception as e:
+            print(f"[VECTORS] canvas render failed ({e}); reading the raster")
+            return None
+
+    def _scene_background(self, max_px=1500):
+        """(rgb array, (E0, E1, N0, N1)) of the input warped into the working
+        CRS at about max_px on its long side, or None. GDAL only (QGIS ships
+        it); the COG's overviews make this a quick read."""
+        lyr = getattr(self, "input_tif_layer", None)
+        if lyr is None or not lyr.isValid():
+            return None
+        try:
+            import numpy as np
+            from osgeo import gdal
+            src = gdal.Open(lyr.source())
+            w, h = src.RasterXSize, src.RasterYSize
+            k = max(1.0, max(w, h) / float(max_px))
+            ds = gdal.Warp("", src, format="MEM", dstSRS=self.proj_crs.toWkt(),
+                           width=max(1, int(w / k)), height=max(1, int(h / k)),
+                           resampleAlg="average", dstAlpha=False)
+            a = ds.GetRasterBand(1).ReadAsArray().astype("float32")
+            nod = ds.GetRasterBand(1).GetNoDataValue()
+            gt = ds.GetGeoTransform()
+            ext = (gt[0], gt[0] + gt[1] * ds.RasterXSize,
+                   gt[3] + gt[5] * ds.RasterYSize, gt[3])
+            valid = np.isfinite(a) & (a != 0)
+            if nod is not None:
+                valid &= a != nod
+            if not valid.any():
+                return None
+            lo, hi = np.percentile(a[valid], [2, 98])
+            g = np.clip((a - lo) / max(hi - lo, 1e-9), 0, 1)
+            return np.dstack([g, g, g, valid.astype("float32")]), ext
+        except Exception as e:
+            print(f"[VECTORS] no background: {e}")
+            return None
+
+    def write_vector_plot(self, png):
+        """The look-vector plot of the marked rows (plot_look_vectors) to png.
+
+        Over the input scene as the input canvas renders it (bands and
+        stretch on screen; a GDAL read if that fails), in the working CRS, titled Satellite - Sensor -
+        Session - Strip from the product metadata beside the input. A plot
+        that cannot be drawn (no matplotlib) is reported and skipped; the CSV,
+        shapefile and statistics are already written."""
+        rows = self.export_rows()
+        if not rows:
+            return None
+        extent = None
+        lyr = getattr(self, "input_tif_layer", None)
+        try:
+            if lyr is not None and lyr.isValid():
+                e = self._extent_in_input_canvas(lyr)
+                extent = (e.xMinimum(), e.xMaximum(), e.yMinimum(), e.yMaximum())
+        except Exception:
+            extent = None
+        try:
+            os.makedirs(os.path.dirname(png), exist_ok=True)
+            plot_look_vectors(
+                rows, png, scene_title(self.input_source or self.input_path),
+                error_summary(self._ground_errors()), extent,
+                self._canvas_background() or self._scene_background())
+            print(f"[VECTORS] look-vector plot -> {png}")
+            return png
+        except Exception as e:
+            print(f"[VECTORS] plot skipped: {e}")
+            return None
 
     def write_stats(self, export_path):
         """Write <name>_stats.csv beside an export. Returns its path, or None."""

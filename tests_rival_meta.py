@@ -713,11 +713,12 @@ check("the file sits beside the export, either kind",
 # ── 22. export names come from the input's folder ──────────────────────────
 print("\n-- export file names --")
 f = H["export_paths"]
-check("named after the folder the input sits in, all three files",
+check("named after the folder the input sits in, all four files",
       f("/out", "/data/NISAR_L2_0042/G1A_ort.tif"),
       {"csv": "/out/csv/NISAR_L2_0042_rival.csv",
        "shp": "/out/shp/NISAR_L2_0042_rival.shp",
-       "stats": "/out/stats/NISAR_L2_0042_rival_stats.csv"})
+       "stats": "/out/stats/NISAR_L2_0042_rival_stats.csv",
+       "plots": "/out/plots/NISAR_L2_0042_rival_vectors.png"})
 check("not the file name", "G1A_ort" in f("/out", "/data/scene_a/G1A_ort.tif")["csv"],
       False)
 check("a folder name with dots is kept whole",
@@ -772,6 +773,42 @@ check("stats follow the band name",
 check("without a band the name is unchanged",
       H["export_paths"]("/out", "/data/P42/X.tif")["csv"],
       os.path.join("/out", "csv", "P42_rival.csv"))
+
+# ── 23c. row view width from the input's resolution; plot title ──────────
+print("\n-- row zoom and look vectors --")
+w = H["row_view_width"]
+check("10x of 1:1: 800 px of a 5.8 m scene", round(w(5.8, 800), 1), 464.0)
+check("191 m HS pixels get a wide view", w(191.0, 800), 15280.0)
+check("clamped below", w(0.5, 800), 200.0)
+check("clamped above", w(1000.0, 4000), 200000.0)
+check("unknown pixel size", w(None, 800), None)
+import tempfile as _tf
+_d = _tf.mkdtemp()
+open(os.path.join(_d, "BAND_META.txt"), "w").write(
+    "SatID = G1A\nSensor = HS\nSessionNumber = 026111104\nStripNumber = 6\n")
+check("title from BAND_META", H["scene_title"](os.path.join(_d, "X_GTD_A_1.tif")),
+      "G1A - HS - 026111104 - 6")
+_x = _tf.mkdtemp()
+open(os.path.join(_x, "P_ort_META.xml"), "w").write(
+    "<AISD><IMAGE><SATID>G1A</SATID><SENSORNAME>HS</SENSORNAME>"
+    "<STRIPID>000006</STRIPID><SESSION_NUMBER>026111104</SESSION_NUMBER>"
+    "</IMAGE></AISD>")
+check("title from a special product's XML", H["scene_title"](os.path.join(_x, "P_ort.tif")),
+      "G1A - HS - 026111104 - 000006")
+check("no metadata, no title", H["scene_title"](os.path.join(_tf.mkdtemp(), "a.tif")), "")
+try:
+    import matplotlib  # noqa: F401
+    png = os.path.join(_d, "S_rival_band6_vectors.png")
+    rows = [{"in_x": 500000.0 + 20000 * i, "in_y": 3000000.0 + 3000 * i,
+             "dx": 100.0 + 40 * i, "dy": -50.0 + 10 * i} for i in range(6)]
+    st = H["error_summary"]([(r["dx"], r["dy"]) for r in rows])
+    H["plot_look_vectors"](rows, png, "G1A - HS", st,
+                           (480000.0, 640000.0, 2990000.0, 3025000.0))
+    check("look-vector plot written", os.path.getsize(png) > 10000, True)
+    H["plot_look_vectors"](rows, png, "", st, (480000.0, 500000.0, 2900000.0, 3100000.0))
+    check("tall scene plot written", os.path.getsize(png) > 10000, True)
+except ImportError:
+    print("  (matplotlib missing: plot not exercised)")
 
 # ── 24. remembered display bands ─────────────────────────────────────────────
 print("\n-- display bands --")
