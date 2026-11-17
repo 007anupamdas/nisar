@@ -113,6 +113,8 @@ def read_bands(src, bands, dtype=np.float64) -> List[np.ndarray]:
     bands = [int(b) for b in bands]
     if not bands:
         return []
+    if dtype is None:
+        dtype = src.dtypes[0]
     interleave = str((src.profile or {}).get('interleave') or '').lower()
     big = src.count > 16 and interleave == 'pixel'
     t0 = _t.time()
@@ -456,10 +458,16 @@ def refine_options(job: Dict) -> Optional[Dict]:
             'shadow_near_km': get('cloud_shadow_near_km', REFINE_DEFAULTS['shadow_near_km'])}
 
 
+# (input, band) -> (single-band copy, 1): the bands a job extracted from a big
+# pixel-interleaved cube (automatch_job.extract_bands), read instead of the cube
+BAND_SOURCES: Dict = {}
+
+
 def masked_band(path: str, band: int, mask_path: str, out_path: str, classes: List[int], dilate_px: int) -> str:
     """One band with the masked classes (grown by dilate_px) set to no data."""
     import cv2
     import rasterio as rio
+    path, band = BAND_SOURCES.get((os.path.abspath(path), int(band)), (path, band))
     with rio.open(path) as src, rio.open(mask_path) as m:
         prof = src.profile.copy()
         nd = src.nodata if src.nodata is not None else 0

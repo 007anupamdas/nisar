@@ -348,7 +348,42 @@ def _unit_name(channel: str, tag: str) -> str:
 def _unit_key(job: Dict, win: int, nf: Optional[int]) -> str:
     """Resume fingerprint of one detector's result at a sweep point: the
     sweep point's, without who ran it (the detector list, the GPU, the queue)."""
-    return _sweep_key({k: v for k, v in job.items() if k not in ('detectors', '_shard', '_queue', '_gpu_mem')}, win, nf)
+    return _sweep_key({k: v for k, v in job.items() if k not in ('detectors', '_shard', '_queue', '_gpu_mem', '_reuse',
+                                                                 '_server_output_dir', '_parent')}, win, nf)
+
+
+def _results_dir(job: Dict, tag: str) -> str:
+    """Where finished detector results are shared between output folders that
+    use the same cache folder (temp_dir): e.g. the fastest, accurate and most
+    accurate presets of one input."""
+    return os.path.join(str(job.get('temp_dir') or os.path.join(job['output_dir'], '_cache')), '_results', tag)
+
+
+def _adopt_result(rec: Dict, other_root: str, root: str) -> Optional[Dict]:
+    """A detector's finished record from another output folder, its match
+    folders copied into this one and its paths rewritten (None when its
+    folders are gone)."""
+    import glob as _glob
+    pol = rec.get('output_dir') or ''
+    tag = rec.get('detector_tag') or ''
+    if not pol or not tag or not os.path.isdir(pol):
+        return None
+    o, r = os.path.normpath(other_root), os.path.normpath(root)
+    rel = os.path.relpath(os.path.normpath(pol), o)
+    if rel.startswith('..'):
+        return None
+    dst_pol = os.path.join(r, rel)
+    found = [p for p in _glob.glob(os.path.join(pol, f'*_{tag}')) if os.path.isdir(p)]
+    if not found:
+        return None
+    for p in found:
+        shutil.copytree(p, os.path.join(dst_pol, os.path.basename(p)), dirs_exist_ok=True)
+
+    def move(v):
+        if isinstance(v, str) and os.path.normpath(v).startswith(o + os.sep):
+            return os.path.join(r, os.path.relpath(os.path.normpath(v), o))
+        return v
+    return {k: move(v) for k, v in rec.items()}
 
 
 def install_queue(E, job: Dict, out_dir: str, tag: str, win: int, nf: Optional[int]) -> None:
@@ -369,6 +404,8 @@ def install_queue(E, job: Dict, out_dir: str, tag: str, win: int, nf: Optional[i
     bigger = own > 0 and any(v > own + 0.5 for v in mem.values())
     reuse = job.get('_reuse') or ''             # finish mode: the finished records of an earlier run, any code
     earlier = _summary_records(out_dir, job) if reuse else {}
+    shared = _results_dir(job, tag)
+    root = str(job['output_dir'])
 
     def claim(channel, dtag):
         name = _unit_name(channel, dtag)
@@ -388,6 +425,18 @@ def install_queue(E, job: Dict, out_dir: str, tag: str, win: int, nf: Optional[i
                     return saved['record']
             except (OSError, ValueError, KeyError, AttributeError, TypeError):
                 pass
+        if job.get('resume'):                # finished in another output folder on the same cache (other preset)
+            try:
+                with open(os.path.join(shared, name + '.json'), encoding='utf-8') as f:
+                    saved = json.load(f)
+                if (saved.get('key') == key and saved['record'].get('status') == 'ok'
+                        and os.path.normpath(saved.get('root') or '') != os.path.normpath(root)):
+                    got = _adopt_result(saved['record'], saved['root'], root)
+                    if got is not None:
+                        print(f"[Job] {dtag}: reused from {saved['root']} (same settings and cache)", flush=True)
+                        return got
+            except (OSError, ValueError, KeyError, AttributeError, TypeError):
+                pass
         rec = earlier.get((str(channel), str(dtag)))
         if rec is not None:
             err = str(rec.get('error') or '')
@@ -398,11 +447,16 @@ def install_queue(E, job: Dict, out_dir: str, tag: str, win: int, nf: Optional[i
     def done(channel, dtag, rec):
         if rec.get('status') == 'ok':
             learn_gpu_peak(dtag, win, rec.get('gpu_peak_gb'))
-        path = os.path.join(units, _unit_name(channel, dtag) + '.json')
-        tmp = f'{path}.{os.getpid()}.tmp'
-        with open(tmp, 'w', encoding='utf-8') as f:
-            json.dump({'key': key, 'gpu': shard, 'record': rec}, f, default=str)
-        os.replace(tmp, path)
+        for folder, extra in ((units, {}), (shared, {'root': root})):
+            try:
+                os.makedirs(folder, exist_ok=True)
+                path = os.path.join(folder, _unit_name(channel, dtag) + '.json')
+                tmp = f'{path}.{os.getpid()}.tmp'
+                with open(tmp, 'w', encoding='utf-8') as f:
+                    json.dump({'key': key, 'gpu': shard, 'record': rec, **extra}, f, default=str)
+                os.replace(tmp, path)
+            except OSError:
+                pass
     E.CLAIM_HOOK, E.UNIT_DONE_HOOK = claim, done
 
 
@@ -1753,6 +1807,57 @@ def prepare_cloud_mask(job: Dict, scene, out_root: str) -> Dict[str, List]:
     return rasters
 
 
+def extract_bands(job: Dict, scene) -> Dict[str, List]:
+    """{channel: [single-band GeoTIFF, 1]} for the matched bands of a big
+    pixel-interleaved cube (more than 16 bands): a pixel-interleaved file
+    stores all bands of a pixel together, so every window the pairs read
+    went through all its bands (a 256-band HS cube: 256 x the data, over the
+    network share). Written once into the cache, in one pass, and reused
+    while the input is unchanged; the cloud step reads from them too."""
+    import automatch_cloud as C
+    import rasterio as rio
+    chans = [c for c in (job.get('channels') or []) if re.fullmatch(r'band\d+', str(c))]
+    if not chans or len(chans) > 8:
+        return {}
+    try:
+        with rio.open(scene.raster_path) as src:
+            il = str(src.profile.get('interleave') or '').lower()
+            if src.count <= 16 or il != 'pixel':
+                return {}
+            folder = os.path.join(scene.cache_dir(job['temp_dir']), 'bands')
+            mt = os.path.getmtime(scene.raster_path)
+            out, need = {}, []
+            for c in chans:
+                p = os.path.join(folder, f'{c}.tif')
+                if os.path.exists(p) and os.path.getmtime(p) >= mt:
+                    out[c] = [p, 1]
+                else:
+                    need.append(c)
+            if need:
+                t0 = time.time()
+                print(f'[Input] {src.count}-band pixel-interleaved cube: extracting {", ".join(need)} once into '
+                      f'{folder} (every later read is then local and single-band) ...', flush=True)
+                arrs = C.read_bands(src, [int(c[4:]) for c in need], None)
+                prof = src.profile.copy()
+                prof.update(count=1, interleave='band', tiled=True, blockxsize=512, blockysize=512, compress=None,
+                            driver='GTiff', BIGTIFF='IF_SAFER')
+                prof.pop('photometric', None)
+                os.makedirs(folder, exist_ok=True)
+                for c, a in zip(need, arrs):
+                    p = os.path.join(folder, f'{c}.tif')
+                    with rio.open(p + '.part', 'w', **prof) as dst:
+                        dst.write(a, 1)
+                    os.replace(p + '.part', p)
+                    out[c] = [p, 1]
+                print(f'[Input] extracted in {time.time() - t0:.0f} s', flush=True)
+    except Exception as e:
+        print(f'[Input] band extraction skipped ({type(e).__name__}: {e}); reading the cube directly', flush=True)
+        return {}
+    for c, (p, _) in out.items():
+        C.BAND_SOURCES[(os.path.abspath(scene.raster_path), int(c[4:]))] = (p, 1)
+    return out
+
+
 def set_interior_filter(job: Dict, scene, out_root: str) -> None:
     """Leave out, wherever matches are read (exports, truth, cross-check),
     those inside featureless areas of the input band (automatch_interior):
@@ -1765,6 +1870,9 @@ def set_interior_filter(job: Dict, scene, out_root: str) -> None:
     path = os.path.join(out_root, f'INTERIOR_MASK_{band}.tif')
     try:
         src = getattr(scene, 'raster_path', None) or job['input_path']
+        over = (job.get('_channel_rasters') or {}).get(band)
+        if over:                               # the extracted (or cloud-masked) single band
+            src, band = str(over[0]), f'band{int(over[1])}'
         if not (os.path.exists(path) and os.path.getmtime(path) >= os.path.getmtime(src)) or job.get('_shard') is None:
             o = IM.options(job)
             o['edge_px'] = float(job.get('interior_edge_px') or o['edge_px'])
@@ -1829,6 +1937,11 @@ def run_job(job: Dict) -> Dict:
             print(f'[Job] auto_bands {job["auto_bands"]}: matching {picked}')
             with open(os.path.join(out_root, 'job_used.json'), 'w', encoding='utf-8') as f:
                 json.dump(job, f, indent=2)
+    if scene.kind == 'raster' and job.get('_shard') is None:
+        ext = extract_bands(job, scene)         # a big pixel-interleaved cube: its matched bands once, locally
+        if ext:
+            job = dict(job, _channel_rasters={**ext, **(job.get('_channel_rasters') or {})})
+            scene.channel_override = dict(job['_channel_rasters'])
     if cloud_on(job):
         job = dict(job, _channel_rasters=prepare_cloud_mask(job, scene, out_root))
     job = dict(job, _window_prep=window_prep_for(job, scene))
@@ -1855,7 +1968,7 @@ def run_job(job: Dict) -> Dict:
     rival_dir = os.path.join(out_root, 'rival')
     suffix = f'_gpu{shard}' if shard is not None else ''
     own_queue = ''
-    if job.get('_reuse') and not job.get('_queue'):     # finish mode on one GPU: resume per detector
+    if not job.get('_queue') and (job.get('resume') or job.get('_reuse')):   # one GPU: resume per detector too
         own_queue = os.path.join(out_root, '_queue', f'{time.strftime("%Y%m%d_%H%M%S")}_{os.getpid()}')
         os.makedirs(own_queue, exist_ok=True)
         job = dict(job, _queue=own_queue)

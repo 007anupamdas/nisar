@@ -123,40 +123,202 @@ def write_shapefile(points: List[Dict], stem: str) -> str:
     return stem + '.shp'
 
 
-def plot_vectors(points: List[Dict], png: str, title: str = '', st: Optional[Dict] = None) -> str:
+def plot_context(job_dir: str, truth_csv: str = '') -> Dict:
+    """What a job's look-vector plots share: the working CRS, the scene's
+    extent and outline, the product's quicklook PNG (from the product folder,
+    else an overview of the input) as background, the truth points and the
+    title Satellite - Sensor - Session - Strip from the product metadata.
+    Anything that cannot be read here is left out."""
+    ctx: Dict = {'title': '', 'extent': None, 'background': None, 'truth': None, 'crs': ''}
+    try:
+        import json
+        import automatch_cross as X
+        import automatch_presets as P
+        import automatch_truth as T
+        ctx['crs'] = T.working_crs_of(job_dir) or ''
+        with open(os.path.join(job_dir, 'job_used.json'), encoding='utf-8') as f:
+            job = json.load(f)
+        inp = job.get('input_path') or ''
+        loc = next((p for p in (inp, X.local_path(inp, job_dir, job.get('output_dir') or ''), X._by_share(inp))
+                    if p and os.path.isfile(p)), '')
+        meta = P.product_meta(loc) if loc else {}
+        name = os.path.basename(inp)
+        sat = meta.get('SatID') or meta.get('SatelliteID') or meta.get('Satellite') or meta.get('Mission') or (
+            name.split('_')[0] if name.startswith(('G1A', 'C3', 'E0')) else '')
+        sensor = meta.get('Sensor') or (name.split('_')[1] if name.startswith('G1A_') else '')
+        session = (meta.get('SessionNumber') or meta.get('SessionNo') or meta.get('Session')
+                   or meta.get('ImagingOrbitNo') or '')
+        strip = meta.get('StripNumber') or meta.get('SegmentNumber') or meta.get('StripNo') or ''
+        ctx['title'] = ' - '.join(str(v) for v in (sat, sensor, session, strip) if str(v).strip())
+        if loc and ctx['crs']:
+            ctx.update(_scene_background(loc, ctx['crs'], prod_extent(meta, ctx['crs'])))
+        tcsv = truth_csv or X.job_truth_csv(job_dir)
+        if tcsv and ctx['crs']:
+            t = T.truth_in_crs(T.load_truth(tcsv), ctx['crs'])
+            ctx['truth'] = t[['E', 'N', 'dE', 'dN']].copy()
+    except Exception as e:
+        print(f'[Report] plot context partly unavailable ({type(e).__name__}: {e})')
+    return ctx
+
+
+def prod_extent(meta: Dict, crs: str):
+    """(E0, E1, N0, N1) in crs of the product's corners (ProdULLat / ProdULLon
+    ... ProdLLLon of BAND_META), or None when the metadata does not give them."""
+    try:
+        lat = [float(meta[f'Prod{c}Lat']) for c in ('UL', 'UR', 'LR', 'LL')]
+        lon = [float(meta[f'Prod{c}Lon']) for c in ('UL', 'UR', 'LR', 'LL')]
+    except (KeyError, ValueError, TypeError):
+        return None
+    from pyproj import CRS, Transformer
+    xs, ys = Transformer.from_crs(CRS.from_epsg(4326), CRS.from_user_input(crs), always_xy=True).transform(lon, lat)
+    return (min(xs), max(xs), min(ys), max(ys))
+
+
+def _scene_background(raster: str, crs: str, prod_ext=None) -> Dict:
+    """{'extent': (E0, E1, N0, N1) m, 'background': (rgb array, extent)}: the
+    extent from the product corners (prod_ext, BAND_META Prod*) when given,
+    else the raster's bounds; the product's quicklook PNG (a .png / .jpg in the product folder, the
+    largest; 'QL' / 'browse' names first), laid over the raster's extent;
+    else an overview of the raster's first band."""
+    import glob as _glob
+    import numpy as np
+    import rasterio as rio
+    from pyproj import CRS, Transformer
+    from rasterio.enums import Resampling
+    with rio.open(raster) as src:
+        b, rcrs = src.bounds, src.crs
+        s = max(1.0, max(src.width, src.height) / 2000.0)
+        ov = src.read(1, out_shape=(max(1, int(src.height / s)), max(1, int(src.width / s))),
+                      resampling=Resampling.average).astype('float32')
+        nod = src.nodata
+    same = rcrs is not None and CRS.from_user_input(rcrs).equals(CRS.from_user_input(crs))
+    if same:
+        ext = (b.left, b.right, b.bottom, b.top)
+    else:
+        tr = Transformer.from_crs(rcrs, CRS.from_user_input(crs), always_xy=True)
+        xs, ys = tr.transform([b.left, b.right, b.right, b.left], [b.top, b.top, b.bottom, b.bottom])
+        ext = (min(xs), max(xs), min(ys), max(ys))
+    if prod_ext is not None:                          # the product's own corners (BAND_META), as the plots use
+        ext = prod_ext
+    folder = os.path.dirname(os.path.abspath(raster))
+    pngs = [p for p in _glob.glob(os.path.join(folder, '*')) if p.lower().endswith(('.png', '.jpg', '.jpeg'))]
+    pngs.sort(key=lambda p: (not any(k in os.path.basename(p).upper() for k in ('QL', 'BROWSE', 'QUICK')),
+                             -os.path.getsize(p)))
+    img = None
+    if pngs:
+        try:
+            import matplotlib.image as mpimg
+            img = mpimg.imread(pngs[0])
+        except Exception:
+            img = None
+    if img is None:                                   # the raster itself, stretched
+        valid = np.isfinite(ov) & (ov != 0) & ((ov != nod) if nod is not None else True)
+        if valid.any():
+            lo, hi = np.percentile(ov[valid], [2, 98])
+            g = np.clip((ov - lo) / max(hi - lo, 1e-9), 0, 1)
+            img = np.dstack([g, g, g, valid.astype('float32')])
+    return {'extent': ext, 'background': (img, ext) if img is not None else None}
+
+
+def plot_vectors(points: List[Dict], png: str, title: str = '', st: Optional[Dict] = None,
+                 ctx: Optional[Dict] = None) -> str:
     """Look vectors: an arrow per point from its input position towards its
-    reference position (the geolocation error), in the working map
-    coordinates (km), coloured by length; the statistics in the corner."""
+    reference position (the geolocation error), coloured by length, on the
+    product's quicklook; the truth points (manual) marked with their own
+    arrows. The figure takes the scene's shape (a long HS strip: a long
+    figure), the colour scale lies along its longer edge, the statistics
+    below it, the title Satellite - Sensor - Session - Strip."""
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
     import numpy as np
-    x = np.asarray([p['In_X'] for p in points]) / 1000.0
-    y = np.asarray([p['In_Y'] for p in points]) / 1000.0
-    dx = np.asarray([p['DX_Err'] for p in points])
-    dy = np.asarray([p['DY_Err'] for p in points])
+    ctx = ctx or {}
+    x = np.asarray([p['In_X'] for p in points], float) / 1000.0
+    y = np.asarray([p['In_Y'] for p in points], float) / 1000.0
+    dx = np.asarray([p['DX_Err'] for p in points], float)
+    dy = np.asarray([p['DY_Err'] for p in points], float)
     d = np.hypot(dx, dy)
-    fig, ax = plt.subplots(figsize=(9, 8))
+    tr = ctx.get('truth')
+    if ctx.get('extent'):
+        e0, e1, n0, n1 = [v / 1000.0 for v in ctx['extent']]
+    elif len(x):
+        pad = max(np.ptp(x), np.ptp(y), 1.0) * 0.05
+        e0, e1, n0, n1 = x.min() - pad, x.max() + pad, y.min() - pad, y.max() + pad
+    else:
+        e0, e1, n0, n1 = 0.0, 1.0, 0.0, 1.0
+    W, H = max(e1 - e0, 1e-3), max(n1 - n0, 1e-3)
+    wide = W >= H
+    # the figure in inches from the scene's own shape: the map 15 in along the
+    # long side, the colour scale along that side, the statistics beyond it
+    L = 15.0
+    if wide:
+        mw, mh = L, max(2.0, L * H / W)
+        left, right, top, bottom = 0.9, 0.4, 0.8, 2.5
+        fw, fh = left + mw + right, top + mh + bottom
+        ax = fig_ax = (left / fw, bottom / fh, mw / fw, mh / fh)
+        cax_r = ((left + 0.15 * mw) / fw, 1.45 / fh, 0.6 * mw / fw, 0.22 / fh)
+        key_xy = ((left + 0.80 * mw) / fw, 1.55 / fh)
+        stat_xy, stat_ha, stat_va = (0.5, 0.15 / fh), 'center', 'bottom'
+    else:
+        mh, mw = L, max(2.0, L * W / H)
+        left, top, bottom = 0.9, 0.8, 0.8
+        fw, fh = left + mw + 0.3 + 0.25 + 1.1 + 4.6, top + mh + bottom
+        ax = fig_ax = (left / fw, bottom / fh, mw / fw, mh / fh)
+        cax_r = ((left + mw + 0.3) / fw, (bottom + 0.15 * mh) / fh, 0.25 / fw, 0.7 * mh / fh)
+        key_xy = ((left + mw + 0.3) / fw, (bottom + 0.08 * mh) / fh)
+        stat_xy, stat_ha, stat_va = ((left + mw + 1.7) / fw, 0.5), 'left', 'center'
+    fig = plt.figure(figsize=(fw, fh))
+    ax = fig.add_axes(fig_ax)
+    cax = fig.add_axes(cax_r)
+    bg = ctx.get('background')
+    if bg is not None:
+        img, ext = bg
+        ax.imshow(img, extent=[v / 1000.0 for v in ext], origin='upper', zorder=0, interpolation='bilinear')
+    span = max(W, H)
+    dmax = max(float(d.max()) if len(d) else 0.0,
+               float(np.hypot(tr['dE'], tr['dN']).max()) if tr is not None and len(tr) else 0.0, 1.0)
+    scale = (dmax / 1000.0) / (0.06 * span)           # the longest arrow: 6 % of the scene's long side
     if len(x):
-        span = max(np.ptp(x), np.ptp(y), 1.0)
-        scale = (d.max() / 1000.0 or 1.0) / (0.08 * span)      # the longest arrow: 8 % of the extent
         q = ax.quiver(x, y, -dx / 1000.0, -dy / 1000.0, d, angles='xy', scale_units='xy', scale=scale,
-                      width=0.003, cmap='viridis')
-        fig.colorbar(q, ax=ax, label='error (m)')
-        ax.scatter(x, y, s=6, c='k', zorder=3)
-    ax.set_aspect('equal')
+                      units='inches', width=0.035, cmap='viridis', zorder=3)
+        ax.scatter(x, y, s=8, c='k', zorder=4)
+        cb = fig.colorbar(q, cax=cax, orientation='horizontal' if wide else 'vertical')
+        cb.set_label('error of each point (m)')
+        ref = float(10 ** np.floor(np.log10(dmax)))
+        ax.quiverkey(q, key_xy[0], key_xy[1], ref / 1000.0, f'arrow: {ref:g} m', labelpos='E',
+                     coordinates='figure', color='k')
+    else:
+        cax.set_visible(False)
+    if tr is not None and len(tr):
+        tx, ty = tr['E'].to_numpy() / 1000.0, tr['N'].to_numpy() / 1000.0
+        ax.quiver(tx, ty, -tr['dE'].to_numpy() / 1000.0, -tr['dN'].to_numpy() / 1000.0, angles='xy',
+                  scale_units='xy', scale=scale, units='inches', width=0.05, color='red', zorder=5)
+        ax.scatter(tx, ty, s=90, marker='*', c='red', edgecolors='white', linewidths=0.8, zorder=6,
+                   label=f'manual points ({len(tr)})')
+        ax.legend(loc='upper left', fontsize=9, framealpha=0.85)
+    ax.set_xlim(e0, e1)
+    ax.set_ylim(n0, n1)
+    ax.set_aspect('equal', adjustable='box')
     ax.set_xlabel('E (km)')
     ax.set_ylabel('N (km)')
-    ax.set_title(title or os.path.basename(png))
+    ax.grid(True, alpha=0.25)
+    ax.set_title(ctx.get('title') or title or os.path.splitext(os.path.basename(png))[0], fontsize=14,
+                 fontweight='bold')
     if st:
-        txt = (f"n {st['n']}   mean dE {st.get('mean_dx_m', 0):.1f} m, dN {st.get('mean_dy_m', 0):.1f} m\n"
-               f"RMSE E {st['rmse_x_m']:.1f} m, N {st['rmse_y_m']:.1f} m   CE90 {st['ce90_m']:.1f} m"
-               + ('' if st.get('ce90_circular', True) else ' (axes unequal)') + f"\nlargest {st.get('max_dist_m', 0):.1f} m")
-        ax.text(0.01, 0.01, txt, transform=ax.transAxes, fontsize=9, va='bottom',
-                bbox=dict(boxstyle='round', fc='white', alpha=0.85))
-    ax.grid(True, alpha=0.3)
-    fig.tight_layout()
-    fig.savefig(png, dpi=130)
+        txt = (f"{os.path.splitext(os.path.basename(png))[0].replace('_vectors', '')}:  n {st['n']}    "
+               f"mean dE {st.get('mean_dx_m', 0):.1f} m, dN {st.get('mean_dy_m', 0):.1f} m    "
+               f"RMSE E {st['rmse_x_m']:.1f} m, N {st['rmse_y_m']:.1f} m    CE90 {st['ce90_m']:.1f} m"
+               + ('' if st.get('ce90_circular', True) else ' (axes unequal)')
+               + f"    largest {st.get('max_dist_m', 0):.1f} m")
+        man = ctx.get('manual')
+        if man:
+            txt += (f"\nmanual points:  n {man['n']}    mean dE {man.get('mean_dx_m', 0):.1f} m, dN "
+                    f"{man.get('mean_dy_m', 0):.1f} m    RMSE E {man['rmse_x_m']:.1f} m, N {man['rmse_y_m']:.1f} m"
+                    f"    CE90 {man['ce90_m']:.1f} m")
+        if not wide:
+            txt = txt.replace('    ', '\n').replace(':  ', ':\n')
+        fig.text(*stat_xy, txt, ha=stat_ha, va=stat_va, fontsize=10, family='monospace')
+    fig.savefig(png, dpi=150)
     plt.close(fig)
     return png
 
@@ -179,14 +341,14 @@ def manual_stats(truth_csv: str) -> Dict:
 COMPARE = ('mean_dx_m', 'mean_dy_m', 'rmse_x_m', 'rmse_y_m', 'rmse_m', 'ce90_m')
 
 
-def report_file(csv_path: str, out_dir: str) -> Dict:
+def report_file(csv_path: str, out_dir: str, ctx: Optional[Dict] = None) -> Dict:
     """Shapefile, look-vector plot and statistics of one RIVAL CSV."""
     os.makedirs(out_dir, exist_ok=True)
     name = os.path.splitext(os.path.basename(csv_path))[0]
     pts = read_points(csv_path)
     st = stats(pts)
     shp = write_shapefile(pts, os.path.join(out_dir, name))
-    png = plot_vectors(pts, os.path.join(out_dir, name + '_vectors.png'), name, st)
+    png = plot_vectors(pts, os.path.join(out_dir, name + '_vectors.png'), name, st, ctx)
     return {'file': os.path.basename(csv_path), **st, 'shapefile': shp, 'vectors_png': png}
 
 
@@ -203,13 +365,6 @@ def report(job_dir: str, all_files: bool = False, quiet: bool = False, truth_csv
         pat = 'RIVAL_*.csv' if all_files else 'RIVAL_*FINAL_*.csv'
         files = [p for p in sorted(glob.glob(os.path.join(job_dir, pat))) if not p.endswith('_detail.csv')]
         out = os.path.join(job_dir, 'REPORT')
-    rows = []
-    for p in files:
-        try:
-            rows.append(report_file(p, out))
-        except Exception as e:
-            print(f'[Report] {os.path.basename(p)}: {type(e).__name__}: {e}')
-            rows.append({'file': os.path.basename(p), 'error': f'{type(e).__name__}: {e}'})
     if not truth_csv and os.path.isdir(job_dir):
         try:
             import automatch_cross as X
@@ -222,6 +377,18 @@ def report(job_dir: str, all_files: bool = False, quiet: bool = False, truth_csv
             manual = manual_stats(truth_csv)
         except Exception as e:
             print(f'[Report] manual points {os.path.basename(truth_csv)} unreadable: {type(e).__name__}: {e}')
+    jd = job_dir if os.path.isdir(job_dir) else os.path.dirname(job_dir)
+    if not os.path.exists(os.path.join(jd, 'job_used.json')):          # FILTERED/ or CLOUDFREE/ of a job
+        jd = os.path.dirname(os.path.normpath(jd))
+    ctx = plot_context(jd, truth_csv) if files else {}
+    ctx['manual'] = manual
+    rows = []
+    for p in files:
+        try:
+            rows.append(report_file(p, out, ctx))
+        except Exception as e:
+            print(f'[Report] {os.path.basename(p)}: {type(e).__name__}: {e}')
+            rows.append({'file': os.path.basename(p), 'error': f'{type(e).__name__}: {e}'})
     if manual and rows:
         for r in rows:
             for k in COMPARE:

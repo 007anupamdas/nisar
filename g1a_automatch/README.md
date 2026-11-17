@@ -198,6 +198,24 @@ at 2048 px) goes to the larger one next time. The progress bars read
 
 ## Report: shapefile, look vectors, RIVAL statistics
 
+The look-vector plot takes the scene's own shape (a long HS strip gives a
+long, narrow figure), over the extent of the product's corners (`ProdULLat`
+... `ProdLLLon` of BAND_META; the raster's bounds without them), with the
+product's quicklook PNG from the product folder as background (an overview
+of the raster without one), the manual points as red stars with their own
+red arrows, the colour scale along the longer edge, the statistics of the
+points and of the manual points outside the map, and the title
+Satellite - Sensor - Session - Strip from the metadata.
+
+**Three presets on one input.** In the run window, **Run all 3 presets** runs
+fastest, accurate and most accurate one after another into
+`<output>/fastest`, `/accurate`, `/most_accurate`, with one cache
+(`<output>/_cache`): references, pairs, the extracted band and the cloud mask
+are made once, and a detector one preset ran is reused by the next (its match
+folders copied in). **Refined points** sets `final_points` (24). A
+pixel-interleaved cube (the 256-band HS) has its matched band extracted once,
+in one pass, so the pairs no longer read through every band.
+
 Every job ends with `REPORT/`: for each final RIVAL file
 (`RIVAL_FINAL_<band>.csv`, `RIVAL_BEST_FINAL_*.csv`) a point shapefile (WGS 84,
 the errors as attributes), a look-vector plot (`<name>_vectors.png`: an

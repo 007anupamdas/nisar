@@ -119,7 +119,7 @@ class RunWindow(QtWidgets.QMainWindow):
         self.mode = QtWidgets.QComboBox()
         self.mode.addItems(list(P.MODES))
         self.mode.setToolTip('accurate: the sensor\'s ranked detectors, MAGSAC + LMedS, 512 px sub-cells, 3 of 5 '
-                             'agreeing. fastest: its fast detectors (1-3 min per pass), MAGSAC, no sub-cells, 2 of 3 '
+                             'agreeing. fastest: its fast detectors (1-3 min per pass), 2 of 3 '
                              'agreeing: about a fifth of the time')
         self.mode.setToolTip(self.mode.toolTip() + '. most accurate: the ranked list plus the slow detectors that '
                              'ranked well (DKM, RoMa, KeyNet, OmniGlue, ...), all run, 4 agreeing: several times '
@@ -151,13 +151,20 @@ class RunWindow(QtWidgets.QMainWindow):
         self.agree.setRange(1, 40)
         self.agree.setToolTip('The error is taken where at least this many of them agree (cross-check); '
                               'the points they agree on go to RIVAL_FINAL')
+        self.final_points = QtWidgets.QSpinBox()
+        self.final_points.setRange(0, 1000)
+        self.final_points.setValue(24)
+        self.final_points.setToolTip('Refined points for RIVAL (RIVAL_FINAL): one best agreed point per sub-tile of a '
+                                     'grid of about this many over the whole scene; tiles on water, cloud or '
+                                     'featureless ground fail (FINAL_TILES_*.csv says why)')
         self.cloud = QtWidgets.QCheckBox('mask clouds')
         self.cloud.setChecked(True)
         self.cloud.setToolTip('By the sensor: MV OmniCloudMask on bands 5, 4, 6 (needs it installed); HV VNIR, '
                               'HS SWIR, ML infrared tests')
         h = QtWidgets.QHBoxLayout()
         for label, wid in (('Sensor', self.sensor), ('Preset', self.mode), ('Band(s)', self.bands), ('Max error (no truth)', self.max_err),
-                           ('Detectors: top', self.top_n), ('error from top', self.agree), ('Device', self.device)):
+                           ('Detectors: top', self.top_n), ('error from top', self.agree),
+                           ('Refined points', self.final_points), ('Device', self.device)):
             h.addWidget(QtWidgets.QLabel(label))
             h.addWidget(wid)
             if wid is self.bands:
@@ -174,19 +181,28 @@ class RunWindow(QtWidgets.QMainWindow):
         hb = QtWidgets.QHBoxLayout()
         self.btn_check = QtWidgets.QPushButton('Check')
         self.btn_run = QtWidgets.QPushButton('Run')
+        self.btn_all = QtWidgets.QPushButton('Run all 3 presets')
+        self.btn_all.setToolTip('fastest, then accurate, then most accurate, into <output>/fastest, /accurate, '
+                                '/most_accurate, sharing one cache (<output>/_cache): references, pairs and the cloud '
+                                'mask are made once, and a detector one preset ran is reused by the next')
         self.btn_stop = QtWidgets.QPushButton('Stop')
         self.btn_open = QtWidgets.QPushButton('Open output folder')
         self.btn_presets = QtWidgets.QPushButton('Presets file…')
         self.btn_presets.setToolTip('Write automatch_presets.json (the presets, to edit) or show where it is; '
                                     'it is read when this window opens')
         self.btn_stop.setEnabled(False)
-        for b in (self.btn_check, self.btn_run, self.btn_stop, self.btn_open, self.btn_presets):
+        for b in (self.btn_check, self.btn_run, self.btn_all, self.btn_stop, self.btn_open, self.btn_presets):
             hb.addWidget(b)
         hb.addStretch(1)
         v.addLayout(hb)
         self.bar = QtWidgets.QProgressBar()
         self.stage = QtWidgets.QLabel('')
         v.addWidget(self.bar)
+        self.gpu_bars = [QtWidgets.QProgressBar(), QtWidgets.QProgressBar()]   # one per GPU of a two-GPU run
+        for b in self.gpu_bars:
+            b.setVisible(False)
+            v.addWidget(b)
+        self._bar_of, self._det_done, self._det_total = {}, 0, 0
         v.addWidget(self.stage)
         self.log = QtWidgets.QPlainTextEdit()
         self.log.setReadOnly(True)
@@ -194,6 +210,7 @@ class RunWindow(QtWidgets.QMainWindow):
         v.addWidget(self.log, 1)
         self.btn_check.clicked.connect(lambda: self.start('preflight'))
         self.btn_run.clicked.connect(lambda: self.start('run'))
+        self.btn_all.clicked.connect(self.run_all)
         self.btn_stop.clicked.connect(self.stop)
         self.btn_open.clicked.connect(self.open_output)
         self.btn_presets.clicked.connect(self.presets_file)
@@ -232,7 +249,7 @@ class RunWindow(QtWidgets.QMainWindow):
         else:
             self.summary.setText('Sensor not known from the file name (G1A_MV_ / HV / HS / ML): choose it under Sensor.')
 
-    def job(self):
+    def job(self, mode: str = '', sub: str = ''):
         s = self.current_sensor()
         if s not in self.presets:
             raise ValueError('choose the sensor (the file name does not say it)')
@@ -243,23 +260,44 @@ class RunWindow(QtWidgets.QMainWindow):
         crisp = self.crispest.isChecked()
         ref, why = P.reference_for(self.input.text(), self.reference.text(), self.reference_c1.text())
         self.log.appendPlainText(f'--- references: {why}: {ref}')
-        job, _ = P.job_for(s, self.input.text(), ref, self.output.text(), self.truth.text(),
+        out = os.path.join(self.output.text(), sub) if sub else self.output.text()
+        job, _ = P.job_for(s, self.input.text(), ref, out, self.truth.text(),
                            [] if crisp else P.parse_bands(self.bands.text()),
                            None if self.truth.text() else self.max_err.value(),
                            self.device.currentText(), self.cloud.isChecked(), self.weights.text(), self.presets,
-                           crispest=1 if crisp else 0, top_n=self.top_n.value(), agree=self.agree.value(),
-                           mode=self.mode.currentText())
+                           crispest=1 if crisp else 0,
+                           top_n=None if mode else self.top_n.value(), agree=None if mode else self.agree.value(),
+                           mode=mode or self.mode.currentText(), final_points=self.final_points.value(),
+                           temp_dir=os.path.join(self.output.text(), '_cache'))
         return job
 
-    # ── running ──────────────────────────────────────────────────────────────
-    def start(self, kind: str):
+    def run_all(self):
+        """The three presets one after the other (their own top X / Y), each
+        into its own subfolder, one cache: the later ones reuse what the
+        earlier ones made."""
         if self.proc is not None:
             return
         try:
-            job = self.job()
+            jobs = [(m, self.job(m, m.replace(' ', '_'))) for m in P.MODES]
         except ValueError as e:
             QtWidgets.QMessageBox.warning(self, 'Automatch', str(e))
             return
+        self._pending = jobs[1:]
+        self._all_done = []
+        self.start('run', jobs[0])
+
+    # ── running ──────────────────────────────────────────────────────────────
+    def start(self, kind: str, preset=None):
+        if self.proc is not None:
+            return
+        if preset is None:
+            self._pending, self._all_done = [], []
+        try:
+            mode, job = preset if preset is not None else (self.mode.currentText(), self.job())
+        except ValueError as e:
+            QtWidgets.QMessageBox.warning(self, 'Automatch', str(e))
+            return
+        self._current = (mode, job['output_dir'])
         os.makedirs(job['output_dir'], exist_ok=True)
         path = os.path.join(job['output_dir'], 'job_preset.json')
         with open(path, 'w', encoding='utf-8') as f:
@@ -271,7 +309,7 @@ class RunWindow(QtWidgets.QMainWindow):
         self.settings.setValue('mode', self.mode.currentText())
         self.settings.setValue('cloud', 'true' if self.cloud.isChecked() else 'false')
         self.settings.setValue('max_err', self.max_err.value())
-        self.log.appendPlainText(f'--- {kind}: {self.current_sensor()} preset, settings in {path}')
+        self.log.appendPlainText(f'--- {kind}: {self.current_sensor()} preset, {mode}, settings in {path}')
         self._kind, self._buf = kind, ''
         self.bar.setRange(0, 0)
         self.proc = QtCore.QProcess(self)
@@ -280,6 +318,7 @@ class RunWindow(QtWidgets.QMainWindow):
         self.proc.readyReadStandardOutput.connect(self.read)
         self.proc.finished.connect(self.finished)
         self.btn_run.setEnabled(False)
+        self.btn_all.setEnabled(False)
         self.btn_check.setEnabled(False)
         self.btn_stop.setEnabled(True)
         self.proc.start(sys.executable, ['-u', JOB_SCRIPT, kind, path])
@@ -300,15 +339,51 @@ class RunWindow(QtWidgets.QMainWindow):
             return
         self.on_event(ev)
 
+    def _bar_for(self, ev):
+        """The bar of the GPU an event comes from (two-GPU run), else the main bar."""
+        g = ev.get('gpu')
+        if g is None or not self._bar_of:
+            return self.bar
+        if g not in self._bar_of and len(self._bar_of) < len(self.gpu_bars):
+            self._bar_of[g] = self.gpu_bars[len(self._bar_of)]
+            self._bar_of[g].setVisible(True)
+        return self._bar_of.get(g, self.bar)
+
     def on_event(self, ev: dict):
         kind = ev.get('event')
         gpu = f"GPU {ev['gpu']}: " if ev.get('gpu') is not None else ''
+        if kind == 'job':                    # the run's plan: the main bar counts detectors, a bar per GPU
+            gpus = list(ev.get('gpus') or [])[:2]
+            self._det_done = 0
+            self._det_total = len(ev.get('detectors') or []) * max(1, len(ev.get('sweep') or [])) * max(
+                1, len(ev.get('channels') or []))
+            self._bar_of = {g: b for g, b in zip(gpus, self.gpu_bars)}
+            for b in self.gpu_bars:
+                b.setVisible(False)
+            for g, b in self._bar_of.items():
+                b.setVisible(True)
+                b.setRange(0, 1)
+                b.setValue(0)
+                b.setFormat(f'GPU {g}: waiting')
+            if self._bar_of:
+                self.bar.setRange(0, max(1, self._det_total))
+                self.bar.setValue(0)
+                self.bar.setFormat(f'detectors 0 / {self._det_total}')
+        elif kind == 'detector_done' and self._bar_of:
+            self._det_done += 1
+            self.bar.setValue(self._det_done)
+            self.bar.setFormat(f'detectors {self._det_done} / {self._det_total}')
         if kind in ('window', 'coarse', 'preprocess', 'h5_read') and ev.get('total'):
-            self.bar.setRange(0, int(ev['total']))
-            self.bar.setValue(int(ev.get('done') or 0))
+            bar = self._bar_for(ev)
+            bar.setRange(0, int(ev['total']))
+            bar.setValue(int(ev.get('done') or 0))
             if kind == 'window':
                 where = f" pair {ev.get('pair_no')}/{ev['pairs']}," if ev.get('pairs') else ''
-                self.bar.setFormat(f"{gpu}{ev.get('detector', '')}{where} window %v/%m")
+                bar.setFormat(f"{gpu}{ev.get('detector', '')}{where} window %v/%m")
+            elif kind == 'coarse':
+                bar.setFormat(f"{gpu}coarse offsets: {ev.get('detector', '')}  %v/%m")
+            else:
+                bar.setFormat(f"{gpu}{kind}  %v/%m")
         if kind == 'detector':
             self.stage.setText(f"{gpu}{ev.get('channel')}: {ev.get('detector')}")
         elif kind == 'stage':
@@ -319,12 +394,13 @@ class RunWindow(QtWidgets.QMainWindow):
             self.stage.setText(f"done in {ev.get('minutes')} min")
 
     def stop(self):
+        self._pending = []                       # Stop ends the three-preset sequence too
         if self.proc is not None:
             kill_tree(self.proc)                 # the run and its GPU workers
 
-    def results(self):
+    def results(self, out: str = ''):
         """The files for RIVAL in the output folder."""
-        out = self.output.text()
+        out = out or self.output.text()
         names = sorted(os.listdir(out)) if os.path.isdir(out) else []
         return ([os.path.join(out, n) for n in names if n.startswith('RIVAL_FINAL_') and '_detail' not in n],
                 [os.path.join(out, n) for n in names if n.startswith('RIVAL_BEST_FINAL_')])
@@ -335,13 +411,31 @@ class RunWindow(QtWidgets.QMainWindow):
         kind, self.proc = self._kind, None
         self.bar.setRange(0, 1)
         self.bar.setValue(1 if code == 0 else 0)
+        self.bar.setFormat('%p%')
+        for b in self.gpu_bars:
+            b.setVisible(False)
+        self._bar_of = {}
+        self.btn_all.setEnabled(True)
         self.btn_run.setEnabled(True)
         self.btn_check.setEnabled(True)
         self.btn_stop.setEnabled(False)
         if kind == 'preflight':
             self.stage.setText('check passed: ready to run' if code == 0 else 'check found problems (see the log)')
             return
-        final, best = self.results()
+        mode, out = getattr(self, '_current', ('', ''))
+        final, best = self.results(out)
+        if getattr(self, '_pending', None) is not None and (self._pending or self._all_done):
+            self._all_done.append((mode, out, code))
+            if code == 0 and self._pending:
+                nxt, self._pending = self._pending[0], self._pending[1:]
+                self.log.appendPlainText(f'--- {mode} done; next: {nxt[0]} (reusing the cache and the detectors '
+                                         f'already run)')
+                self.start('run', nxt)
+                return
+            self.log.appendPlainText('--- the presets: ' + '; '.join(
+                f"{m}: {'done' if c == 0 else f'ended with code {c}'} -> {o}" for m, o, c in self._all_done)
+                + ' (REPORT/REPORT_STATS.csv in each: the points against the manual ones)')
+            self._pending, self._all_done = [], []
         if code == 0 and (final or best):
             self.log.appendPlainText('--- for RIVAL:')
             for p in final:

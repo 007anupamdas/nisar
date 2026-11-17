@@ -217,9 +217,18 @@ def test_e2e_rerun(tmp):
     rc, log1 = _run_job(job, tmp, True)
     check('rerun: first run', rc, 0)
     rc, log2 = _run_job(job, tmp, True)
-    check('rerun: same settings -> results reused', rc == 0 and 'reusing finished results' in log2)
+    check('rerun: same settings -> results reused (per detector)',
+          (rc, 'reusing its finished result' in log2, 'Running sift' in log2), (0, True, False))
     rc, log3 = _run_job({**job, 'smnn_thresholds': [0.9]}, tmp, True)
-    check('rerun: changed settings -> run again', rc == 0 and 'running again' in log3)
+    check('rerun: changed settings -> run again', (rc, 'Running sift' in log3), (0, True))
+    # another output folder on the same cache (e.g. another preset): the detector's result is taken over
+    rc, log4 = _run_job({**job, 'smnn_thresholds': [0.9], 'output_dir': os.path.join(tmp, 'out_rerun_b'),
+                         'temp_dir': os.path.join(out, '_cache')}, tmp, True)
+    check('rerun: another output folder on the same cache reuses the detector (copied in) and the pairs',
+          (rc, 'reused from' in log4, 'Running sift' in log4, '[Cache] All 1 pairs loaded' in log4,
+           bool(glob.glob(os.path.join(tmp, 'out_rerun_b', 'win1024_nfauto', 'band1_toC1', 'filtered_same-res_sift',
+                                       '*.csv'))), os.path.exists(os.path.join(tmp, 'out_rerun_b', 'RUN_MANIFEST.csv'))),
+          (0, True, False, True, True, True))
     check('rerun: preprocessing reused from the cache', '[Cache] All 1 pairs loaded' in log3)
     files = [os.path.basename(f) for f in glob.glob(
         os.path.join(out, 'win1024_nfauto', 'band1_toC1', 'filtered_same-res_sift', '*.csv'))]
@@ -715,6 +724,36 @@ def test_target(tmp):
           (P.sensor_of(tif), P.reference_for(tif, '/l8', '/c1')[0], P.reference_for(tif, '/l8', '')[0],
            P.reference_for('/x/G1A_HS_x.tif', '/l8', '/c1')[0], P.sensor_of('/x/C3MX660000100DP.tif')),
           ('MV', '/c1', '/l8', '/l8', 'C3'))
+
+
+def test_extract_bands(tmp):
+    """A big pixel-interleaved cube: the matched band extracted once into the
+    cache (one pass), used instead of the cube, reused while unchanged."""
+    import contextlib
+    import io
+    import types
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_origin
+    import automatch_cloud as C
+    import automatch_job as J
+    p = os.path.join(tmp, 'cube.tif')
+    a = (np.arange(20 * 64 * 64).reshape(20, 64, 64) % 1000).astype(np.uint16)
+    with rasterio.open(p, 'w', driver='GTiff', height=64, width=64, count=20, dtype='uint16', crs='EPSG:32644',
+                       transform=from_origin(500000, 2000000, 180, 180), interleave='pixel') as d:
+        d.write(a)
+    scene = types.SimpleNamespace(raster_path=p, cache_dir=lambda t: os.path.join(t, 'scene'))
+    job = {'channels': ['band7'], 'temp_dir': os.path.join(tmp, 'cube_cache')}
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        ext = J.extract_bands(job, scene)
+    with rasterio.open(ext['band7'][0]) as s:
+        same = bool((s.read(1) == a[6]).all())
+    with contextlib.redirect_stdout(io.StringIO()) as buf2:
+        J.extract_bands(job, scene)
+    check('input: a big pixel-interleaved cube: the matched band extracted once (same values), used by the cloud '
+          'step too, reused the next time',
+          (same, 'extracting band7' in buf.getvalue(), C.BAND_SOURCES.get((os.path.abspath(p), 7)) == (ext['band7'][0], 1),
+           'extracting' in buf2.getvalue()), (True, True, True, False))
 
 
 def test_interior_and_final(tmp):
@@ -1269,13 +1308,13 @@ def test_presets(tmp):
     j3, _ = P.job_for('HS', '/d/G1A_HS_x.tif', '/ref', '/out', '/t/pts_band28.csv', presets=pre, top_n=3, agree=2)
     jf, _ = P.job_for('MV', '/d/G1A_MV_x.tif', '/ref', '/out', '/t/pts_band4.csv', presets=pre, mode='fastest')
     ja, _ = P.job_for('MV', '/d/G1A_MV_x.tif', '/ref', '/out', '/t/pts_band4.csv', presets=pre, mode='accurate')
-    check('presets: accurate (ranked list, MAGSAC + LMedS, sub-cells, 3 of 5) and fastest (fast list, MAGSAC, '
-          'no sub-cells, 2 of 3)',
+    check('presets: accurate (ranked list, 3 of 5) and fastest (fast list, 2 of 3), the same RANSAC and sub-cells '
+          '(so their detector results are shared)',
           (ja['detectors'][0], ja['ransac_methods'], ja['subcell_px'], ja['cross_top_n'], ja['cross_min_agree'],
            jf['detectors'], jf['ransac_methods'], jf['subcell_px'], jf['cross_top_n'], jf['cross_min_agree'],
            'fast_detectors' in jf),
-          ('disk', ['magsac', 'lmeds'], [512], 5, 3, ['loftr', 'imw-xfeat-lg', 'imw-aliked-lg'], ['magsac'], [], 3, 2,
-           False))
+          ('disk', ['magsac', 'lmeds'], [512], 5, 3, ['loftr', 'imw-xfeat-lg', 'imw-aliked-lg'], ['magsac', 'lmeds'],
+           [512], 3, 2, False))
     jm, _ = P.job_for('MV', '/d/G1A_MV_x.tif', '/ref', '/out', '/t/pts_band4.csv', presets=pre, mode='most accurate')
     check('presets: most accurate adds the slow ones that ranked well, all run, 4 agreeing',
           (len(jm['detectors']), 'imw-dkm' in jm['detectors'], 'imw-omniglue' in jm['detectors'], jm['cross_top_n'],
@@ -1356,6 +1395,18 @@ def test_gui_run(tmp):
     w.start('preflight')
     ok = w.proc is not None and w.proc.waitForFinished(180000)
     app.processEvents()
+    w.on_event({'event': 'job', 'gpus': [0, 1], 'detectors': ['a', 'b', 'c'], 'sweep': [[512, None]]})
+    w.on_event({'event': 'window', 'gpu': 1, 'detector': 'loftr', 'done': 5, 'total': 40, 'pair_no': 3, 'pairs': 29})
+    w.on_event({'event': 'detector_done', 'gpu': 0})
+    check('run window: two GPUs: a bar each (pair k/n, windows), the main bar counts the detectors',
+          (w.gpu_bars[0].isHidden(), w.gpu_bars[1].isHidden(), w.gpu_bars[1].format(), w.gpu_bars[1].value(),
+           w.bar.format()),
+          (False, False, 'GPU 1: loftr pair 3/29, window %v/%m', 5, 'detectors 1 / 3'))
+    jf = w.job('fastest', 'fastest')
+    check('run window: run all 3: each preset into its subfolder, one shared cache, its own top X / Y, refined points',
+          (os.path.basename(jf['output_dir']), jf['temp_dir'] == os.path.join(tmp, 'out_runwin', '_cache'),
+           jf['cross_top_n'], jf['final_points'], [m.replace(' ', '_') for m in G.P.MODES]),
+          ('fastest', True, 3, 24, ['fastest', 'accurate', 'most_accurate']))
     check('run window: the job carries the paths and choices (top 2, 2 agreeing); Check runs the preflight and reports',
           (job['detectors'], job['device'], job['cloud_mask'], job['max_expected_error_m'], ok, job['cross_min_agree'],
            os.path.exists(os.path.join(tmp, 'out_runwin', 'job_preset.json')), w.stage.text()),
@@ -5511,6 +5562,7 @@ def main():
         test_finish(tmp)
         test_report(tmp)
         test_interior_and_final(tmp)
+        test_extract_bands(tmp)
         test_target(tmp)
         test_presets(tmp)
         test_jobs_312_317(tmp)

@@ -50,12 +50,12 @@ INFO_KEYS = ('note', 'band_hint', 'top_n', 'agree', 'fast_detectors', 'slow_dete
 
 # Two ways to run each sensor. accurate: its ranked list, both RANSAC
 # estimators, 512 px sub-cells, the error where 3 of the top 5 agree.
-# fastest: its fast list (1-3 min per pass), MAGSAC only, no sub-cells, the
+# fastest: its fast list (1-3 min per pass), the same RANSAC and sub-cells, the
 # error where 2 of the top 3 agree: about a fifth of the time.
 # most accurate: the ranked list plus the slow ones that ranked well but were
 # left out for their time (DKM, RoMa, KeyNet, OmniGlue, ...), all of them run, 4
 # agreeing: several times the accurate preset's time.
-MODES = {'fastest': {'ransac_methods': ['magsac'], 'subcell_px': [], 'top_n': 3, 'agree': 2},
+MODES = {'fastest': {'top_n': 3, 'agree': 2},       # same RANSAC / sub-cells: results shared between presets
          'accurate': {},
          'most accurate': {'top_n': 13, 'agree': 4}}
 SENSORS: Dict[str, Dict] = {
@@ -208,7 +208,7 @@ def job_for(sensor: str, input_path: str, reference_dir: str, output_dir: str, t
             bands: Optional[List[str]] = None, max_error_km: Optional[float] = None, device: str = '',
             cloud: Optional[bool] = None, weights_dir: str = '', presets: Optional[Dict] = None,
             crispest: int = 0, top_n: Optional[int] = None, agree: Optional[int] = None,
-            mode: str = 'accurate') -> Tuple[Dict, str]:
+            mode: str = 'accurate', final_points: Optional[int] = None, temp_dir: str = '') -> Tuple[Dict, str]:
     """(job, note): the sensor's preset with this run's paths and the few
     things chosen in the window (search range without truth, device, clouds
     on / off) and the band(s): the user's; else, when asked, the crispest N;
@@ -253,6 +253,10 @@ def job_for(sensor: str, input_path: str, reference_dir: str, output_dir: str, t
         job['cloud_mask'] = 'on' if cloud else 'none'
     if weights_dir:
         job['weights_cache_dir'] = weights_dir
+    if final_points is not None:
+        job['final_points'] = int(final_points)
+    if temp_dir:
+        job['temp_dir'] = temp_dir
     return job, note
 
 
