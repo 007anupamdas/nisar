@@ -109,7 +109,10 @@ Two presets per sensor (**Preset**): *accurate* — the sensor's ranked
 list, MAGSAC and LMedS, 512 px sub-cells, 3 of the top 5 agreeing; *fastest*
 — its fast list (detectors at 1–3 min per pass that still rank well),
 MAGSAC only, no sub-cells, 2 of the top 3 agreeing, about a fifth of the
-time. Each sensor's list is ranked, best first: **Detectors: top X** runs the
+time; *most accurate* — the ranked list plus the slow detectors that ranked
+well but were left out for their time (DKM, RoMa, KeyNet, OmniGlue, D2-Net /
+GIM-RoMa), all 13 run, 4 agreeing, several times the time. Each sensor's
+list is ranked, best first: **Detectors: top X** runs the
 first X of it (5), and **error from top Y** (3) is how many of them must
 agree on an offset for it to count (the cross-check's `RIVAL_FINAL`). Both
 are per sensor, in the presets, and can be changed for a run. All: keypoints

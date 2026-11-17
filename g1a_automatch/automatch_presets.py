@@ -46,18 +46,23 @@ COMMON: Dict = {
 # Per sensor: what differs. The band(s) are the user's, per run (band_hint: a
 # suggestion shown beside the field). 'note' and 'band_hint' are shown in the
 # GUI, not sent to the job.
-INFO_KEYS = ('note', 'band_hint', 'top_n', 'agree', 'fast_detectors')   # read by the window, not job settings
+INFO_KEYS = ('note', 'band_hint', 'top_n', 'agree', 'fast_detectors', 'slow_detectors')   # read by the window
 
 # Two ways to run each sensor. accurate: its ranked list, both RANSAC
 # estimators, 512 px sub-cells, the error where 3 of the top 5 agree.
 # fastest: its fast list (1-3 min per pass), MAGSAC only, no sub-cells, the
 # error where 2 of the top 3 agree: about a fifth of the time.
-MODES = {'accurate': {},
-         'fastest': {'ransac_methods': ['magsac'], 'subcell_px': [], 'top_n': 3, 'agree': 2}}
+# most accurate: the ranked list plus the slow ones that ranked well but were
+# left out for their time (DKM, RoMa, KeyNet, OmniGlue, ...), all of them run, 4
+# agreeing: several times the accurate preset's time.
+MODES = {'fastest': {'ransac_methods': ['magsac'], 'subcell_px': [], 'top_n': 3, 'agree': 2},
+         'accurate': {},
+         'most accurate': {'top_n': 13, 'agree': 4}}
 SENSORS: Dict[str, Dict] = {
     'MV': {'detectors': ['disk', 'imw-minima-roma', 'imw-minima-loftr', 'loftr', 'imw-sfd2-nn', 'dog',
                          'imw-aliked-lg', 'imw-xfeat-lg'],
            'fast_detectors': ['loftr', 'imw-xfeat-lg', 'imw-aliked-lg', 'imw-sfd2-nn', 'imw-minima-loftr'],
+           'slow_detectors': ['imw-dkm', 'imw-roma', 'keynet', 'imw-omniglue', 'imw-d2net-nn'],
            'window_sizes': [1024], 'band_hint': 'band3 (650 nm)',
            'cloud_method_MV': 'omnicloudmask', 'cloud_bands': ['band5', 'band4', 'band6'],
            'note': 'MX-VNIR: 1024 px windows (better than 2048 in every MV job); clouds by OmniCloudMask on bands '
@@ -65,21 +70,25 @@ SENSORS: Dict[str, Dict] = {
                    'often; the fast list is the ones at 1-3 min per pass among the top 20.'},
     'HV': {'detectors': ['imw-lanet-nn', 'imw-ripe-nn', 'imw-rdd-nn', 'imw-minima-loftr', 'disk'],
            'fast_detectors': ['imw-lanet-nn', 'imw-ripe-nn', 'imw-minima-loftr', 'loftr', 'imw-xfeat-lg'],
+           'slow_detectors': ['imw-roma', 'imw-minima-roma', 'imw-dkm', 'keynet', 'imw-omniglue'],
            'window_sizes': [512], 'band_hint': 'the band you benchmarked (e.g. band30)',
            'note': 'HyS-VNIR: 512 px windows; clouds by the VNIR tests.'},
     'HS': {'detectors': ['imw-minima-roma', 'imw-roma', 'imw-eloftr', 'imw-topicfm', 'imw-lanet-nn'],
            'fast_detectors': ['imw-minima-loftr', 'imw-eloftr', 'imw-lanet-nn', 'loftr', 'imw-topicfm'],
+           'slow_detectors': ['imw-dkm', 'imw-gim-roma', 'keynet', 'imw-omniglue', 'disk'],
            'window_sizes': [512], 'band_hint': 'near 1250, 1650 or 2200 nm (e.g. band28), not 1380 / 1900 nm',
            'note': 'HyS-SWIR: 512 px windows; clouds by the SWIR tests. RoMa / MINIMA-RoMa reached 16 of 16 truth '
                    'points.'},
     'C3': {'detectors': ['disk', 'imw-minima-roma', 'imw-minima-loftr', 'loftr', 'imw-sfd2-nn'],
            'fast_detectors': ['loftr', 'imw-xfeat-lg', 'imw-aliked-lg', 'imw-sfd2-nn', 'imw-minima-loftr'],
+           'slow_detectors': ['imw-dkm', 'imw-roma', 'keynet', 'imw-omniglue', 'imw-d2net-nn'],
            'window_sizes': [1024], 'band_hint': 'the MX band you benchmarked (PAN: band1)',
            'cloud_method_MV': 'omnicloudmask',
            'note': 'Cartosat-3 (MX / PAN): no benchmark yet; the detectors that did best on G1A MV as a start. '
                    'References: C1 over India, L8 elsewhere (the run window chooses by the scene centre).'},
     'ML': {'detectors': ['imw-minima-roma', 'imw-roma', 'imw-eloftr', 'imw-topicfm', 'imw-lanet-nn'],
            'fast_detectors': ['imw-minima-loftr', 'imw-eloftr', 'imw-lanet-nn', 'loftr', 'imw-topicfm'],
+           'slow_detectors': ['imw-dkm', 'imw-gim-roma', 'keynet', 'imw-omniglue', 'disk'],
            'window_sizes': [512], 'band_hint': 'not band1 (7.35 um) or band6 (13.25 um)',
            'note': 'MX-LWIR: no benchmark yet, the HS list as a start; gradient window preparation (thermal against '
                    'optical); clouds by the infrared tests.'},
@@ -210,9 +219,11 @@ def job_for(sensor: str, input_path: str, reference_dir: str, output_dir: str, t
     job = copy.deepcopy(presets[sensor])
     if mode not in MODES:
         raise ValueError(f'mode {mode!r}: one of {", ".join(MODES)}')
-    fast = job.pop('fast_detectors', None)
+    fast, slow = job.pop('fast_detectors', None), job.pop('slow_detectors', None)
     if mode == 'fastest' and fast:
         job['detectors'] = list(fast)
+    elif mode == 'most accurate' and slow:
+        job['detectors'] = list(job['detectors']) + [d for d in slow if d not in job['detectors']]
     job.update(copy.deepcopy(MODES[mode]))
     note = job.pop('note', '')
     job.pop('band_hint', None)

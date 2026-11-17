@@ -97,6 +97,9 @@ class RunWindow(QtWidgets.QMainWindow):
         self.mode.setToolTip('accurate: the sensor\'s ranked detectors, MAGSAC + LMedS, 512 px sub-cells, 3 of 5 '
                              'agreeing. fastest: its fast detectors (1-3 min per pass), MAGSAC, no sub-cells, 2 of 3 '
                              'agreeing: about a fifth of the time')
+        self.mode.setToolTip(self.mode.toolTip() + '. most accurate: the ranked list plus the slow detectors that '
+                             'ranked well (DKM, RoMa, KeyNet, OmniGlue, ...), all run, 4 agreeing: several times '
+                             'the time')
         self.mode.setCurrentText(self.settings.value('mode', 'accurate') or 'accurate')
         self.mode.currentIndexChanged.connect(lambda *_: (setattr(self, '_shown_sensor', None), self.refresh()))
         self.bands = QtWidgets.QLineEdit()
@@ -195,6 +198,8 @@ class RunWindow(QtWidgets.QMainWindow):
             p = dict(self.presets[s], **P.MODES[m])
             if m == 'fastest' and p.get('fast_detectors'):
                 p['detectors'] = p['fast_detectors']
+            elif m == 'most accurate' and p.get('slow_detectors'):
+                p['detectors'] = list(p['detectors']) + [d for d in p['slow_detectors'] if d not in p['detectors']]
             if s != getattr(self, '_shown_sensor', None):     # the preset's own numbers, until changed here
                 self.top_n.setValue(int(p.get('top_n', 5) or 5))
                 self.agree.setValue(int(p.get('agree', 3) or 3))

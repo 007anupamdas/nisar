@@ -1176,6 +1176,10 @@ def test_presets(tmp):
            'fast_detectors' in jf),
           ('disk', ['magsac', 'lmeds'], [512], 5, 3, ['loftr', 'imw-xfeat-lg', 'imw-aliked-lg'], ['magsac'], [], 3, 2,
            False))
+    jm, _ = P.job_for('MV', '/d/G1A_MV_x.tif', '/ref', '/out', '/t/pts_band4.csv', presets=pre, mode='most accurate')
+    check('presets: most accurate adds the slow ones that ranked well, all run, 4 agreeing',
+          (len(jm['detectors']), 'imw-dkm' in jm['detectors'], 'imw-omniglue' in jm['detectors'], jm['cross_top_n'],
+           jm['cross_min_agree'], list(P.MODES)), (13, True, True, 13, 4, ['fastest', 'accurate', 'most accurate']))
     check('presets: top X detectors run, the error from top Y agreeing',
           (len(j3['detectors']), j3['cross_top_n'], j3['cross_min_agree']), (3, 3, 2))
     job, _ = P.job_for('MV', '/d/G1A_MV_x.tif', '/ref', '/out', bands=P.parse_bands('4, band6'), max_error_km=30,
