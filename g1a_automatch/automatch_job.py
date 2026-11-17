@@ -195,12 +195,80 @@ def gpu_need_gb(detector: str, window: int) -> float:
     return max(a if w == 1024 else b, _learned_peaks().get(f'{fam}@{w}', 0.0))
 
 
-def gpu_order(detectors: List[str], window: int, own_gb: float, all_gb: List[float]) -> List[str]:
-    """The order a GPU worker goes through the queue: the largest GPU of the
-    job takes the heaviest detectors first, the others the lightest first,
-    so the heavy ones end on the GPU with the most memory."""
-    largest = own_gb >= max(all_gb or [own_gb]) - 0.5
-    return sorted(detectors, key=lambda d: gpu_need_gb(d, window), reverse=largest)
+def gpu_share(detectors: List[str], window: int, mem: Dict[int, float]) -> Dict[int, List[str]]:
+    """Each GPU's own share of the detectors: ranked by the memory they need,
+    the least-memory ones to the smallest GPU, the most to the largest
+    (contiguous runs of the ranking, as many detectors each as can be)."""
+    ranked = sorted(detectors, key=lambda d: (gpu_need_gb(d, window), d))
+    gpus = sorted(mem, key=lambda g: (mem[g], g))
+    n, k = len(ranked), max(1, len(gpus))
+    out, start = {}, 0
+    for i, g in enumerate(gpus):
+        stop = start + n // k + (1 if i >= k - n % k else 0)     # the larger GPUs take the odd one over
+        out[g] = ranked[start:stop]
+        start = stop
+    return out
+
+
+def gpu_order(detectors: List[str], window: int, own: int, mem: Dict[int, float]) -> List[str]:
+    """The order a GPU worker goes through the queue: its own share first
+    (gpu_share; the largest GPU its heaviest first, the others their lightest
+    first), and only then the other GPUs' shares, from their ends (what the
+    other GPU would reach last), so a GPU takes over another's work only when
+    its own is done. Too heavy for this GPU: left to the larger (install_queue)."""
+    share = gpu_share(detectors, window, mem)
+    largest = max(mem, key=lambda g: (mem[g], g)) if mem else own
+
+    def run_order(g):
+        return sorted(share.get(g, []), key=lambda d: gpu_need_gb(d, window), reverse=(g == largest))
+    order = run_order(own)
+    for g in sorted((g for g in share if g != own), key=lambda g: abs(mem[g] - mem.get(own, 0.0))):
+        order += list(reversed(run_order(g)))
+    return order
+
+
+def start_parent_watchdog(parent_pid=None, every_s: float = 3.0) -> None:
+    """A GPU worker ends itself when the process that started it is gone
+    (the run was stopped: the GUI ends the parent; on Windows its children
+    would otherwise go on using the GPU)."""
+    import threading
+    try:
+        ppid = int(parent_pid or os.environ.get('AUTOMATCH_PARENT_PID') or 0)
+    except ValueError:
+        ppid = 0
+    if ppid <= 0:
+        return
+
+    def watch():
+        while True:
+            time.sleep(every_s)
+            if not process_alive(ppid):
+                print(f'[Job] the run was stopped (parent {ppid} gone): this worker ends', flush=True)
+                os._exit(3)
+    threading.Thread(target=watch, daemon=True).start()
+
+
+def process_alive(pid: int) -> bool:
+    """Whether a process is still running (on Windows: not merely a handle left open)."""
+    try:
+        if os.name == 'nt':
+            import ctypes
+            k = ctypes.windll.kernel32
+            h = k.OpenProcess(0x1000, False, int(pid))          # PROCESS_QUERY_LIMITED_INFORMATION
+            if not h:
+                return False
+            code = ctypes.c_ulong()
+            ok = k.GetExitCodeProcess(h, ctypes.byref(code))
+            k.CloseHandle(h)
+            return bool(ok) and code.value == 259            # STILL_ACTIVE
+        os.kill(int(pid), 0)
+        try:                                                   # a zombie (ended, not yet reaped) is gone too
+            with open(f'/proc/{int(pid)}/stat') as f:
+                return f.read().split(')')[-1].split()[0] != 'Z'
+        except OSError:
+            return True
+    except (OSError, ValueError, AttributeError):
+        return False
 
 
 def gpus_of(device: str) -> List[int]:
@@ -230,6 +298,7 @@ def fan_out(script: str, argv: List[str], gpus: List[int], extra=None) -> int:
     procs = []
     for i, g in enumerate(gpus):
         env = dict(os.environ)
+        env['AUTOMATCH_PARENT_PID'] = str(os.getpid())   # the workers end when the run is stopped
         for k in ('CUDA_VISIBLE_DEVICES', 'AUTOMATCH_GPU'):
             env.pop(k, None)
         cmd = [sys.executable, script] + list(argv) + ['--device', f'cuda:{g}', '--shard', f'{i}/{len(gpus)}']
@@ -412,7 +481,10 @@ def run_sharded(job: Dict, gpus: List[int], out_root: str) -> List[Dict]:
     mem = gpu_memory_gb()
     if mem:
         print('[Job] GPU memory: ' + ', '.join(f'GPU {g}: {mem.get(g, 0):.0f} GB' for g in gpus)
-              + ' -- the heavy detectors go to the larger GPU first', flush=True)
+              + ' -- the least-memory detectors to the smaller GPU, the most to the larger; a GPU takes over '
+                'the other\'s only when its own are done', flush=True)
+        for g, share in gpu_share(dets, max(job.get('window_sizes') or [1024]), {g: mem[g] for g in gpus if g in mem}).items():
+            print(f'[Job] GPU {g} ({mem[g]:.0f} GB) first: {", ".join(share)}', flush=True)
     queue = os.path.join(out_root, '_queue', f'{time.strftime("%Y%m%d_%H%M%S")}_{os.getpid()}')
     os.makedirs(queue, exist_ok=True)
     print(f'[Job] {len(dets)} detector(s) on one queue for GPUs {", ".join(map(str, gpus))}: each GPU takes '
@@ -429,6 +501,7 @@ def run_sharded(job: Dict, gpus: List[int], out_root: str) -> List[Dict]:
         with open(jp, 'w', encoding='utf-8') as f:
             json.dump(sub, f, indent=2)
         env = dict(os.environ)
+        env['AUTOMATCH_PARENT_PID'] = str(os.getpid())   # the workers end when the run is stopped
         for k in ('CUDA_VISIBLE_DEVICES', 'AUTOMATCH_GPU'):
             env.pop(k, None)
         p = subprocess.Popen([sys.executable, os.path.abspath(__file__), 'run', jp], stdout=subprocess.PIPE,
@@ -1706,6 +1779,8 @@ def set_interior_filter(job: Dict, scene, out_root: str) -> None:
 
 def run_job(job: Dict) -> Dict:
     job = expand_selection(normalize(job))
+    if job.get('_shard') is not None:
+        start_parent_watchdog()                # a stopped run ends this worker too
     gpus = [] if job.get('_shard') is not None else gpus_of(job['device'])
     if gpus and len(job['detectors']) < 2:
         gpus = []
@@ -1815,7 +1890,7 @@ def run_job(job: Dict) -> Dict:
                     install_queue(E, job, out_dir, tag, win, nf)
                     mem = {int(k): float(v) for k, v in (job.get('_gpu_mem') or {}).items()}
                     if mem and job.get('_shard') is not None:
-                        run_dets = gpu_order(list(detectors), win, mem.get(int(job['_shard']), 0.0), list(mem.values()))
+                        run_dets = gpu_order(list(detectors), win, int(job['_shard']), mem)
                 records = E.AutoMatchPipeline(cfg).run(job['input_path'], run_dets)
                 with open(key_path, 'w') as fh:
                     fh.write(key)

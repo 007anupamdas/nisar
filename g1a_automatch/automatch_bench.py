@@ -780,6 +780,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                      'cross': {'top_n': 0 if a.no_cross else a.top, 'min_agree': a.min_agree, 'cell_km': a.cell_km}}
     out_dir = a.out or a.folder[0]
     os.makedirs(out_dir, exist_ok=True)
+    if a.shard:
+        J.start_parent_watchdog()              # a stopped benchmark ends this GPU worker too
     return batch(out_dir, a.jobs, a.success_px, a.recompute, a.all_jobs, cross,
                  a.cloud_model_dir if a.cloud == 'omnicloudmask' else None, accuracy, J.parse_shard(a.shard),
                  cloudfree, [f for f in a.folder if os.path.normpath(f) != os.path.normpath(out_dir)])

@@ -182,11 +182,15 @@ points' own statistics (the truth file: n, mean dE / dN, RMSE, CE90) as a
 row, and each final file's difference to them (`*_vs_manual_m`): the goal is
 near 0.
 
-**GPU memory.** With two GPUs, the job reads each GPU's memory: the larger
-GPU's worker takes the heaviest detectors first (peak memory per detector
-and window from jobs 1068 / 1069, `GPU_NEED_GB`), the smaller one the
-lightest first and leaves to the larger any detector needing more than 85 %
-of its own memory. Each detector's peak is also learned on the machine
+**GPU memory.** With two GPUs, the job reads each GPU's memory and ranks the
+detectors by the memory they need (per detector and window, `GPU_NEED_GB`
+from jobs 1068 / 1069, raised by what was seen on the machine): the
+least-memory half is the smaller GPU's own share, the rest the larger's (the
+log lists both). Each GPU runs its own share first and takes over work from
+the other only when its own is done, from the end of the other's list; the
+smaller one never takes a detector needing more than 85 % of its memory.
+**Stop** ends the run and its GPU workers (the whole process tree; a worker
+also ends itself within seconds when its parent is gone). Each detector's peak is also learned on the machine
 (`~/.automatch/gpu_peaks.json`, the largest seen per detector and window
 size), so a detector that once filled a GPU (imw-rdd-nn: 16 GB on the A4000
 at 2048 px) goes to the larger one next time. The progress bars read

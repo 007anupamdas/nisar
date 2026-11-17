@@ -994,6 +994,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             print('\n'.join(problems))
             return 2
     out = a.out or os.path.join(os.path.dirname(os.path.abspath(a.images[0])), 'cloud_sweep')
+    if a.shard:
+        J.start_parent_watchdog()              # a stopped sweep ends this GPU worker too
     run(a.images, out, a.reference, a.sensor, a.conf, a.bright, ' '.join(a.blob_km2), ' '.join(a.shadow_km),
         a.crisp, not a.no_spec, a.classes, a.model_dir, a.device, a.max_side, a.write_top, pngs=a.pngs,
         sheets=a.sheets, method=a.method, ir_dt=a.ir_dt, ir_split=a.ir_split, swir_k=a.swir_k,

@@ -32,6 +32,30 @@ sys.path.insert(0, HERE)
 import automatch_presets as P  # noqa: E402
 from automatch_job import AUTOMATCH_VERSION, PROGRESS_PREFIX  # noqa: E402  (no torch import)
 
+
+def kill_tree(proc) -> None:
+    """End a QProcess and every process it started (the GPU workers of a
+    two-GPU run): taskkill /T on Windows, the children first elsewhere. The
+    workers also end themselves when their parent is gone."""
+    import subprocess
+    try:
+        pid = int(proc.processId())
+    except Exception:
+        pid = 0
+    if pid > 0:
+        try:
+            if os.name == 'nt':
+                subprocess.run(['taskkill', '/PID', str(pid), '/T', '/F'], capture_output=True, timeout=15,
+                               creationflags=0x08000000)
+            else:
+                subprocess.run(['pkill', '-TERM', '-P', str(pid)], capture_output=True, timeout=15)
+        except Exception:
+            pass
+    try:
+        proc.kill()
+    except Exception:
+        pass
+
 DEVICES = ('all', 'auto', 'cuda:0', 'cuda:1', 'cpu')
 
 
@@ -296,7 +320,7 @@ class RunWindow(QtWidgets.QMainWindow):
 
     def stop(self):
         if self.proc is not None:
-            self.proc.kill()
+            kill_tree(self.proc)                 # the run and its GPU workers
 
     def results(self):
         """The files for RIVAL in the output folder."""

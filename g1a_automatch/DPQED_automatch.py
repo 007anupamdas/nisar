@@ -44,6 +44,30 @@ JOB_SCRIPT = os.path.join(HERE, 'automatch_job.py')
 sys.path.insert(0, HERE)
 from automatch_job import AUTOMATCH_VERSION, DEFAULT_JOB, PROGRESS_PREFIX  # noqa: E402  (no torch import)
 
+
+def kill_tree(proc) -> None:
+    """End a QProcess and every process it started (the GPU workers of a
+    two-GPU run): taskkill /T on Windows, the children first elsewhere. The
+    workers also end themselves when their parent is gone."""
+    import subprocess
+    try:
+        pid = int(proc.processId())
+    except Exception:
+        pid = 0
+    if pid > 0:
+        try:
+            if os.name == 'nt':
+                subprocess.run(['taskkill', '/PID', str(pid), '/T', '/F'], capture_output=True, timeout=15,
+                               creationflags=0x08000000)
+            else:
+                subprocess.run(['pkill', '-TERM', '-P', str(pid)], capture_output=True, timeout=15)
+        except Exception:
+            pass
+    try:
+        proc.kill()
+    except Exception:
+        pass
+
 Qt = QtCore.Qt
 CHECKED = Qt.CheckState.Checked if QT_API != 'PyQt5' else Qt.Checked
 UNCHECKED = Qt.CheckState.Unchecked if QT_API != 'PyQt5' else Qt.Unchecked
@@ -3826,9 +3850,8 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             self.queue_on.setChecked(False)
             self.log.appendPlainText(f'--- queue paused ({len(self._run_queue)} waiting): tick "Run the queue" '
                                      f'to go on')
-        self.lbl_status.setText('Stopping …')
-        self.proc.terminate()
-        QtCore.QTimer.singleShot(5000, lambda: self.proc and self.proc.kill())
+        self.lbl_status.setText('Stopping … (the run and its GPU workers)')
+        kill_tree(self.proc)
 
     def open_output(self):
         self._open_path(self.out_path.text())

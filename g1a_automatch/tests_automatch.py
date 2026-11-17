@@ -730,6 +730,7 @@ def test_interior_and_final(tmp):
     import automatch_cross as X
     import automatch_interior as IM
     import automatch_job as J
+    import time as _wd_time
     rng = np.random.default_rng(7)
     n = 600
     img = (1000 + 300 * rng.random((n, n))).astype(np.float32)          # textured land
@@ -762,8 +763,27 @@ def test_interior_and_final(tmp):
            bool(tiles.loc[tiles['status'] != 'ok', 'status'].str.contains('no agreed matches').all()),
            float((fin['dE'] - 500).abs().max()) < 60), (True, True, True, True, True))
     # GPU routing
-    o_big = J.gpu_order(['imw-xfeat-lg', 'imw-gim-dkm', 'disk'], 1024, 20.0, [16.0, 20.0])
-    o_small = J.gpu_order(['imw-xfeat-lg', 'imw-gim-dkm', 'disk'], 1024, 16.0, [16.0, 20.0])
+    dets = ['imw-xfeat-lg', 'imw-gim-dkm', 'disk', 'imw-lanet-nn', 'imw-rdd-dense', 'loftr']
+    mem = {0: 16.0, 1: 20.0}
+    share = J.gpu_share(dets, 1024, mem)
+    o_big = J.gpu_order(dets, 1024, 1, mem)
+    o_small = J.gpu_order(dets, 1024, 0, mem)
+    check('gpu: ranked by memory, the least-memory half to the smaller GPU, the rest to the larger; each runs its '
+          'own share first and only then takes over the other\'s, from its end',
+          (sorted(share[0]), sorted(share[1]), o_small[:3], o_small[3:], o_big[:3], o_big[3:]),
+          (['disk', 'imw-lanet-nn', 'imw-xfeat-lg'], ['imw-gim-dkm', 'imw-rdd-dense', 'loftr'],
+           ['imw-lanet-nn', 'imw-xfeat-lg', 'disk'], ['loftr', 'imw-rdd-dense', 'imw-gim-dkm'],
+           ['imw-gim-dkm', 'imw-rdd-dense', 'loftr'], ['disk', 'imw-xfeat-lg', 'imw-lanet-nn']))
+    import subprocess
+    gone = subprocess.Popen([sys.executable, '-c', 'pass'])
+    gone.wait()
+    t0 = _wd_time.time()
+    w = subprocess.run([sys.executable, '-c', 'import sys, time; sys.path.insert(0, sys.argv[1]); import automatch_job as J; '
+                        'J.start_parent_watchdog(int(sys.argv[2]), 0.2); time.sleep(20)', HERE, str(gone.pid)],
+                       capture_output=True, text=True, timeout=60)
+    check('gpu worker: ends itself when the run that started it is gone (Stop)',
+          (J.process_alive(os.getpid()), J.process_alive(gone.pid), w.returncode, _wd_time.time() - t0 < 15),
+          (True, False, 3, True))
     import types
     e0 = types.SimpleNamespace()
     job = J.normalize({'input_path': os.path.join(tmp, 'x.tif'), 'output_dir': os.path.join(tmp, 'gq2'),
@@ -774,7 +794,7 @@ def test_interior_and_final(tmp):
           'its memory to the larger',
           (o_big[0], o_small[0], e0.CLAIM_HOOK('b1', 'imw-sp-lg-kt0p2'), e0.CLAIM_HOOK('b1', 'disk_depth'),
            J.gpu_need_gb('imw-rdd-nn-kt0p2', 2048)),
-          ('imw-gim-dkm', 'imw-xfeat-lg', False, True, 16.0))
+          ('imw-gim-dkm', 'imw-lanet-nn', False, True, 16.0))
     J.install_queue(e0, dict(job, _queue=os.path.join(tmp, 'gq2', 'q2'), _shard=0, _gpu_mem={'0': 16.0, '1': 20.0}),
                     os.path.join(tmp, 'gq2', 'w2'), 'w2', 2048, None)
     old_file = J.GPU_PEAKS_FILE
