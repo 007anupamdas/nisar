@@ -887,6 +887,20 @@ def test_interior_and_final(tmp):
     check('gpu: a detector too heavy for the smaller GPU is left to the larger while it is its own; a peak seen '
           'here is learned',
           (refused, learned), (False, 15.2))
+    J.install_queue(e0, dict(heavy, _queue=os.path.join(tmp, 'gq2', 'q3'), _shard=0, _gpu_mem={'0': 16.0, '1': 20.0}),
+                    os.path.join(tmp, 'gq2', 'w3'), 'w3', 1024, None)
+    old_file = J.GPU_PEAKS_FILE
+    J.GPU_PEAKS_FILE = os.path.join(tmp, 'gpu_peaks2.json')
+    try:
+        e0.CLAIM_HOOK('b1', 'imw-xfeat-lg')
+        e0.UNIT_DONE_HOOK('b1', 'imw-xfeat-lg', {'status': 'failed', 'error': 'RuntimeError: CUDA out of memory.'})
+        qd = os.path.join(tmp, 'gq2', 'q3', 'w3')
+        back = (os.path.exists(os.path.join(qd, J._unit_name('b1', 'imw-xfeat-lg') + '.handback')),
+                os.path.exists(os.path.join(qd, J._unit_name('b1', 'imw-xfeat-lg'))), J.gpu_need_gb('imw-xfeat-lg', 1024))
+    finally:
+        J.GPU_PEAKS_FILE = old_file
+    check('gpu: out of memory on the smaller GPU: handed back (marked for the larger, claim freed), remembered as '
+          'needing all of it', back, (True, False, 16.0))
     check('gpu: a heavy detector is never taken over by the smaller GPU (CUDA out of memory)',
           (taken_over, kept_big), (False, False))
 

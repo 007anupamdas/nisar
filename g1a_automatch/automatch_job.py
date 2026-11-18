@@ -402,9 +402,6 @@ def install_queue(E, job: Dict, out_dir: str, tag: str, win: int, nf: Optional[i
     mem = {int(k): float(v) for k, v in (job.get('_gpu_mem') or {}).items()}
     own = mem.get(int(shard), 0.0) if shard is not None else 0.0
     bigger = own > 0 and any(v > own + 0.5 for v in mem.values())
-    own_share = set()
-    if bigger and shard is not None:
-        own_share = {_gpu_family(d) for d in gpu_share(list(job.get('detectors') or []), win, mem).get(int(shard), [])}
     reuse = job.get('_reuse') or ''             # finish mode: the finished records of an earlier run, any code
     earlier = _summary_records(out_dir, job) if reuse else {}
     shared = _results_dir(job, tag)
@@ -460,7 +457,12 @@ def install_queue(E, job: Dict, out_dir: str, tag: str, win: int, nf: Optional[i
                 os.remove(os.path.join(claims, _unit_name(channel, dtag)))
             except OSError:
                 pass
-            print(f'[Job] {dtag}: out of GPU memory here ({own:.0f} GB): left to the larger GPU', flush=True)
+            try:
+                with open(os.path.join(claims, _unit_name(channel, dtag) + '.handback'), 'w', encoding='utf-8') as f:
+                    f.write(f'{dtag}\n{channel}\n')
+            except OSError:
+                pass
+            print(f'[Job] {dtag}: out of GPU memory here ({own:.0f} GB): handed to the larger GPU', flush=True)
             return
         if rec.get('status') == 'ok':
             learn_gpu_peak(dtag, win, max(float(rec.get('gpu_peak_gb') or 0), float(rec.get('gpu_reserved_gb') or 0)))
@@ -602,8 +604,50 @@ def run_sharded(job: Dict, gpus: List[int], out_root: str) -> List[Dict]:
         t.start()
     for t in threads:
         t.join()
+    # handed back: detectors that ran out of memory on a smaller GPU, run now on the largest, in this job
+    back = []
+    for dp, _, fs in os.walk(queue):
+        for f in fs:
+            if f.endswith('.handback'):
+                tag = _read_text(os.path.join(dp, f)).splitlines()[0] if _read_text(os.path.join(dp, f)) else ''
+                base = max((d for d in dets if tag == d or tag.startswith(d + '_') or tag.startswith(d + '-')),
+                           key=len, default='')
+                if base and base not in back:
+                    back.append(base)
+    big = max(gpus, key=lambda g: (mem.get(g, 0.0), g)) if mem else gpus[-1]
+    rows_back: List[Dict] = []
+    if back:
+        print(f'[Job] out of memory on the smaller GPU: {", ".join(back)} -- running on GPU {big} now', flush=True)
+        jp = os.path.join(out_root, f'job_gpu{big}.json')
+        with open(jp, encoding='utf-8') as f:
+            sub = json.load(f)
+        sub.update(detectors=back, _gpu_mem={})                 # one GPU: it takes whatever is left
+        jp2 = os.path.join(out_root, f'job_gpu{big}_handback.json')
+        with open(jp2, 'w', encoding='utf-8') as f:
+            json.dump(sub, f, indent=2)
+        mp_big = os.path.join(out_root, f'RUN_MANIFEST_gpu{big}.csv')
+        first = mp_big + '.first'
+        if os.path.exists(mp_big):
+            os.replace(mp_big, first)
+        env = dict(os.environ)
+        env['AUTOMATCH_PARENT_PID'] = str(os.getpid())
+        for k in ('CUDA_VISIBLE_DEVICES', 'AUTOMATCH_GPU'):
+            env.pop(k, None)
+        p2 = subprocess.Popen([sys.executable, os.path.abspath(__file__), 'run', jp2], stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, text=True, env=env, bufsize=1, encoding='utf-8',
+                              errors='replace')
+        relay(big, p2)
+        p2.wait()
+        import pandas as pd
+        try:
+            rows_back = pd.read_csv(mp_big).to_dict('records') if os.path.exists(mp_big) else []
+        except pd.errors.EmptyDataError:
+            rows_back = []
+        if os.path.exists(first):
+            os.replace(first, mp_big)
     rows = []
-    claimed = [_read_text(os.path.join(dp, f)) for dp, _, fs in os.walk(queue) for f in fs]
+    claimed = [_read_text(os.path.join(dp, f)) for dp, _, fs in os.walk(queue) for f in fs
+               if not f.endswith('.handback')]
     ran = {g: claimed.count(str(g)) for g, _ in procs}
     shutil.rmtree(queue, ignore_errors=True)
     try:
@@ -624,6 +668,10 @@ def run_sharded(job: Dict, gpus: List[int], out_root: str) -> List[Dict]:
         else:
             rows.append({'sweep': '', 'detector': f'(GPU {g} worker)', 'status': 'failed',
                          'error': f'no manifest from the GPU {g} worker (exit code {rc})'})
+    if rows_back:                              # the second try replaces the out-of-memory failures
+        redone = {(str(r.get('sweep')), str(r.get('channel')), str(r.get('detector'))) for r in rows_back}
+        rows = [r for r in rows if (str(r.get('sweep')), str(r.get('channel')), str(r.get('detector'))) not in redone]
+        rows += rows_back
     return rows
 
 
