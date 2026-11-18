@@ -50,7 +50,7 @@ import pandas as pd  # noqa: E402
 MAX_POINTS_PER_CELL = 200      # per configuration and cell, in the RIVAL file
 MAX_FINAL_POINTS = 500         # RIVAL_DENSE_<channel>.csv: up to this many, spread over what has matches (0: off)
 FINAL_POINTS = 24              # RIVAL_FINAL_<channel>.csv: one best point per sub-tile of a grid over the scene
-CONSISTENT_CELL_PX = 64        # RIVAL_CONSISTENT_<channel>.csv: cells of this many working pixels (8 x 8 in a
+CONSISTENT_CELL_PX = [64, 128]  # RIVAL_CONSISTENT_<channel>_<L>px.csv: cells of L working pixels (64: 8 x 8 in a
                                # 512 px window); a cell counts when the top detectors agree there, one point kept
 KEEP_PER_CELL = 3              # agreeing configurations kept per cell: the least distorted there
 OUTLIER_K = 3.0                # points further than this many x the cell's own scatter are dropped
@@ -435,9 +435,26 @@ def consistent_points(top: List[Dict], cell_m: float, tol_m: float, need: int) -
                               'kept_max_gap_m']).reset_index(drop=True), cells
 
 
-def _job_cell_px(d: str) -> int:
-    """The job's cross_cell_px (job_used.json), else CONSISTENT_CELL_PX."""
-    return _job_setting(d, 'cross_cell_px', CONSISTENT_CELL_PX)
+def cell_levels(v) -> List[int]:
+    """cross_cell_px as a list of levels: 64 -> [64]; [64, 128]; '64, 128'; 0 / [] -> []."""
+    if v is None:
+        return list(CONSISTENT_CELL_PX)
+    if isinstance(v, str):
+        v = [x for x in re.split(r'[,\s;]+', v.strip()) if x]
+    if not isinstance(v, (list, tuple)):
+        v = [v]
+    return [int(float(x)) for x in v if int(float(x)) > 0]
+
+
+def _job_cell_px(d: str) -> List[int]:
+    """The job's cross_cell_px (job_used.json) as levels, else CONSISTENT_CELL_PX."""
+    try:
+        import json
+        with open(os.path.join(d, 'job_used.json'), encoding='utf-8') as f:
+            v = json.load(f).get('cross_cell_px')
+    except (OSError, ValueError):
+        v = None
+    return cell_levels(v)
 
 
 def _job_final_points(d: str) -> int:
@@ -464,7 +481,12 @@ def final_of(rival_csv: str, crs: str, final_points: int = FINAL_POINTS, output_
     import automatch_rival as R2
     pts = R2.apply_point_mask(pts)                  # the interior / cloud filter, when on
     ch = re.search(r'_(band\d+|[A-Z]{2})\.csv$', name)
-    cpath = os.path.join(os.path.dirname(rival_csv), f'CONSISTENT_CELLS_{ch.group(1)}.csv') if ch else ''
+    cpath = ''
+    if ch:                                  # the finest agreement level's cells
+        import glob as _g
+        lv = sorted(_g.glob(os.path.join(os.path.dirname(rival_csv), f'CONSISTENT_CELLS_{ch.group(1)}_*px.csv')),
+                    key=lambda p: int(re.search(r'_(\d+)px\.csv$', p).group(1)))
+        cpath = lv[0] if lv else os.path.join(os.path.dirname(rival_csv), f'CONSISTENT_CELLS_{ch.group(1)}.csv')
     if cpath and os.path.exists(cpath):           # only where the top detectors agree (64 px cells)
         try:
             cells = pd.read_csv(cpath)
@@ -507,7 +529,7 @@ def run(output_dir: str, top_n: int = 5, min_agree: int = 0, cell_km: float = 25
         cfgs: Optional[List[Dict]] = None, quiet: bool = False, keep: int = KEEP_PER_CELL,
         out_dir: Optional[str] = None, ranking_csv: Optional[str] = None,
         max_points: int = MAX_FINAL_POINTS, final_points: Optional[int] = None,
-        cell_px: Optional[int] = None) -> Dict[str, Dict]:
+        cell_px=None) -> Dict[str, Dict]:
     """Cross-check every channel of an output folder; returns per channel
     {'csv', 'summary', 'configs', 'cells', 'points', 'truth_rmse_m'}.
     out_dir: where its files go (default output_dir); ranking_csv: the truth
@@ -537,7 +559,7 @@ def run(output_dir: str, top_n: int = 5, min_agree: int = 0, cell_km: float = 25
     truth = T.truth_in_crs(T.load_truth(truth_csv), crs) if truth_csv else None
     need = min_agree if min_agree > 0 else max(2, top_n // 2 + 1)
     final_points = _job_final_points(output_dir) if final_points is None else int(final_points)
-    cell_px = _job_cell_px(output_dir) if cell_px is None else int(cell_px)
+    cell_px = _job_cell_px(output_dir) if cell_px is None else cell_levels(cell_px)
     res_m = float(T.job_resolution(output_dir) or 10.0)
     out: Dict[str, Dict] = {}
     summary_rows = []
@@ -575,37 +597,58 @@ def run(output_dir: str, top_n: int = 5, min_agree: int = 0, cell_km: float = 25
                 dpath = os.path.join(out_dir, f'RIVAL_DENSE_{ch}.csv')
                 R.write_rival_csv(dense, crs, dpath, dpath[:-4] + '_detail.csv')
                 res.update({'dense_csv': dpath, 'dense_points': int(len(dense))})
-            pool = pts
-            if cell_px > 0:                # the best keypoint of each 64 px cell where the top detectors agree
-                cpts, ccells = consistent_points(top, cell_px * res_m, tol, req)
-                ccells.assign(cell_m=cell_px * res_m, tolerance_m=tol).to_csv(
-                    os.path.join(out_dir, f'CONSISTENT_CELLS_{ch}.csv'), index=False)
-                n_c = int(ccells['kept'].sum()) if len(ccells) else 0
-                res.update({'consistent_cell_m': round(cell_px * res_m, 1), 'consistent_cells': n_c,
-                            'consistent_points': int(len(cpts))})
-                if len(cpts):
-                    cp = os.path.join(out_dir, f'RIVAL_CONSISTENT_{ch}.csv')
-                    R.write_rival_csv(cpts, crs, cp, cp[:-4] + '_detail.csv')
-                    res['consistent_csv'] = cp
-                    pool = cpts
-                    if truth is not None:
-                        s, _ = T.score_config({'points': cpts.assign(chip=cpts['source_file'])[
+            levels = [int(v) for v in cell_px if int(v) > 0] or [0]
+            for L in levels:               # each agreement level: its consistent points and its final pick
+                pool, sfx = pts, (f'_{L}px' if L > 0 else '')
+                if L > 0:                  # the best keypoint of each L px cell where the top detectors agree
+                    cpts, ccells = consistent_points(top, L * res_m, tol, req)
+                    ccells.assign(cell_m=L * res_m, tolerance_m=tol).to_csv(
+                        os.path.join(out_dir, f'CONSISTENT_CELLS_{ch}{sfx}.csv'), index=False)
+                    n_c = int(ccells['kept'].sum()) if len(ccells) else 0
+                    res.update({f'consistent_cell_m{sfx}': round(L * res_m, 1), f'consistent_cells{sfx}': n_c,
+                                f'consistent_points{sfx}': int(len(cpts))})
+                    if len(cpts):
+                        cp = os.path.join(out_dir, f'RIVAL_CONSISTENT_{ch}{sfx}.csv')
+                        R.write_rival_csv(cpts, crs, cp, cp[:-4] + '_detail.csv')
+                        res[f'consistent_csv{sfx}'] = cp
+                        pool = cpts
+                        if truth is not None:
+                            s, _ = T.score_config({'points': cpts.assign(chip=cpts['source_file'])[
+                                ['E', 'N', 'dE', 'dN', 'chip']]}, truth, 5000.0)
+                            res.update({f'consistent_truth_rmse_m{sfx}': s['truth_rmse_m'],
+                                        f'consistent_truth_reached{sfx}': s['truth_reached']})
+                if final_points > 0 and len(pool):   # no distortion: one offset for the whole scene
+                    mE, mN = float(pool['dE'].median()), float(pool['dN'].median())
+                    rig = pool[np.hypot(pool['dE'] - mE, pool['dN'] - mN) <= 2.0 * tol]
+                    ext_r, cov_r, _ = scene_extent(output_dir, crs, rig if len(rig) else pool)
+                    fin_r, tiles_r = final_grid(rig, ext_r, final_points, cov_r)
+                    rpath = os.path.join(out_dir, f'RIVAL_FINAL_{ch}{sfx}_rigid.csv')
+                    R.write_rival_csv(fin_r, crs, rpath, rpath[:-4] + '_detail.csv')
+                    tiles_r.to_csv(os.path.join(out_dir, f'FINAL_TILES_{ch}{sfx}_rigid.csv'), index=False)
+                    res.update({f'rigid_offset_dE_m{sfx}': round(mE, 1), f'rigid_offset_dN_m{sfx}': round(mN, 1),
+                                f'rigid_share{sfx}': round(len(rig) / float(len(pool)), 3),
+                                f'rigid_final_points{sfx}': int(len(fin_r)), f'rigid_csv{sfx}': rpath})
+                    if truth is not None and len(fin_r):
+                        s, _ = T.score_config({'points': fin_r.assign(chip=fin_r['source_file'])[
                             ['E', 'N', 'dE', 'dN', 'chip']]}, truth, 5000.0)
-                        res.update({'consistent_truth_rmse_m': s['truth_rmse_m'],
-                                    'consistent_truth_reached': s['truth_reached']})
-            if final_points > 0:           # the file for RIVAL: one best point per sub-tile of the scene
-                extent, covered, src = scene_extent(output_dir, crs, pool)
-                fin, tiles = final_grid(pool, extent, final_points, covered)
-                fpath = os.path.join(out_dir, f'RIVAL_FINAL_{ch}.csv')
-                R.write_rival_csv(fin, crs, fpath, fpath[:-4] + '_detail.csv')
-                tiles.to_csv(os.path.join(out_dir, f'FINAL_TILES_{ch}.csv'), index=False)
-                n_ok = int((tiles['status'] == 'ok').sum()) if len(tiles) else 0
-                res.update({'final_csv': fpath, 'final_points': int(len(fin)), 'final_tiles': int(len(tiles)),
-                            'final_tiles_ok': n_ok, 'final_extent_from': src})
-                if truth is not None and len(fin):
-                    s, _ = T.score_config({'points': fin.assign(chip=fin['source_file'])[
-                        ['E', 'N', 'dE', 'dN', 'chip']]}, truth, 5000.0)
-                    res.update({'final_truth_rmse_m': s['truth_rmse_m'], 'final_truth_reached': s['truth_reached']})
+                        res[f'rigid_truth_rmse_m{sfx}'] = s['truth_rmse_m']
+                if final_points > 0:       # the file for RIVAL: one best point per sub-tile of the scene
+                    extent, covered, src = scene_extent(output_dir, crs, pool)
+                    fin, tiles = final_grid(pool, extent, final_points, covered)
+                    fpath = os.path.join(out_dir, f'RIVAL_FINAL_{ch}{sfx}.csv')
+                    R.write_rival_csv(fin, crs, fpath, fpath[:-4] + '_detail.csv')
+                    tiles.to_csv(os.path.join(out_dir, f'FINAL_TILES_{ch}{sfx}.csv'), index=False)
+                    n_ok = int((tiles['status'] == 'ok').sum()) if len(tiles) else 0
+                    res.update({f'final_csv{sfx}': fpath, f'final_points{sfx}': int(len(fin)),
+                                f'final_tiles{sfx}': int(len(tiles)), f'final_tiles_ok{sfx}': n_ok,
+                                'final_extent_from': src})
+                    if 'final_csv' not in res:
+                        res['final_csv'] = fpath
+                    if truth is not None and len(fin):
+                        s, _ = T.score_config({'points': fin.assign(chip=fin['source_file'])[
+                            ['E', 'N', 'dE', 'dN', 'chip']]}, truth, 5000.0)
+                        res.update({f'final_truth_rmse_m{sfx}': s['truth_rmse_m'],
+                                    f'final_truth_reached{sfx}': s['truth_reached']})
             if truth is not None:
                 s, _ = T.score_config({'points': pts.assign(chip=pts['source_file'])[['E', 'N', 'dE', 'dN', 'chip']]},
                                       truth, 5000.0)
@@ -621,19 +664,31 @@ def run(output_dir: str, top_n: int = 5, min_agree: int = 0, cell_km: float = 25
             if res.get('truth_rmse_m') is not None:
                 msg += f"; truth RMSE {res['truth_rmse_m']:.0f} m at {res['truth_reached']}/{res['truth_total']}"
             print(msg + (f" -> {res['csv']}" if res.get('csv') else ''))
-            if res.get('consistent_points') is not None:
-                print(f"[Cross] {ch}: {res['consistent_points']} consistent points: the best keypoint of each "
-                      f"{cell_px} px cell ({res['consistent_cell_m']:.0f} m) where {req}+ of the top {len(top)} agree"
-                      + (f" (truth RMSE {res['consistent_truth_rmse_m']:.0f} m at {res['consistent_truth_reached']}/"
-                         f"{res['truth_total']})" if res.get('consistent_truth_rmse_m') is not None else '')
-                      + (f" -> {res['consistent_csv']}" if res.get('consistent_csv') else ''))
-            if res.get('final_csv'):
-                print(f"[Cross] {ch}: for RIVAL: {res['final_points']} best points, one per sub-tile "
-                      f"({res['final_tiles_ok']} of {res['final_tiles']} tiles have one; FINAL_TILES_{ch}.csv says "
-                      f"why the others failed)"
-                      + (f" (truth RMSE {res['final_truth_rmse_m']:.0f} m at {res['final_truth_reached']}/"
-                         f"{res['truth_total']})" if res.get('final_truth_rmse_m') is not None else '')
-                      + f" -> {res['final_csv']}")
+            for L in [int(v) for v in cell_px if int(v) > 0] or [0]:
+                sfx = f'_{L}px' if L > 0 else ''
+                if res.get(f'consistent_points{sfx}') is not None:
+                    print(f"[Cross] {ch}: {L} px: {res[f'consistent_points{sfx}']} consistent points: the best "
+                          f"keypoint of each {L} px cell ({res[f'consistent_cell_m{sfx}']:.0f} m) where {req}+ of the "
+                          f"top {len(top)} agree"
+                          + (f" (truth RMSE {res[f'consistent_truth_rmse_m{sfx}']:.0f} m at "
+                             f"{res[f'consistent_truth_reached{sfx}']}/{res['truth_total']})"
+                             if res.get(f'consistent_truth_rmse_m{sfx}') is not None else '')
+                          + (f" -> {res[f'consistent_csv{sfx}']}" if res.get(f'consistent_csv{sfx}') else ''))
+                if res.get(f'rigid_csv{sfx}'):
+                    print(f"[Cross] {ch}: {L} px, no distortion (one offset {res[f'rigid_offset_dE_m{sfx}']:.0f} / "
+                          f"{res[f'rigid_offset_dN_m{sfx}']:.0f} m for the scene): {100 * res[f'rigid_share{sfx}']:.0f} % "
+                          f"of the consistent points fit it, {res[f'rigid_final_points{sfx}']} final points"
+                          + (f" (truth RMSE {res[f'rigid_truth_rmse_m{sfx}']:.0f} m)"
+                             if res.get(f'rigid_truth_rmse_m{sfx}') is not None else '')
+                          + f" -> {res[f'rigid_csv{sfx}']}")
+                if res.get(f'final_csv{sfx}'):
+                    print(f"[Cross] {ch}: {L} px: for RIVAL: {res[f'final_points{sfx}']} best points, one per sub-tile "
+                          f"({res[f'final_tiles_ok{sfx}']} of {res[f'final_tiles{sfx}']} tiles have one; "
+                          f"FINAL_TILES_{ch}{sfx}.csv says why the others failed)"
+                          + (f" (truth RMSE {res[f'final_truth_rmse_m{sfx}']:.0f} m at "
+                             f"{res[f'final_truth_reached{sfx}']}/{res['truth_total']})"
+                             if res.get(f'final_truth_rmse_m{sfx}') is not None else '')
+                          + f" -> {res[f'final_csv{sfx}']}")
             for c in top:
                 print(f"         {c['detector']} + {c['matcher']} {c['ransac']} ({c['sweep']})")
     if summary_rows:
@@ -975,9 +1030,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument('output_dir')
     ap.add_argument('--top', type=int, default=5, help='configurations compared, one per detector (default 5)')
     ap.add_argument('--min-agree', type=int, default=0, help='how many must agree in a cell (default: more than half)')
-    ap.add_argument('--cell-px', type=int, default=None,
-                    help=f'RIVAL_CONSISTENT: cells of this many working pixels where the top detectors must agree, '
-                         f'one best point each (default the job\'s cross_cell_px, else {CONSISTENT_CELL_PX}; 0: off)')
+    ap.add_argument('--cell-px', type=int, nargs='+', default=None,
+                    help=f'agreement levels: cells of these many working pixels where the top detectors must agree, '
+                         f'one best point each, and a final pick from each (default the job\'s cross_cell_px, else '
+                         f'{" ".join(map(str, CONSISTENT_CELL_PX))}; 0: off)')
     ap.add_argument('--final-points', type=int, default=None,
                     help=f'RIVAL_FINAL / RIVAL_BEST_FINAL: one best point per sub-tile of a grid of about this many '
                          f'over the scene (default the job\'s final_points, else {FINAL_POINTS})')

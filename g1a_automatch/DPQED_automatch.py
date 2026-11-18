@@ -2494,11 +2494,9 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.interior_edge.setToolTip('A match is inside when no textured pixel lies within this distance (input '
                                       'pixels): larger keeps more of the shore, smaller rejects more')
         self.interior_on.toggled.connect(self.interior_edge.setEnabled)
-        self.cell_px = QtWidgets.QSpinBox()
-        self.cell_px.setRange(0, 4096)
-        self.cell_px.setValue(64)
-        self.cell_px.setSuffix(' px')
-        self.cell_px.setToolTip('Consistent points: cells of this many working pixels (8 x 8 in a 512 px window); a '
+        self.cell_px = QtWidgets.QLineEdit('64, 128')
+        self.cell_px.setMaximumWidth(90)
+        self.cell_px.setToolTip('Agreement levels (px, e.g. 64, 128): cells of each size (64: 8 x 8 in a 512 px window); a '
                                 'cell counts where the top detectors agree, its best keypoint is kept '
                                 '(RIVAL_CONSISTENT), and the final points are picked only among these. 0: off')
         hf = QtWidgets.QHBoxLayout()
@@ -2815,7 +2813,9 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.cross_keep.setValue(int(j.get('cross_keep_per_cell') or 3))
         self.cross_max.setValue(int(500 if j.get('cross_max_points') is None else j['cross_max_points']))
         self.final_points.setValue(int(24 if j.get('final_points') is None else j['final_points']))
-        self.cell_px.setValue(int(64 if j.get('cross_cell_px') is None else j['cross_cell_px']))
+        cv = j.get('cross_cell_px')
+        self.cell_px.setText(', '.join(str(v) for v in (cv if isinstance(cv, (list, tuple)) else [cv]))
+                             if cv not in (None, '') else '64, 128')
         self.interior_on.setChecked(bool(True if j.get('interior_filter') is None else j['interior_filter']))
         self.interior_edge.setValue(float(j.get('interior_edge_px') or 4.0))
         self.channels.set_checked(list(j['channels'] or []))
@@ -2931,7 +2931,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             'cross_keep_per_cell': self.cross_keep.value(),
             'cross_max_points': self.cross_max.value(),
             'final_points': self.final_points.value(),
-            'cross_cell_px': self.cell_px.value(),
+            'cross_cell_px': parse_int_list(self.cell_px.text(), 'agreement cells') or [0],
             'interior_filter': self.interior_on.isChecked(),
             'interior_edge_px': self.interior_edge.value(),
             'detectors': dets,

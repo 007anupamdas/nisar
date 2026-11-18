@@ -38,7 +38,7 @@ COMMON: Dict = {
     'top_n': 5,                              # the first N detectors of the sensor's list run (ranked best first)
     'agree': 3,                              # the error is where at least this many of them agree (cross-check)
     'cross_max_points': 500,
-    'cross_cell_px': 64,                     # agreement cells: the best keypoint where the top detectors agree
+    'cross_cell_px': [64, 128],              # agreement levels: the best keypoint where the top detectors agree
     'cloud_mask': 'on', 'cloud_mask_classes': [1],
     'stretch_percentiles': [1, 99], 'window_prep': 'auto',
     'device': 'all', 'resume': True,
@@ -190,6 +190,12 @@ def reference_for(path: str, ref_l8: str, ref_c1: str = '', region=INDIA_REGION)
     return ref_l8, f'L8 (scene centre {lon:.2f}, {lat:.2f} outside the Indian region)'
 
 
+def parse_levels(text: str) -> List[int]:
+    """'64, 128' -> [64, 128]; '' or '0' -> [0] (off)."""
+    out = [int(float(t)) for t in re.split(r'[,\s;]+', str(text or '').strip()) if t]
+    return out or [0]
+
+
 def parse_bands(text: str) -> List[str]:
     """'28, band30 5' -> ['band28', 'band30', 'band5']."""
     out = []
@@ -258,7 +264,7 @@ def job_for(sensor: str, input_path: str, reference_dir: str, output_dir: str, t
     if final_points is not None:
         job['final_points'] = int(final_points)
     if cell_px is not None:
-        job['cross_cell_px'] = int(cell_px)
+        job['cross_cell_px'] = [int(v) for v in (cell_px if isinstance(cell_px, (list, tuple)) else [cell_px])]
     if temp_dir:
         job['temp_dir'] = temp_dir
     return job, note

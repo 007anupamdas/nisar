@@ -732,6 +732,42 @@ def test_target(tmp):
           ('MV', '/c1', '/l8', '/l8', 'C3'))
 
 
+def test_cross_levels(tmp):
+    """cross on a finished job: an agreement level each (64 and 128 px), a
+    consistent set and a final pick from each; the report plots every set."""
+    import glob
+    import numpy as np
+    import pandas as pd
+    import automatch_cross as X
+    import automatch_report as RP
+    rng = np.random.default_rng(9)
+
+    def cfg(det):
+        n = 3000
+        E, N = rng.uniform(0, 300000, n), rng.uniform(0, 300000, n)
+        dE, dN = 500 + rng.normal(0, 15, n), -300 + rng.normal(0, 15, n)
+        return {'channel': 'band3', 'sweep': 'win512_nfauto', 'detector': det, 'matcher': 'm', 'ransac': 'magsac45',
+                'points': pd.DataFrame({'E': E, 'N': N, 'dE': dE, 'dN': dN, 'x1-map': E, 'y1-map': N,
+                                        'x2-map': E - dE, 'y2-map': N - dN, 'source_file': det})}
+    out = os.path.join(tmp, 'levels_job')
+    os.makedirs(out, exist_ok=True)
+    import contextlib
+    import io
+    with contextlib.redirect_stdout(io.StringIO()):
+        res = X.run(out, 5, 3, 25.0, working_crs='EPSG:32644', cfgs=[cfg(d) for d in 'abcde'], cell_px=[64, 128],
+                    final_points=24)
+        rows = RP.report(out, quiet=True)
+    names = sorted(os.path.basename(p) for p in glob.glob(os.path.join(out, 'RIVAL_*.csv')) if '_detail' not in p)
+    r = res['band3']
+    check('cross levels: 64 and 128 px each give a consistent set, a final pick and a no-distortion (rigid) pick; '
+          'the report plots each set',
+          ('RIVAL_FINAL_band3_64px.csv' in names, 'RIVAL_FINAL_band3_128px.csv' in names,
+           'RIVAL_CONSISTENT_band3_128px.csv' in names and 'RIVAL_FINAL_band3_64px_rigid.csv' in names,
+           r['consistent_points_64px'] > 0 < r['consistent_points_128px'],
+           len(rows) == len([n for n in names if not n.startswith('RIVAL_CROSS')])),
+          (True, True, True, True, True))
+
+
 def test_consistent_points(tmp):
     """64 px cells (in a 512 px window): a cell counts only where the top
     detectors agree; its best keypoint is kept, with how many agree and their
@@ -1488,13 +1524,13 @@ def test_gui_run(tmp):
           (w.gpu_bars[0].isHidden(), w.gpu_bars[1].isHidden(), w.gpu_bars[1].format(), w.gpu_bars[1].value(),
            w.bar.format()),
           (False, False, 'GPU 1: loftr pair 3/29, window %v/%m', 5, 'detectors 1 / 3'))
-    w.cell_px.setValue(32)
+    w.cell_px.setText('32, 96')
     jf = w.job('fastest', 'fastest')
     check('run window: run all 3: each preset into its subfolder, one shared cache, its own top X / Y, refined points, '
           'agreement cells',
           (os.path.basename(jf['output_dir']), jf['temp_dir'] == os.path.join(tmp, 'out_runwin', '_cache'),
            jf['cross_top_n'], jf['final_points'], jf['cross_cell_px'], [m.replace(' ', '_') for m in G.P.MODES]),
-          ('fastest', True, 3, 24, 32, ['fastest', 'accurate', 'most_accurate']))
+          ('fastest', True, 3, 24, [32, 96], ['fastest', 'accurate', 'most_accurate']))
     check('run window: the job carries the paths and choices (top 2, 2 agreeing); Check runs the preflight and reports',
           (job['detectors'], job['device'], job['cloud_mask'], job['max_expected_error_m'], ok, job['cross_min_agree'],
            os.path.exists(os.path.join(tmp, 'out_runwin', 'job_preset.json')), w.stage.text()),
@@ -5667,6 +5703,7 @@ def main():
         test_extract_bands(tmp)
         test_band_banding(tmp)
         test_consistent_points(tmp)
+        test_cross_levels(tmp)
         test_target(tmp)
         test_presets(tmp)
         test_jobs_312_317(tmp)

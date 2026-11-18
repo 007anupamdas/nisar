@@ -150,7 +150,13 @@ def plot_context(job_dir: str, truth_csv: str = '') -> Dict:
                    or meta.get('ImagingOrbitNo') or '')
         strip = meta.get('StripNumber') or meta.get('SegmentNumber') or meta.get('StripNo') or ''
         dop = meta.get('DateOfPass') or meta.get('DateofPass') or meta.get('DOP') or ''
-        ctx['title'] = ' - '.join(str(v) for v in (sat, sensor, session, strip, dop) if str(v).strip())
+        try:
+            from datetime import datetime as _dt
+            dop = _dt.strptime(str(dop).strip(), '%d-%b-%Y').strftime('%d-%b-%Y')     # 17-Nov-2026
+        except ValueError:
+            pass
+        ss = '/'.join(str(v) for v in (session, strip) if str(v).strip())
+        ctx['title'] = (f'{sat}: ' if sat else '') + ' '.join(str(v) for v in (sensor, dop, ss) if str(v).strip())
         if loc and ctx['crs']:
             ctx.update(_scene_background(loc, ctx['crs'], prod_extent(meta, ctx['crs'])))
         tcsv = truth_csv or X.job_truth_csv(job_dir)
@@ -400,8 +406,12 @@ def report(job_dir: str, all_files: bool = False, quiet: bool = False, truth_csv
     if os.path.isfile(job_dir):
         files, out = [job_dir], os.path.join(os.path.dirname(job_dir), 'REPORT')
     else:
-        pat = 'RIVAL_*.csv' if all_files else 'RIVAL_*FINAL_*.csv'
-        files = [p for p in sorted(glob.glob(os.path.join(job_dir, pat))) if not p.endswith('_detail.csv')]
+        allr = [p for p in sorted(glob.glob(os.path.join(job_dir, 'RIVAL_*.csv'))) if not p.endswith('_detail.csv')]
+        if all_files:
+            files = allr
+        else:                              # every set worth looking at: FINAL (each level), BEST_FINAL, BEST,
+            keep = ('RIVAL_FINAL_', 'RIVAL_BEST_', 'RIVAL_DENSE_', 'RIVAL_CONSISTENT_')   # DENSE, CONSISTENT
+            files = [p for p in allr if os.path.basename(p).startswith(keep)]
         out = os.path.join(job_dir, 'REPORT')
     if not truth_csv and os.path.isdir(job_dir):
         try:

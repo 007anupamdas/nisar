@@ -189,6 +189,18 @@ numbers), and `RIVAL_BEST_FINAL` keeps only the best detector's points in
 such cells that agree with them. GUI and run window: *agreement cells* (px);
 `cross --cell-px`.
 
+**Two agreement levels and the no-distortion check.** `cross_cell_px` is a
+list (default 64 and 128 px): each level gives `RIVAL_CONSISTENT_<band>_<L>px`
+and `RIVAL_FINAL_<band>_<L>px` (24 points), and a no-distortion pick
+`RIVAL_FINAL_<band>_<L>px_rigid` -- only the points that fit one offset for the
+whole scene (within 2 x the tolerance; CROSS_SUMMARY gives the offset and the
+share that fits). The consensus so far always allowed distortion
+(`consensus_model` surface); the rigid pick shows what is left without it.
+`RIVAL_BEST_FINAL` uses the finest level. For old jobs: `cross <job folder>`
+(and `--cell-px 64 128`). The report now plots every set: FINAL (each level,
+and rigid), BEST_FINAL, BEST, DENSE, CONSISTENT; title
+`G1A: HS 17-Nov-2026 54321/4`.
+
 **Against the manual points.** `REPORT/REPORT_STATS.csv` has the manual
 points' own statistics (the truth file: n, mean dE / dN, RMSE, CE90) as a
 row, and each final file's difference to them (`*_vs_manual_m`): the goal is
