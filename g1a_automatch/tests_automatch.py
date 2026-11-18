@@ -1980,6 +1980,7 @@ def test_gui_dialog():
               (gj['interior_filter'], gj['interior_edge_px'], gj['final_points'], w.interior_on.isChecked(),
                w.interior_edge.value(), w.interior_edge.isEnabled(), w.final_points.value()),
               (True, 7.0, 30, False, 5.5, False, 12))
+        before = [w.det_table.item(r, 0).checkState() for r in range(w.det_table.rowCount())]
         w.select_detector_group('fast')
         fast = [d for d in w._selected_detectors()[0]]
         w.group_add.setChecked(True)
@@ -1991,6 +1992,8 @@ def test_gui_dialog():
         check('gui: detector groups tick at once (fast; slow added; none clears)',
               (bool(fast) == bool(set(fast) & set(G.DETECTOR_GROUPS['fast'])) and set(fast) <= set(G.DETECTOR_GROUPS['fast']),
                set(fast) <= set(both), none), (True, True, []))
+        for r, st in enumerate(before):
+            w.det_table.item(r, 0).setCheckState(st)
         check('gui: shared coarse fields reach the job', (w.get_job()['coarse_shared'], w.get_job()['coarse_detectors']),
               (False, ['imw-topicfm', 'loftr']))
         w.coarse_shared.setChecked(True)

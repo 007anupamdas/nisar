@@ -151,6 +151,13 @@ def cross_check(top: List[Dict], cell_m: float, tol_m: float, min_agree: int,
     apart their medians are, the cell's scatter and the points dropped."""
     meds = [_cell_medians(c['points'], cell_m) for c in top]
     cells = sorted(set().union(*[set(m) for m in meds])) if meds else []
+    # each configuration's points grouped by cell once (not filtered again for every cell:
+    # 64 px cells on MV are tens of thousands)
+    by_cell = []
+    for c in top:
+        p = c['points']
+        ij = np.floor(p[['E', 'N']].to_numpy() / cell_m).astype(int)
+        by_cell.append({k: v for k, v in p.groupby([ij[:, 0], ij[:, 1]], sort=False).indices.items()})
     kept, rows = [], []
     for k in cells:
         have = [(i, m[k]) for i, m in enumerate(meds) if k in m]
@@ -168,11 +175,7 @@ def cross_check(top: List[Dict], cell_m: float, tol_m: float, min_agree: int,
                      'detectors': ', '.join(top[i]['detector'] for i in agree)})
         if not ok:
             continue
-        inside = {}
-        for i in agree:
-            p = top[i]['points']
-            ij = np.floor(p[['E', 'N']].to_numpy() / cell_m).astype(int)
-            inside[i] = p[(ij[:, 0] == k[0]) & (ij[:, 1] == k[1])]
+        inside = {i: top[i]['points'].iloc[by_cell[i].get(k, [])] for i in agree}
         spread = {i: _spread(inside[i]) for i in agree}
         best = sorted(agree, key=lambda i: spread[i])[:max(1, keep)]
         bm = [meds[i][k] for i in best]
@@ -361,27 +364,52 @@ def _job_setting(d: str, key: str, default):
 def consistent_points(top: List[Dict], cell_m: float, tol_m: float, need: int) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """(one point per consistent cell, the cells): the scene in cells of
     cell_m (64 working pixels: 8 x 8 cells in a 512 px window); in each, the
-    top configurations' points there, and the cell counts when at least
-    `need` of them give offsets (their medians in the cell) within tol_m of
-    each other. Its point: of the agreeing configurations' points, the one
-    closest to the offset they agree on (the cell's best keypoint). Cells
-    where they disagree, or too few have points, keep nothing."""
+    top configurations' offsets there (their medians in the cell), and the
+    cell counts when at least `need` of them lie within tol_m of the median
+    of all of them. Its point: of the agreeing configurations' points within
+    tol_m of that, the one closest to it (the cell's best keypoint), with the
+    number agreeing (n_agree) and how far apart they are (agree_spread_m).
+    Done for all cells at once (tens of thousands on MV)."""
     if not top:
         return pd.DataFrame(), pd.DataFrame()
-    pts, cells = cross_check(top, cell_m, tol_m, need, keep=len(top))
-    if pts.empty:
-        return pts, cells
-    ij = np.floor(pts[['E', 'N']].to_numpy() / cell_m).astype(int)
-    pts = pts.assign(_ci=ij[:, 0], _cj=ij[:, 1])
-    kc = cells[cells['kept']].copy()
-    kc['n_agree'] = kc['agreeing'].astype(int)
-    kc['agree_spread_m'] = kc['kept_max_gap_m'].astype(float).round(1)     # how far apart the agreeing ones are
-    med = kc.set_index(['cell_i', 'cell_j'])[['median_dE_m', 'median_dN_m', 'n_agree', 'agree_spread_m']]
-    pts = pts.join(med, on=['_ci', '_cj'])
-    pts = pts[pts['median_dE_m'].notna()]
-    d = np.hypot(pts['dE'] - pts['median_dE_m'], pts['dN'] - pts['median_dN_m'])
-    best = pts.assign(_d=d, off_agreed_m=d.round(1)).sort_values('_d').groupby(['_ci', '_cj'], sort=False).head(1)
-    return best.drop(columns=['_d', 'median_dE_m', 'median_dN_m']).reset_index(drop=True), cells
+    frames = []
+    for k, c in enumerate(top):
+        p = c['points']
+        if len(p):
+            frames.append(p.assign(_cfg=k, cross_detector=c['detector'], cross_matcher=c['matcher'],
+                                   cross_sweep=c['sweep']))
+    if not frames:
+        return pd.DataFrame(), pd.DataFrame()
+    allp = pd.concat(frames, ignore_index=True)
+    allp['cell_i'] = np.floor(allp['E'].to_numpy() / cell_m).astype(np.int64)
+    allp['cell_j'] = np.floor(allp['N'].to_numpy() / cell_m).astype(np.int64)
+    cm = allp.groupby(['cell_i', 'cell_j', '_cfg'], sort=False)[['dE', 'dN']].median().reset_index()
+    cmed = cm.groupby(['cell_i', 'cell_j'])[['dE', 'dN']].median().rename(columns={'dE': 'mE', 'dN': 'mN'})
+    cm = cm.join(cmed, on=['cell_i', 'cell_j'])
+    cm['agrees'] = np.hypot(cm['dE'] - cm['mE'], cm['dN'] - cm['mN']) <= tol_m
+    ag = cm[cm['agrees']]
+    stats = ag.groupby(['cell_i', 'cell_j']).agg(agreeing=('_cfg', 'size'), aE0=('dE', 'min'), aE1=('dE', 'max'),
+                                                  aN0=('dN', 'min'), aN1=('dN', 'max'),
+                                                  median_dE_m=('dE', 'median'), median_dN_m=('dN', 'median'))
+    cells = cm.groupby(['cell_i', 'cell_j']).agg(configs_with_matches=('_cfg', 'size')).join(stats)
+    cells['agreeing'] = cells['agreeing'].fillna(0).astype(int)
+    cells['kept'] = (cells['agreeing'] >= max(2, int(need))) & (cells['configs_with_matches'] >= 2)
+    cells['kept_max_gap_m'] = np.hypot(cells['aE1'] - cells['aE0'], cells['aN1'] - cells['aN0']).round(1)
+    cells = cells.drop(columns=['aE0', 'aE1', 'aN0', 'aN1']).reset_index()
+    kc = cells[cells['kept']]
+    ok = ag.merge(kc[['cell_i', 'cell_j', 'median_dE_m', 'median_dN_m', 'agreeing', 'kept_max_gap_m']],
+                  on=['cell_i', 'cell_j'])[['cell_i', 'cell_j', '_cfg', 'median_dE_m', 'median_dN_m', 'agreeing',
+                                            'kept_max_gap_m']]
+    cand = allp.merge(ok, on=['cell_i', 'cell_j', '_cfg'])
+    if cand.empty:
+        return cand, cells
+    d = np.hypot(cand['dE'] - cand['median_dE_m'], cand['dN'] - cand['median_dN_m'])
+    cand = cand.assign(_d=d)[d <= tol_m]
+    best = cand.sort_values('_d').groupby(['cell_i', 'cell_j'], sort=False).head(1)
+    best = best.assign(n_agree=best['agreeing'].astype(int), agree_spread_m=best['kept_max_gap_m'],
+                       off_agreed_m=best['_d'].round(1))
+    return best.drop(columns=['_d', '_cfg', 'cell_i', 'cell_j', 'median_dE_m', 'median_dN_m', 'agreeing',
+                              'kept_max_gap_m']).reset_index(drop=True), cells
 
 
 def _job_cell_px(d: str) -> int:
