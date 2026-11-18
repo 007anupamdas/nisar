@@ -149,7 +149,8 @@ def plot_context(job_dir: str, truth_csv: str = '') -> Dict:
         session = (meta.get('SessionNumber') or meta.get('SessionNo') or meta.get('Session')
                    or meta.get('ImagingOrbitNo') or '')
         strip = meta.get('StripNumber') or meta.get('SegmentNumber') or meta.get('StripNo') or ''
-        ctx['title'] = ' - '.join(str(v) for v in (sat, sensor, session, strip) if str(v).strip())
+        dop = meta.get('DateOfPass') or meta.get('DateofPass') or meta.get('DOP') or ''
+        ctx['title'] = ' - '.join(str(v) for v in (sat, sensor, session, strip, dop) if str(v).strip())
         if loc and ctx['crs']:
             ctx.update(_scene_background(loc, ctx['crs'], prod_extent(meta, ctx['crs'])))
         tcsv = truth_csv or X.job_truth_csv(job_dir)
@@ -279,13 +280,13 @@ def plot_vectors(points: List[Dict], png: str, title: str = '', st: Optional[Dic
                float(np.hypot(tr['dE'], tr['dN']).max()) if tr is not None and len(tr) else 0.0, 1.0)
     scale = (dmax / 1000.0) / (0.06 * span)           # the longest arrow: 6 % of the scene's long side
     if len(x):
-        q = ax.quiver(x, y, -dx / 1000.0, -dy / 1000.0, d, angles='xy', scale_units='xy', scale=scale,
+        q = ax.quiver(x, y, -dx / 1000.0, -dy / 1000.0, d / 1000.0, angles='xy', scale_units='xy', scale=scale,
                       units='inches', width=0.035, cmap='viridis', zorder=3)
         ax.scatter(x, y, s=8, c='k', zorder=4)
         cb = fig.colorbar(q, cax=cax, orientation='horizontal' if wide else 'vertical')
-        cb.set_label('error of each point (m)')
+        cb.set_label('error of each point (km)')
         ref = float(10 ** np.floor(np.log10(dmax)))
-        ax.quiverkey(q, key_xy[0], key_xy[1], ref / 1000.0, f'arrow: {ref:g} m', labelpos='E',
+        ax.quiverkey(q, key_xy[0], key_xy[1], ref / 1000.0, f'arrow: {ref / 1000.0:g} km', labelpos='E',
                      coordinates='figure', color='k')
     else:
         cax.set_visible(False)
@@ -301,20 +302,57 @@ def plot_vectors(points: List[Dict], png: str, title: str = '', st: Optional[Dic
     ax.set_aspect('equal', adjustable='box')
     ax.set_xlabel('E (km)')
     ax.set_ylabel('N (km)')
+    if ctx.get('crs'):                     # lon / lat on the axes (along the scene's middle row / column)
+        try:
+            from matplotlib.ticker import FuncFormatter
+            from pyproj import CRS, Transformer
+            to_ll = Transformer.from_crs(CRS.from_user_input(ctx['crs']), CRS.from_epsg(4326), always_xy=True)
+            xc, yc = (e0 + e1) / 2.0 * 1000.0, (n0 + n1) / 2.0 * 1000.0
+
+            def lon_of(v, _pos=None):
+                lo = to_ll.transform(v * 1000.0, yc)[0]
+                return f'{abs(lo):.2f}°{"E" if lo >= 0 else "W"}'
+
+            def lat_of(v, _pos=None):
+                la = to_ll.transform(xc, v * 1000.0)[1]
+                return f'{abs(la):.2f}°{"N" if la >= 0 else "S"}'
+            from matplotlib.ticker import FixedLocator
+            to_xy = Transformer.from_crs(CRS.from_epsg(4326), CRS.from_user_input(ctx['crs']), always_xy=True)
+            lon0, lon1 = sorted([to_ll.transform(e0 * 1000.0, yc)[0], to_ll.transform(e1 * 1000.0, yc)[0]])
+            lat0, lat1 = sorted([to_ll.transform(xc, n0 * 1000.0)[1], to_ll.transform(xc, n1 * 1000.0)[1]])
+            lonc, latc = to_ll.transform(xc, yc)
+
+            def nice(lo, hi, want):
+                for st in (0.01, 0.02, 0.05, 0.1, 0.2, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0):
+                    if (hi - lo) / st <= want:
+                        return [round(v, 6) for v in np.arange(np.ceil(lo / st) * st, hi + 1e-9, st)]
+                return [lo, hi]
+            nx = 10 if W >= H else 4
+            ny = 4 if W >= H else 10
+            ax.xaxis.set_major_locator(FixedLocator([to_xy.transform(v, latc)[0] / 1000.0 for v in nice(lon0, lon1, nx)]))
+            ax.yaxis.set_major_locator(FixedLocator([to_xy.transform(lonc, v)[1] / 1000.0 for v in nice(lat0, lat1, ny)]))
+            ax.xaxis.set_major_formatter(FuncFormatter(lon_of))
+            ax.yaxis.set_major_formatter(FuncFormatter(lat_of))
+            ax.set_xlabel('Longitude (along the scene\'s middle)')
+            ax.set_ylabel('Latitude (along the scene\'s middle)')
+        except Exception:
+            pass
     ax.grid(True, alpha=0.25)
     ax.set_title(ctx.get('title') or title or os.path.splitext(os.path.basename(png))[0], fontsize=14,
                  fontweight='bold')
     if st:
+        def km(v):
+            return f'{float(v or 0) / 1000.0:.3f} km'
         txt = (f"{os.path.splitext(os.path.basename(png))[0].replace('_vectors', '')}:  n {st['n']}    "
-               f"mean dE {st.get('mean_dx_m', 0):.1f} m, dN {st.get('mean_dy_m', 0):.1f} m    "
-               f"RMSE E {st['rmse_x_m']:.1f} m, N {st['rmse_y_m']:.1f} m    CE90 {st['ce90_m']:.1f} m"
+               f"mean dE {km(st.get('mean_dx_m'))}, dN {km(st.get('mean_dy_m'))}    "
+               f"RMSE E {km(st['rmse_x_m'])}, N {km(st['rmse_y_m'])}    CE90 {km(st['ce90_m'])}"
                + ('' if st.get('ce90_circular', True) else ' (axes unequal)')
-               + f"    largest {st.get('max_dist_m', 0):.1f} m")
+               + f"    largest {km(st.get('max_dist_m'))}")
         man = ctx.get('manual')
         if man:
-            txt += (f"\nmanual points:  n {man['n']}    mean dE {man.get('mean_dx_m', 0):.1f} m, dN "
-                    f"{man.get('mean_dy_m', 0):.1f} m    RMSE E {man['rmse_x_m']:.1f} m, N {man['rmse_y_m']:.1f} m"
-                    f"    CE90 {man['ce90_m']:.1f} m")
+            txt += (f"\nmanual points:  n {man['n']}    mean dE {km(man.get('mean_dx_m'))}, dN "
+                    f"{km(man.get('mean_dy_m'))}    RMSE E {km(man['rmse_x_m'])}, N {km(man['rmse_y_m'])}"
+                    f"    CE90 {km(man['ce90_m'])}")
         if not wide:
             txt = txt.replace('    ', '\n').replace(':  ', ':\n')
         fig.text(*stat_xy, txt, ha=stat_ha, va=stat_va, fontsize=10, family='monospace')

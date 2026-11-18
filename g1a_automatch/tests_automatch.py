@@ -764,6 +764,36 @@ def test_consistent_points(tmp):
           (True, True, True, True, 1, 4, True))
 
 
+def test_band_banding(tmp):
+    """Crispest bands: a band with a strip across the swath (brighter rows,
+    HS / HV detector banding) is ranked down, terrain shared by all bands is
+    not banding."""
+    import contextlib
+    import io
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_origin
+    import automatch_engine as E
+    rng = np.random.default_rng(5)
+    h, w, nb = 600, 400, 8
+    yy, xx = np.mgrid[0:h, 0:w]
+    terrain = 1000 + 200 * np.sin(xx / 7.0) * np.cos(yy / 9.0) + 300 * (yy > 300)      # detail + a coast step
+    cube = np.stack([terrain * (1 + 0.05 * k) + rng.normal(0, 3, (h, w)) for k in range(nb)]).astype(np.float32)
+    cube[5, 200:260, :] *= 1.12                    # band 6: a 12 % brighter strip across the swath
+    p = os.path.join(tmp, 'banded.tif')
+    with rasterio.open(p, 'w', driver='GTiff', height=h, width=w, count=nb, dtype='float32', crs='EPSG:32644',
+                       transform=from_origin(500000, 2000000, 30, 30)) as d:
+        d.write(cube)
+    with contextlib.redirect_stdout(io.StringIO()):
+        rows = E.band_quality(p)
+    by = {r['band']: r for r in rows}
+    others = [by[b]['banding_pct'] for b in by if b != 6]
+    check('bands: the band with a strip across the swath has the banding and is ranked down; the shared terrain '
+          '(a coast step) is not banding',
+          (by[6]['banding_pct'] > 5, max(others) < 1.0, by[6]['score'] < 0.5 * min(by[b]['score'] for b in by if b != 6),
+           'band6' not in E.pick_bands(rows, 3)), (True, True, True, True))
+
+
 def test_extract_bands(tmp):
     """A big pixel-interleaved cube: the matched band extracted once into the
     cache (one pass), used instead of the cube, reused while unchanged."""
@@ -5635,6 +5665,7 @@ def main():
         test_report(tmp)
         test_interior_and_final(tmp)
         test_extract_bands(tmp)
+        test_band_banding(tmp)
         test_consistent_points(tmp)
         test_target(tmp)
         test_presets(tmp)

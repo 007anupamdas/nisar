@@ -1406,6 +1406,51 @@ def _stripe_sigma(block: np.ndarray, valid: np.ndarray) -> float:
     return out
 
 
+BANDING_HALF_PCT = 2.0     # a band whose own banding is 2 % of its level scores half
+
+
+def _band_banding(rowp: Dict[int, np.ndarray], colp: Dict[int, np.ndarray]) -> Dict[int, float]:
+    """Each band's own banding (%): its row (and column) mean profile fitted
+    as the terrain's shape (the pattern all bands share most: their first
+    principal component, at the band's own contrast) plus a smooth trend
+    (illumination); the spread (p95 - p5) of what is left over. Strips
+    across the swath that only some bands carry (HS / HV detector banding)
+    stand out; terrain does not. Twice: the second time without the banded
+    bands, so their strips do not leak into the terrain's shape."""
+    out: Dict[int, float] = {}
+    if len(rowp) < 3:
+        return {b: 0.0 for b in rowp}
+    for profs in (rowp, colp):
+        names = list(profs)
+        stack = np.vstack([profs[b] for b in names])
+        good = np.all(np.isfinite(stack), axis=0)
+        use = [i for i in range(len(stack)) if np.nanstd(stack[i]) > 0]
+        if good.sum() < 20 or len(use) < 3:
+            continue
+        x = np.linspace(-1.0, 1.0, int(good.sum()))
+
+        def amps(rows):
+            M = stack[rows][:, good]
+            M = M - M.mean(axis=1, keepdims=True)
+            M = M / np.maximum(np.linalg.norm(M, axis=1, keepdims=True), 1e-12)
+            common = np.linalg.svd(M, full_matrices=False)[2][0]
+            A = np.column_stack([np.ones(len(x)), common, x, x * x])
+            res = {}
+            for i in use:
+                p = stack[i][good]
+                coef, *_ = np.linalg.lstsq(A, p, rcond=None)
+                r = p - A @ coef
+                res[i] = float(np.subtract(*np.percentile(r, [95, 5]))) * 100.0
+            return res
+        a1 = amps(use)
+        med = float(np.median(list(a1.values())))
+        clean = [i for i in use if a1[i] <= max(3.0 * med, 1.0)]
+        a2 = amps(clean) if 3 <= len(clean) < len(use) else a1
+        for i, v in a2.items():
+            out[names[i]] = max(out.get(names[i], 0.0), v)
+    return out
+
+
 def band_quality(path: str, bands: Optional[List[int]] = None, max_side: int = 1024,
                  block: int = 256, n_blocks: int = 6, nodata: Optional[float] = None) -> List[Dict]:
     """How crisp and clean every band of a raster is, without a reference.
@@ -1453,6 +1498,7 @@ def band_quality(path: str, bands: Optional[List[int]] = None, max_side: int = 1
 
         # overview pass: signal spread and coverage, a few bands at a time
         spread, cover, ovalid = {}, {}, np.zeros((oh, ow), np.float32)
+        rowp, colp = {}, {}                      # each band's row / column mean profile (banding)
         for k in range(0, len(idx), 16):
             chunk = idx[k:k + 16]
             arr = src.read(chunk, out_shape=(len(chunk), oh, ow)).astype(np.float64)
@@ -1461,6 +1507,13 @@ def band_quality(path: str, bands: Optional[List[int]] = None, max_side: int = 1
                 cover[b] = float(v.mean())
                 ovalid += v
                 spread[b] = float(np.subtract(*np.percentile(a[v], [98, 2]))) if v.sum() > 50 else 0.0
+                x = np.where(v, a, np.nan)
+                med = float(np.nanmedian(x)) if v.any() else 0.0
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    # means, not medians: a mean scales with the band's contrast, so the terrain fits out
+                    rowp[b] = np.nanmean(x, axis=1) / med if med else np.full(oh, np.nan)
+                    colp[b] = np.nanmean(x, axis=0) / med if med else np.full(ow, np.nan)
         ovalid /= max(1, len(idx))
 
         # full-resolution blocks where most bands are valid, spread over the image
@@ -1491,6 +1544,7 @@ def band_quality(path: str, bands: Optional[List[int]] = None, max_side: int = 1
                     detail[b].append(_detail_rms(a, v))
                     qstep[b].append(_quant_step(a, v))
         best_cover = max(cover.values()) if cover else 0.0
+        banding = _band_banding(rowp, colp)
         for b in idx:
             n = [x for x in noise[b] if np.isfinite(x)]
             sn = float(np.median(n)) if n else float('nan')
@@ -1512,11 +1566,15 @@ def band_quality(path: str, bands: Optional[List[int]] = None, max_side: int = 1
             dsnr = det / nd_ if (ok and nd_ > 0) else 0.0
             # detail must clearly beat the noise: half weight at 6 dB (twice the noise)
             score = 100.0 * sharp * dsnr ** 2 / (dsnr ** 2 + 4.0) if snr > 0 else 0.0
+            # banding: strips across the swath this band has and the others do not (half weight at 2 %)
+            bnd = banding.get(b, 0.0)
+            score *= 1.0 / (1.0 + (bnd / BANDING_HALF_PCT) ** 2)
             rows.append({'channel': f'band{b}', 'band': b, 'score': float(round(score, 3)),
                          'sharpness': float(round(sharp, 4)),
                          'detail_db': float(round(20 * np.log10(dsnr), 2)) if dsnr > 0 else UNUSABLE_DB,
                          'snr_db': float(round(20 * np.log10(snr), 2)) if snr > 0 else UNUSABLE_DB,
                          'signal': sig, 'detail': det, 'noise': sn, 'striping': st,
+                         'banding_pct': float(round(bnd, 2)),
                          'valid_fraction': round(cover[b], 4)})
     return rows
 
@@ -1551,10 +1609,11 @@ def format_band_quality(rows: List[Dict], picked: List[str], top: int = 15) -> s
     lines = [f'[Bands] crispness of {len(rows)} band(s) (score = sharpness x detail above noise); '
              f'picked: {", ".join(picked) or "none"}',
              f"  {'band':<8} {'score':>6} {'sharp':>6} {'detail dB':>9} {'SNR dB':>7} {'noise':>9} "
-             f"{'striping':>9} {'valid':>6}"]
+             f"{'striping':>9} {'banding%':>8} {'valid':>6}"]
     for r in best:
         lines.append(f"  {r['channel']:<8} {r['score']:6.1f} {r['sharpness']:6.3f} {r['detail_db']:9.1f} "
-                     f"{r['snr_db']:7.1f} {r['noise']:9.3g} {r['striping']:9.3g} {r['valid_fraction']:6.2f}"
+                     f"{r['snr_db']:7.1f} {r['noise']:9.3g} {r['striping']:9.3g} {r.get('banding_pct', 0):8.2f} "
+                     f"{r['valid_fraction']:6.2f}"
                      f"{'  <- picked' if r['channel'] in picked else ''}")
     if len(rows) > top:
         prof = ' '.join(f"{r['band']}:{r['score']:.0f}" for r in rows[::max(1, len(rows) // 30)])
