@@ -68,6 +68,28 @@ def kill_tree(proc) -> None:
     except Exception:
         pass
 
+# Detector groups by minutes per pass (jobs 1068 / 1069, MV) and how they
+# ranked against the ground truth (jobs 1064-1069): the GUI ticks a group at once.
+DETECTOR_GROUPS = {
+    'fast': ['loftr', 'imw-liftfeat-nn', 'imw-xoftr', 'imw-xfeat-lg', 'imw-aliked-lg', 'imw-lanet-nn',
+             'imw-sfd2-nn', 'imw-darkfeat-nn', 'imw-minima-loftr', 'imw-ripe-nn', 'imw-topicfm', 'imw-eloftr',
+             'imw-aspanformer', 'imw-sp-lg', 'imw-sp-sg', 'imw-sp-nn', 'imw-alike-nn', 'imw-xfeat-dense',
+             'imw-r2d2-nn'],
+    'medium': ['imw-dkm', 'imw-minima-roma', 'imw-rdd-nn', 'imw-roma', 'imw-gim-roma', 'imw-dad-roma',
+               'imw-rord-nn', 'imw-gim-dkm', 'imw-rdd-dense'],
+    'slow': ['imw-d2net-nn', 'disk', 'dog', 'sift', 'gftt', 'hessian', 'dedode', 'keynet', 'imw-omniglue'],
+    'good': ['loftr', 'imw-minima-loftr', 'imw-aliked-lg', 'imw-sfd2-nn', 'imw-darkfeat-nn', 'imw-xfeat-lg',
+             'imw-lanet-nn', 'imw-topicfm', 'imw-eloftr', 'imw-aspanformer', 'imw-dkm', 'imw-minima-roma',
+             'imw-roma', 'imw-rdd-nn', 'imw-gim-roma', 'disk', 'dog', 'keynet', 'imw-omniglue'],
+}
+DETECTOR_GROUP_HELP = {
+    'fast': 'Under 4 min per pass (MV, jobs 1068 / 1069)', 'medium': '4-10 min per pass',
+    'slow': 'Over 10 min per pass', 'all': 'Every offered detector', 'none': 'Untick all',
+    'good': 'In the top 10 against the ground truth at least once (jobs 1064-1069), whatever their time; '
+            'leaves out sift, gftt, hessian, dedode, the SuperPoint family, alike, xfeat-dense, r2d2, dad-roma, '
+            'rord, gim-dkm, rdd-dense, d2net, liftfeat, xoftr, ripe',
+}
+
 Qt = QtCore.Qt
 CHECKED = Qt.CheckState.Checked if QT_API != 'PyQt5' else Qt.Checked
 UNCHECKED = Qt.CheckState.Unchecked if QT_API != 'PyQt5' else Qt.Unchecked
@@ -2514,6 +2536,19 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         top.addWidget(wb)
         self.btn_weights = wb
         lay.addLayout(top)
+        grp = QtWidgets.QHBoxLayout()
+        grp.addWidget(QtWidgets.QLabel('Select:'))
+        for label, key in (('Fast (< 4 min)', 'fast'), ('Medium (4-10 min)', 'medium'), ('Slow (> 10 min)', 'slow'),
+                           ('Worth it (ranked well)', 'good'), ('All', 'all'), ('None', 'none')):
+            gb = QtWidgets.QPushButton(label)
+            gb.setToolTip(DETECTOR_GROUP_HELP.get(key, ''))
+            gb.clicked.connect(lambda _=False, k=key: self.select_detector_group(k))
+            grp.addWidget(gb)
+        self.group_add = QtWidgets.QCheckBox('add to the ticked ones')
+        self.group_add.setToolTip('Off: the group replaces the selection. On: the group is ticked in addition')
+        grp.addWidget(self.group_add)
+        grp.addStretch(1)
+        lay.addLayout(grp)
         self.det_table = QtWidgets.QTableWidget(0, 5)
         self.det_table.setHorizontalHeaderLabels(['detector', 'source', 'matchers (check to run)',
                                                   'parameters', 'weights'])
@@ -2964,6 +2999,25 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
 
     # ── channels ─────────────────────────────────────────────────────────────
     # ── detectors ────────────────────────────────────────────────────────────
+    def select_detector_group(self, key: str) -> None:
+        """Tick a group of detectors (DETECTOR_GROUPS) in the table; the others
+        are unticked unless 'add to the ticked ones'."""
+        add = self.group_add.isChecked() and key not in ('all', 'none')
+        want = DETECTOR_GROUPS.get(key)
+        n = 0
+        for r in range(self.det_table.rowCount()):
+            if not self._selectable(r):
+                continue
+            item = self.det_table.item(r, 0)
+            name = item.text()
+            on = (key == 'all') or (want is not None and name in want)
+            if on:
+                item.setCheckState(CHECKED)
+                n += 1
+            elif not add:
+                item.setCheckState(UNCHECKED)
+        self.lbl_status.setText(f'{n} detector(s) of the group "{key}" ticked' + (' (added)' if add else ''))
+
     def _selectable(self, r):
         """False for the greyed catalogue rows that are not offered."""
         item = self.det_table.item(r, 0)
