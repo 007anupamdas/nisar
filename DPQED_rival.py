@@ -1497,7 +1497,28 @@ TITLE_KEYS = {          # BAND_META.txt keys, then the special products' XML tag
     "sensor":  ("Sensor", "SENSORNAME"),
     "session": ("SessionNumber", "SessionNo", "Session", "SESSION_NUMBER"),
     "strip":   ("StripNumber", "StripNo", "StripId", "STRIPID"),
+    "date":    ("DateOfPass", "DateofPass", "DOP", "DATEOFPASS"),
 }
+
+
+def prod_corners(input_path):
+    """[(lon, lat)] x4 of the product's own corners -- Prod{UL,UR,LR,LL}{Lat,Lon}
+    of BAND_META.txt beside the input -- or None. The look-vector plot takes its
+    extent from them, as the matcher's report does."""
+    meta = os.path.join(os.path.dirname(os.path.abspath(input_path or "")), "BAND_META.txt")
+    if not input_path or not os.path.isfile(meta):
+        return None
+    vals = {}
+    with open(meta, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if "=" in line:
+                k, v = line.split("=", 1)
+                vals.setdefault(k.strip(), v.strip())
+    try:
+        return [(float(vals[f"Prod{c}Lon"]), float(vals[f"Prod{c}Lat"]))
+                for c in ("UL", "UR", "LR", "LL")]
+    except (KeyError, ValueError):
+        return None
 
 
 def scene_title(input_path):
@@ -1526,16 +1547,25 @@ def scene_title(input_path):
                         vals.setdefault(k.strip(), v.strip())
     except Exception:
         return ""
-    parts = []
-    for field in ("sat", "sensor", "session", "strip"):
-        v = next((vals[k] for k in TITLE_KEYS[field]
-                  if vals.get(k) and vals[k] not in ("-9999", "-9999.")), "")
-        if v:
-            parts.append(v)
-    return " - ".join(parts)
+    got = {}
+    for field in TITLE_KEYS:
+        got[field] = next((vals[k] for k in TITLE_KEYS[field]
+                           if vals.get(k) and vals[k] not in ("-9999", "-9999.")), "")
+    dop = got.get("date", "")
+    from datetime import datetime as _dt
+    for fmt in ("%d-%b-%Y", "%d-%m-%Y", "%d/%m/%Y", "%Y-%m-%d"):
+        try:
+            dop = _dt.strptime(dop, fmt).strftime("%d-%b-%Y")     # 17-Nov-2026
+            break
+        except ValueError:
+            pass
+    ss = "/".join(v for v in (got["session"], got["strip"]) if v)
+    body = " ".join(v for v in (got["sensor"], dop, ss) if v)
+    return (f"{got['sat']}: " if got["sat"] else "") + body
 
 
-def plot_look_vectors(rows, png, title="", st=None, extent=None, background=None):
+def plot_look_vectors(rows, png, title="", st=None, extent=None, background=None,
+                      to_ll=None, to_xy=None):
     """Look vectors: an arrow per point from its input position towards its
     reference position (the error), coloured by length, over the scene.
 
@@ -1545,6 +1575,11 @@ def plot_look_vectors(rows, png, title="", st=None, extent=None, background=None
     HS strip gives a long figure -- with the colour scale along its longer
     edge and the statistics (st, error_summary) beyond it. Rendered with the
     Agg canvas directly, never pyplot, so QGIS's own GUI backend is untouched.
+
+    to_ll(x, y) -> (lon, lat) and to_xy(lon, lat) -> (x, y), working CRS in m:
+    when given, the axes read longitude / latitude (along the scene's middle
+    row / column) instead of E / N km. Errors are in km throughout, as in the
+    matcher's report.
     """
     import numpy as np
     from matplotlib.figure import Figure
@@ -1591,13 +1626,14 @@ def plot_look_vectors(rows, png, title="", st=None, extent=None, background=None
     dmax = max(float(d.max()) if len(d) else 0.0, 1.0)
     scale = (dmax / 1000.0) / (0.06 * max(W, H))   # longest arrow: 6% of the long side
     if len(x):
-        q = ax.quiver(x, y, -dx / 1000.0, -dy / 1000.0, d, angles="xy", scale_units="xy",
-                      scale=scale, units="inches", width=0.035, cmap="viridis", zorder=3)
+        q = ax.quiver(x, y, -dx / 1000.0, -dy / 1000.0, d / 1000.0, angles="xy",
+                      scale_units="xy", scale=scale, units="inches", width=0.035,
+                      cmap="viridis", zorder=3)
         ax.scatter(x, y, s=8, c="k", zorder=4)
         cb = fig.colorbar(q, cax=cax, orientation="horizontal" if wide else "vertical")
-        cb.set_label("error of each point (m)")
+        cb.set_label("error of each point (km)")
         ref = float(10 ** np.floor(np.log10(dmax)))
-        ax.quiverkey(q, key_xy[0], key_xy[1], ref / 1000.0, f"arrow: {ref:g} m",
+        ax.quiverkey(q, key_xy[0], key_xy[1], ref / 1000.0, f"arrow: {ref / 1000.0:g} km",
                      labelpos="E", coordinates="figure", color="k")
     else:
         cax.set_visible(False)
@@ -1607,15 +1643,49 @@ def plot_look_vectors(rows, png, title="", st=None, extent=None, background=None
     ax.set_xlabel("E (km)")
     ax.set_ylabel("N (km)")
     ax.grid(True, alpha=0.25)
+    if to_ll and to_xy:
+        try:
+            from matplotlib.ticker import FixedLocator, FuncFormatter
+            xc, yc = (e0 + e1) / 2.0 * 1000.0, (n0 + n1) / 2.0 * 1000.0
+            lonc, latc = to_ll(xc, yc)
+            lon0, lon1 = sorted([to_ll(e0 * 1000.0, yc)[0], to_ll(e1 * 1000.0, yc)[0]])
+            lat0, lat1 = sorted([to_ll(xc, n0 * 1000.0)[1], to_ll(xc, n1 * 1000.0)[1]])
+
+            def nice(lo, hi, want):
+                for step in (0.01, 0.02, 0.05, 0.1, 0.2, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0):
+                    if (hi - lo) / step <= want:
+                        return [round(v, 6) for v in
+                                np.arange(np.ceil(lo / step) * step, hi + 1e-9, step)]
+                return [lo, hi]
+            ax.xaxis.set_major_locator(FixedLocator(
+                [to_xy(v, latc)[0] / 1000.0 for v in nice(lon0, lon1, 10 if wide else 4)]))
+            ax.yaxis.set_major_locator(FixedLocator(
+                [to_xy(lonc, v)[1] / 1000.0 for v in nice(lat0, lat1, 4 if wide else 10)]))
+
+            def lon_of(v, _pos=None):
+                lo = to_ll(v * 1000.0, yc)[0]
+                return f"{abs(lo):.2f}°{'E' if lo >= 0 else 'W'}"
+
+            def lat_of(v, _pos=None):
+                la = to_ll(xc, v * 1000.0)[1]
+                return f"{abs(la):.2f}°{'N' if la >= 0 else 'S'}"
+            ax.xaxis.set_major_formatter(FuncFormatter(lon_of))
+            ax.yaxis.set_major_formatter(FuncFormatter(lat_of))
+            ax.set_xlabel("Longitude (along the scene's middle)")
+            ax.set_ylabel("Latitude (along the scene's middle)")
+        except Exception:
+            pass
     name = os.path.splitext(os.path.basename(png))[0].replace("_vectors", "")
     ax.set_title(title or name, fontsize=14, fontweight="bold")
     if st and st.get("n"):
+        def km(v):
+            return f"{float(v or 0) / 1000.0:.3f} km"
         txt = (f"{name}:  n {st['n']}    "
-               f"mean dE {st['mean_x']:.1f} m, dN {st['mean_y']:.1f} m    "
-               f"RMSE E {st['rmse_x']:.1f} m, N {st['rmse_y']:.1f} m    "
-               f"CE90 {st['ce90']:.1f} m"
+               f"mean dE {km(st['mean_x'])}, dN {km(st['mean_y'])}    "
+               f"RMSE E {km(st['rmse_x'])}, N {km(st['rmse_y'])}    "
+               f"CE90 {km(st['ce90'])}"
                + ("" if st.get("circular", True) else " (axes unequal)")
-               + f"    largest {st.get('max_r', 0):.1f} m")
+               + f"    largest {km(st.get('max_r'))}")
         if not wide:
             txt = txt.replace("    ", "\n").replace(":  ", ":\n")
         fig.text(*stat_xy, txt, ha=stat_ha, va=stat_va, fontsize=10, family="monospace")
@@ -4844,12 +4914,31 @@ class QCDashboard(QMainWindow):
                 extent = (e.xMinimum(), e.xMaximum(), e.yMinimum(), e.yMaximum())
         except Exception:
             extent = None
+        src = self.input_source or self.input_path
+        corners = prod_corners(src)
+        if corners:                  # the product's own corners, as the matcher
+            try:
+                pts = [self.transform_wgs_to_proj.transform(QgsPointXY(lo, la))
+                       for lo, la in corners]
+                extent = (min(p.x() for p in pts), max(p.x() for p in pts),
+                          min(p.y() for p in pts), max(p.y() for p in pts))
+            except Exception:
+                pass
+
+        def to_ll(x, y):
+            p = self.transform_proj_to_wgs.transform(QgsPointXY(x, y))
+            return p.x(), p.y()
+
+        def to_xy(lon, lat):
+            p = self.transform_wgs_to_proj.transform(QgsPointXY(lon, lat))
+            return p.x(), p.y()
         try:
             os.makedirs(os.path.dirname(png), exist_ok=True)
             plot_look_vectors(
-                rows, png, scene_title(self.input_source or self.input_path),
+                rows, png, scene_title(src),
                 error_summary(self._ground_errors()), extent,
-                self._canvas_background() or self._scene_background())
+                self._canvas_background() or self._scene_background(),
+                to_ll, to_xy)
             print(f"[VECTORS] look-vector plot -> {png}")
             return png
         except Exception as e:

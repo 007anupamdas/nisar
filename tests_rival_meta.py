@@ -786,16 +786,21 @@ check("unknown pixel size", w(None, 800), None)
 import tempfile as _tf
 _d = _tf.mkdtemp()
 open(os.path.join(_d, "BAND_META.txt"), "w").write(
-    "SatID = G1A\nSensor = HS\nSessionNumber = 026111104\nStripNumber = 6\n")
-check("title from BAND_META", H["scene_title"](os.path.join(_d, "X_GTD_A_1.tif")),
-      "G1A - HS - 026111104 - 6")
+    "SatID = G1A\nSensor = HS\nSessionNumber = 026111104\nStripNumber = 6\n"
+    "DateOfPass = 17-NOV-2026\nProdULLat = 28.35\nProdULLon = 71.84\nProdURLat = 28.35\n"
+    "ProdURLon = 88.93\nProdLRLat = 25.53\nProdLRLon = 88.93\nProdLLLat = 25.53\n"
+    "ProdLLLon = 71.84\n")
+check("title as the matcher's: Sat: Sensor date session/strip",
+      H["scene_title"](os.path.join(_d, "X_GTD_A_1.tif")), "G1A: HS 17-Nov-2026 026111104/6")
+check("product corners from BAND_META", H["prod_corners"](os.path.join(_d, "X.tif"))[1],
+      (88.93, 28.35))
 _x = _tf.mkdtemp()
 open(os.path.join(_x, "P_ort_META.xml"), "w").write(
     "<AISD><IMAGE><SATID>G1A</SATID><SENSORNAME>HS</SENSORNAME>"
     "<STRIPID>000006</STRIPID><SESSION_NUMBER>026111104</SESSION_NUMBER>"
     "</IMAGE></AISD>")
 check("title from a special product's XML", H["scene_title"](os.path.join(_x, "P_ort.tif")),
-      "G1A - HS - 026111104 - 000006")
+      "G1A: HS 026111104/000006")
 check("no metadata, no title", H["scene_title"](os.path.join(_tf.mkdtemp(), "a.tif")), "")
 try:
     import matplotlib  # noqa: F401
@@ -803,8 +808,11 @@ try:
     rows = [{"in_x": 500000.0 + 20000 * i, "in_y": 3000000.0 + 3000 * i,
              "dx": 100.0 + 40 * i, "dy": -50.0 + 10 * i} for i in range(6)]
     st = H["error_summary"]([(r["dx"], r["dy"]) for r in rows])
-    H["plot_look_vectors"](rows, png, "G1A - HS", st,
-                           (480000.0, 640000.0, 2990000.0, 3025000.0))
+    import pyproj as _pp
+    _f = _pp.Transformer.from_crs(32644, 4326, always_xy=True).transform
+    _b = _pp.Transformer.from_crs(4326, 32644, always_xy=True).transform
+    H["plot_look_vectors"](rows, png, "G1A: HS", st,
+                           (480000.0, 640000.0, 2990000.0, 3025000.0), None, _f, _b)
     check("look-vector plot written", os.path.getsize(png) > 10000, True)
     H["plot_look_vectors"](rows, png, "", st, (480000.0, 500000.0, 2900000.0, 3100000.0))
     check("tall scene plot written", os.path.getsize(png) > 10000, True)
