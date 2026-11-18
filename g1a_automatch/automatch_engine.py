@@ -428,8 +428,45 @@ PROGRESS_HOOK: Optional[Callable[[Dict], None]] = None
 # it here), False (another GPU took it) or a dict (its finished record, kept
 # from an earlier run); UNIT_DONE_HOOK(channel, tag, record) when one ends.
 CLAIM_HOOK: Optional[Callable] = None
-PAIR_POS: List[int] = [0, 0]          # [k, n]: the pair being matched is the k-th of n (progress only)
+PAIR_POS: List[int] = [0, 0]
+# Set by the job (the detector's resume fingerprint): each pair's matches are
+# kept in <channel folder>/_pair_results/ and read back by a run with the same
+# fingerprint, so a stopped run goes on from its last finished pair.
+PAIR_RESULT_KEY: Optional[str] = None          # [k, n]: the pair being matched is the k-th of n (progress only)
 UNIT_DONE_HOOK: Optional[Callable] = None
+
+
+def _pair_matches(matcher, work: Dict, pol_out_dir: str, tag: str, pid, est: Dict) -> List:
+    """matcher.process_disk_cached_pair(work), kept per pair while PAIR_RESULT_KEY
+    is set: a resumed run reads the pairs it finished instead of matching them again."""
+    if not PAIR_RESULT_KEY:
+        return matcher.process_disk_cached_pair(work)
+    import pickle
+    folder = os.path.join(pol_out_dir, '_pair_results')
+    path = os.path.join(folder, f'{tag}__pair{pid}.pkl')
+    key = hashlib.sha1(json.dumps([PAIR_RESULT_KEY, tag, str(pid), round(float(est.get('dx') or 0), 3),
+                                   round(float(est.get('dy') or 0), 3), est.get('method')],
+                                  default=str).encode()).hexdigest()
+    try:
+        with open(path, 'rb') as f:
+            saved = pickle.load(f)
+        if saved.get('key') == key:
+            print(f'[Resume] {tag} pair {pid}: matches of the earlier run reused')
+            report('window', detector=tag, matcher='resumed', pair=pid, pair_no=PAIR_POS[0] or None,
+                   pairs=PAIR_POS[1] or None, done=1, total=1)
+            return saved['data']
+    except (OSError, EOFError, pickle.UnpicklingError, AttributeError, KeyError, TypeError, ValueError):
+        pass
+    data = matcher.process_disk_cached_pair(work)
+    try:
+        os.makedirs(folder, exist_ok=True)
+        tmp = f'{path}.{os.getpid()}.tmp'
+        with open(tmp, 'wb') as f:
+            pickle.dump({'key': key, 'data': data}, f, protocol=pickle.HIGHEST_PROTOCOL)
+        os.replace(tmp, path)
+    except Exception as e:
+        print(f'[Resume] {tag} pair {pid}: not kept ({type(e).__name__}: {e})')
+    return data
 
 
 def report(event: str, **fields):
@@ -5739,7 +5776,7 @@ class AutoMatchPipeline:
                     work = dict(pair, coarse_dx=est['dx'], coarse_dy=est['dy'],
                                 coarse_method=est['method'], coarse_field=est.get('field'),
                                 search_margin_m=margin)
-                    all_match_data.extend(matcher.process_disk_cached_pair(work))
+                    all_match_data.extend(_pair_matches(matcher, work, pol_out_dir, tag, pid, est))
                 safe_cuda_empty_cache()
 
                 raw_dir = os.path.join(pol_out_dir, f'raw_matches_{suffix}_{tag}')

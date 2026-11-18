@@ -221,6 +221,12 @@ def test_e2e_rerun(tmp):
           (rc, 'reusing its finished result' in log2, 'Running sift' in log2), (0, True, False))
     rc, log3 = _run_job({**job, 'smnn_thresholds': [0.9]}, tmp, True)
     check('rerun: changed settings -> run again', (rc, 'Running sift' in log3), (0, True))
+    # a run stopped inside a detector: its finished pairs are read back, not matched again
+    for f in glob.glob(os.path.join(out, 'win1024_nfauto', '_units', '*.json')):
+        os.remove(f)                              # the detector never finished
+    rc, log5 = _run_job({**job, 'smnn_thresholds': [0.9], 'resume': True}, tmp, True)
+    check('resume inside a detector: its finished pairs reused, not matched again',
+          (rc, 'matches of the earlier run reused' in log5, 'Running sift' in log5), (0, True, True))
     # another output folder on the same cache (e.g. another preset): the detector's result is taken over
     rc, log4 = _run_job({**job, 'smnn_thresholds': [0.9], 'output_dir': os.path.join(tmp, 'out_rerun_b'),
                          'temp_dir': os.path.join(out, '_cache')}, tmp, True)

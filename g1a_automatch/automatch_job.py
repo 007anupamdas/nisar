@@ -458,6 +458,7 @@ def install_queue(E, job: Dict, out_dir: str, tag: str, win: int, nf: Optional[i
             except OSError:
                 pass
     E.CLAIM_HOOK, E.UNIT_DONE_HOOK = claim, done
+    E.PAIR_RESULT_KEY = key if job.get('resume') else None
 
 
 def _summary_records(out_dir: str, job: Dict) -> Dict[Tuple[str, str], Dict]:
@@ -2020,6 +2021,7 @@ def run_job(job: Dict) -> Dict:
                 records = [{'status': 'failed', 'error': f'{type(e).__name__}: {e}'}]
             finally:
                 E.CLAIM_HOOK = E.UNIT_DONE_HOOK = None
+                E.PAIR_RESULT_KEY = None
             E.safe_cuda_empty_cache()
         for rec in records:
             row = {'sweep': tag, 'window_size': win, 'num_features': nf or 'auto',
