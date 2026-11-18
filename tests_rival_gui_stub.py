@@ -2161,18 +2161,22 @@ store.clear()
 qw.QFileDialog.getExistingDirectory = MagicMock(return_value=scene_dir)
 qw.QInputDialog.getItem = MagicMock(side_effect=AssertionError("asked with one scene"))
 win._ask_bands = MagicMock(return_value=[3, 1])
+_cache = tempfile.mkdtemp()
+R.COG_CACHE_DIR = _cache            # 'this machine', standing in for ~/RIVAL_cog
 win.load_input_folder()
-cog = os.path.join(scene_dir, "266697511_ITD_A_1_b3-1_cog.tif")
-assert os.path.exists(cog), os.listdir(scene_dir)
+cog = os.path.join(_cache, os.path.basename(scene_dir), "266697511_ITD_A_1_b3-1_cog.tif")
+assert os.path.exists(cog), os.listdir(_cache)
+assert not [f for f in os.listdir(scene_dir) if "_cog" in f], "COG written in the product folder"
 with rasterio.open(cog) as d:
     assert d.count == 2 and float(d.read(1)[0, 0]) == 3.0 and float(d.read(2)[0, 0]) == 1.0
     assert d.descriptions == ("B3", "B1"), d.descriptions
     assert d.crs.to_epsg() == 32644
 args, kw = win.load_input_path.call_args
 assert args[0] == cog and kw.get("source") == src, (args, kw)
-assert not [f for f in os.listdir(scene_dir) if f.endswith(".part")]
+assert not [f for f in os.listdir(os.path.dirname(cog)) if f.endswith(".part")]
 print("\na scene folder loads its *ITD.tif, the chosen bands (3, 1) become a "
-      "COG beside it, in that order, and the COG is what loads")
+      "COG in the local cache (not the server's product folder), in that order, "
+      "and the COG is what loads")
 
 # a second load with the same bands reuses the COG
 mtime = os.path.getmtime(cog)
@@ -2584,8 +2588,8 @@ win.input_tif_layer = None
 R.QgsRasterLayer = lambda p_, n_: MagicMock(isValid=lambda: True)
 win.ref_folder_path = None
 win.load_input_tif()
-cog34 = os.path.join(d34, "G1A_ort_b4-2-1_cog.tif")
-assert os.path.exists(cog34), os.listdir(d34)
+cog34 = R.cog_path_for(tif34, [4, 2, 1])   # in the local cache
+assert os.path.exists(cog34) and not os.path.exists(os.path.join(d34, "G1A_ort_b4-2-1_cog.tif")), cog34
 assert adopted == {"path": cog34, "source": tif34, "naming": "file"}, adopted
 assert store["input_tif_dir"] == d34
 print("\nLoad Input TIF builds G1A_ort_b4-2-1_cog.tif beside the TIF and loads it")

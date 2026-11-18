@@ -746,7 +746,7 @@ check("only *GTD_*_1 / *ITD_*_1 are the scene",
                  "x_itd_y_1.tiff"])
 check("an empty folder has no scene", f([]), [])
 check("the COG is named for its bands, beside the source",
-      H["cog_path_for"]("/d/266697511_ITD_A_1.tif", [3, 1]),
+      H["cog_path_for"]("/d/266697511_ITD_A_1.tif", [3, 1], ""),
       "/d/266697511_ITD_A_1_b3-1_cog.tif")
 
 # ── 23b. exports named after the band evaluated ─────────────────────────────
@@ -818,6 +818,12 @@ try:
     check("tall scene plot written", os.path.getsize(png) > 10000, True)
 except ImportError:
     print("  (matplotlib missing: plot not exercised)")
+
+check("by default the COG is local, under the product folder's name",
+      H["cog_path_for"]("//server/prod/266697511/266697511_ITD_A_1.tif", [2], "/home/u/RIVAL_cog"),
+      os.path.join("/home/u/RIVAL_cog", "266697511", "266697511_ITD_A_1_b2_cog.tif"))
+check("COG_CACHE_DIR is the default", H["cog_path_for"]("/srv/p/x.tif", [1]).startswith(
+      os.path.expanduser(H["COG_CACHE_DIR"])), True)
 
 # ── 24. remembered display bands ─────────────────────────────────────────────
 print("\n-- display bands --")

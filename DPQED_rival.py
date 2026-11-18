@@ -442,6 +442,10 @@ ALWAYS_ASK_BANDS = True
 COG_COUNT_KEY = "cog_count"     # last 1-or-3 answer
 INPUT_SCENE_PATTERN = r"(ITD|GTD)_.*_1$"
 COG_SUFFIX = "_cog"
+# COGs are written on this machine, never beside the product: the product
+# folder is on the server. One subfolder per product folder keeps two scenes
+# with the same tif name apart. Empty = beside the source (the old way).
+COG_CACHE_DIR = "~/RIVAL_cog"
 COG_CREATION_OPTIONS = ["COMPRESS=DEFLATE", "BIGTIFF=IF_SAFER",
                         "NUM_THREADS=ALL_CPUS", "OVERVIEWS=AUTO"]
 
@@ -1438,10 +1442,20 @@ def default_rgb(band_count):
     return list(range(1, min(3, int(band_count)) + 1))
 
 
-def cog_path_for(src, bands):
-    """<stem>_b1-2-3_cog.tif beside src: one COG per band choice."""
-    stem = os.path.splitext(src)[0]
-    return f"{stem}_b{'-'.join(str(int(b)) for b in bands)}{COG_SUFFIX}.tif"
+def cog_path_for(src, bands, cache_dir=None):
+    """<stem>_b1-2-3_cog.tif for src: one COG per band choice.
+
+    Written locally, in cache_dir (COG_CACHE_DIR by default) under the name of
+    the folder the product sits in -- not in the product folder, which is on
+    the server. cache_dir '' puts it beside src."""
+    cache_dir = COG_CACHE_DIR if cache_dir is None else cache_dir
+    name = (os.path.splitext(os.path.basename(src))[0]
+            + f"_b{'-'.join(str(int(b)) for b in bands)}{COG_SUFFIX}.tif")
+    if not cache_dir:
+        return os.path.join(os.path.dirname(src), name)
+    cache_dir = os.path.expanduser(cache_dir)
+    parent = os.path.basename(os.path.dirname(os.path.abspath(src))) or "scene"
+    return os.path.join(cache_dir, parent, name)
 
 
 def cog_source_bands(path):
@@ -1705,6 +1719,7 @@ def build_cog(src, dst, bands, progress=None):
     or failed build never leaves a half-written file that would later be
     reused as though it were complete.
     """
+    os.makedirs(os.path.dirname(os.path.abspath(dst)), exist_ok=True)
     tmp = dst + ".part"
     try:
         from osgeo import gdal
