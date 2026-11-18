@@ -268,6 +268,12 @@ the current code. The server's own settings file is kept as
 `job_used_server.json`. The benchmark's `BENCH_SUMMARY.csv` also shows each
 detector's median minutes per pass, to weigh its result against its cost.
 
+**Run auto (by distortion)** (run window) runs the fastest preset, reads its
+rigid share (the share of consistent points that fit one offset for the whole
+scene, at the coarsest agreement level) and goes on: 80 % or more -- stop,
+little distortion; 40-80 % -- accurate; under 40 % -- most accurate (one cache,
+so only the added detectors run). The choice is in `AUTO_PRESET.txt`.
+
 ## Hyperspectral cubes: which band (auto_bands)
 
 The good bands of a G1A HS/HV cube change from image to image. In one, the
