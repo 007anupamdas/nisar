@@ -56,6 +56,66 @@ def kill_tree(proc) -> None:
     except Exception:
         pass
 
+
+def job_summary(out_dir: str, minutes=None) -> str:
+    """What a finished job left, in a few lines, for the job-complete dialog."""
+    import glob as _glob
+    lines = [f'Output: {out_dir}'] + ([f'Done in {float(minutes):.1f} min'] if minutes not in (None, '') else [])
+    try:
+        import pandas as pd
+        c = pd.read_csv(os.path.join(out_dir, 'CROSS_SUMMARY.csv'))
+        for r in c.to_dict('records'):
+            ch = r.get('channel')
+            lines.append(f"{ch}: cross-check {'reliable' if str(r.get('reliable')).lower() == 'true' else 'NOT reliable'}"
+                         f", {r.get('points')} agreed points")
+            for k in sorted(k for k in r if k.startswith('final_points_')):
+                lv = k[len('final_points_'):]
+                share = r.get(f'rigid_share_{lv}')
+                lines.append(f"  {lv}: {r[k]} final points ({r.get(f'final_tiles_ok_{lv}')} of "
+                             f"{r.get(f'final_tiles_{lv}')} tiles)"
+                             + (f", {100 * float(share):.0f} % fit one offset" if share == share and share is not None
+                                else ''))
+    except Exception:
+        pass
+    try:
+        import pandas as pd
+        st = pd.read_csv(os.path.join(out_dir, 'REPORT', 'REPORT_STATS.csv'))
+        man = st[st['file'].astype(str).str.startswith('MANUAL')]
+        for r in st[st['file'].astype(str).str.startswith('RIVAL_FINAL_')].to_dict('records'):
+            lines.append(f"{r['file']}: mean dE {float(r.get('mean_dx_m') or 0) / 1000:.3f} km, dN "
+                         f"{float(r.get('mean_dy_m') or 0) / 1000:.3f} km, CE90 {float(r.get('ce90_m') or 0) / 1000:.3f} km"
+                         + (f"  (manual CE90 {float(man['ce90_m'].iloc[0]) / 1000:.3f} km)" if len(man) else ''))
+    except Exception:
+        pass
+    auto = os.path.join(os.path.dirname(os.path.normpath(out_dir)), 'AUTO_PRESET.txt')
+    if os.path.exists(auto):
+        lines.append('Auto: ' + open(auto, encoding='utf-8').read().strip().replace('\n', '; '))
+    n_png = len(_glob.glob(os.path.join(out_dir, 'REPORT', '*_vectors.png')))
+    if n_png:
+        lines.append(f'{n_png} look-vector plot(s) in REPORT/')
+    return '\n'.join(lines)
+
+
+def show_job_done(parent, out_dir: str, minutes=None):
+    """A non-blocking job-complete dialog with the summary and buttons to the folder and the plots."""
+    box = QtWidgets.QMessageBox(parent)
+    box.setWindowTitle('Job complete')
+    box.setText(job_summary(out_dir, minutes))
+    open_b = box.addButton('Open folder', QtWidgets.QMessageBox.ButtonRole.ActionRole
+                           if QT_API != 'PyQt5' else QtWidgets.QMessageBox.ActionRole)
+    plots_b = box.addButton('Open plots', QtWidgets.QMessageBox.ButtonRole.ActionRole
+                            if QT_API != 'PyQt5' else QtWidgets.QMessageBox.ActionRole)
+    box.addButton(QtWidgets.QMessageBox.StandardButton.Close if QT_API != 'PyQt5' else QtWidgets.QMessageBox.Close)
+
+    def clicked(b):
+        target = out_dir if b is open_b else os.path.join(out_dir, 'REPORT') if b is plots_b else ''
+        if target and os.path.isdir(target):
+            QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(target))
+    box.buttonClicked.connect(clicked)
+    box.setModal(False)
+    box.show()
+    return box
+
 DEVICES = ('all', 'auto', 'cuda:0', 'cuda:1', 'cpu')
 
 
@@ -483,6 +543,8 @@ class RunWindow(QtWidgets.QMainWindow):
                 f"{m}: {'done' if c == 0 else f'ended with code {c}'} -> {o}" for m, o, c in self._all_done)
                 + ' (REPORT/REPORT_STATS.csv in each: the points against the manual ones)')
             self._pending, self._all_done = [], []
+        if code == 0 and out and kind == 'run':
+            self._done_box = show_job_done(self, out)
         if code == 0 and (final or best):
             self.log.appendPlainText('--- for RIVAL:')
             for p in final:

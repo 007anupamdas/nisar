@@ -82,13 +82,86 @@ DETECTOR_GROUPS = {
              'imw-lanet-nn', 'imw-topicfm', 'imw-eloftr', 'imw-aspanformer', 'imw-dkm', 'imw-minima-roma',
              'imw-roma', 'imw-rdd-nn', 'imw-gim-roma', 'disk', 'dog', 'keynet', 'imw-omniglue'],
 }
+# the GPU server: every detector that is fast or medium and ranked well (no slow one, none not worth it)
+DETECTOR_GROUPS['server'] = [d for d in DETECTOR_GROUPS['good'] if d not in DETECTOR_GROUPS['slow']]
+def detector_set(speeds, good_only: bool) -> List[str]:
+    """The detectors of the chosen speed groups ('fast', 'medium', 'slow', any
+    combination), only those that ranked well when good_only."""
+    out = []
+    for sp in ('fast', 'medium', 'slow'):
+        if sp in speeds:
+            out += [d for d in DETECTOR_GROUPS[sp] if d not in out]
+    return [d for d in out if d in DETECTOR_GROUPS['good']] if good_only else out
+
+
 DETECTOR_GROUP_HELP = {
+    'server': 'For the server: the fast and medium detectors that ranked well (no slow one, none not worth its time)',
     'fast': 'Under 4 min per pass (MV, jobs 1068 / 1069)', 'medium': '4-10 min per pass',
     'slow': 'Over 10 min per pass', 'all': 'Every offered detector', 'none': 'Untick all',
     'good': 'In the top 10 against the ground truth at least once (jobs 1064-1069), whatever their time; '
             'leaves out sift, gftt, hessian, dedode, the SuperPoint family, alike, xfeat-dense, r2d2, dad-roma, '
             'rord, gim-dkm, rdd-dense, d2net, liftfeat, xoftr, ripe',
 }
+
+
+def job_summary(out_dir: str, minutes=None) -> str:
+    """What a finished job left, in a few lines, for the job-complete dialog."""
+    import glob as _glob
+    lines = [f'Output: {out_dir}'] + ([f'Done in {float(minutes):.1f} min'] if minutes not in (None, '') else [])
+    try:
+        import pandas as pd
+        c = pd.read_csv(os.path.join(out_dir, 'CROSS_SUMMARY.csv'))
+        for r in c.to_dict('records'):
+            ch = r.get('channel')
+            lines.append(f"{ch}: cross-check {'reliable' if str(r.get('reliable')).lower() == 'true' else 'NOT reliable'}"
+                         f", {r.get('points')} agreed points")
+            for k in sorted(k for k in r if k.startswith('final_points_')):
+                lv = k[len('final_points_'):]
+                share = r.get(f'rigid_share_{lv}')
+                lines.append(f"  {lv}: {r[k]} final points ({r.get(f'final_tiles_ok_{lv}')} of "
+                             f"{r.get(f'final_tiles_{lv}')} tiles)"
+                             + (f", {100 * float(share):.0f} % fit one offset" if share == share and share is not None
+                                else ''))
+    except Exception:
+        pass
+    try:
+        import pandas as pd
+        st = pd.read_csv(os.path.join(out_dir, 'REPORT', 'REPORT_STATS.csv'))
+        man = st[st['file'].astype(str).str.startswith('MANUAL')]
+        for r in st[st['file'].astype(str).str.startswith('RIVAL_FINAL_')].to_dict('records'):
+            lines.append(f"{r['file']}: mean dE {float(r.get('mean_dx_m') or 0) / 1000:.3f} km, dN "
+                         f"{float(r.get('mean_dy_m') or 0) / 1000:.3f} km, CE90 {float(r.get('ce90_m') or 0) / 1000:.3f} km"
+                         + (f"  (manual CE90 {float(man['ce90_m'].iloc[0]) / 1000:.3f} km)" if len(man) else ''))
+    except Exception:
+        pass
+    auto = os.path.join(os.path.dirname(os.path.normpath(out_dir)), 'AUTO_PRESET.txt')
+    if os.path.exists(auto):
+        lines.append('Auto: ' + open(auto, encoding='utf-8').read().strip().replace('\n', '; '))
+    n_png = len(_glob.glob(os.path.join(out_dir, 'REPORT', '*_vectors.png')))
+    if n_png:
+        lines.append(f'{n_png} look-vector plot(s) in REPORT/')
+    return '\n'.join(lines)
+
+
+def show_job_done(parent, out_dir: str, minutes=None):
+    """A non-blocking job-complete dialog with the summary and buttons to the folder and the plots."""
+    box = QtWidgets.QMessageBox(parent)
+    box.setWindowTitle('Job complete')
+    box.setText(job_summary(out_dir, minutes))
+    open_b = box.addButton('Open folder', QtWidgets.QMessageBox.ButtonRole.ActionRole
+                           if QT_API != 'PyQt5' else QtWidgets.QMessageBox.ActionRole)
+    plots_b = box.addButton('Open plots', QtWidgets.QMessageBox.ButtonRole.ActionRole
+                            if QT_API != 'PyQt5' else QtWidgets.QMessageBox.ActionRole)
+    box.addButton(QtWidgets.QMessageBox.StandardButton.Close if QT_API != 'PyQt5' else QtWidgets.QMessageBox.Close)
+
+    def clicked(b):
+        target = out_dir if b is open_b else os.path.join(out_dir, 'REPORT') if b is plots_b else ''
+        if target and os.path.isdir(target):
+            QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(target))
+    box.buttonClicked.connect(clicked)
+    box.setModal(False)
+    box.show()
+    return box
 
 Qt = QtCore.Qt
 CHECKED = Qt.CheckState.Checked if QT_API != 'PyQt5' else Qt.Checked
@@ -664,7 +737,8 @@ class PackDialog(QtWidgets.QDialog):
                 'pack/weights': '/maintenance/ICIGDev/GPUPOC/input/dqe/imw_runtime/imw_cache',
                 'pack/cache': '', 'pack/code': '/maintenance/ICIGDev/GPUPOC/exe/anup/nisar/g1a_automatch/automatch_gpuaas.py',
                 'pack/gpu_mb': 40000,
-                'pack/all_det': False, 'pack/all_match': False}
+                'pack/all_det': False, 'pack/all_match': False, 'pack/server_set': True, 'pack/good_only': True,
+                'pack/speed_fast': True, 'pack/speed_medium': True, 'pack/speed_slow': False}
 
     def __init__(self, settings, job, parent=None):
         super().__init__(parent)
@@ -718,7 +792,26 @@ class PackDialog(QtWidgets.QDialog):
         self.all_det.setChecked(str(get('pack/all_det')).lower() == 'true')
         self.all_match = QtWidgets.QCheckBox('every matcher each detector offers')
         self.all_match.setChecked(str(get('pack/all_match')).lower() == 'true')
+        self.server_set = QtWidgets.QCheckBox('by speed group:')
+        self.server_set.setToolTip('The detectors of the ticked speed groups (any combination), only those that '
+                                   'ranked well when ticked; instead of the main window\'s selection')
+        self.server_set.setChecked(str(get('pack/server_set')).lower() == 'true')
+        self.server_set.toggled.connect(lambda on: on and self.all_det.setChecked(False))
+        self.all_det.toggled.connect(lambda on: on and self.server_set.setChecked(False))
+        self.pack_speeds = {}
+        hs = QtWidgets.QHBoxLayout()
+        hs.addWidget(self.server_set)
+        for label, key in (('fast', 'fast'), ('medium', 'medium'), ('slow', 'slow')):
+            cb = QtWidgets.QCheckBox(label)
+            cb.setChecked(str(get(f'pack/speed_{key}')).lower() == 'true')
+            self.pack_speeds[key] = cb
+            hs.addWidget(cb)
+        self.pack_good = QtWidgets.QCheckBox('only those that ranked well')
+        self.pack_good.setChecked(str(get('pack/good_only')).lower() == 'true')
+        hs.addWidget(self.pack_good)
+        hs.addStretch(1)
         f.addRow('Detectors', self.all_det)
+        f.addRow('', hs)
         f.addRow('Matchers', self.all_match)
         self.dry = QtWidgets.QCheckBox('only list what would be copied, and its size')
         f.addRow('', self.dry)
@@ -745,6 +838,11 @@ class PackDialog(QtWidgets.QDialog):
             a += ['--server-cache', self.cache.text().strip()]
         if self.all_det.isChecked():
             a += ['--set', 'detectors=all']
+        elif self.server_set.isChecked():
+            chosen = detector_set([k for k, cb in self.pack_speeds.items() if cb.isChecked()], self.pack_good.isChecked())
+            if not chosen:
+                raise ValueError('Tick at least one speed group (fast, medium, slow).')
+            a += ['--set', 'detectors=' + json.dumps(chosen)]
         if self.all_match.isChecked():
             a += ['--set', 'matchers=all']
         if self.dry.isChecked():
@@ -765,7 +863,11 @@ class PackDialog(QtWidgets.QDialog):
                          ('pack/share_local', self.share_local.text()), ('pack/share_server', self.share_server.text()),
                          ('pack/weights', self.weights.text().strip()), ('pack/cache', self.cache.text().strip()),
                          ('pack/code', self.code.text().strip()), ('pack/gpu_mb', self.gpu_mb.value()),
-                         ('pack/all_det', self.all_det.isChecked()), ('pack/all_match', self.all_match.isChecked())):
+                         ('pack/all_det', self.all_det.isChecked()), ('pack/all_match', self.all_match.isChecked()),
+                         ('pack/server_set', self.server_set.isChecked()), ('pack/good_only', self.pack_good.isChecked()),
+                         ('pack/speed_fast', self.pack_speeds['fast'].isChecked()),
+                         ('pack/speed_medium', self.pack_speeds['medium'].isChecked()),
+                         ('pack/speed_slow', self.pack_speeds['slow'].isChecked())):
             self.settings.setValue(key, val)
         self.accept()
 
@@ -2536,10 +2638,24 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         lay.addLayout(top)
         grp = QtWidgets.QHBoxLayout()
         grp.addWidget(QtWidgets.QLabel('Select:'))
-        for label, key in (('Fast (< 4 min)', 'fast'), ('Medium (4-10 min)', 'medium'), ('Slow (> 10 min)', 'slow'),
-                           ('Worth it (ranked well)', 'good'), ('All', 'all'), ('None', 'none')):
+        self.speed_boxes = {}
+        for label, key in (('Fast (< 4 min)', 'fast'), ('Medium (4-10 min)', 'medium'), ('Slow (> 10 min)', 'slow')):
+            cb = QtWidgets.QCheckBox(label)
+            cb.setToolTip(DETECTOR_GROUP_HELP.get(key, ''))
+            cb.setChecked(key != 'slow')
+            self.speed_boxes[key] = cb
+            grp.addWidget(cb)
+        self.good_only = QtWidgets.QCheckBox('only those that ranked well')
+        self.good_only.setToolTip(DETECTOR_GROUP_HELP['good'])
+        self.good_only.setChecked(True)
+        grp.addWidget(self.good_only)
+        tb = QtWidgets.QPushButton('Tick these')
+        tb.setToolTip('Tick the detectors of the chosen groups (any combination)')
+        tb.clicked.connect(lambda: self.select_detector_speeds(
+            [k for k, cb in self.speed_boxes.items() if cb.isChecked()], self.good_only.isChecked()))
+        grp.addWidget(tb)
+        for label, key in (('All', 'all'), ('None', 'none')):
             gb = QtWidgets.QPushButton(label)
-            gb.setToolTip(DETECTOR_GROUP_HELP.get(key, ''))
             gb.clicked.connect(lambda _=False, k=key: self.select_detector_group(k))
             grp.addWidget(gb)
         self.group_add = QtWidgets.QCheckBox('add to the ticked ones')
@@ -2999,6 +3115,13 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
 
     # ── channels ─────────────────────────────────────────────────────────────
     # ── detectors ────────────────────────────────────────────────────────────
+    def select_detector_speeds(self, speeds, good_only: bool) -> None:
+        """Tick the detectors of any combination of speed groups (detector_set)."""
+        DETECTOR_GROUPS['_chosen'] = detector_set(speeds, good_only)
+        self.select_detector_group('_chosen')
+        self.lbl_status.setText(f"{len(DETECTOR_GROUPS['_chosen'])} detector(s) of {' + '.join(speeds) or 'no group'}"
+                                + (' that ranked well' if good_only else '') + ' ticked (where offered)')
+
     def select_detector_group(self, key: str) -> None:
         """Tick a group of detectors (DETECTOR_GROUPS) in the table; the others
         are unticked unless 'add to the ticked ones'."""
@@ -3352,6 +3475,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
                 self.lbl_status.setText(f"Done in {done.get('minutes')} min. Best: "
                                         + ', '.join(f'{k}: {os.path.basename(v)}' for k, v in done['best'].items()))
                 self.bar_sweep.setValue(self.bar_sweep.maximum())
+                self._done_box = show_job_done(self, self.out_path.text(), done.get('minutes'))
             else:
                 failed = next((e for e in events if e.get('event') == 'failed'), None)
                 msg = '; '.join(failed['errors']) if failed else f'exit code {code} — see Log'

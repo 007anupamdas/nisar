@@ -1535,6 +1535,18 @@ def test_gui_run(tmp):
            w.bar.format()),
           (False, False, 'GPU 1: loftr pair 3/29, window %v/%m', 5, 'detectors 1 / 3'))
     w.cell_px.setText('32, 96')
+    import pandas as _pd
+    sd = os.path.join(tmp, 'done_job')
+    os.makedirs(sd, exist_ok=True)
+    _pd.DataFrame([{'channel': 'band3', 'reliable': True, 'points': 900, 'final_points_64px': 22, 'final_tiles_64px': 24,
+                    'final_tiles_ok_64px': 22, 'rigid_share_64px': 0.55}]).to_csv(os.path.join(sd, 'CROSS_SUMMARY.csv'),
+                                                                                  index=False)
+    txt = G.job_summary(sd, 12.5)
+    box = G.show_job_done(w, sd, 12.5)
+    check('run window: job complete dialog: time, final points per level, rigid share',
+          ('12.5 min' in txt, '64px: 22 final points (22 of 24 tiles), 55 % fit one offset' in txt, box.isVisible()),
+          (True, True, True))
+    box.close()
     jf = w.job('fastest', 'fastest')
     check('run window: run all 3: each preset into its subfolder, one shared cache, its own top X / Y, refined points, '
           'agreement cells',
@@ -2089,11 +2101,26 @@ def test_gui_dialog():
         w.group_add.setChecked(False)
         w.select_detector_group('none')
         none = w._selected_detectors()[0] if any(w._selectable(r) for r in range(w.det_table.rowCount())) else []
+        combo = G.detector_set(['fast', 'slow'], False)
+        check('gui: speed groups combine (fast + slow; ranked-well filter)',
+              (set(G.DETECTOR_GROUPS['fast']) <= set(combo), set(G.DETECTOR_GROUPS['slow']) <= set(combo),
+               'imw-minima-roma' in combo, 'sift' in G.detector_set(['slow'], True)), (True, True, False, False))
         check('gui: detector groups tick at once (fast; slow added; none clears)',
               (bool(fast) == bool(set(fast) & set(G.DETECTOR_GROUPS['fast'])) and set(fast) <= set(G.DETECTOR_GROUPS['fast']),
                set(fast) <= set(both), none), (True, True, []))
         for r, st in enumerate(before):
             w.det_table.item(r, 0).setCheckState(st)
+        pk = w.pack_dialog(run=False)
+        pk.all_det.setChecked(False)
+        pk.server_set.setChecked(True)
+        for k, on in (('fast', True), ('medium', True), ('slow', False)):
+            pk.pack_speeds[k].setChecked(on)
+        pk.pack_good.setChecked(True)
+        pa = pk.args()[0]
+        sv = json.loads(pa[pa.index('--set') + 1].split('=', 1)[1]) if '--set' in pa else []
+        check('gui pack: the server set: fast and medium detectors that ranked well, no slow ones',
+              (bool(sv), not (set(sv) & set(G.DETECTOR_GROUPS['slow'])), 'imw-minima-roma' in sv, 'sift' in sv),
+              (True, True, True, False))
         check('gui: shared coarse fields reach the job', (w.get_job()['coarse_shared'], w.get_job()['coarse_detectors']),
               (False, ['imw-topicfm', 'loftr']))
         w.coarse_shared.setChecked(True)
