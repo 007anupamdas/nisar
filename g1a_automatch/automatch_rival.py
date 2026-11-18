@@ -55,28 +55,40 @@ def apply_point_mask(df: pd.DataFrame, xcol: str = 'x1-map', ycol: str = 'y1-map
 
 def collect_points(filtered_dir: str, filenames: List[str]) -> pd.DataFrame:
     """Inlier correspondences of the given filtered CSVs, with provenance."""
-    frames = []
+    # read the files, then filter, mask and label all their rows at once (a
+    # job of 300+ configurations x 300+ chips reads 100 000 files: the per-file
+    # work was what took the time)
+    frames, names = [], []
     for name in filenames:
-        path = os.path.join(filtered_dir, name)
-        if not os.path.exists(path):
+        try:
+            df = pd.read_csv(os.path.join(filtered_dir, name))
+        except (OSError, pd.errors.EmptyDataError):
             continue
-        df = pd.read_csv(path)
-        if 'inliers' in df.columns:
-            df = df[df['inliers'].astype(str).str.lower().str.contains('true')]
-        df = apply_point_mask(df)
         if df.empty:
             continue
-        p = _parse(name) or {}
-        df = df.assign(source_file=name, detector=p.get('detector'),
-                       matcher=p.get('match_method'), match_parameter=p.get('match_parameter'),
-                       ransac_method=p.get('ransac_method'), ransac_threshold=p.get('ransac_threshold'),
-                       ransac_confidence=p.get('ransac_confidence'), pair_id=p.get('pair_id'),
-                       scan=p.get('scan'), pix=p.get('pix'), channel=p.get('nisar_pol'),
-                       reference=p.get('s1_ref_tag'))
         frames.append(df)
+        names.append(name)
     if not frames:
         return pd.DataFrame()
     out = pd.concat(frames, ignore_index=True)
+    out['source_file'] = np.repeat(np.asarray(names, dtype=object), [len(f) for f in frames])
+    if 'inliers' in out.columns:
+        inl = out['inliers']
+        keep = inl.astype(bool) if inl.dtype == bool else inl.astype(str).str.lower().str.contains('true')
+        out = out[keep.to_numpy()]
+    out = apply_point_mask(out)
+    if out.empty:
+        return pd.DataFrame()
+    meta = []
+    for name in set(out['source_file']):
+        p = _parse(name) or {}
+        meta.append({'source_file': name, 'detector': p.get('detector'), 'matcher': p.get('match_method'),
+                     'match_parameter': p.get('match_parameter'), 'ransac_method': p.get('ransac_method'),
+                     'ransac_threshold': p.get('ransac_threshold'), 'ransac_confidence': p.get('ransac_confidence'),
+                     'pair_id': p.get('pair_id'), 'scan': p.get('scan'), 'pix': p.get('pix'),
+                     'channel': p.get('nisar_pol'), 'reference': p.get('s1_ref_tag')})
+    out = out.drop(columns=[c for c in meta[0] if c != 'source_file' and c in out.columns]).merge(
+        pd.DataFrame(meta), on='source_file', how='left')
     # The same correspondence can survive in several windows' RANSAC sets.
     return out.drop_duplicates(subset=['x1-map', 'y1-map', 'x2-map', 'y2-map'])
 

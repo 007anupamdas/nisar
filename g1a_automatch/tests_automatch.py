@@ -876,8 +876,8 @@ def test_interior_and_final(tmp):
     old_file = J.GPU_PEAKS_FILE
     J.GPU_PEAKS_FILE = os.path.join(tmp, 'gpu_peaks.json')
     try:
-        refused = e0.CLAIM_HOOK('b1', 'dedode_L-C4_B-C4')        # in the A4000's own share, too heavy: left
-        taken_over = e0.CLAIM_HOOK('b1', 'imw-rdd-nn-kt0p2')     # the A4500's: taken over once the A4000 is done
+        refused = e0.CLAIM_HOOK('b1', 'dedode_L-C4_B-C4')        # too heavy for the A4000: left to the A4500
+        taken_over = e0.CLAIM_HOOK('b1', 'imw-rdd-nn-kt0p2')     # also too heavy: never taken over
         kept_big = e0.CLAIM_HOOK('b1', 'imw-minima-loftr')       # 20 GB at 2048: never on the 16 GB GPU
         J.learn_gpu_peak('imw-xfeat-lg', 1024, 15.2)
         J.learn_gpu_peak('imw-xfeat-lg', 1024, 3.0)               # a lower peak does not lower it
@@ -887,8 +887,8 @@ def test_interior_and_final(tmp):
     check('gpu: a detector too heavy for the smaller GPU is left to the larger while it is its own; a peak seen '
           'here is learned',
           (refused, learned), (False, 15.2))
-    check('gpu: a heavy detector of the larger GPU\'s share is taken over by the smaller one when its own are done',
-          (taken_over, kept_big), (True, False))
+    check('gpu: a heavy detector is never taken over by the smaller GPU (CUDA out of memory)',
+          (taken_over, kept_big), (False, False))
 
 
 def test_report(tmp):

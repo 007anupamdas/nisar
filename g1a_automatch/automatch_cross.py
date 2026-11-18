@@ -68,15 +68,38 @@ def _spread(p: pd.DataFrame) -> float:
     return float(1.4826 * np.median(d))
 
 
-def _configs(output_dir: str, chips: str = 'consensus') -> List[Dict]:
-    """Every configuration of every run under output_dir, with its matches."""
+RANK_SAMPLE_FILES = 60     # chips per configuration read to rank them by agreement (all of them for the top)
+
+
+def _cfg_key(c: Dict) -> Tuple:
+    return (str(c['channel']), str(c['sweep']), str(c['detector']), str(c['matcher']), str(c['ransac']))
+
+
+def _configs(output_dir: str, chips: str = 'consensus', max_files: Optional[int] = None,
+             only: Optional[set] = None) -> List[Dict]:
+    """Every configuration of every run under output_dir, with its matches;
+    max_files: at most that many of each one's chip files, spread over them
+    (enough to rank them); only: just these configurations (_cfg_key)."""
     import automatch_rival as R
     import automatch_truth as T
+    import time as _time
     out = []
     settings = T.consensus_settings(output_dir)
-    for run in T.find_runs(output_dir):
+    runs = T.find_runs(output_dir)
+    t0, last = _time.time(), _time.time()
+    for k_run, run in enumerate(runs, 1):
+        if _time.time() - last > 30 or k_run == len(runs):
+            print(f'[Cross] reading the matches: {k_run}/{len(runs)} detector runs, {len(out)} configurations, '
+                  f'{_time.time() - t0:.0f} s', flush=True)
+            last = _time.time()
         for key, cfg in T.config_points(run['filtered_dir'], run['final_dir'], chips, settings).items():
-            pts = R.collect_points(run['filtered_dir'], cfg['files'])
+            if only is not None and (str(cfg['channel']), run['sweep'], str(cfg['detector']), str(cfg['matcher']),
+                                     str(cfg['ransac'])) not in only:
+                continue
+            files = list(cfg['files'])
+            if max_files and len(files) > max_files:
+                files = files[::int(math.ceil(len(files) / float(max_files)))]
+            pts = R.collect_points(run['filtered_dir'], files)
             if pts.empty:
                 continue
             pts = pts.assign(E=pts['x1-map'], N=pts['y1-map'], dE=pts['x1-map'] - pts['x2-map'],
@@ -504,7 +527,8 @@ def run(output_dir: str, top_n: int = 5, min_agree: int = 0, cell_km: float = 25
     # then nothing was filtered; 1.5 x the RANSAC threshold (3 px by default) instead
     tol = float(tol_m or 0.0)
     cell_m = float(cell_km) * 1000.0
-    cfgs = cfgs if cfgs is not None else _configs(output_dir)
+    full_given = cfgs is not None
+    cfgs = cfgs if full_given else _configs(output_dir, max_files=RANK_SAMPLE_FILES)   # a sample each: to rank
     out_dir = out_dir or output_dir
     os.makedirs(out_dir, exist_ok=True)
     rank_path = ranking_csv or os.path.join(output_dir, 'TRUTH_RANKING.csv')
@@ -524,6 +548,9 @@ def run(output_dir: str, top_n: int = 5, min_agree: int = 0, cell_km: float = 25
             th = pd.Series([c['ransac'] for c in mine]).str.extract(r'(\d+(?:\.\d+)?)$')[0].astype(float)
             tol = 1.5 * float(th.median()) if th.notna().any() else 1000.0
         top, how = pick_top(mine, top_n, cell_m, tol, rk)
+        if not full_given and top:              # the chosen ones with all their points
+            full = {_cfg_key(c): c for c in _configs(output_dir, only={_cfg_key(c) for c in top})}
+            top = [full.get(_cfg_key(c), c) for c in top]
         if len(top) < 2:
             print(f'[Cross] {ch}: fewer than 2 configurations to compare; skipped')
             continue

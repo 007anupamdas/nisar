@@ -414,17 +414,16 @@ def install_queue(E, job: Dict, out_dir: str, tag: str, win: int, nf: Optional[i
         name = _unit_name(channel, dtag)
         need = gpu_need_gb(dtag, win)
         heavy = bigger and need > 0.85 * own
-        if heavy and (_gpu_family(dtag) in own_share or need > own):
-            return False                     # too heavy for this GPU (or more than it has): the larger one takes it
+        if heavy:
+            return False                     # too heavy for this GPU: the larger one takes it (taking it over
+                                             # in tiles failed with CUDA out-of-memory on many models)
         try:
             fd = os.open(os.path.join(claims, name), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except FileExistsError:
             return False
         os.write(fd, str(shard).encode())
         os.close(fd)
-        if heavy:                            # its own share done: rather than wait idle, take it in tiles
-            print(f'[Job] {dtag}: taken over from the larger GPU (this one\'s share is done); it may need '
-                  f'about {gpu_need_gb(dtag, win):.0f} GB of {own:.0f}, so it may be matched in tiles', flush=True)
+
         if job.get('resume'):
             try:
                 with open(os.path.join(units, name + '.json'), encoding='utf-8') as f:
@@ -453,6 +452,16 @@ def install_queue(E, job: Dict, out_dir: str, tag: str, win: int, nf: Optional[i
         return True
 
     def done(channel, dtag, rec):
+        err = str(rec.get('error') or '').lower()
+        if bigger and rec.get('status') != 'ok' and ('out of memory' in err or 'cuda error' in err):
+            # too big for this GPU after all: remembered as such, and handed back for the larger one
+            learn_gpu_peak(dtag, win, own)
+            try:
+                os.remove(os.path.join(claims, _unit_name(channel, dtag)))
+            except OSError:
+                pass
+            print(f'[Job] {dtag}: out of GPU memory here ({own:.0f} GB): left to the larger GPU', flush=True)
+            return
         if rec.get('status') == 'ok':
             learn_gpu_peak(dtag, win, max(float(rec.get('gpu_peak_gb') or 0), float(rec.get('gpu_reserved_gb') or 0)))
         for folder, extra in ((units, {}), (shared, {'root': root})):
