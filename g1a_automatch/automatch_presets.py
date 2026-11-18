@@ -236,6 +236,30 @@ def parse_bands(text: str) -> List[str]:
     return out
 
 
+# The window per sensor, and the larger one once the largest truth error passes a level:
+# sensor: (window, larger window, switch above this error in km)
+SENSOR_WINDOWS = {'MV': (1024, 2048, 20.0), 'HS': (512, 1024, 40.0), 'HV': (512, 1024, 80.0),
+                  'ML': (512, 1024, 30.0), 'C3': (1024, 2048, 20.0)}
+
+
+def window_for_truth(sensor: str, truth_csv: str, default: List[int]) -> Tuple[List[int], str]:
+    """With a truth file: the sensor's window, or its larger one when the
+    largest error of the manual points is above the sensor's level
+    (SENSOR_WINDOWS); else the preset's. (windows, why)"""
+    rule = SENSOR_WINDOWS.get(sensor)
+    if not truth_csv or not rule or not os.path.exists(truth_csv):
+        return list(default), ''
+    try:
+        import automatch_report as RP
+        worst = float(RP.manual_stats(truth_csv).get('max_dist_m') or 0.0) / 1000.0
+    except Exception:
+        return list(default), ''
+    small, big, level = rule
+    if worst > level:
+        return [big], f'window {big} px: the largest truth error {worst:.1f} km is above {level:g} km ({sensor})'
+    return [small], f'window {small} px: the largest truth error {worst:.1f} km is within {level:g} km ({sensor})'
+
+
 def truth_band(truth_csv: str) -> str:
     """The band a truth file's name carries (pts_band28.csv / pts_B28.csv), else ''."""
     m = re.search(r'[_\-. ](?:band_?|b)(\d+)$', os.path.splitext(os.path.basename(truth_csv or ''))[0], re.I)
@@ -276,6 +300,9 @@ def job_for(sensor: str, input_path: str, reference_dir: str, output_dir: str, t
     job.update(input_path=input_path, reference_dir=reference_dir, output_dir=output_dir)
     if truth_csv:
         job['truth_csv'] = truth_csv
+        job['window_sizes'], why = window_for_truth(sensor, truth_csv, job.get('window_sizes') or [1024])
+        if why:
+            note = (note + ' ' if note else '') + f'[{why}]'
     if bands:                                # the user's bands
         job.update(channels=list(bands), auto_bands=0, channels_from_truth=False)
     elif crispest:                           # asked for: the N bands with the most detail

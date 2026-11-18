@@ -6085,7 +6085,9 @@ class AutoMatchPipeline:
                     try:
                         with open(path, encoding='utf-8', errors='replace') as f:
                             owner, _, k = f.read().strip().partition(' ')
-                        if k != key or (owner.isdigit() and not _pid_alive(int(owner))):
+                        if not owner:
+                            return False             # just made, its owner still writing it: taken
+                        if (k and k != key) or (owner.isdigit() and not _pid_alive(int(owner))):
                             os.remove(path)          # another run's claim, or a stopped worker's: take it
                             continue
                     except OSError:

@@ -1451,6 +1451,14 @@ def test_presets(tmp):
         picks.append(P.auto_next(P.rigid_share(cs))[0])
     check('presets auto: by the rigid share (the coarsest level): stop / accurate / most accurate',
           (picks, P.auto_next(None)[0]), ([None, 'accurate', 'most accurate'], 'accurate'))
+    import pandas as _pd2
+    tw = os.path.join(tmp, 'pts_band4.csv')
+    _pd2.DataFrame({'In_X': [0, 1], 'In_Y': [0, 1], 'Ref_X': [0, 0], 'Ref_Y': [0, 0], 'DX_Err': [14000.0, 9000.0],
+                    'DY_Err': [16000.0, 3000.0]}).to_csv(tw, index=False)
+    jw, nw = P.job_for('MV', '/d/G1A_MV_x.tif', '/ref', '/out', tw, presets=pre)
+    jh, _ = P.job_for('HS', '/d/G1A_HS_x.tif', '/ref', '/out', tw, presets=pre)
+    check('presets: with a truth file the window is picked: largest error 21 km -> MV 2048 px (above 20 km), '
+          'HS 512 px (92 km)', (jw['window_sizes'], jh['window_sizes'], 'above 20 km' in nw), ([2048], [512], True))
     check('presets: top X detectors run, the error from top Y agreeing',
           (len(j3['detectors']), j3['cross_top_n'], j3['cross_min_agree']), (3, 3, 2))
     job, _ = P.job_for('MV', '/d/G1A_MV_x.tif', '/ref', '/out', bands=P.parse_bands('4, band6'), max_error_km=30,

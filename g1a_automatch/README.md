@@ -268,6 +268,11 @@ the current code. The server's own settings file is kept as
 `job_used_server.json`. The benchmark's `BENCH_SUMMARY.csv` also shows each
 detector's median minutes per pass, to weigh its result against its cost.
 
+**Windows per sensor** (with a truth file: the larger one once its largest
+error is above the level): MV 1024 / 2048 above 20 km; HS 512 / 1024 above
+40 km; HV 512 / 1024 above 80 km; ML 512 / 1024 above 30 km; C3 1024 / 2048
+above 20 km (`SENSOR_WINDOWS`). The run window logs the choice.
+
 **Run auto (by distortion)** (run window) runs the fastest preset, reads its
 rigid share (the share of consistent points that fit one offset for the whole
 scene, at the coarsest agreement level) and goes on: 80 % or more -- stop,

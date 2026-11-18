@@ -334,7 +334,7 @@ class RunWindow(QtWidgets.QMainWindow):
         ref, why = P.reference_for(self.input.text(), self.reference.text(), self.reference_c1.text())
         self.log.appendPlainText(f'--- references: {why}: {ref}')
         out = os.path.join(self.output.text(), sub) if sub else self.output.text()
-        job, _ = P.job_for(s, self.input.text(), ref, out, self.truth.text(),
+        job, note = P.job_for(s, self.input.text(), ref, out, self.truth.text(),
                            [] if crisp else P.parse_bands(self.bands.text()),
                            None if self.truth.text() else self.max_err.value(),
                            self.device.currentText(), self.cloud.isChecked(), self.weights.text(), self.presets,
@@ -343,6 +343,8 @@ class RunWindow(QtWidgets.QMainWindow):
                            mode=mode or self.mode.currentText(), final_points=self.final_points.value(),
                            cell_px=P.parse_levels(self.cell_px.text()),
                            temp_dir=os.path.join(self.output.text(), '_cache'))
+        if '[window' in note:
+            self.log.appendPlainText('--- ' + note[note.index('[window') + 1:].rstrip(']'))
         return job
 
     def run_auto(self):
