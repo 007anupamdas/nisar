@@ -1441,6 +1441,16 @@ def test_presets(tmp):
     check('presets: most accurate adds the slow ones that ranked well, all run, 4 agreeing',
           (len(jm['detectors']), 'imw-dkm' in jm['detectors'], 'imw-omniglue' in jm['detectors'], jm['cross_top_n'],
            jm['cross_min_agree'], list(P.MODES)), (13, True, True, 13, 4, ['fastest', 'accurate', 'most accurate']))
+    import pandas as _pd
+    cs = os.path.join(tmp, 'auto_cs')
+    os.makedirs(cs, exist_ok=True)
+    picks = []
+    for share in (0.9, 0.6, 0.2):
+        _pd.DataFrame([{'rigid_share_64px': 0.1, 'rigid_share_128px': share}]).to_csv(
+            os.path.join(cs, 'CROSS_SUMMARY.csv'), index=False)
+        picks.append(P.auto_next(P.rigid_share(cs))[0])
+    check('presets auto: by the rigid share (the coarsest level): stop / accurate / most accurate',
+          (picks, P.auto_next(None)[0]), ([None, 'accurate', 'most accurate'], 'accurate'))
     check('presets: top X detectors run, the error from top Y agreeing',
           (len(j3['detectors']), j3['cross_top_n'], j3['cross_min_agree']), (3, 3, 2))
     job, _ = P.job_for('MV', '/d/G1A_MV_x.tif', '/ref', '/out', bands=P.parse_bands('4, band6'), max_error_km=30,

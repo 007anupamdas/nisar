@@ -59,6 +59,37 @@ INFO_KEYS = ('note', 'band_hint', 'top_n', 'agree', 'fast_detectors', 'slow_dete
 MODES = {'fastest': {'top_n': 3, 'agree': 2},       # same RANSAC / sub-cells: results shared between presets
          'accurate': {},
          'most accurate': {'top_n': 13, 'agree': 4}}
+# Auto: the fastest preset first; its rigid share (the consistent points that
+# fit one offset for the whole scene) says how distorted the product is.
+AUTO_LOW, AUTO_HIGH = 0.8, 0.4
+
+
+def rigid_share(out_dir: str) -> Optional[float]:
+    """The rigid share a finished run's cross-check found (CROSS_SUMMARY.csv:
+    the coarsest agreement level), or None."""
+    import pandas as pd
+    try:
+        c = pd.read_csv(os.path.join(out_dir, 'CROSS_SUMMARY.csv'))
+    except (OSError, ValueError):
+        return None
+    cols = sorted([k for k in c.columns if k.startswith('rigid_share')],
+                  key=lambda k: int(re.search(r'(\d+)px', k).group(1)) if re.search(r'(\d+)px', k) else 0)
+    vals = [float(c[k].dropna().iloc[0]) for k in reversed(cols) if c[k].notna().any()]
+    return vals[0] if vals else None
+
+
+def auto_next(share: Optional[float]) -> Tuple[Optional[str], str]:
+    """(the next preset after the fastest, or None to stop; why) by the rigid share."""
+    if share is None:
+        return 'accurate', 'no rigid share (no cross-check): accurate to be safe'
+    if share >= AUTO_LOW:
+        return None, (f'{100 * share:.0f} % of the points fit one offset: little or no distortion -- the fastest '
+                      f'result stands (load its _128px_rigid or _128px final points)')
+    if share >= AUTO_HIGH:
+        return 'accurate', f'{100 * share:.0f} % fit one offset: moderate distortion -- accurate'
+    return 'most accurate', f'only {100 * share:.0f} % fit one offset: strong distortion -- most accurate'
+
+
 SENSORS: Dict[str, Dict] = {
     'MV': {'detectors': ['disk', 'imw-minima-roma', 'imw-minima-loftr', 'loftr', 'imw-sfd2-nn', 'dog',
                          'imw-aliked-lg', 'imw-xfeat-lg'],

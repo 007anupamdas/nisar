@@ -189,6 +189,11 @@ class RunWindow(QtWidgets.QMainWindow):
         self.btn_check = QtWidgets.QPushButton('Check')
         self.btn_run = QtWidgets.QPushButton('Run')
         self.btn_all = QtWidgets.QPushButton('Run all 3 presets')
+        self.btn_auto = QtWidgets.QPushButton('Run auto (by distortion)')
+        self.btn_auto.setToolTip('The fastest preset first; then by how much of the scene fits one offset (rigid share): '
+                                 'over 80 % stop there (little distortion), 40-80 % accurate, under 40 % most accurate. '
+                                 'One cache, so the second run only adds detectors. The choice is written to '
+                                 'AUTO_PRESET.txt in the output folder')
         self.btn_all.setToolTip('fastest, then accurate, then most accurate, into <output>/fastest, /accurate, '
                                 '/most_accurate, sharing one cache (<output>/_cache): references, pairs and the cloud '
                                 'mask are made once, and a detector one preset ran is reused by the next')
@@ -198,7 +203,7 @@ class RunWindow(QtWidgets.QMainWindow):
         self.btn_presets.setToolTip('Write automatch_presets.json (the presets, to edit) or show where it is; '
                                     'it is read when this window opens')
         self.btn_stop.setEnabled(False)
-        for b in (self.btn_check, self.btn_run, self.btn_all, self.btn_stop, self.btn_open, self.btn_presets):
+        for b in (self.btn_check, self.btn_run, self.btn_all, self.btn_auto, self.btn_stop, self.btn_open, self.btn_presets):
             hb.addWidget(b)
         hb.addStretch(1)
         v.addLayout(hb)
@@ -218,6 +223,7 @@ class RunWindow(QtWidgets.QMainWindow):
         self.btn_check.clicked.connect(lambda: self.start('preflight'))
         self.btn_run.clicked.connect(lambda: self.start('run'))
         self.btn_all.clicked.connect(self.run_all)
+        self.btn_auto.clicked.connect(self.run_auto)
         self.btn_stop.clicked.connect(self.stop)
         self.btn_open.clicked.connect(self.open_output)
         self.btn_presets.clicked.connect(self.presets_file)
@@ -279,6 +285,19 @@ class RunWindow(QtWidgets.QMainWindow):
                            temp_dir=os.path.join(self.output.text(), '_cache'))
         return job
 
+    def run_auto(self):
+        """The fastest preset, then the one its rigid share calls for (P.auto_next)."""
+        if self.proc is not None:
+            return
+        try:
+            job = self.job('fastest', 'fastest')
+        except ValueError as e:
+            QtWidgets.QMessageBox.warning(self, 'Automatch', str(e))
+            return
+        self._pending, self._all_done = [], []
+        self._auto = True
+        self.start('run', ('fastest', job))
+
     def run_all(self):
         """The three presets one after the other (their own top X / Y), each
         into its own subfolder, one cache: the later ones reuse what the
@@ -327,6 +346,7 @@ class RunWindow(QtWidgets.QMainWindow):
         self.proc.finished.connect(self.finished)
         self.btn_run.setEnabled(False)
         self.btn_all.setEnabled(False)
+        self.btn_auto.setEnabled(False)
         self.btn_check.setEnabled(False)
         self.btn_stop.setEnabled(True)
         self.proc.start(sys.executable, ['-u', JOB_SCRIPT, kind, path])
@@ -403,6 +423,7 @@ class RunWindow(QtWidgets.QMainWindow):
 
     def stop(self):
         self._pending = []                       # Stop ends the three-preset sequence too
+        self._auto = False
         if self.proc is not None:
             kill_tree(self.proc)                 # the run and its GPU workers
 
@@ -424,6 +445,7 @@ class RunWindow(QtWidgets.QMainWindow):
             b.setVisible(False)
         self._bar_of = {}
         self.btn_all.setEnabled(True)
+        self.btn_auto.setEnabled(True)
         self.btn_run.setEnabled(True)
         self.btn_check.setEnabled(True)
         self.btn_stop.setEnabled(False)
@@ -432,6 +454,23 @@ class RunWindow(QtWidgets.QMainWindow):
             return
         mode, out = getattr(self, '_current', ('', ''))
         final, best = self.results(out)
+        if getattr(self, '_auto', False) and mode == 'fastest':
+            self._auto = False
+            if code == 0:
+                share = P.rigid_share(out)
+                nxt, why = P.auto_next(share)
+                self.log.appendPlainText(f'--- auto: {why}')
+                try:
+                    with open(os.path.join(self.output.text(), 'AUTO_PRESET.txt'), 'w', encoding='utf-8') as f:
+                        f.write(f"rigid share: {share}\nchosen: {nxt or 'fastest'}\n{why}\n")
+                except OSError:
+                    pass
+                if nxt:
+                    try:
+                        self.start('run', (nxt, self.job(nxt, nxt.replace(' ', '_'))))
+                        return
+                    except ValueError as e:
+                        self.log.appendPlainText(f'--- auto: {nxt} not started ({e})')
         if getattr(self, '_pending', None) is not None and (self._pending or self._all_done):
             self._all_done.append((mode, out, code))
             if code == 0 and self._pending:
