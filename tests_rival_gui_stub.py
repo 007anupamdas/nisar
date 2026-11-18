@@ -452,8 +452,10 @@ win.cb_sync.isChecked = MagicMock(return_value=True)
 win.canvas_left.extent = MagicMock(return_value=_Rect(320000, 1898000,
                                                       330000, 1902000))
 rect = win._ref_view_rect(_PointXY(325000.0, 1900000.0))
-assert rect.xMaximum() - rect.xMinimum() == 10000.0, rect
-print("zoomed input (10 km wide) -> reference view matches:", rect)
+_want = 10000.0 * R.ROW_VIEW_ZOOM_INPUT / R.ROW_VIEW_ZOOM
+assert abs(rect.xMaximum() - rect.xMinimum() - _want) < 1e-6, rect
+print(f"zoomed input (10 km wide) -> reference follows at the row-select ratio "
+      f"({_want:.0f} m):", rect)
 
 # unsynced, it falls back to the fixed reference width
 win.cb_sync.isChecked = MagicMock(return_value=False)

@@ -779,6 +779,7 @@ print("\n-- row zoom and look vectors --")
 w = H["row_view_width"]
 check("10x of 1:1: 800 px of a 5.8 m scene", round(w(5.8, 800), 1), 464.0)
 check("191 m HS pixels get a wide view", w(191.0, 800), 15280.0)
+check("the input at its gentler zoom (2x): 191 m HS", w(191.0, 800, 2.0), 76400.0)
 check("clamped below", w(0.5, 800), 200.0)
 check("clamped above", w(1000.0, 4000), 200000.0)
 check("unknown pixel size", w(None, 800), None)

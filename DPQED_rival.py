@@ -169,7 +169,11 @@ left_view_width = 5000       # ground width of the input view, metres (fallback)
 # magnified from 1:1). A fixed 5 km was 26 pixels of a 191 m HS scene -- a
 # few blurry blocks -- and 860 pixels of a 5.8 m LISS-4 one. Clamped to
 # ROW_VIEW_MIN_M .. ROW_VIEW_MAX_M of ground.
-ROW_VIEW_ZOOM  = 10.0
+ROW_VIEW_ZOOM  = 10.0         # the reference canvas's width (judged good)
+# The input is coarser than its reference (191 m HS over 15 m Landsat): at 10
+# screen pixels per pixel it is a few blurry blocks. It gets its own, gentler
+# magnification -- each canvas zoomed for the resolution it shows.
+ROW_VIEW_ZOOM_INPUT = 2.0
 ROW_VIEW_MIN_M = 200.0
 ROW_VIEW_MAX_M = 200000.0
 NORM_GAMMA  = 0.5         # gamma exponent for sqrt stretch (0.5 = square root)
@@ -2910,7 +2914,10 @@ class QCDashboard(QMainWindow):
             width_m = None
             try:
                 if self.cb_sync.isChecked():
-                    width_m = self._left_view_width()
+                    # the same ratio a row selection sets, so panning or
+                    # zooming the input keeps the reference at its finer zoom
+                    lw = self._left_view_width()
+                    width_m = lw * ROW_VIEW_ZOOM_INPUT / ROW_VIEW_ZOOM if lw else None
             except Exception:
                 width_m = None
             if width_m is None:
@@ -3962,13 +3969,14 @@ class QCDashboard(QMainWindow):
         except Exception:
             return None
 
-    def _row_view_width(self):
-        """Ground width for a selected row's views (row_view_width), metres."""
+    def _row_view_width(self, zoom=None):
+        """Ground width for a selected row's view (row_view_width), metres:
+        zoom screen pixels per input pixel (ROW_VIEW_ZOOM by default)."""
         try:
             px = self.canvas_left.size().width()
         except Exception:
             px = None
-        w = row_view_width(self._input_pixel_m(), px)
+        w = row_view_width(self._input_pixel_m(), px, zoom)
         return w if w else left_view_width
 
     def sync_view_to_row(self):
@@ -4003,7 +4011,7 @@ class QCDashboard(QMainWindow):
                 canvas_size = self.canvas_left.size()
                 aspect = canvas_size.width() / max(canvas_size.height(), 1)
                 
-                width_m = self._row_view_width()
+                width_m = self._row_view_width(ROW_VIEW_ZOOM_INPUT)
                 height_m = width_m / aspect
                 rect = QgsRectangle(
                 ix - width_m / 2,
@@ -4021,8 +4029,8 @@ class QCDashboard(QMainWindow):
                 
                 
 
-            # the reference at the same ground width, so both show one scale
-            ref_w = self._row_view_width()
+            # the reference zoomed further in: it is the finer of the two
+            ref_w = self._row_view_width(ROW_VIEW_ZOOM)
             if rx != 0.0 or ry != 0.0:
                 self.show_ref_at(QgsPointXY(rx, ry), MARKER_COLOR_REF, ref_w)
             elif ix != 0.0 or iy != 0.0:
