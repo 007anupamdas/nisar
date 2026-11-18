@@ -867,24 +867,28 @@ def test_interior_and_final(tmp):
                        'detectors': ['sift']})
     J.install_queue(e0, dict(job, _queue=os.path.join(tmp, 'gq2', 'q'), _shard=0, _gpu_mem={'0': 16.0, '1': 20.0}),
                     os.path.join(tmp, 'gq2', 'w'), 'w', 1024, None)
-    check('gpu: the larger GPU takes the heaviest first, the smaller the lightest first and leaves the ones near '
-          'its memory to the larger',
-          (o_big[0], o_small[0], e0.CLAIM_HOOK('b1', 'imw-sp-lg-kt0p2'), e0.CLAIM_HOOK('b1', 'disk_depth'),
-           J.gpu_need_gb('imw-rdd-nn-kt0p2', 2048)),
-          ('imw-gim-dkm', 'imw-lanet-nn', False, True, 16.0))
-    J.install_queue(e0, dict(job, _queue=os.path.join(tmp, 'gq2', 'q2'), _shard=0, _gpu_mem={'0': 16.0, '1': 20.0}),
+    check('gpu: the larger GPU takes the heaviest first, the smaller the lightest first',
+          (o_big[0], o_small[0], e0.CLAIM_HOOK('b1', 'disk_depth'), J.gpu_need_gb('imw-rdd-nn-kt0p2', 2048)),
+          ('imw-gim-dkm', 'imw-lanet-nn', True, 16.0))
+    heavy = dict(job, detectors=['dedode', 'sift', 'imw-d2net-nn', 'imw-rdd-nn'])     # at 2048 px all above 13.6 GB
+    J.install_queue(e0, dict(heavy, _queue=os.path.join(tmp, 'gq2', 'q2'), _shard=0, _gpu_mem={'0': 16.0, '1': 20.0}),
                     os.path.join(tmp, 'gq2', 'w2'), 'w2', 2048, None)
     old_file = J.GPU_PEAKS_FILE
     J.GPU_PEAKS_FILE = os.path.join(tmp, 'gpu_peaks.json')
     try:
-        refused = e0.CLAIM_HOOK('b1', 'imw-rdd-nn-kt0p2')
+        refused = e0.CLAIM_HOOK('b1', 'dedode_L-C4_B-C4')        # in the A4000's own share, too heavy: left
+        taken_over = e0.CLAIM_HOOK('b1', 'imw-rdd-nn-kt0p2')     # the A4500's: taken over once the A4000 is done
+        kept_big = e0.CLAIM_HOOK('b1', 'imw-minima-loftr')       # 20 GB at 2048: never on the 16 GB GPU
         J.learn_gpu_peak('imw-xfeat-lg', 1024, 15.2)
         J.learn_gpu_peak('imw-xfeat-lg', 1024, 3.0)               # a lower peak does not lower it
         learned = J.gpu_need_gb('imw-xfeat-lg', 1024)
     finally:
         J.GPU_PEAKS_FILE = old_file
-    check('gpu: rdd-nn at 2048 px (16 GB seen on the A4000) left to the larger GPU; a peak seen here is learned',
+    check('gpu: a detector too heavy for the smaller GPU is left to the larger while it is its own; a peak seen '
+          'here is learned',
           (refused, learned), (False, 15.2))
+    check('gpu: a heavy detector of the larger GPU\'s share is taken over by the smaller one when its own are done',
+          (taken_over, kept_big), (True, False))
 
 
 def test_report(tmp):

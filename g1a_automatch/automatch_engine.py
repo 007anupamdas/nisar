@@ -5847,6 +5847,8 @@ class AutoMatchPipeline:
                 if th.cuda.is_available():
                     try:
                         rec['gpu_peak_gb'] = round(th.cuda.max_memory_allocated() / 1024 ** 3, 2)
+                        # what the GPU really had to give (nvidia-smi): torch's reserved peak
+                        rec['gpu_reserved_gb'] = round(th.cuda.max_memory_reserved() / 1024 ** 3, 2)
                         total = th.cuda.get_device_properties(th.cuda.current_device()).total_memory / 1024 ** 3
                         mem = f", peak GPU memory {rec['gpu_peak_gb']:.1f} of {total:.1f} GB"
                     except Exception:

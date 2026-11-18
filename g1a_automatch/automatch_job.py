@@ -135,9 +135,9 @@ def gpu_memory_gb() -> Dict[int, float]:
 GPU_NEED_GB = {
     'imw-sp-lg': (14.5, 4.1), 'imw-gim-dkm': (12.9, 7.4), 'imw-rdd-dense': (11.5, 7.9), 'imw-rdd-nn': (8.2, 16.0),
     'imw-d2net-nn': (7.6, 14.3), 'imw-dkm': (7.4, 7.4), 'imw-topicfm': (7.2, 7.3), 'imw-rord-nn': (6.8, 8.4),
-    'dedode': (6.6, 14.2), 'imw-aspanformer': (6.4, 7.3), 'imw-eloftr': (6.4, 6.0), 'imw-minima-loftr': (6.3, 11.7),
+    'dedode': (6.6, 14.2), 'imw-aspanformer': (6.4, 7.3), 'imw-eloftr': (6.4, 6.0), 'imw-minima-loftr': (6.3, 20.0),
     'imw-liftfeat-nn': (5.9, 7.5), 'imw-r2d2-nn': (5.5, 5.7), 'loftr': (5.4, 7.7), 'imw-roma': (5.4, 5.5),
-    'imw-gim-roma': (5.4, 5.5), 'imw-xoftr': (5.4, 5.0), 'imw-minima-roma': (5.4, 5.5), 'keynet': (5.3, 14.2),
+    'imw-gim-roma': (5.4, 5.5), 'imw-xoftr': (5.4, 5.0), 'imw-minima-roma': (5.4, 20.0), 'keynet': (5.3, 14.2),
     'dog': (5.3, 14.1), 'gftt': (5.2, 9.6), 'hessian': (5.2, 14.2), 'sift': (5.1, 14.3), 'imw-dad-roma': (4.7, 4.8),
     'imw-aliked-lg': (4.1, 9.4), 'imw-ripe-nn': (3.8, 9.4), 'disk': (3.0, 9.9), 'imw-sfd2-nn': (2.7, 7.5),
     'imw-xfeat-dense': (2.6, 7.3), 'imw-darkfeat-nn': (2.2, 6.0), 'imw-xfeat-lg': (2.1, 4.3), 'imw-alike-nn': (1.9, 5.3),
@@ -402,6 +402,9 @@ def install_queue(E, job: Dict, out_dir: str, tag: str, win: int, nf: Optional[i
     mem = {int(k): float(v) for k, v in (job.get('_gpu_mem') or {}).items()}
     own = mem.get(int(shard), 0.0) if shard is not None else 0.0
     bigger = own > 0 and any(v > own + 0.5 for v in mem.values())
+    own_share = set()
+    if bigger and shard is not None:
+        own_share = {_gpu_family(d) for d in gpu_share(list(job.get('detectors') or []), win, mem).get(int(shard), [])}
     reuse = job.get('_reuse') or ''             # finish mode: the finished records of an earlier run, any code
     earlier = _summary_records(out_dir, job) if reuse else {}
     shared = _results_dir(job, tag)
@@ -409,14 +412,19 @@ def install_queue(E, job: Dict, out_dir: str, tag: str, win: int, nf: Optional[i
 
     def claim(channel, dtag):
         name = _unit_name(channel, dtag)
-        if bigger and gpu_need_gb(dtag, win) > 0.85 * own:
-            return False                     # too heavy for this GPU: the larger one takes it
+        need = gpu_need_gb(dtag, win)
+        heavy = bigger and need > 0.85 * own
+        if heavy and (_gpu_family(dtag) in own_share or need > own):
+            return False                     # too heavy for this GPU (or more than it has): the larger one takes it
         try:
             fd = os.open(os.path.join(claims, name), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except FileExistsError:
             return False
         os.write(fd, str(shard).encode())
         os.close(fd)
+        if heavy:                            # its own share done: rather than wait idle, take it in tiles
+            print(f'[Job] {dtag}: taken over from the larger GPU (this one\'s share is done); it may need '
+                  f'about {gpu_need_gb(dtag, win):.0f} GB of {own:.0f}, so it may be matched in tiles', flush=True)
         if job.get('resume'):
             try:
                 with open(os.path.join(units, name + '.json'), encoding='utf-8') as f:
@@ -446,7 +454,7 @@ def install_queue(E, job: Dict, out_dir: str, tag: str, win: int, nf: Optional[i
 
     def done(channel, dtag, rec):
         if rec.get('status') == 'ok':
-            learn_gpu_peak(dtag, win, rec.get('gpu_peak_gb'))
+            learn_gpu_peak(dtag, win, max(float(rec.get('gpu_peak_gb') or 0), float(rec.get('gpu_reserved_gb') or 0)))
         for folder, extra in ((units, {}), (shared, {'root': root})):
             try:
                 os.makedirs(folder, exist_ok=True)
