@@ -2752,4 +2752,29 @@ assert R.QCDashboard.choose_cog_folder(c) is None and c._cog_folder() == "/local
 qw.QFileDialog.getExistingDirectory = _gd
 print("COG Folder: the chosen local folder is remembered and COGs go there")
 
+# ── 39. crispest bands avoid banding (the matcher's rule) ─────────────────
+import contextlib, io
+rng39 = np.random.default_rng(5)
+h39, w39, nb39 = 600, 400, 8
+yy, xx = np.mgrid[0:h39, 0:w39]
+terrain = 1000 + 200 * np.sin(xx / 7.0) * np.cos(yy / 9.0) + 300 * (yy > 300)
+cube = np.stack([terrain * (1 + 0.05 * k) + rng39.normal(0, 3, (h39, w39))
+                 for k in range(nb39)]).astype(np.float32)
+cube[5, 200:260, :] *= 1.12          # band 6: a 12 % brighter strip across the swath
+p39 = os.path.join(tempfile.mkdtemp(), "banded.tif")
+with rasterio.open(p39, "w", driver="GTiff", height=h39, width=w39, count=nb39,
+                   dtype="float32", crs="EPSG:32644",
+                   transform=from_origin(500000, 2000000, 30, 30)) as d:
+    d.write(cube)
+sys.modules.pop("osgeo", None)
+with contextlib.redirect_stdout(io.StringIO()):
+    rows39 = R.band_quality(p39)
+by39 = {r["band"]: r for r in rows39}
+others = [by39[b]["banding_pct"] for b in by39 if b != 6]
+assert by39[6]["banding_pct"] > 5 and max(others) < 1.0, (by39[6], others)
+assert by39[6]["score"] < 0.5 * min(by39[b]["score"] for b in by39 if b != 6)
+assert 6 not in R.pick_bands(rows39, 3) and R.quality_pick(rows39, 1) != [6]
+print("crispest bands: the band with a strip across the swath is ranked down; "
+      "the terrain shared by all bands (a coast step) is not banding")
+
 print("\nstubbed integration OK")

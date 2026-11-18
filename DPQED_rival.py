@@ -1925,9 +1925,58 @@ class _BandReader:
         self.ds = None
 
 
+BANDING_HALF_PCT = 2.0     # a band whose own banding is 2 % of its level scores half
+
+
+def _band_banding(rowp, colp):
+    """Each band's own banding (%), as the matcher's engine measures it: its
+    row (and column) mean profile fitted as the terrain's shape -- the pattern
+    all bands share most, their first principal component -- plus a smooth
+    trend; the p95 - p5 spread of what is left. Strips across the swath that
+    only some bands carry (HS / HV detector banding) stand out; terrain does
+    not. Fitted twice, the second time without the banded bands, so their
+    strips do not leak into the terrain's shape."""
+    import numpy as np
+    out = {}
+    if len(rowp) < 3:
+        return {b: 0.0 for b in rowp}
+    for profs in (rowp, colp):
+        names = list(profs)
+        stack = np.vstack([profs[b] for b in names])
+        good = np.all(np.isfinite(stack), axis=0)
+        use = [i for i in range(len(stack)) if np.nanstd(stack[i]) > 0]
+        if good.sum() < 20 or len(use) < 3:
+            continue
+        x = np.linspace(-1.0, 1.0, int(good.sum()))
+
+        def amps(rows):
+            M = stack[rows][:, good]
+            M = M - M.mean(axis=1, keepdims=True)
+            M = M / np.maximum(np.linalg.norm(M, axis=1, keepdims=True), 1e-12)
+            common = np.linalg.svd(M, full_matrices=False)[2][0]
+            A = np.column_stack([np.ones(len(x)), common, x, x * x])
+            res = {}
+            for i in use:
+                p = stack[i][good]
+                coef, *_ = np.linalg.lstsq(A, p, rcond=None)
+                r = p - A @ coef
+                res[i] = float(np.subtract(*np.percentile(r, [95, 5]))) * 100.0
+            return res
+        a1 = amps(use)
+        med = float(np.median(list(a1.values())))
+        clean = [i for i in use if a1[i] <= max(3.0 * med, 1.0)]
+        a2 = amps(clean) if 3 <= len(clean) < len(use) else a1
+        for i, v in a2.items():
+            out[names[i]] = max(out.get(names[i], 0.0), v)
+    return out
+
+
 def band_quality(path, bands=None, max_side=1024, block=256, n_blocks=6, nodata=None):
     """Score every band for crisp detail above its noise (see the engine's
-    docstring); returns one dict per band with 'band', 'score', 'detail_db'."""
+    docstring); returns one dict per band with 'band', 'score', 'detail_db',
+    'banding_pct'. A band carrying its own strips across the swath (HS / HV
+    detector banding) is scored down, as the matcher now does."""
+    import warnings
     import numpy as np
     global _DOG_GAIN
     if _DOG_GAIN is None:
@@ -1949,6 +1998,7 @@ def band_quality(path, bands=None, max_side=1024, block=256, n_blocks=6, nodata=
             return v
 
         spread, cover, ovalid = {}, {}, np.zeros((oh, ow), np.float32)
+        rowp, colp = {}, {}              # each band's row / column mean profile (banding)
         for k in range(0, len(idx), 16):
             chunk = idx[k:k + 16]
             arr = src.overview(chunk, oh, ow)
@@ -1958,6 +2008,14 @@ def band_quality(path, bands=None, max_side=1024, block=256, n_blocks=6, nodata=
                 ovalid += v
                 spread[b] = (float(np.subtract(*np.percentile(a[v], [98, 2])))
                              if v.sum() > 50 else 0.0)
+                xb = np.where(v, a.astype(np.float64), np.nan)
+                med = float(np.nanmedian(xb)) if v.any() else 0.0
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", RuntimeWarning)
+                    # means, not medians: a mean scales with the band's
+                    # contrast, so the terrain fits out
+                    rowp[b] = np.nanmean(xb, axis=1) / med if med else np.full(oh, np.nan)
+                    colp[b] = np.nanmean(xb, axis=0) / med if med else np.full(ow, np.nan)
         ovalid /= max(1, len(idx))
 
         bs = int(min(block, src.height, src.width))
@@ -1988,6 +2046,7 @@ def band_quality(path, bands=None, max_side=1024, block=256, n_blocks=6, nodata=
                     detail[b].append(_detail_rms(a, v))
                     qstep[b].append(_quant_step(a, v))
         best_cover = max(cover.values()) if cover else 0.0
+        banding = _band_banding(rowp, colp)
         for b in idx:
             n = [x for x in noise[b] if np.isfinite(x)]
             sn = float(np.median(n)) if n else float("nan")
@@ -2009,9 +2068,14 @@ def band_quality(path, bands=None, max_side=1024, block=256, n_blocks=6, nodata=
             sharp = det / sig if sig > 0 else 0.0
             dsnr = det / nd_ if (ok and nd_ > 0) else 0.0
             score = 100.0 * sharp * dsnr ** 2 / (dsnr ** 2 + 4.0) if snr > 0 else 0.0
+            # banding: strips across the swath this band has and the others
+            # do not -- half weight at BANDING_HALF_PCT
+            bnd = banding.get(b, 0.0)
+            score *= 1.0 / (1.0 + (bnd / BANDING_HALF_PCT) ** 2)
             rows.append({"band": b, "score": float(round(score, 3)),
                          "detail_db": (float(round(20 * np.log10(dsnr), 2))
-                                       if dsnr > 0 else UNUSABLE_DB)})
+                                       if dsnr > 0 else UNUSABLE_DB),
+                         "banding_pct": float(round(bnd, 2))})
     finally:
         src.close()
     return rows
@@ -5200,7 +5264,8 @@ class QCDashboard(QMainWindow):
             rows = band_quality(src)
             top = sorted(rows, key=lambda r: -r["score"])[:5]
             print("[COG] band quality, best first: " + ", ".join(
-                f"{r['band']} ({r['score']:.1f}, {r['detail_db']:+.1f} dB)"
+                f"{r['band']} ({r['score']:.1f}, {r['detail_db']:+.1f} dB, "
+                f"banding {r.get('banding_pct', 0):.1f}%)"
                 for r in top))
             return rows
         except Exception as e:
