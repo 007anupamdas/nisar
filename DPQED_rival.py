@@ -445,7 +445,8 @@ COG_SUFFIX = "_cog"
 # COGs are written on this machine, never beside the product: the product
 # folder is on the server. One subfolder per product folder keeps two scenes
 # with the same tif name apart. Empty = beside the source (the old way).
-COG_CACHE_DIR = "~/RIVAL_cog"
+COG_CACHE_DIR = "~/RIVAL_cog"   # default; the COG Folder button overrides it
+COG_FOLDER_KEY = "cog_folder"
 COG_CREATION_OPTIONS = ["COMPRESS=DEFLATE", "BIGTIFF=IF_SAFER",
                         "NUM_THREADS=ALL_CPUS", "OVERVIEWS=AUTO"]
 
@@ -2416,6 +2417,10 @@ class QCDashboard(QMainWindow):
             "bearing, so two scenes over one area overlay as quiver plots.")
         self.btn_out_folder = QPushButton("Output Folder")
         self.btn_out_folder.setToolTip("Where Export CSV / SHP write -- kept until changed")
+        self.btn_cog_folder = QPushButton("COG Folder")
+        self.btn_cog_folder.setToolTip(
+            "Local folder the COGs are built in (not the server's product folder)\n"
+            "-- kept until changed")
         self.btn_del   = QPushButton("Delete Row")
         self.btn_del.setToolTip("Delete Row  (Ctrl+Delete)")
         self.btn_clear = QPushButton("Clear Rows")
@@ -2493,7 +2498,8 @@ class QCDashboard(QMainWindow):
         for w in ([self.btn_input_tif, self.btn_input_file, self.btn_clear_input,
                    self.btn_reference_folder,
                    self.btn_load, self.btn_add, self.btn_export,
-                   self.btn_del, self.btn_clear, self.btn_out_folder]
+                   self.btn_del, self.btn_clear, self.btn_out_folder,
+                   self.btn_cog_folder]
                   + [self.tool_buttons[m] for m in MAP_TOOLS]
                   + [self.cb_sync, self.cb_auto_mark]):
             btn_layout.addWidget(w)
@@ -2512,6 +2518,7 @@ class QCDashboard(QMainWindow):
         self.btn_input_file.clicked.connect(self.load_input_tif)
         self.btn_clear_input.clicked.connect(self.clear_input)
         self.btn_out_folder.clicked.connect(self.choose_output_folder)
+        self.btn_cog_folder.clicked.connect(self.choose_cog_folder)
         self.btn_reference_folder.clicked.connect(self.select_reference_folder)
         self.btn_load.clicked.connect(self.load_csv_smart)
         self.btn_add.clicked.connect(self.add_manual_row)
@@ -4044,6 +4051,28 @@ class QCDashboard(QMainWindow):
         self.markers[key] = [cross]
         canvas.refresh()
 
+    def _cog_folder(self):
+        """The local COG folder: the one chosen with COG Folder, else
+        COG_CACHE_DIR."""
+        try:
+            v = str(self._settings().value(COG_FOLDER_KEY, "") or "")
+        except Exception:
+            v = ""
+        return v or os.path.expanduser(COG_CACHE_DIR)
+
+    def choose_cog_folder(self):
+        """Pick the local folder COGs are built in; remembered."""
+        folder = QFileDialog.getExistingDirectory(
+            self, "Folder to build COGs in (local)", self._cog_folder())
+        if not folder:
+            return None
+        try:
+            self._settings().setValue(COG_FOLDER_KEY, folder)
+        except Exception:
+            pass
+        print(f"[COG] COGs are built in {folder}")
+        return folder
+
     def _input_pixel_m(self):
         """The input raster's pixel size in working-CRS metres, or None."""
         lyr = getattr(self, "input_tif_layer", None)
@@ -5094,7 +5123,7 @@ class QCDashboard(QMainWindow):
         bands = self._ask_bands(src)
         if not bands:
             return
-        cog = cog_path_for(src, bands)
+        cog = cog_path_for(src, bands, self._cog_folder())
         if os.path.exists(cog) and os.path.getmtime(cog) >= os.path.getmtime(src):
             print(f"[COG] reusing {os.path.basename(cog)}")
         elif not self._build_cog_with_progress(src, cog, bands):

@@ -2734,4 +2734,22 @@ R.QCDashboard._save_auto_mark(a, False)
 assert store == {"auto_mark": "false"}
 print("Auto-mark off: no jump and no provisional cross on the other canvas; remembered")
 
+# ── 38. COG Folder button: chosen folder remembered and used ──────────────
+import types
+st38 = {}
+c = types.SimpleNamespace(_settings=lambda: types.SimpleNamespace(
+    value=lambda k, d=None: st38.get(k, d), setValue=st38.__setitem__))
+c._cog_folder = R.QCDashboard._cog_folder.__get__(c)
+assert c._cog_folder() == os.path.expanduser(R.COG_CACHE_DIR)
+_gd = qw.QFileDialog.getExistingDirectory
+qw.QFileDialog.getExistingDirectory = MagicMock(return_value="/local/cogs")
+assert R.QCDashboard.choose_cog_folder(c) == "/local/cogs"
+assert c._cog_folder() == "/local/cogs"
+assert R.cog_path_for("/srv/P1/a.tif", [2], c._cog_folder()) == os.path.join(
+    "/local/cogs", "P1", "a_b2_cog.tif")
+qw.QFileDialog.getExistingDirectory = MagicMock(return_value="")
+assert R.QCDashboard.choose_cog_folder(c) is None and c._cog_folder() == "/local/cogs"
+qw.QFileDialog.getExistingDirectory = _gd
+print("COG Folder: the chosen local folder is remembered and COGs go there")
+
 print("\nstubbed integration OK")
