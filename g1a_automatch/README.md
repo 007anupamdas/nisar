@@ -105,13 +105,20 @@ the window for every setting, sweeps and the benchmark.
 | Band | yours (suggested band3) | yours | yours (near 1250 / 1650 / 2200 nm) | yours (not band1 / band6) |
 | Clouds | OmniCloudMask, bands 5, 4, 6 | VNIR tests | SWIR tests | infrared tests |
 
-Two presets per sensor (**Preset**): *accurate* — the sensor's ranked
-list, MAGSAC and LMedS, 512 px sub-cells, 3 of the top 5 agreeing; *fastest*
-— its fast list (detectors at 1–3 min per pass that still rank well),
-MAGSAC only, no sub-cells, 2 of the top 3 agreeing, about a fifth of the
-time; *most accurate* — the ranked list plus the slow detectors that ranked
-well but were left out for their time (DKM, RoMa, KeyNet, OmniGlue, D2-Net /
-GIM-RoMa), all 13 run, 4 agreeing, several times the time. Each sensor's
+Four tiers per sensor (**Preset**), all prefixes of one list ranked by truth
+accuracy (mean per-job percentile of RMSE × (truth points / reached)², over
+MV 8, HS 14, HV 10 truth jobs up to 1080; ML uses the HS list, C3 the MV list):
+*fastest* — top 5, 3 agreeing; *fast* — top 10, 3 agreeing; *medium* — top
+20, 4 agreeing; *slow* — all 30 (incl. OmniGlue, DKM, RoMa), 4 agreeing. The
+same RANSAC and sub-cells, so a tier reuses what the tiers below it ran. The
+earlier names still work: *accurate* = fast, *most accurate* = medium.
+
+| Tier | MV | HS | HV |
+|---|---|---|---|
+| fastest | MINIMA-RoMa, DISK, DarkFeat, DoG, TopicFM | MINIMA-RoMa, XoFTR, MINIMA-LoFTR, TopicFM, DeDoDe | DISK, MINIMA-RoMa, DoG, DeDoDe, DarkFeat |
+| fast (+) | SFD2, XoFTR, D2-Net, KeyNet, RDD | ASpanFormer, GIM-RoMa, DISK, D2-Net, ELoFTR | RIPE, RDD, TopicFM, SFD2, MINIMA-LoFTR |
+
+Each sensor's
 list is ranked, best first: **Detectors: top X** runs the
 first X of it (5), and **error from top Y** (3) is how many of them must
 agree on an offset for it to count (the cross-check's `RIVAL_FINAL`). Both
@@ -232,8 +239,8 @@ points and of the manual points outside the map, and the title
 Satellite - Sensor - Session - Strip from the metadata.
 
 **Three presets on one input.** In the run window, **Run all 3 presets** runs
-fastest, accurate and most accurate one after another into
-`<output>/fastest`, `/accurate`, `/most_accurate`, with one cache
+fastest, fast, medium and slow one after another into
+`<output>/fastest`, `/fast`, `/medium`, `/slow`, with one cache
 (`<output>/_cache`): references, pairs, the extracted band and the cloud mask
 are made once, and a detector one preset ran is reused by the next (its match
 folders copied in). **Refined points** sets `final_points` (24). A
@@ -276,7 +283,7 @@ above 20 km (`SENSOR_WINDOWS`). The run window logs the choice.
 **Run auto (by distortion)** (run window) runs the fastest preset, reads its
 rigid share (the share of consistent points that fit one offset for the whole
 scene, at the coarsest agreement level) and goes on: 80 % or more -- stop,
-little distortion; 40-80 % -- accurate; under 40 % -- most accurate (one cache,
+little distortion; 40-80 % -- fast; under 40 % -- medium (one cache,
 so only the added detectors run). The choice is in `AUTO_PRESET.txt`.
 
 ## Hyperspectral cubes: which band (auto_bands)

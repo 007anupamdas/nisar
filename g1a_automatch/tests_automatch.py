@@ -1426,21 +1426,21 @@ def test_presets(tmp):
     check('presets: an HS job: its detectors and window, truth decides range and band, all GPUs, cross-check 3 of 5',
           (n['detectors'][:2], n['window_sizes'], n['max_error_from_truth'], n['channels_from_truth'], n['device'],
            n['cross_top_n'], n['cross_min_agree'], 'note' in job, bool(note), 'top_n' in job),
-          (['imw-minima-roma', 'imw-roma'], [512], True, True, 'all', 5, 3, False, True, False))
+          (['imw-minima-roma', 'imw-xoftr'], [512], True, True, 'all', 10, 3, False, True, False))
     j3, _ = P.job_for('HS', '/d/G1A_HS_x.tif', '/ref', '/out', '/t/pts_band28.csv', presets=pre, top_n=3, agree=2)
     jf, _ = P.job_for('MV', '/d/G1A_MV_x.tif', '/ref', '/out', '/t/pts_band4.csv', presets=pre, mode='fastest')
-    ja, _ = P.job_for('MV', '/d/G1A_MV_x.tif', '/ref', '/out', '/t/pts_band4.csv', presets=pre, mode='accurate')
-    check('presets: accurate (ranked list, 3 of 5) and fastest (fast list, 2 of 3), the same RANSAC and sub-cells '
-          '(so their detector results are shared)',
-          (ja['detectors'][0], ja['ransac_methods'], ja['subcell_px'], ja['cross_top_n'], ja['cross_min_agree'],
-           jf['detectors'], jf['ransac_methods'], jf['subcell_px'], jf['cross_top_n'], jf['cross_min_agree'],
-           'fast_detectors' in jf),
-          ('disk', ['magsac', 'lmeds'], [512], 5, 3, ['loftr', 'imw-xfeat-lg', 'imw-aliked-lg'], ['magsac', 'lmeds'],
-           [512], 3, 2, False))
-    jm, _ = P.job_for('MV', '/d/G1A_MV_x.tif', '/ref', '/out', '/t/pts_band4.csv', presets=pre, mode='most accurate')
-    check('presets: most accurate adds the slow ones that ranked well, all run, 4 agreeing',
-          (len(jm['detectors']), 'imw-dkm' in jm['detectors'], 'imw-omniglue' in jm['detectors'], jm['cross_top_n'],
-           jm['cross_min_agree'], list(P.MODES)), (13, True, True, 13, 4, ['fastest', 'accurate', 'most accurate']))
+    ja, _ = P.job_for('MV', '/d/G1A_MV_x.tif', '/ref', '/out', '/t/pts_band4.csv', presets=pre, mode='fast')
+    jm, _ = P.job_for('MV', '/d/G1A_MV_x.tif', '/ref', '/out', '/t/pts_band4.csv', presets=pre, mode='medium')
+    js, _ = P.job_for('MV', '/d/G1A_MV_x.tif', '/ref', '/out', '/t/pts_band4.csv', presets=pre, mode='slow')
+    jo, _ = P.job_for('MV', '/d/G1A_MV_x.tif', '/ref', '/out', '/t/pts_band4.csv', presets=pre, mode='most accurate')
+    check('presets: four tiers are prefixes of one ranked list (5 / 10 / 20 / 30), the same RANSAC and sub-cells; '
+          'the earlier names still work',
+          (len(jf['detectors']), len(ja['detectors']), len(jm['detectors']), len(js['detectors']),
+           ja['detectors'][:5] == jf['detectors'], js['detectors'][:20] == jm['detectors'],
+           jf['ransac_methods'] == js['ransac_methods'], jf['subcell_px'] == js['subcell_px'],
+           (jf['cross_min_agree'], ja['cross_min_agree'], jm['cross_min_agree']), jo['detectors'] == jm['detectors'],
+           list(P.MODES)),
+          (5, 10, 20, 30, True, True, True, True, (3, 3, 4), True, ['fastest', 'fast', 'medium', 'slow']))
     import pandas as _pd
     cs = os.path.join(tmp, 'auto_cs')
     os.makedirs(cs, exist_ok=True)
@@ -1449,8 +1449,8 @@ def test_presets(tmp):
         _pd.DataFrame([{'rigid_share_64px': 0.1, 'rigid_share_128px': share}]).to_csv(
             os.path.join(cs, 'CROSS_SUMMARY.csv'), index=False)
         picks.append(P.auto_next(P.rigid_share(cs))[0])
-    check('presets auto: by the rigid share (the coarsest level): stop / accurate / most accurate',
-          (picks, P.auto_next(None)[0]), ([None, 'accurate', 'most accurate'], 'accurate'))
+    check('presets auto: by the rigid share (the coarsest level): stop / fast / medium',
+          (picks, P.auto_next(None)[0]), ([None, 'fast', 'medium'], 'fast'))
     import pandas as _pd2
     tw = os.path.join(tmp, 'pts_band4.csv')
     _pd2.DataFrame({'In_X': [0, 1], 'In_Y': [0, 1], 'Ref_X': [0, 0], 'Ref_Y': [0, 0], 'DX_Err': [14000.0, 9000.0],
@@ -1519,9 +1519,9 @@ def test_gui_run(tmp):
         S.make_all(data, 4013.0, -2487.0)
     w.mode.setCurrentText('fastest')
     fast_txt = w.summary.text()
-    w.mode.setCurrentText('accurate')
-    check('run window: the fastest preset shows its fast list and 3 / 2', ('fastest' in fast_txt and 'imw-xfeat-lg' in
-          fast_txt, w.top_n.value(), w.agree.value()), (True, 5, 3))
+    w.mode.setCurrentText('fast')
+    check('run window: the fastest tier shows its list; fast sets top 10 / 3', ('fastest' in fast_txt and 'imw-minima-roma'
+          in fast_txt, w.top_n.value(), w.agree.value()), (True, 10, 3))
     w.top_n.setValue(2)
     w.agree.setValue(2)
     w.presets['MV'].update(detectors=['sift', 'dog', 'disk'])
@@ -1556,11 +1556,11 @@ def test_gui_run(tmp):
           (True, True, True))
     box.close()
     jf = w.job('fastest', 'fastest')
-    check('run window: run all 3: each preset into its subfolder, one shared cache, its own top X / Y, refined points, '
+    check('run window: run all 4: each tier into its subfolder, one shared cache, its own top X / Y, refined points, '
           'agreement cells',
           (os.path.basename(jf['output_dir']), jf['temp_dir'] == os.path.join(tmp, 'out_runwin', '_cache'),
            jf['cross_top_n'], jf['final_points'], jf['cross_cell_px'], [m.replace(' ', '_') for m in G.P.MODES]),
-          ('fastest', True, 3, 24, [32, 96], ['fastest', 'accurate', 'most_accurate']))
+          ('fastest', True, 5, 24, [32, 96], ['fastest', 'fast', 'medium', 'slow']))
     check('run window: the job carries the paths and choices (top 2, 2 agreeing); Check runs the preflight and reports',
           (job['detectors'], job['device'], job['cloud_mask'], job['max_expected_error_m'], ok, job['cross_min_agree'],
            os.path.exists(os.path.join(tmp, 'out_runwin', 'job_preset.json')), w.stage.text()),

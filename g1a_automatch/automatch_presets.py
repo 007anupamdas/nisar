@@ -25,7 +25,8 @@ PRESETS_FILE = os.path.join(HERE, 'automatch_presets.json')
 
 # What the presets rest on, shown in the run window. They are provisional:
 # updated here as the logs and rankings of finished jobs come in.
-BASIS = 'provisional, as of 2026-11-17: MV 4 jobs (1066-1069), HV 2-11 jobs per detector, HS 3 jobs, ML and C3 none yet'
+BASIS = ('as of 2026-11-19: MV 8 truth jobs (up to 1080), HS 14, HV 10; ML uses the HS list and C3 the MV list '
+         '(no benchmark yet)')
 
 # For every sensor
 COMMON: Dict = {
@@ -47,18 +48,19 @@ COMMON: Dict = {
 # Per sensor: what differs. The band(s) are the user's, per run (band_hint: a
 # suggestion shown beside the field). 'note' and 'band_hint' are shown in the
 # GUI, not sent to the job.
-INFO_KEYS = ('note', 'band_hint', 'top_n', 'agree', 'fast_detectors', 'slow_detectors')   # read by the window
+INFO_KEYS = ('note', 'band_hint', 'top_n', 'agree')   # read by the window
 
-# Two ways to run each sensor. accurate: its ranked list, both RANSAC
-# estimators, 512 px sub-cells, the error where 3 of the top 5 agree.
-# fastest: its fast list (1-3 min per pass), the same RANSAC and sub-cells, the
-# error where 2 of the top 3 agree: about a fifth of the time.
-# most accurate: the ranked list plus the slow ones that ranked well but were
-# left out for their time (DKM, RoMa, KeyNet, OmniGlue, ...), all of them run, 4
-# agreeing: several times the accurate preset's time.
-MODES = {'fastest': {'top_n': 3, 'agree': 2},       # same RANSAC / sub-cells: results shared between presets
-         'accurate': {},
-         'most accurate': {'top_n': 13, 'agree': 4}}
+# Four tiers per sensor. Each sensor's detector list is ranked best first by
+# truth accuracy (mean per-job percentile of RMSE x (truth points / reached)^2,
+# over all its truth jobs; a detector's best variant per job). A tier runs the
+# first top_n: fastest the top 5, fast the top 10, medium the top 20, slow all
+# 30 (with the slow ones such as OmniGlue, DKM, RoMa). Same RANSAC and
+# sub-cells, so a tier reuses the results of the tiers below it.
+MODES = {'fastest': {'top_n': 5, 'agree': 3},
+         'fast': {'top_n': 10, 'agree': 3},
+         'medium': {'top_n': 20, 'agree': 4},
+         'slow': {'top_n': 30, 'agree': 4}}
+MODE_ALIASES = {'accurate': 'fast', 'most accurate': 'medium'}      # the earlier names
 # Auto: the fastest preset first; its rigid share (the consistent points that
 # fit one offset for the whole scene) says how distorted the product is.
 AUTO_LOW, AUTO_HIGH = 0.8, 0.4
@@ -81,46 +83,55 @@ def rigid_share(out_dir: str) -> Optional[float]:
 def auto_next(share: Optional[float]) -> Tuple[Optional[str], str]:
     """(the next preset after the fastest, or None to stop; why) by the rigid share."""
     if share is None:
-        return 'accurate', 'no rigid share (no cross-check): accurate to be safe'
+        return 'fast', 'no rigid share (no cross-check): fast to be safe'
     if share >= AUTO_LOW:
         return None, (f'{100 * share:.0f} % of the points fit one offset: little or no distortion -- the fastest '
                       f'result stands (load its _128px_rigid or _128px final points)')
     if share >= AUTO_HIGH:
-        return 'accurate', f'{100 * share:.0f} % fit one offset: moderate distortion -- accurate'
-    return 'most accurate', f'only {100 * share:.0f} % fit one offset: strong distortion -- most accurate'
+        return 'fast', f'{100 * share:.0f} % fit one offset: moderate distortion -- fast (top 10)'
+    return 'medium', f'only {100 * share:.0f} % fit one offset: strong distortion -- medium (top 20)'
 
 
 SENSORS: Dict[str, Dict] = {
-    'MV': {'detectors': ['disk', 'imw-minima-roma', 'imw-minima-loftr', 'loftr', 'imw-sfd2-nn', 'dog',
-                         'imw-aliked-lg', 'imw-xfeat-lg'],
-           'fast_detectors': ['loftr', 'imw-xfeat-lg', 'imw-aliked-lg', 'imw-sfd2-nn', 'imw-minima-loftr'],
-           'slow_detectors': ['imw-dkm', 'imw-roma', 'keynet', 'imw-omniglue', 'imw-d2net-nn'],
+    'MV': {'detectors': ['imw-minima-roma', 'disk', 'imw-darkfeat-nn', 'dog', 'imw-topicfm', 'imw-sfd2-nn', 'imw-xoftr',
+                   'imw-d2net-nn', 'keynet', 'imw-rdd-nn', 'imw-eloftr', 'imw-liftfeat-nn', 'imw-xfeat-lg',
+                   'imw-aliked-lg', 'imw-dkm', 'sift', 'imw-dad-roma', 'imw-roma', 'gftt', 'imw-gim-roma',
+                   'imw-minima-loftr', 'hessian', 'dedode', 'imw-omniglue', 'imw-aspanformer', 'imw-xfeat-dense',
+                   'imw-lanet-nn', 'loftr', 'imw-r2d2-nn', 'imw-alike-nn'],
            'window_sizes': [1024], 'band_hint': 'band3 (650 nm)',
            'cloud_method_MV': 'omnicloudmask', 'cloud_bands': ['band5', 'band4', 'band6'],
            'note': 'MX-VNIR: 1024 px windows (better than 2048 in every MV job); clouds by OmniCloudMask on bands '
                    '5, 4, 6. From jobs 1066-1069: disk, MINIMA-RoMa / -LoFTR and loftr were in the top 10 most '
                    'often; the fast list is the ones at 1-3 min per pass among the top 20.'},
-    'HV': {'detectors': ['imw-lanet-nn', 'imw-ripe-nn', 'imw-rdd-nn', 'imw-minima-loftr', 'disk'],
-           'fast_detectors': ['imw-lanet-nn', 'imw-ripe-nn', 'imw-minima-loftr', 'loftr', 'imw-xfeat-lg'],
-           'slow_detectors': ['imw-roma', 'imw-minima-roma', 'imw-dkm', 'keynet', 'imw-omniglue'],
+    'HV': {'detectors': ['disk', 'imw-minima-roma', 'dog', 'dedode', 'imw-darkfeat-nn', 'imw-ripe-nn', 'imw-rdd-nn',
+                   'imw-topicfm', 'imw-sfd2-nn', 'imw-minima-loftr', 'gftt', 'keynet', 'imw-lanet-nn', 'hessian',
+                   'imw-aspanformer', 'sift', 'imw-dkm', 'imw-gim-roma', 'loftr', 'imw-eloftr', 'imw-d2net-nn',
+                   'imw-aliked-lg', 'imw-xfeat-lg', 'imw-xoftr', 'imw-r2d2-nn', 'imw-rord-nn', 'imw-roma',
+                   'imw-alike-nn', 'imw-liftfeat-nn', 'loftr-windoor'],
            'window_sizes': [512], 'band_hint': 'the band you benchmarked (e.g. band30)',
            'note': 'HyS-VNIR: 512 px windows; clouds by the VNIR tests.'},
-    'HS': {'detectors': ['imw-minima-roma', 'imw-roma', 'imw-eloftr', 'imw-topicfm', 'imw-lanet-nn'],
-           'fast_detectors': ['imw-minima-loftr', 'imw-eloftr', 'imw-lanet-nn', 'loftr', 'imw-topicfm'],
-           'slow_detectors': ['imw-dkm', 'imw-gim-roma', 'keynet', 'imw-omniglue', 'disk'],
+    'HS': {'detectors': ['imw-minima-roma', 'imw-xoftr', 'imw-minima-loftr', 'imw-topicfm', 'dedode', 'imw-aspanformer',
+                   'imw-gim-roma', 'disk', 'imw-d2net-nn', 'imw-eloftr', 'imw-ripe-nn', 'imw-roma', 'imw-sfd2-nn',
+                   'dog', 'imw-darkfeat-nn', 'loftr', 'imw-rdd-nn', 'imw-liftfeat-nn', 'imw-lanet-nn',
+                   'imw-xfeat-dense', 'keynet', 'sift', 'imw-xfeat-lg', 'hessian', 'imw-rord-nn', 'imw-aliked-lg',
+                   'loftr-windoor', 'imw-dkm', 'gftt', 'imw-r2d2-nn'],
            'window_sizes': [512], 'band_hint': 'near 1250, 1650 or 2200 nm (e.g. band28), not 1380 / 1900 nm',
            'note': 'HyS-SWIR: 512 px windows; clouds by the SWIR tests. RoMa / MINIMA-RoMa reached 16 of 16 truth '
                    'points.'},
-    'C3': {'detectors': ['disk', 'imw-minima-roma', 'imw-minima-loftr', 'loftr', 'imw-sfd2-nn'],
-           'fast_detectors': ['loftr', 'imw-xfeat-lg', 'imw-aliked-lg', 'imw-sfd2-nn', 'imw-minima-loftr'],
-           'slow_detectors': ['imw-dkm', 'imw-roma', 'keynet', 'imw-omniglue', 'imw-d2net-nn'],
+    'C3': {'detectors': ['imw-minima-roma', 'disk', 'imw-darkfeat-nn', 'dog', 'imw-topicfm', 'imw-sfd2-nn', 'imw-xoftr',
+                   'imw-d2net-nn', 'keynet', 'imw-rdd-nn', 'imw-eloftr', 'imw-liftfeat-nn', 'imw-xfeat-lg',
+                   'imw-aliked-lg', 'imw-dkm', 'sift', 'imw-dad-roma', 'imw-roma', 'gftt', 'imw-gim-roma',
+                   'imw-minima-loftr', 'hessian', 'dedode', 'imw-omniglue', 'imw-aspanformer', 'imw-xfeat-dense',
+                   'imw-lanet-nn', 'loftr', 'imw-r2d2-nn', 'imw-alike-nn'],
            'window_sizes': [1024], 'band_hint': 'the MX band you benchmarked (PAN: band1)',
            'cloud_method_MV': 'omnicloudmask',
            'note': 'Cartosat-3 (MX / PAN): no benchmark yet; the detectors that did best on G1A MV as a start. '
                    'References: C1 over India, L8 elsewhere (the run window chooses by the scene centre).'},
-    'ML': {'detectors': ['imw-minima-roma', 'imw-roma', 'imw-eloftr', 'imw-topicfm', 'imw-lanet-nn'],
-           'fast_detectors': ['imw-minima-loftr', 'imw-eloftr', 'imw-lanet-nn', 'loftr', 'imw-topicfm'],
-           'slow_detectors': ['imw-dkm', 'imw-gim-roma', 'keynet', 'imw-omniglue', 'disk'],
+    'ML': {'detectors': ['imw-minima-roma', 'imw-xoftr', 'imw-minima-loftr', 'imw-topicfm', 'dedode', 'imw-aspanformer',
+                   'imw-gim-roma', 'disk', 'imw-d2net-nn', 'imw-eloftr', 'imw-ripe-nn', 'imw-roma', 'imw-sfd2-nn',
+                   'dog', 'imw-darkfeat-nn', 'loftr', 'imw-rdd-nn', 'imw-liftfeat-nn', 'imw-lanet-nn',
+                   'imw-xfeat-dense', 'keynet', 'sift', 'imw-xfeat-lg', 'hessian', 'imw-rord-nn', 'imw-aliked-lg',
+                   'loftr-windoor', 'imw-dkm', 'gftt', 'imw-r2d2-nn'],
            'window_sizes': [512], 'band_hint': 'not band1 (7.35 um) or band6 (13.25 um)',
            'note': 'MX-LWIR: no benchmark yet, the HS list as a start; gradient window preparation (thermal against '
                    'optical); clouds by the infrared tests.'},
@@ -270,7 +281,7 @@ def job_for(sensor: str, input_path: str, reference_dir: str, output_dir: str, t
             bands: Optional[List[str]] = None, max_error_km: Optional[float] = None, device: str = '',
             cloud: Optional[bool] = None, weights_dir: str = '', presets: Optional[Dict] = None,
             crispest: int = 0, top_n: Optional[int] = None, agree: Optional[int] = None,
-            mode: str = 'accurate', final_points: Optional[int] = None, temp_dir: str = '',
+            mode: str = 'fast', final_points: Optional[int] = None, temp_dir: str = '',
             cell_px: Optional[int] = None) -> Tuple[Dict, str]:
     """(job, note): the sensor's preset with this run's paths and the few
     things chosen in the window (search range without truth, device, clouds
@@ -280,13 +291,9 @@ def job_for(sensor: str, input_path: str, reference_dir: str, output_dir: str, t
     if sensor not in presets:
         raise ValueError(f'no preset for sensor {sensor!r}: one of {", ".join(presets)}')
     job = copy.deepcopy(presets[sensor])
+    mode = MODE_ALIASES.get(mode, mode)
     if mode not in MODES:
         raise ValueError(f'mode {mode!r}: one of {", ".join(MODES)}')
-    fast, slow = job.pop('fast_detectors', None), job.pop('slow_detectors', None)
-    if mode == 'fastest' and fast:
-        job['detectors'] = list(fast)
-    elif mode == 'most accurate' and slow:
-        job['detectors'] = list(job['detectors']) + [d for d in slow if d not in job['detectors']]
     job.update(copy.deepcopy(MODES[mode]))
     note = job.pop('note', '')
     job.pop('band_hint', None)

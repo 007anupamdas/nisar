@@ -178,13 +178,11 @@ class RunWindow(QtWidgets.QMainWindow):
         self.sensor.setToolTip('The preset used. From the file name: G1A_MV_ / G1A_HV_ / G1A_HS_ / G1A_ML_')
         self.mode = QtWidgets.QComboBox()
         self.mode.addItems(list(P.MODES))
-        self.mode.setToolTip('accurate: the sensor\'s ranked detectors, MAGSAC + LMedS, 512 px sub-cells, 3 of 5 '
-                             'agreeing. fastest: its fast detectors (1-3 min per pass), 2 of 3 '
-                             'agreeing: about a fifth of the time')
-        self.mode.setToolTip(self.mode.toolTip() + '. most accurate: the ranked list plus the slow detectors that '
-                             'ranked well (DKM, RoMa, KeyNet, OmniGlue, ...), all run, 4 agreeing: several times '
-                             'the time')
-        self.mode.setCurrentText(self.settings.value('mode', 'accurate') or 'accurate')
+        self.mode.setToolTip('Detectors ranked by truth accuracy per sensor: fastest runs the top 5 (3 agreeing), '
+                             'fast the top 10 (3 agreeing), medium the top 20 (4 agreeing), slow all 30 (4 agreeing, '
+                             'incl. OmniGlue, DKM, RoMa). The same RANSAC and sub-cells: a tier reuses the detectors '
+                             'the tiers below it ran')
+        self.mode.setCurrentText(P.MODE_ALIASES.get(self.settings.value('mode', 'fast') or 'fast', self.settings.value('mode', 'fast') or 'fast'))
         self.mode.currentIndexChanged.connect(lambda *_: (setattr(self, '_shown_sensor', None), self.refresh()))
         self.bands = QtWidgets.QLineEdit()
         self.bands.setPlaceholderText('e.g. 28 or 28, 50')
@@ -248,14 +246,14 @@ class RunWindow(QtWidgets.QMainWindow):
         hb = QtWidgets.QHBoxLayout()
         self.btn_check = QtWidgets.QPushButton('Check')
         self.btn_run = QtWidgets.QPushButton('Run')
-        self.btn_all = QtWidgets.QPushButton('Run all 3 presets')
+        self.btn_all = QtWidgets.QPushButton('Run all 4 tiers')
         self.btn_auto = QtWidgets.QPushButton('Run auto (by distortion)')
         self.btn_auto.setToolTip('The fastest preset first; then by how much of the scene fits one offset (rigid share): '
-                                 'over 80 % stop there (little distortion), 40-80 % accurate, under 40 % most accurate. '
+                                 'over 80 % stop there (little distortion), 40-80 % fast (top 10), under 40 % medium (top 20). '
                                  'One cache, so the second run only adds detectors. The choice is written to '
                                  'AUTO_PRESET.txt in the output folder')
-        self.btn_all.setToolTip('fastest, then accurate, then most accurate, into <output>/fastest, /accurate, '
-                                '/most_accurate, sharing one cache (<output>/_cache): references, pairs and the cloud '
+        self.btn_all.setToolTip('fastest, fast, medium, then slow, into <output>/fastest, /fast, /medium, /slow, '
+                                'sharing one cache (<output>/_cache): references, pairs and the cloud '
                                 'mask are made once, and a detector one preset ran is reused by the next')
         self.btn_stop = QtWidgets.QPushButton('Stop')
         self.btn_open = QtWidgets.QPushButton('Open output folder')
@@ -310,14 +308,10 @@ class RunWindow(QtWidgets.QMainWindow):
         if s in self.presets:
             m = self.mode.currentText()
             p = dict(self.presets[s], **P.MODES[m])
-            if m == 'fastest' and p.get('fast_detectors'):
-                p['detectors'] = p['fast_detectors']
-            elif m == 'most accurate' and p.get('slow_detectors'):
-                p['detectors'] = list(p['detectors']) + [d for d in p['slow_detectors'] if d not in p['detectors']]
-            if s != getattr(self, '_shown_sensor', None):     # the preset's own numbers, until changed here
+            if s != getattr(self, '_shown_sensor', None) or m != getattr(self, '_shown_mode', None):     # the preset's own numbers, until changed here
                 self.top_n.setValue(int(p.get('top_n', 5) or 5))
                 self.agree.setValue(int(p.get('agree', 3) or 3))
-                self._shown_sensor = s
+                self._shown_sensor, self._shown_mode = s, m
             self.summary.setText(f'<b>{s} preset, {m}</b> ({P.BASIS})<br>' + P.describe(p).replace('\n', '<br>'))
         else:
             self.summary.setText('Sensor not known from the file name (G1A_MV_ / HV / HS / ML): choose it under Sensor.')

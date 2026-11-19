@@ -227,6 +227,35 @@ def _scene_background(raster: str, crs: str, prod_ext=None) -> Dict:
     return {'extent': ext, 'background': (img, ext) if img is not None else None}
 
 
+# The look-vector plot's settings, as DPQED_rival.py (plot_look_vectors) on the
+# l-band-accuracy-cog branch: bright colours only (cyan -> green -> yellow ->
+# orange -> red) so every arrow stands out on the scene, white point markers,
+# 'Error (km)' over a short colour bar, bold 16 pt axis labels and bold ticks,
+# the RMSE under the title and Mean / Std / CE90 below the plot.
+BRIGHT = ((0, 200, 255), (0, 220, 120), (255, 230, 0), (255, 140, 0), (255, 40, 40))
+
+
+def _ne(st: Dict, ky: str, kx: str) -> str:
+    return f"{float(st.get(ky) or 0) / 1000.0:.3f} km N / {float(st.get(kx) or 0) / 1000.0:.3f} km E"
+
+
+def vectors_title(title: str, st: Optional[Dict]) -> str:
+    """'<title>' over 'RMSE n km N / e km E' (DPQED_rival.vectors_title)."""
+    if not (st and st.get('n')):
+        return title
+    rm = f"RMSE {_ne(st, 'rmse_y_m', 'rmse_x_m')}"
+    return f'{title}\n{rm}' if title else rm
+
+
+def vectors_footer(st: Optional[Dict]) -> str:
+    """'Mean ...   |   Std ...   |   CE90 c km' (DPQED_rival.vectors_footer)."""
+    if not (st and st.get('n')):
+        return ''
+    return (f"n {st['n']}   |   Mean {_ne(st, 'mean_dy_m', 'mean_dx_m')}   |   Std {_ne(st, 'std_dy_m', 'std_dx_m')}"
+            f"   |   CE90 {float(st.get('ce90_m') or 0) / 1000.0:.3f} km"
+            + ('' if st.get('ce90_circular', True) else ' (axes unequal)'))
+
+
 def plot_vectors(points: List[Dict], png: str, title: str = '', st: Optional[Dict] = None,
                  ctx: Optional[Dict] = None) -> str:
     """Look vectors: an arrow per point from its input position towards its
@@ -260,18 +289,18 @@ def plot_vectors(points: List[Dict], png: str, title: str = '', st: Optional[Dic
     L = 15.0
     if wide:
         mw, mh = L, max(2.0, L * H / W)
-        left, right, top, bottom = 0.9, 0.4, 0.8, 2.5
+        left, right, top, bottom = 1.2, 1.2, 0.75, 1.75     # page room for an edge arrow
         fw, fh = left + mw + right, top + mh + bottom
         ax = fig_ax = (left / fw, bottom / fh, mw / fw, mh / fh)
-        cax_r = ((left + 0.15 * mw) / fw, 1.45 / fh, 0.6 * mw / fw, 0.22 / fh)
-        key_xy = ((left + 0.80 * mw) / fw, 1.55 / fh)
+        cax_r = ((left + 0.35 * mw) / fw, 0.85 / fh, 0.3 * mw / fw, 0.12 / fh)
+        key_xy = ((left + 0.72 * mw) / fw, 0.9 / fh)
         stat_xy, stat_ha, stat_va = (0.5, 0.15 / fh), 'center', 'bottom'
     else:
         mh, mw = L, max(2.0, L * W / H)
-        left, top, bottom = 0.9, 0.8, 0.8
-        fw, fh = left + mw + 0.3 + 0.25 + 1.1 + 4.6, top + mh + bottom
+        left, top, bottom = 0.9, 1.1, 0.8
+        fw, fh = left + mw + 0.3 + 0.15 + 1.1 + 4.6, top + mh + bottom
         ax = fig_ax = (left / fw, bottom / fh, mw / fw, mh / fh)
-        cax_r = ((left + mw + 0.3) / fw, (bottom + 0.15 * mh) / fh, 0.25 / fw, 0.7 * mh / fh)
+        cax_r = ((left + mw + 0.3) / fw, (bottom + 0.35 * mh) / fh, 0.15 / fw, 0.3 * mh / fh)
         key_xy = ((left + mw + 0.3) / fw, (bottom + 0.08 * mh) / fh)
         stat_xy, stat_ha, stat_va = ((left + mw + 1.7) / fw, 0.5), 'left', 'center'
     fig = plt.figure(figsize=(fw, fh))
@@ -286,13 +315,17 @@ def plot_vectors(points: List[Dict], png: str, title: str = '', st: Optional[Dic
                float(np.hypot(tr['dE'], tr['dN']).max()) if tr is not None and len(tr) else 0.0, 1.0)
     scale = (dmax / 1000.0) / (0.06 * span)           # the longest arrow: 6 % of the scene's long side
     if len(x):
+        from matplotlib.colors import LinearSegmentedColormap
+        bright = LinearSegmentedColormap.from_list('rival_bright', [tuple(c / 255.0 for c in v) for v in BRIGHT])
         q = ax.quiver(x, y, -dx / 1000.0, -dy / 1000.0, d / 1000.0, angles='xy', scale_units='xy', scale=scale,
-                      units='inches', width=0.035, cmap='viridis', zorder=3)
-        ax.scatter(x, y, s=8, c='k', zorder=4)
+                      units='inches', width=0.035, cmap=bright, zorder=3)
+        q.set_clip_on(False)                 # an arrow at the scene's edge may run past the frame
+        ax.scatter(x, y, s=14, c='white', edgecolors='0.35', linewidths=0.6, zorder=4)
         cb = fig.colorbar(q, cax=cax, orientation='horizontal' if wide else 'vertical')
-        cb.set_label('error of each point (km)')
+        cb.ax.tick_params(labelsize=8)
+        cb.ax.set_title('Error (km)', fontsize=9, loc='left' if wide else 'center')
         ref = float(10 ** np.floor(np.log10(dmax)))
-        ax.quiverkey(q, key_xy[0], key_xy[1], ref / 1000.0, f'arrow: {ref / 1000.0:g} km', labelpos='E',
+        ax.quiverkey(q, key_xy[0], key_xy[1], ref / 1000.0, f'Arrow: {ref / 1000.0:g} km', labelpos='E',
                      coordinates='figure', color='k')
     else:
         cax.set_visible(False)
@@ -306,8 +339,8 @@ def plot_vectors(points: List[Dict], png: str, title: str = '', st: Optional[Dic
     ax.set_xlim(e0, e1)
     ax.set_ylim(n0, n1)
     ax.set_aspect('equal', adjustable='box')
-    ax.set_xlabel('E (km)')
-    ax.set_ylabel('N (km)')
+    ax.set_xlabel('E (km)', fontweight='bold', fontsize=16)
+    ax.set_ylabel('N (km)', fontweight='bold', fontsize=16)
     if ctx.get('crs'):                     # lon / lat on the axes (along the scene's middle row / column)
         try:
             from matplotlib.ticker import FuncFormatter
@@ -339,29 +372,24 @@ def plot_vectors(points: List[Dict], png: str, title: str = '', st: Optional[Dic
             ax.yaxis.set_major_locator(FixedLocator([to_xy.transform(lonc, v)[1] / 1000.0 for v in nice(lat0, lat1, ny)]))
             ax.xaxis.set_major_formatter(FuncFormatter(lon_of))
             ax.yaxis.set_major_formatter(FuncFormatter(lat_of))
-            ax.set_xlabel('Longitude (along the scene\'s middle)')
-            ax.set_ylabel('Latitude (along the scene\'s middle)')
+            ax.set_xlabel('Longitude', fontweight='bold', fontsize=16)
+            ax.set_ylabel('Latitude', fontweight='bold', fontsize=16)
         except Exception:
             pass
     ax.grid(True, alpha=0.25)
-    ax.set_title(ctx.get('title') or title or os.path.splitext(os.path.basename(png))[0], fontsize=14,
-                 fontweight='bold')
+    name = os.path.splitext(os.path.basename(png))[0].replace('_vectors', '')
+    ax.set_title(vectors_title(ctx.get('title') or title or name, st), fontsize=14, fontweight='bold', pad=4)
     if st:
-        def km(v):
-            return f'{float(v or 0) / 1000.0:.3f} km'
-        txt = (f"{os.path.splitext(os.path.basename(png))[0].replace('_vectors', '')}:  n {st['n']}    "
-               f"mean dE {km(st.get('mean_dx_m'))}, dN {km(st.get('mean_dy_m'))}    "
-               f"RMSE E {km(st['rmse_x_m'])}, N {km(st['rmse_y_m'])}    CE90 {km(st['ce90_m'])}"
-               + ('' if st.get('ce90_circular', True) else ' (axes unequal)')
-               + f"    largest {km(st.get('max_dist_m'))}")
+        txt = vectors_footer(st)
         man = ctx.get('manual')
         if man:
-            txt += (f"\nmanual points:  n {man['n']}    mean dE {km(man.get('mean_dx_m'))}, dN "
-                    f"{km(man.get('mean_dy_m'))}    RMSE E {km(man['rmse_x_m'])}, N {km(man['rmse_y_m'])}"
-                    f"    CE90 {km(man['ce90_m'])}")
+            txt += f"\nmanual points: {vectors_footer(man)}   |   RMSE {_ne(man, 'rmse_y_m', 'rmse_x_m')}"
         if not wide:
-            txt = txt.replace('    ', '\n').replace(':  ', ':\n')
-        fig.text(*stat_xy, txt, ha=stat_ha, va=stat_va, fontsize=10, family='monospace')
+            txt = txt.replace('   |   ', '\n')
+        fig.text(*stat_xy, txt, ha=stat_ha, va=stat_va, fontsize=11)
+    fig.canvas.draw()                        # tick labels exist once drawn: bold them
+    for t in ax.get_xticklabels() + ax.get_yticklabels():
+        t.set_fontweight('bold')
     fig.savefig(png, dpi=150)
     plt.close(fig)
     return png
