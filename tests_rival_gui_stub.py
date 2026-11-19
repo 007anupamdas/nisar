@@ -195,10 +195,31 @@ assert not warns, warns
 d3 = tempfile.mkdtemp()
 open(os.path.join(d3, "some_scene.tif"), "w").close()
 open(os.path.join(d3, "readme.txt"), "w").close()
+R.REF_HEADER_FALLBACK = False       # the operational behaviour: refuse
 mode, prints, warns = scan(d3)
 report("unplaceable rasters", mode, prints, warns)
 assert mode is None and not prints, (mode, prints)
 assert warns and "index.shp" in warns[0] and "N16E73.tif" in warns[0], warns
+
+# with the fallback (the default), the same folder is placed by meta corners
+# beside a raster, else by each raster's own header
+open(os.path.join(d3, "readme.txt"), "w").write("nothing useful")
+open(os.path.join(d3, "meta_scene.tif"), "w").close()
+open(os.path.join(d3, "meta_scene_META.xml"), "w").write(
+    "<AISD><IMD><ULLAT>28.35</ULLAT><ULLON>71.84</ULLON><URLAT>28.35</URLAT>"
+    "<URLON>88.93</URLON><LRLAT>25.53</LRLAT><LRLON>88.93</LRLON>"
+    "<LLLAT>25.53</LLLAT><LLLON>71.84</LLLON></IMD></AISD>")
+R.REF_HEADER_FALLBACK = True
+win._header_ring = lambda path: [(78.0, 17.0), (79.0, 17.0), (79.0, 16.0), (78.0, 16.0)]
+mode, prints, warns = scan(d3)
+report("fallback: meta corners / raster headers", mode, prints, warns)
+recs = {os.path.basename(k): v for k, v in win.ref_footprints.items()}
+assert mode == R.REF_MODE_HEADER, mode
+assert recs["meta_scene.tif"]["ring"][1] == (88.93, 28.35), recs["meta_scene.tif"]
+assert recs["meta_scene.tif"]["source"].startswith("meta corners")
+assert recs["some_scene.tif"]["source"] == "raster header"
+del win._header_ring
+print("fallback: a bare tif folder is placed by meta corners, else raster headers")
 
 # ── 4. an empty folder is refused outright ───────────────────────────────────
 d4 = tempfile.mkdtemp()
@@ -2776,5 +2797,37 @@ assert by39[6]["score"] < 0.5 * min(by39[b]["score"] for b in by39 if b != 6)
 assert 6 not in R.pick_bands(rows39, 3) and R.quality_pick(rows39, 1) != [6]
 print("crispest bands: the band with a strip across the swath is ranked down; "
       "the terrain shared by all bands (a coast step) is not banding")
+
+# ── 40. Export writes the look-vector plot (the whole method, stubbed Qt) ──
+import types, pyproj
+_f = pyproj.Transformer.from_crs(32644, 4326, always_xy=True).transform
+_b = pyproj.Transformer.from_crs(4326, 32644, always_xy=True).transform
+class _TF:
+    def __init__(self, fn): self.fn = fn
+    def transform(self, p):
+        x, y = self.fn(p.x(), p.y()); return _PointXY(x, y)
+d40 = tempfile.mkdtemp()
+rows40 = [R.quiver_row(i + 1, 500000.0 + 9000 * i, 2000000.0 + 4000 * i,
+                       500000.0 + 9000 * i - 120, 2000000.0 + 4000 * i + 40)
+          for i in range(5)]
+v = types.SimpleNamespace(
+    export_rows=lambda: rows40, input_tif_layer=None,
+    input_source=os.path.join(d40, "X_GTD_A_1.tif"), input_path=None,
+    transform_proj_to_wgs=_TF(_f), transform_wgs_to_proj=_TF(_b),
+    _ground_errors=lambda: [(r["dx"], r["dy"]) for r in rows40],
+    _canvas_background=lambda: None, _scene_background=lambda: None)
+_qp = R.QgsPointXY
+R.QgsPointXY = _PointXY
+v._write_vector_plot = R.QCDashboard._write_vector_plot.__get__(v)
+png40 = os.path.join(d40, "plots", "X_rival_vectors.png")
+shown = []
+_mb40 = R.QMessageBox
+R.QMessageBox = types.SimpleNamespace(warning=lambda *a: shown.append(a[-1]))
+assert R.QCDashboard.write_vector_plot(v, png40) == png40, shown
+assert os.path.getsize(png40) > 10000 and not shown
+v._write_vector_plot = lambda p: 1 / 0
+assert R.QCDashboard.write_vector_plot(v, png40) is None and shown, shown
+R.QMessageBox, R.QgsPointXY = _mb40, _qp
+print("Export writes plots/<name>_vectors.png; a failure is shown, never silent")
 
 print("\nstubbed integration OK")

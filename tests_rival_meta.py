@@ -825,6 +825,16 @@ check("by default the COG is local, under the product folder's name",
 check("COG_CACHE_DIR is the default", H["cog_path_for"]("/srv/p/x.tif", [1]).startswith(
       os.path.expanduser(H["COG_CACHE_DIR"])), True)
 
+f = H["corners_from_meta_text"]
+check("corners from key = value (BAND_META)", f(
+    "ProdULLat = 28.3\nProdULLon = 71.8\nProdURLat = 28.3\nProdURLon = 88.9\n"
+    "ProdLRLat = 25.5\nProdLRLon = 88.9\nProdLLLat = 25.5\nProdLLLon = 71.8\n")[2], (88.9, 25.5))
+check("corners from XML tags with underscores, -9999 skipped", f(
+    "<UL_LAT>-9999.</UL_LAT><UL_LAT>17</UL_LAT><UL_LON>78</UL_LON><UR_LAT>17</UR_LAT>"
+    "<UR_LON>79</UR_LON><LR_LAT>16</LR_LAT><LR_LON>79</LR_LON><LL_LAT>16</LL_LAT>"
+    "<LL_LON>78</LL_LON>")[0], (78.0, 17.0))
+check("incomplete corners", f("ULLAT = 1\nULLON = 2"), None)
+
 # ── 24. remembered display bands ─────────────────────────────────────────────
 print("\n-- display bands --")
 f = H["parse_band_choice"]

@@ -233,7 +233,10 @@ BAND_UNKNOWN  = "UNK"
 REF_MODE_SIDECAR = "sidecar"       # one metadata file per raster (NISAR, S1)
 REF_MODE_INDEX   = "index-shp"     # one shapefile indexing the whole set (L8)
 REF_MODE_TILE    = "degree-tile"   # the footprint is in the name (C1: N16E73)
+REF_MODE_HEADER  = "raster-header"  # fallback for user testing: corners from a
+                                    # meta file beside each tif, else its own header
 REF_MODE_OVERRIDE = None
+REF_HEADER_FALLBACK = True          # use REF_MODE_HEADER when nothing else places
 
 # 'N16E73.tif' is the cell whose SOUTH-WEST corner is 16 N, 73 E, i.e. 16-17 N
 # by 73-74 E. Change this if a collection is tiled at another step.
@@ -1185,6 +1188,32 @@ def pick_index_shapefile(names):
         if os.path.splitext(os.path.basename(shp))[0].lower() == "index":
             return shp
     return shps[0]
+
+
+CORNER_RE = re.compile(
+    r"(?:^|[^A-Za-z])(?:prod|img|image|scene|product)?_?(UL|UR|LR|LL)_?(LAT|LON)\w*"
+    r"\s*(?:=|:|>)\s*(-?\d+(?:\.\d+)?)", re.IGNORECASE)
+
+
+def corners_from_meta_text(text):
+    """[(lon, lat)] UL, UR, LR, LL from any metadata text, or None.
+
+    A last resort for an ad-hoc reference folder: key = value lines
+    (ProdULLat = 28.35), XML tags (<ULLAT>28.35</ULLAT>, <UL_LAT>) -- the first
+    complete set of the four corners wins. -9999 placeholders are skipped."""
+    got = {}
+    for m in CORNER_RE.finditer(text or ""):
+        c, ax, v = m.group(1).upper(), m.group(2).upper(), float(m.group(3))
+        if v <= -999:
+            continue
+        got.setdefault((c, ax), v)
+    try:
+        ring = [(got[(c, "LON")], got[(c, "LAT")]) for c in ("UL", "UR", "LR", "LL")]
+    except KeyError:
+        return None
+    if not all(-180 <= lo <= 180 and -90 <= la <= 90 for lo, la in ring):
+        return None
+    return ring
 
 
 def detect_reference_mode(names):
@@ -3377,6 +3406,8 @@ class QCDashboard(QMainWindow):
 
         listing = list(rasters) + list(metas) + list(others)
         mode = REF_MODE_OVERRIDE or detect_reference_mode(listing)
+        if mode is None and REF_HEADER_FALLBACK:
+            mode = REF_MODE_HEADER
         if mode is None:
             QMessageBox.warning(
                 self, "Reference Folder",
@@ -3395,8 +3426,15 @@ class QCDashboard(QMainWindow):
             errors = self._scan_index(rasters, {**metas, **others})
         elif mode == REF_MODE_SIDECAR:
             errors = self._scan_sidecars(rasters, metas)
-        else:
+        elif mode == REF_MODE_TILE:
             errors = self._scan_tile_names(rasters)
+        else:
+            errors = self._scan_headers(rasters, {**metas, **others})
+        if (not self.ref_footprints and mode != REF_MODE_HEADER
+                and REF_HEADER_FALLBACK):
+            print(f"[META] {mode} placed nothing; falling back to {REF_MODE_HEADER}")
+            mode = REF_MODE_HEADER
+            errors = self._scan_headers(rasters, {**metas, **others})
 
         self.ref_mode = mode
         self._reproject_footprints()
@@ -3497,6 +3535,71 @@ class QCDashboard(QMainWindow):
             except Exception as e:
                 errors.append(f"{meta_file}: {e}")
         return errors
+
+    def _scan_headers(self, rasters, candidates):
+        """Fallback (user testing): every raster placed by itself.
+
+        First a metadata file named after the raster (or a lone one in its
+        folder) with four corners in it (corners_from_meta_text); else the
+        raster's own header -- its extent, corners taken to lon/lat. Slower
+        than an index (each file is opened) and the extent includes any nodata
+        collar, so operational collections should keep their index/sidecars.
+        """
+        errors = []
+        by_dir = {}
+        for name, path in candidates.items():
+            if name.lower().endswith((".txt", ".xml", ".met")):
+                by_dir.setdefault(os.path.dirname(path), []).append(path)
+        n_meta = n_hdr = 0
+        for name, path in sorted(rasters.items()):
+            stem = os.path.splitext(name)[0].lower()
+            near = by_dir.get(os.path.dirname(path), [])
+            mine = [m for m in near if os.path.basename(m).lower().startswith(stem)]
+            if not mine and len(near) == 1:
+                mine = near
+            ring, src = None, None
+            for m in mine:
+                try:
+                    with open(m, encoding="utf-8", errors="replace") as f:
+                        ring = corners_from_meta_text(f.read())
+                except OSError:
+                    ring = None
+                if ring:
+                    src = f"meta corners ({os.path.basename(m)})"
+                    n_meta += 1
+                    break
+            if ring is None:
+                ring = self._header_ring(path)
+                if ring:
+                    src = "raster header"
+                    n_hdr += 1
+            if ring is None:
+                errors.append(f"{name}: no corners in a meta file and no "
+                              f"georeferencing in its header")
+                continue
+            self.ref_footprints[path] = {"ring": ring, "band": BAND_UNKNOWN,
+                                         "crs": None, "granule": None,
+                                         "source": src, "meta": None}
+        print(f"[META] fallback: {n_meta} footprint(s) from meta corners, "
+              f"{n_hdr} from raster headers")
+        return errors
+
+    def _header_ring(self, path):
+        """The raster's extent corners in lon/lat (UL, UR, LR, LL), or None."""
+        try:
+            lyr = QgsRasterLayer(path, "hdr")
+            if not lyr.isValid() or not lyr.crs().isValid():
+                return None
+            e = lyr.extent()
+            tf = QgsCoordinateTransform(lyr.crs(), self.wgs84_crs,
+                                        QgsProject.instance())
+            pts = [tf.transform(QgsPointXY(x, y)) for x, y in (
+                (e.xMinimum(), e.yMaximum()), (e.xMaximum(), e.yMaximum()),
+                (e.xMaximum(), e.yMinimum()), (e.xMinimum(), e.yMinimum()))]
+            return [(p.x(), p.y()) for p in pts]
+        except Exception as ex:
+            print(f"[META] {os.path.basename(path)}: header unreadable ({ex})")
+            return None
 
     def _scan_tile_names(self, rasters):
         """The footprint is the name: 'N16E73.tif' is a degree cell."""
@@ -4897,9 +5000,23 @@ class QCDashboard(QMainWindow):
         targets = self._export_targets(("csv", "shp", "plots"), "Export")
         if not targets:
             return
-        self.save_csv(path=targets["csv"])
-        self.save_shapefile(path=targets["shp"])
-        self.write_vector_plot(targets["plots"])
+        # each step on its own: one failing (a locked shapefile, a missing
+        # library) must not stop the others -- the plot came last and was the
+        # one silently lost
+        for label, step in (("CSV", lambda: self.save_csv(path=targets["csv"])),
+                            ("shapefile", lambda: self.save_shapefile(path=targets["shp"]))):
+            try:
+                step()
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                QMessageBox.warning(self, "Export", f"{label} failed:\n{e}")
+        png = self.write_vector_plot(targets["plots"])
+        if png:
+            try:
+                self.statusBar().showMessage(f"Look-vector plot: {png}", 15000)
+            except Exception:
+                pass
 
     def _export_targets(self, kinds, title):
         """{kind: path} for each kind (and 'stats') in the output folder, or None.
@@ -5004,6 +5121,25 @@ class QCDashboard(QMainWindow):
             return None
 
     def write_vector_plot(self, png):
+        """_write_vector_plot, never raising: a failure is printed with its
+        traceback and shown, so a missing plot is never silent."""
+        try:
+            out = self._write_vector_plot(png)
+        except Exception as e:
+            out, err = None, e
+            import traceback
+            traceback.print_exc()
+        else:
+            err = getattr(self, "_vector_plot_error", None)
+        if out is None and err is not None:
+            hint = ("\n\nmatplotlib is missing from this QGIS's Python: "
+                    "install it (OSGeo4W Setup -> python3-matplotlib)."
+                    if isinstance(err, ImportError) else "")
+            QMessageBox.warning(self, "Look-vector plot",
+                                f"The plot was not written:\n{err}{hint}")
+        return out
+
+    def _write_vector_plot(self, png):
         """The look-vector plot of the marked rows (plot_look_vectors) to png.
 
         Over the input scene as the input canvas renders it (bands and
@@ -5011,6 +5147,7 @@ class QCDashboard(QMainWindow):
         Session - Strip from the product metadata beside the input. A plot
         that cannot be drawn (no matplotlib) is reported and skipped; the CSV,
         shapefile and statistics are already written."""
+        self._vector_plot_error = None
         rows = self.export_rows()
         if not rows:
             return None
@@ -5050,7 +5187,10 @@ class QCDashboard(QMainWindow):
             print(f"[VECTORS] look-vector plot -> {png}")
             return png
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             print(f"[VECTORS] plot skipped: {e}")
+            self._vector_plot_error = e
             return None
 
     def write_stats(self, export_path):
