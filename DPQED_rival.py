@@ -1669,8 +1669,11 @@ def vectors_title(title, st):
     """'<scene>   RMSE: Northing y km, Easting x km' (the RMSE when known)."""
     if not (st and st.get("n")):
         return title
-    rm = (f"RMSE: Northing {st['rmse_y'] / 1000.0:.3f} km, "
-          f"Easting {st['rmse_x'] / 1000.0:.3f} km")
+    def ne(ky, kx):
+        return (f"Northing {st.get(ky, 0) / 1000.0:.3f} km, "
+                f"Easting {st.get(kx, 0) / 1000.0:.3f} km")
+    rm = (f"RMSE: {ne('rmse_y', 'rmse_x')}   |   Mean: {ne('mean_y', 'mean_x')}"
+          f"   |   Std: {ne('std_y', 'std_x')}")
     return f"{title}\n{rm}" if title else rm      # RMSE on its own line, below
 
 
@@ -1718,7 +1721,7 @@ def plot_look_vectors(rows, png, title="", st=None, extent=None, background=None
         mw, mh = L, max(2.0, L * H / W)
         # page room beyond the map (not map margin) for an edge arrow: the
         # longest is 6 % of the long side, 0.9 in
-        left, right, top, bottom = 1.2, 1.2, 1.3, 1.6
+        left, right, top, bottom = 1.2, 1.2, 0.9, 1.6
         fw, fh = left + mw + right, top + mh + bottom
         ax_r = (left / fw, bottom / fh, mw / fw, mh / fh)
         cax_r = ((left + 0.35 * mw) / fw, 0.55 / fh, 0.3 * mw / fw, 0.12 / fh)
@@ -1753,9 +1756,9 @@ def plot_look_vectors(rows, png, title="", st=None, extent=None, background=None
         ax.scatter(x, y, s=14, c="white", edgecolors="0.35", linewidths=0.6, zorder=4)
         cb = fig.colorbar(q, cax=cax, orientation="horizontal" if wide else "vertical")
         cb.ax.tick_params(labelsize=8)
-        cb.ax.set_title("error (km)", fontsize=9, loc="left" if wide else "center")
+        cb.ax.set_title("Error (km)", fontsize=9, loc="left" if wide else "center")
         ref = float(10 ** np.floor(np.log10(dmax)))
-        ax.quiverkey(q, key_xy[0], key_xy[1], ref / 1000.0, f"arrow: {ref / 1000.0:g} km",
+        ax.quiverkey(q, key_xy[0], key_xy[1], ref / 1000.0, f"Arrow: {ref / 1000.0:g} km",
                      labelpos="E", coordinates="figure", color="k")
     else:
         cax.set_visible(False)
@@ -1798,7 +1801,7 @@ def plot_look_vectors(rows, png, title="", st=None, extent=None, background=None
         except Exception:
             pass
     name = os.path.splitext(os.path.basename(png))[0].replace("_vectors", "")
-    ax.set_title(vectors_title(title or name, st), fontsize=14, fontweight="bold")
+    ax.set_title(vectors_title(title or name, st), fontsize=14, fontweight="bold", pad=4)
     # tick labels exist once the figure is drawn: draw, bold them, save
     fig.canvas.draw()
     for t in ax.get_xticklabels() + ax.get_yticklabels():
@@ -1861,7 +1864,7 @@ def plot_look_vectors_qt(rows, png, title="", st=None, extent=None, background=N
     W, H = max(e1 - e0, 1.0), max(n1 - n0, 1.0)
     L = 1800.0
     mw, mh = (L, max(300.0, L * H / W)) if W >= H else (max(300.0, L * W / H), L)
-    left, right, top, bottom = 150, 150, 150, 150   # page room for edge arrows
+    left, right, top, bottom = 150, 150, 100, 150   # page room for edge arrows
     img = QImage(int(left + mw + right), int(top + mh + bottom), QImage.Format_ARGB32)
     img.fill(QColor(255, 255, 255))
     p = QPainter(img)
@@ -1982,19 +1985,19 @@ def plot_look_vectors_qt(rows, png, title="", st=None, extent=None, background=N
         p.drawLine(QPointF(xx, cy + 12), QPointF(xx, cy + 17))
         p.drawText(QRectF(xx - 50, cy + 17, 100, 22), Qt.AlignHCenter, f"{v:g}")
     p.drawText(QRectF(cx0 - 260, cy - 5, 250, 22), Qt.AlignRight | Qt.AlignVCenter,
-               "error (km)")
+               "Error (km)")
     ref = float(10 ** math.floor(math.log10(dmax)))
     ka = QPointF(left + 0.72 * mw, cy + 6)
     arrow(ka, -ref, 0.0, QColor(0, 0, 0), 3.0)      # points right, ref m long
     p.setPen(QColor(0, 0, 0))
     p.drawText(QRectF(ka.x() + ref * k + 10, cy - 5, 260, 22), Qt.AlignLeft | Qt.AlignVCenter,
-               f"arrow: {ref / 1000.0:g} km")
+               f"Arrow: {ref / 1000.0:g} km")
     # title and statistics
     name = os.path.splitext(os.path.basename(png))[0].replace("_vectors", "")
     tf = QFont("Sans", 20)
     tf.setBold(True)
     p.setFont(tf)
-    p.drawText(QRectF(0, 8, img.width(), top - 20), Qt.AlignHCenter,
+    p.drawText(QRectF(0, 4, img.width(), top - 8), Qt.AlignHCenter | Qt.AlignBottom,
                vectors_title(title or name, st))
     p.end()
     if not img.save(png):
