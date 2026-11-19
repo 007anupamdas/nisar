@@ -801,6 +801,11 @@ open(os.path.join(_x, "P_ort_META.xml"), "w").write(
     "</IMAGE></AISD>")
 check("title from a special product's XML", H["scene_title"](os.path.join(_x, "P_ort.tif")),
       "G1A: HS 026111104/000006")
+_t = _tf.mkdtemp(); os.makedirs(os.path.join(_t, "META"))
+open(os.path.join(_t, "META", "BAND_META.txt"), "w").write(
+    "SatID = G1A\nSensor = LISS4\nDateOfPass = 03-JAN-2026\n")
+check("Load Input TIF: meta in a META/ subfolder still found",
+      H["scene_title"](os.path.join(_t, "scene.tif")), "G1A: LISS4 03-Jan-2026")
 check("no metadata, no title", H["scene_title"](os.path.join(_tf.mkdtemp(), "a.tif")), "")
 try:
     import matplotlib  # noqa: F401

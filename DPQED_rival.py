@@ -1549,20 +1549,48 @@ def prod_corners(input_path):
     """[(lon, lat)] x4 of the product's own corners -- Prod{UL,UR,LR,LL}{Lat,Lon}
     of BAND_META.txt beside the input -- or None. The look-vector plot takes its
     extent from them, as the matcher's report does."""
-    meta = os.path.join(os.path.dirname(os.path.abspath(input_path or "")), "BAND_META.txt")
-    if not input_path or not os.path.isfile(meta):
-        return None
-    vals = {}
-    with open(meta, encoding="utf-8", errors="replace") as f:
-        for line in f:
-            if "=" in line:
-                k, v = line.split("=", 1)
-                vals.setdefault(k.strip(), v.strip())
+    for meta in input_meta_files(input_path):
+        try:
+            with open(meta, encoding="utf-8", errors="replace") as f:
+                ring = corners_from_meta_text(f.read())
+        except OSError:
+            continue
+        if ring:
+            return ring
+    return None
+
+
+def input_meta_files(input_path):
+    """Metadata files for an input tif, best first: <stem>_META.xml / .txt,
+    BAND_META.txt, then any other *meta*.txt/.xml -- in the tif's folder and
+    a meta/ or metadata/ subfolder of it. Works the same whether the scene
+    came by Load Input Folder or Load Input TIF."""
+    if not input_path:
+        return []
+    folder = os.path.dirname(os.path.abspath(input_path))
+    stem = os.path.splitext(os.path.basename(input_path))[0].lower()
+    dirs = [folder]
     try:
-        return [(float(vals[f"Prod{c}Lon"]), float(vals[f"Prod{c}Lat"]))
-                for c in ("UL", "UR", "LR", "LL")]
-    except (KeyError, ValueError):
-        return None
+        dirs += [os.path.join(folder, d) for d in sorted(os.listdir(folder))
+                 if d.lower() in ("meta", "metadata")
+                 and os.path.isdir(os.path.join(folder, d))]
+    except OSError:
+        return []
+    found = []
+    for d in dirs:
+        try:
+            names = sorted(os.listdir(d))
+        except OSError:
+            continue
+        for n in names:
+            low = n.lower()
+            if not low.endswith((".txt", ".xml")) or "meta" not in low:
+                if not (d != folder and low.endswith((".txt", ".xml"))):
+                    continue
+            rank = (0 if low.startswith(stem) else
+                    1 if low == "band_meta.txt" else 2)
+            found.append((rank, os.path.join(d, n)))
+    return [p for _, p in sorted(found)]
 
 
 def scene_title(input_path):
@@ -1571,26 +1599,22 @@ def scene_title(input_path):
     products, a tag per value). '' when neither gives anything."""
     if not input_path:
         return ""
-    folder = os.path.dirname(os.path.abspath(input_path))
-    stem = os.path.splitext(os.path.basename(input_path))[0]
     vals = {}
-    meta = os.path.join(folder, "BAND_META.txt")
-    xml = os.path.join(folder, stem + "_META.xml")
-    try:
-        if os.path.isfile(xml):
-            import xml.etree.ElementTree as ET
-            root = ET.parse(xml).getroot()
-            for el in root.iter():
-                if el.text and el.text.strip() and el.tag not in vals:
-                    vals[el.tag] = el.text.strip()
-        elif os.path.isfile(meta):
-            with open(meta, encoding="utf-8", errors="replace") as f:
-                for line in f:
-                    if "=" in line:
-                        k, v = line.split("=", 1)
-                        vals.setdefault(k.strip(), v.strip())
-    except Exception:
-        return ""
+    for meta in input_meta_files(input_path):
+        try:
+            if meta.lower().endswith(".xml"):
+                import xml.etree.ElementTree as ET
+                for el in ET.parse(meta).getroot().iter():
+                    if el.text and el.text.strip() and el.tag not in vals:
+                        vals[el.tag] = el.text.strip()
+            else:
+                with open(meta, encoding="utf-8", errors="replace") as f:
+                    for line in f:
+                        if "=" in line:
+                            k, v = line.split("=", 1)
+                            vals.setdefault(k.strip(), v.strip())
+        except Exception:
+            continue
     got = {}
     for field in TITLE_KEYS:
         got[field] = next((vals[k] for k in TITLE_KEYS[field]
