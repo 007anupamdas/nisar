@@ -825,6 +825,8 @@ _c = _tf.mkdtemp(); _cog = os.path.join(_c, "x_b2_cog.tif")
 open(_cog + ".source.txt", "w").write("/srv/P/x.tif")
 check("a COG names the scene it came from", H["cog_source_of"](_cog), "/srv/P/x.tif")
 check("anything else is its own source", H["cog_source_of"]("/a/b.tif"), "/a/b.tif")
+check("latitude ticks every whole degree", H["degree_ticks"](25.53, 28.35), [26.0, 27.0, 28.0])
+check("latitude ticks on a 1-degree scene still exist", len(H["degree_ticks"](16.2, 16.9)) >= 2, True)
 check("no metadata, no title", H["scene_title"](os.path.join(_tf.mkdtemp(), "a.tif")), "")
 try:
     import matplotlib  # noqa: F401

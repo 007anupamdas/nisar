@@ -1782,7 +1782,7 @@ def plot_look_vectors(rows, png, title="", st=None, extent=None, background=None
             ax.xaxis.set_major_locator(FixedLocator(
                 [to_xy(v, latc)[0] / 1000.0 for v in nice(lon0, lon1, 10 if wide else 4)]))
             ax.yaxis.set_major_locator(FixedLocator(
-                [to_xy(lonc, v)[1] / 1000.0 for v in nice(lat0, lat1, 4 if wide else 10)]))
+                [to_xy(lonc, v)[1] / 1000.0 for v in degree_ticks(lat0, lat1)]))
 
             def lon_of(v, _pos=None):
                 lo = to_ll(v * 1000.0, yc)[0]
@@ -1819,6 +1819,14 @@ def _viridis(t):
     f = t - i
     a, b = VIRIDIS[i], VIRIDIS[i + 1]
     return tuple(int(round(a[k] + (b[k] - a[k]) * f)) for k in range(3))
+
+
+def degree_ticks(lo, hi):
+    """Latitude ticks every whole degree; finer (nice steps) only when the
+    scene spans less than two degrees, so there are always some."""
+    if hi - lo >= 2.0:
+        return [float(v) for v in range(int(math.ceil(lo)), int(math.floor(hi)) + 1)]
+    return _nice_ticks(lo, hi, 4)
 
 
 def _nice_ticks(lo, hi, want):
@@ -1896,7 +1904,7 @@ def plot_look_vectors_qt(rows, png, title="", st=None, extent=None, background=N
             lat0, lat1 = sorted([to_ll(xc, n0)[1], to_ll(xc, n1)[1]])
             for v in _nice_ticks(lon0, lon1, 10 if W >= H else 4):
                 xticks.append((to_xy(v, latc)[0], f"{abs(v):.2f}°{'E' if v >= 0 else 'W'}"))
-            for v in _nice_ticks(lat0, lat1, 4 if W >= H else 10):
+            for v in degree_ticks(lat0, lat1):
                 yticks.append((to_xy(lonc, v)[1], f"{abs(v):.2f}°{'N' if v >= 0 else 'S'}"))
             xlabel, ylabel = "Longitude", "Latitude"
         except Exception:
