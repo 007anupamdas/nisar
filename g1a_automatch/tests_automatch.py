@@ -1426,7 +1426,7 @@ def test_presets(tmp):
     check('presets: an HS job: its detectors and window, truth decides range and band, all GPUs, cross-check 3 of 5',
           (n['detectors'][:2], n['window_sizes'], n['max_error_from_truth'], n['channels_from_truth'], n['device'],
            n['cross_top_n'], n['cross_min_agree'], 'note' in job, bool(note), 'top_n' in job),
-          (['imw-minima-roma', 'imw-xoftr'], [512], True, True, 'all', 10, 3, False, True, False))
+          (['disk', 'imw-topicfm'], [512], True, True, 'all', 10, 3, False, True, False))
     j3, _ = P.job_for('HS', '/d/G1A_HS_x.tif', '/ref', '/out', '/t/pts_band28.csv', presets=pre, top_n=3, agree=2)
     jf, _ = P.job_for('MV', '/d/G1A_MV_x.tif', '/ref', '/out', '/t/pts_band4.csv', presets=pre, mode='fastest')
     ja, _ = P.job_for('MV', '/d/G1A_MV_x.tif', '/ref', '/out', '/t/pts_band4.csv', presets=pre, mode='fast')
@@ -1531,7 +1531,7 @@ def test_gui_run(tmp):
     w.mode.setCurrentText('fastest')
     fast_txt = w.summary.text()
     w.mode.setCurrentText('fast')
-    check('run window: the fastest tier shows its list; fast sets top 10 / 3', ('fastest' in fast_txt and 'imw-minima-roma'
+    check('run window: the fastest tier shows its list; fast sets top 10 / 3', ('fastest' in fast_txt and 'imw-sfd2-nn'
           in fast_txt, w.top_n.value(), w.agree.value()), (True, 10, 3))
     w.top_n.setValue(2)
     w.agree.setValue(2)

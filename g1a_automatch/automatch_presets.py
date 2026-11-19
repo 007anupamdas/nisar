@@ -51,8 +51,10 @@ COMMON: Dict = {
 INFO_KEYS = ('note', 'band_hint', 'top_n', 'agree')   # read by the window
 
 # Four tiers per sensor. Each sensor's detector list is ranked best first by
-# truth accuracy (mean per-job percentile of RMSE x (truth points / reached)^2,
-# over all its truth jobs; a detector's best variant per job). A tier runs the
+# fast AND accurate: the mean of two per-job percentiles over all its truth
+# jobs, accuracy (RMSE x (truth points / reached)^2, a detector's best variant)
+# and speed (s per window), equally weighted; a detector less accurate than
+# 55 % of the others goes to the end whatever its speed. A tier runs the
 # first top_n: fastest the top 5, fast the top 10, medium the top 20, slow all
 # 30 (with the slow ones such as OmniGlue, DKM, RoMa). Same RANSAC and
 # sub-cells, so a tier reuses the results of the tiers below it.
@@ -125,45 +127,45 @@ def auto_next(share: Optional[float]) -> Tuple[Optional[str], str]:
 
 
 SENSORS: Dict[str, Dict] = {
-    'MV': {'detectors': ['imw-minima-roma', 'disk', 'imw-darkfeat-nn', 'dog', 'imw-topicfm', 'imw-sfd2-nn', 'imw-xoftr',
-                   'imw-d2net-nn', 'keynet', 'imw-rdd-nn', 'imw-eloftr', 'imw-liftfeat-nn', 'imw-xfeat-lg',
-                   'imw-aliked-lg', 'imw-dkm', 'sift', 'imw-dad-roma', 'imw-roma', 'gftt', 'imw-gim-roma',
-                   'imw-minima-loftr', 'hessian', 'dedode', 'imw-omniglue', 'imw-aspanformer', 'imw-xfeat-dense',
-                   'imw-lanet-nn', 'loftr', 'imw-r2d2-nn', 'imw-alike-nn'],
+    'MV': {'detectors': ['disk', 'dog', 'imw-sfd2-nn', 'imw-darkfeat-nn', 'imw-xoftr', 'sift', 'keynet',
+                   'imw-liftfeat-nn', 'imw-xfeat-lg', 'imw-eloftr', 'imw-topicfm', 'imw-minima-loftr', 'gftt',
+                   'imw-minima-roma', 'imw-rdd-nn', 'imw-aliked-lg', 'imw-d2net-nn', 'hessian', 'imw-gim-roma',
+                   'dedode', 'imw-dkm', 'imw-aspanformer', 'imw-dad-roma', 'imw-roma', 'imw-omniglue',
+                   'imw-xfeat-dense', 'loftr', 'loftr-windoornew', 'loftr-windoor', 'imw-alike-nn'],
            'window_sizes': [1024], 'band_hint': 'band3 (650 nm)',
            'cloud_method_MV': 'omnicloudmask', 'cloud_bands': ['band5', 'band4', 'band6'],
            'note': 'MX-VNIR: 1024 px windows (better than 2048 in every MV job); clouds by OmniCloudMask on bands '
                    '5, 4, 6. From jobs 1066-1069: disk, MINIMA-RoMa / -LoFTR and loftr were in the top 10 most '
                    'often; the fast list is the ones at 1-3 min per pass among the top 20.'},
-    'HV': {'detectors': ['disk', 'imw-minima-roma', 'dog', 'dedode', 'imw-darkfeat-nn', 'imw-ripe-nn', 'imw-rdd-nn',
-                   'imw-topicfm', 'imw-sfd2-nn', 'imw-minima-loftr', 'gftt', 'keynet', 'imw-lanet-nn', 'hessian',
-                   'imw-aspanformer', 'sift', 'imw-dkm', 'imw-gim-roma', 'loftr', 'imw-eloftr', 'imw-d2net-nn',
-                   'imw-aliked-lg', 'imw-xfeat-lg', 'imw-xoftr', 'imw-r2d2-nn', 'imw-rord-nn', 'imw-roma',
-                   'imw-alike-nn', 'imw-liftfeat-nn', 'loftr-windoor'],
+    'HV': {'detectors': ['disk', 'dog', 'sift', 'imw-darkfeat-nn', 'imw-lanet-nn', 'gftt', 'dedode', 'keynet', 'loftr',
+                   'imw-sfd2-nn', 'imw-eloftr', 'imw-minima-loftr', 'hessian', 'imw-ripe-nn', 'imw-topicfm',
+                   'imw-xfeat-lg', 'imw-d2net-nn', 'imw-minima-roma', 'imw-aspanformer', 'imw-rdd-nn',
+                   'imw-aliked-lg', 'imw-dkm', 'imw-gim-roma', 'loftr-windoor', 'loftr-windoornew', 'imw-xoftr',
+                   'imw-alike-nn', 'imw-liftfeat-nn', 'imw-r2d2-nn', 'imw-xfeat-dense'],
            'window_sizes': [512], 'band_hint': 'the band you benchmarked (e.g. band30)',
            'note': 'HyS-VNIR: 512 px windows; clouds by the VNIR tests.'},
-    'HS': {'detectors': ['imw-minima-roma', 'imw-xoftr', 'imw-minima-loftr', 'imw-topicfm', 'dedode', 'imw-aspanformer',
-                   'imw-gim-roma', 'disk', 'imw-d2net-nn', 'imw-eloftr', 'imw-ripe-nn', 'imw-roma', 'imw-sfd2-nn',
-                   'dog', 'imw-darkfeat-nn', 'loftr', 'imw-rdd-nn', 'imw-liftfeat-nn', 'imw-lanet-nn',
-                   'imw-xfeat-dense', 'keynet', 'sift', 'imw-xfeat-lg', 'hessian', 'imw-rord-nn', 'imw-aliked-lg',
-                   'loftr-windoor', 'imw-dkm', 'gftt', 'imw-r2d2-nn'],
+    'HS': {'detectors': ['disk', 'imw-topicfm', 'dedode', 'imw-xoftr', 'imw-eloftr', 'imw-minima-loftr', 'dog',
+                   'imw-sfd2-nn', 'imw-lanet-nn', 'imw-darkfeat-nn', 'imw-liftfeat-nn', 'imw-d2net-nn', 'loftr',
+                   'imw-ripe-nn', 'imw-aspanformer', 'imw-minima-roma', 'imw-rdd-nn', 'imw-gim-roma', 'imw-roma',
+                   'loftr-windoor', 'hessian', 'loftr-windoornew', 'sift', 'imw-xfeat-dense', 'imw-alike-nn',
+                   'gftt', 'keynet', 'imw-rord-nn', 'imw-r2d2-nn', 'imw-xfeat-lg'],
            'window_sizes': [512], 'band_hint': 'near 1250, 1650 or 2200 nm (e.g. band28), not 1380 / 1900 nm',
            'note': 'HyS-SWIR: 512 px windows; clouds by the SWIR tests. RoMa / MINIMA-RoMa reached 16 of 16 truth '
                    'points.'},
-    'C3': {'detectors': ['imw-minima-roma', 'disk', 'imw-darkfeat-nn', 'dog', 'imw-topicfm', 'imw-sfd2-nn', 'imw-xoftr',
-                   'imw-d2net-nn', 'keynet', 'imw-rdd-nn', 'imw-eloftr', 'imw-liftfeat-nn', 'imw-xfeat-lg',
-                   'imw-aliked-lg', 'imw-dkm', 'sift', 'imw-dad-roma', 'imw-roma', 'gftt', 'imw-gim-roma',
-                   'imw-minima-loftr', 'hessian', 'dedode', 'imw-omniglue', 'imw-aspanformer', 'imw-xfeat-dense',
-                   'imw-lanet-nn', 'loftr', 'imw-r2d2-nn', 'imw-alike-nn'],
+    'C3': {'detectors': ['disk', 'dog', 'imw-sfd2-nn', 'imw-darkfeat-nn', 'imw-xoftr', 'sift', 'keynet',
+                   'imw-liftfeat-nn', 'imw-xfeat-lg', 'imw-eloftr', 'imw-topicfm', 'imw-minima-loftr', 'gftt',
+                   'imw-minima-roma', 'imw-rdd-nn', 'imw-aliked-lg', 'imw-d2net-nn', 'hessian', 'imw-gim-roma',
+                   'dedode', 'imw-dkm', 'imw-aspanformer', 'imw-dad-roma', 'imw-roma', 'imw-omniglue',
+                   'imw-xfeat-dense', 'loftr', 'loftr-windoornew', 'loftr-windoor', 'imw-alike-nn'],
            'window_sizes': [1024], 'band_hint': 'the MX band you benchmarked (PAN: band1)',
            'cloud_method_MV': 'omnicloudmask',
            'note': 'Cartosat-3 (MX / PAN): no benchmark yet; the detectors that did best on G1A MV as a start. '
                    'References: C1 over India, L8 elsewhere (the run window chooses by the scene centre).'},
-    'ML': {'detectors': ['imw-minima-roma', 'imw-xoftr', 'imw-minima-loftr', 'imw-topicfm', 'dedode', 'imw-aspanformer',
-                   'imw-gim-roma', 'disk', 'imw-d2net-nn', 'imw-eloftr', 'imw-ripe-nn', 'imw-roma', 'imw-sfd2-nn',
-                   'dog', 'imw-darkfeat-nn', 'loftr', 'imw-rdd-nn', 'imw-liftfeat-nn', 'imw-lanet-nn',
-                   'imw-xfeat-dense', 'keynet', 'sift', 'imw-xfeat-lg', 'hessian', 'imw-rord-nn', 'imw-aliked-lg',
-                   'loftr-windoor', 'imw-dkm', 'gftt', 'imw-r2d2-nn'],
+    'ML': {'detectors': ['disk', 'imw-topicfm', 'dedode', 'imw-xoftr', 'imw-eloftr', 'imw-minima-loftr', 'dog',
+                   'imw-sfd2-nn', 'imw-lanet-nn', 'imw-darkfeat-nn', 'imw-liftfeat-nn', 'imw-d2net-nn', 'loftr',
+                   'imw-ripe-nn', 'imw-aspanformer', 'imw-minima-roma', 'imw-rdd-nn', 'imw-gim-roma', 'imw-roma',
+                   'loftr-windoor', 'hessian', 'loftr-windoornew', 'sift', 'imw-xfeat-dense', 'imw-alike-nn',
+                   'gftt', 'keynet', 'imw-rord-nn', 'imw-r2d2-nn', 'imw-xfeat-lg'],
            'window_sizes': [512], 'band_hint': 'not band1 (7.35 um) or band6 (13.25 um)',
            'note': 'MX-LWIR: no benchmark yet, the HS list as a start; gradient window preparation (thermal against '
                    'optical); clouds by the infrared tests.'},

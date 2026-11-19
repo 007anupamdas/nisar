@@ -105,13 +105,21 @@ the window for every setting, sweeps and the benchmark.
 | Band | yours (suggested band3) | yours | yours (near 1250 / 1650 / 2200 nm) | yours (not band1 / band6) |
 | Clouds | OmniCloudMask, bands 5, 4, 6 | VNIR tests | SWIR tests | infrared tests |
 
-Four tiers per sensor (**Preset**), all prefixes of one list ranked by truth
-accuracy (mean per-job percentile of RMSE × (truth points / reached)², over
-MV 8, HS 14, HV 10 truth jobs up to 1080; ML uses the HS list, C3 the MV list):
-*fastest* — top 5, 3 agreeing; *fast* — top 10, 3 agreeing; *medium* — top
-20, 4 agreeing; *slow* — all 30 (incl. OmniGlue, DKM, RoMa), 4 agreeing. The
-same RANSAC and sub-cells, so a tier reuses what the tiers below it ran. The
-earlier names still work: *accurate* = fast, *most accurate* = medium.
+Four tiers per sensor (**Preset**), all prefixes of one list ranked by fast
+*and* accurate: the mean of two per-job percentiles, accuracy (truth RMSE ×
+(truth points / reached)²) and speed (s per window), over MV 8, HS 14, HV 10
+truth jobs up to 1080; a method less accurate than 55 % of the others goes to
+the end however fast. ML uses the HS list, C3 the MV list. *fastest* — top 5,
+3 agreeing; *fast* — top 10, 3 agreeing; *medium* — top 20, 4 agreeing;
+*slow* — all 30, 4 agreeing. The same RANSAC and sub-cells, so a tier reuses
+what the tiers below it ran. The earlier names still work: *accurate* = fast,
+*most accurate* = medium.
+
+| Tier | MV | HS | HV |
+|---|---|---|---|
+| top 5 | disk, dog, imw-sfd2-nn, imw-darkfeat-nn, imw-xoftr | disk, imw-topicfm, dedode, imw-xoftr, imw-eloftr | disk, dog, sift, imw-darkfeat-nn, imw-lanet-nn |
+| 6-10 | sift, keynet, imw-liftfeat-nn, imw-xfeat-lg, imw-eloftr | imw-minima-loftr, dog, imw-sfd2-nn, imw-lanet-nn, imw-darkfeat-nn | gftt, dedode, keynet, loftr, imw-sfd2-nn |
+| 11-20 | imw-topicfm, imw-minima-loftr, gftt, imw-minima-roma, imw-rdd-nn, imw-aliked-lg, imw-d2net-nn, hessian, imw-gim-roma, dedode | imw-liftfeat-nn, imw-d2net-nn, loftr, imw-ripe-nn, imw-aspanformer, imw-minima-roma, imw-rdd-nn, imw-gim-roma, imw-roma, loftr-windoor | imw-eloftr, imw-minima-loftr, hessian, imw-ripe-nn, imw-topicfm, imw-xfeat-lg, imw-d2net-nn, imw-minima-roma, imw-aspanformer, imw-rdd-nn |
 
 **Run auto** climbs the ranked list: top 3 with 2 agreeing; if that fails,
 top 5 with 3; then top 10 with 5; then top 20 with 5 (each into
