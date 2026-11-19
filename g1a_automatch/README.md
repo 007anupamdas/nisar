@@ -113,6 +113,13 @@ MV 8, HS 14, HV 10 truth jobs up to 1080; ML uses the HS list, C3 the MV list):
 same RANSAC and sub-cells, so a tier reuses what the tiers below it ran. The
 earlier names still work: *accurate* = fast, *most accurate* = medium.
 
+**Run auto** climbs the ranked list: top 3 with 2 agreeing; if that fails,
+top 5 with 3; then top 10 with 5; then top 20 with 5 (each into
+`<output>/auto_topN_agreeK`, one cache, so a step only adds detectors). A step
+passes when the cross-check is reliable and the final points fill 80 % of the
+sub-tiles at the finest level. `AUTO_PRESET.txt` lists each step and the one
+chosen.
+
 | Tier | MV | HS | HV |
 |---|---|---|---|
 | fastest | MINIMA-RoMa, DISK, DarkFeat, DoG, TopicFM | MINIMA-RoMa, XoFTR, MINIMA-LoFTR, TopicFM, DeDoDe | DISK, MINIMA-RoMa, DoG, DeDoDe, DarkFeat |

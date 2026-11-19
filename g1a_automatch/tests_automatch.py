@@ -1451,6 +1451,17 @@ def test_presets(tmp):
         picks.append(P.auto_next(P.rigid_share(cs))[0])
     check('presets auto: by the rigid share (the coarsest level): stop / fast / medium',
           (picks, P.auto_next(None)[0]), ([None, 'fast', 'medium'], 'fast'))
+    passes = []
+    for row in ({'reliable': True, 'final_tiles_64px': 24, 'final_tiles_ok_64px': 22, 'final_tiles_128px': 24,
+                 'final_tiles_ok_128px': 10},
+                {'reliable': True, 'final_tiles_64px': 24, 'final_tiles_ok_64px': 12},
+                {'reliable': False, 'final_tiles_64px': 24, 'final_tiles_ok_64px': 24}):
+        _pd.DataFrame([row]).to_csv(os.path.join(cs, 'CROSS_SUMMARY.csv'), index=False)
+        passes.append(P.step_passes(cs)[0])
+    check('presets auto ladder: top 3/2, 5/3, 10/5, 20/5; a step passes when reliable and 80 % of the sub-tiles '
+          '(finest level) have a final point',
+          (P.AUTO_STEPS, passes, P.auto_step_name(2)),
+          ([(3, 2), (5, 3), (10, 5), (20, 5)], [True, False, False], 'auto_top10_agree5'))
     import pandas as _pd2
     tw = os.path.join(tmp, 'pts_band4.csv')
     _pd2.DataFrame({'In_X': [0, 1], 'In_Y': [0, 1], 'Ref_X': [0, 0], 'Ref_Y': [0, 0], 'DX_Err': [14000.0, 9000.0],

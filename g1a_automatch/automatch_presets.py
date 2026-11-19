@@ -61,9 +61,41 @@ MODES = {'fastest': {'top_n': 5, 'agree': 3},
          'medium': {'top_n': 20, 'agree': 4},
          'slow': {'top_n': 30, 'agree': 4}}
 MODE_ALIASES = {'accurate': 'fast', 'most accurate': 'medium'}      # the earlier names
-# Auto: the fastest preset first; its rigid share (the consistent points that
-# fit one offset for the whole scene) says how distorted the product is.
-AUTO_LOW, AUTO_HIGH = 0.8, 0.4
+# Auto: a ladder up the ranked list. Each step runs the top N and asks K of
+# them to agree; it passes when the cross-check is reliable and the final
+# points fill at least AUTO_TILE_SHARE of the sub-tiles (finest level), else
+# the next step runs (the same cache: only the new detectors run).
+AUTO_STEPS = [(3, 2), (5, 3), (10, 5), (20, 5)]       # (top N, K agreeing)
+AUTO_TILE_SHARE = 0.8
+AUTO_LOW, AUTO_HIGH = 0.8, 0.4                         # rigid share: little / strong distortion (reported)
+
+
+def auto_step_name(i: int) -> str:
+    n, k = AUTO_STEPS[i]
+    return f'auto_top{n}_agree{k}'
+
+
+def step_passes(out_dir: str, tile_share: float = AUTO_TILE_SHARE) -> Tuple[bool, str]:
+    """(passed, why) of a finished auto step from its CROSS_SUMMARY.csv."""
+    import pandas as pd
+    try:
+        c = pd.read_csv(os.path.join(out_dir, 'CROSS_SUMMARY.csv'))
+    except (OSError, ValueError):
+        return False, 'no cross-check result'
+    if not len(c):
+        return False, 'no cross-check result'
+    r = c.iloc[0].to_dict()
+    lv = sorted([int(m.group(1)) for k in r for m in [re.match(r'final_tiles_ok_(\d+)px$', k)] if m])
+    sfx = f'_{lv[0]}px' if lv else ''
+    ok, tot = r.get(f'final_tiles_ok{sfx}'), r.get(f'final_tiles{sfx}')
+    if not bool(r.get('reliable')):
+        return False, 'the top detectors do not agree on enough of the scene (not reliable)'
+    if ok is None or tot is None or pd.isna(ok) or not tot:
+        return False, 'no final points'
+    share = float(ok) / float(tot)
+    if share < tile_share:
+        return False, f'final points in {int(ok)} of {int(tot)} sub-tiles ({100 * share:.0f} % < {100 * tile_share:.0f} %)'
+    return True, f'final points in {int(ok)} of {int(tot)} sub-tiles ({100 * share:.0f} %), reliable'
 
 
 def rigid_share(out_dir: str) -> Optional[float]:

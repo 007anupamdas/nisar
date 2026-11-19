@@ -247,11 +247,11 @@ class RunWindow(QtWidgets.QMainWindow):
         self.btn_check = QtWidgets.QPushButton('Check')
         self.btn_run = QtWidgets.QPushButton('Run')
         self.btn_all = QtWidgets.QPushButton('Run all 4 tiers')
-        self.btn_auto = QtWidgets.QPushButton('Run auto (by distortion)')
-        self.btn_auto.setToolTip('The fastest preset first; then by how much of the scene fits one offset (rigid share): '
-                                 'over 80 % stop there (little distortion), 40-80 % fast (top 10), under 40 % medium (top 20). '
-                                 'One cache, so the second run only adds detectors. The choice is written to '
-                                 'AUTO_PRESET.txt in the output folder')
+        self.btn_auto = QtWidgets.QPushButton('Run auto (top 3 → 5 → 10 → 20)')
+        self.btn_auto.setToolTip('Top 3 with 2 agreeing; if that fails, top 5 with 3 agreeing; then top 10 with 5; '
+                                 'then top 20 with 5. A step passes when the cross-check is reliable and the final '
+                                 'points fill 80 % of the sub-tiles. One cache: each step only adds detectors. Each '
+                                 'step into <output>/auto_topN_agreeK; the outcome in AUTO_PRESET.txt')
         self.btn_all.setToolTip('fastest, fast, medium, then slow, into <output>/fastest, /fast, /medium, /slow, '
                                 'sharing one cache (<output>/_cache): references, pairs and the cloud '
                                 'mask are made once, and a detector one preset ran is reused by the next')
@@ -316,7 +316,7 @@ class RunWindow(QtWidgets.QMainWindow):
         else:
             self.summary.setText('Sensor not known from the file name (G1A_MV_ / HV / HS / ML): choose it under Sensor.')
 
-    def job(self, mode: str = '', sub: str = ''):
+    def job(self, mode: str = '', sub: str = '', top_agree=None):
         s = self.current_sensor()
         if s not in self.presets:
             raise ValueError('choose the sensor (the file name does not say it)')
@@ -333,7 +333,8 @@ class RunWindow(QtWidgets.QMainWindow):
                            None if self.truth.text() else self.max_err.value(),
                            self.device.currentText(), self.cloud.isChecked(), self.weights.text(), self.presets,
                            crispest=1 if crisp else 0,
-                           top_n=None if mode else self.top_n.value(), agree=None if mode else self.agree.value(),
+                           top_n=(top_agree[0] if top_agree else None if mode else self.top_n.value()),
+                           agree=(top_agree[1] if top_agree else None if mode else self.agree.value()),
                            mode=mode or self.mode.currentText(), final_points=self.final_points.value(),
                            cell_px=P.parse_levels(self.cell_px.text()),
                            temp_dir=os.path.join(self.output.text(), '_cache'))
@@ -341,18 +342,24 @@ class RunWindow(QtWidgets.QMainWindow):
             self.log.appendPlainText('--- ' + note[note.index('[window') + 1:].rstrip(']'))
         return job
 
+    def auto_job(self, i: int):
+        n, k = P.AUTO_STEPS[i]
+        return P.auto_step_name(i), self.job('slow', P.auto_step_name(i), (n, k))
+
     def run_auto(self):
-        """The fastest preset, then the one its rigid share calls for (P.auto_next)."""
+        """The auto ladder (P.AUTO_STEPS): top 3 / 2 agreeing, then top 5 / 3, top 10 / 5, top 20 / 5,
+        each only when the one before failed (P.step_passes)."""
         if self.proc is not None:
             return
         try:
-            job = self.job('fastest', 'fastest')
+            step = self.auto_job(0)
         except ValueError as e:
             QtWidgets.QMessageBox.warning(self, 'Automatch', str(e))
             return
         self._pending, self._all_done = [], []
-        self._auto = True
-        self.start('run', ('fastest', job))
+        self._auto = 0
+        self._auto_log = []
+        self.start('run', step)
 
     def run_all(self):
         """The three presets one after the other (their own top X / Y), each
@@ -367,6 +374,7 @@ class RunWindow(QtWidgets.QMainWindow):
             return
         self._pending = jobs[1:]
         self._all_done = []
+        self._auto = None
         self.start('run', jobs[0])
 
     # ── running ──────────────────────────────────────────────────────────────
@@ -479,7 +487,7 @@ class RunWindow(QtWidgets.QMainWindow):
 
     def stop(self):
         self._pending = []                       # Stop ends the three-preset sequence too
-        self._auto = False
+        self._auto = None
         if self.proc is not None:
             kill_tree(self.proc)                 # the run and its GPU workers
 
@@ -510,23 +518,28 @@ class RunWindow(QtWidgets.QMainWindow):
             return
         mode, out = getattr(self, '_current', ('', ''))
         final, best = self.results(out)
-        if getattr(self, '_auto', False) and mode == 'fastest':
-            self._auto = False
-            if code == 0:
-                share = P.rigid_share(out)
-                nxt, why = P.auto_next(share)
-                self.log.appendPlainText(f'--- auto: {why}')
+        i = getattr(self, '_auto', None)
+        if i is not None and kind == 'run':
+            ok, why = P.step_passes(out) if code == 0 else (False, f'the run failed (exit {code})')
+            self._auto_log.append(f'{mode}: {"passed" if ok else "failed"}: {why}')
+            self.log.appendPlainText(f'--- auto: {mode}: {"passed" if ok else "failed"}: {why}')
+            last = ok or i + 1 >= len(P.AUTO_STEPS) or code != 0
+            if last:
+                self._auto = None
+                chosen = mode if ok else f'none passed; the last step ({mode}) is the result'
                 try:
                     with open(os.path.join(self.output.text(), 'AUTO_PRESET.txt'), 'w', encoding='utf-8') as f:
-                        f.write(f"rigid share: {share}\nchosen: {nxt or 'fastest'}\n{why}\n")
+                        f.write(f"chosen: {chosen}\nrigid share: {P.rigid_share(out)}\n" + '\n'.join(self._auto_log) + '\n')
                 except OSError:
                     pass
-                if nxt:
-                    try:
-                        self.start('run', (nxt, self.job(nxt, nxt.replace(' ', '_'))))
-                        return
-                    except ValueError as e:
-                        self.log.appendPlainText(f'--- auto: {nxt} not started ({e})')
+            else:
+                self._auto = i + 1
+                try:
+                    self.start('run', self.auto_job(i + 1))
+                    return
+                except ValueError as e:
+                    self._auto = None
+                    self.log.appendPlainText(f'--- auto: next step not started ({e})')
         if getattr(self, '_pending', None) is not None and (self._pending or self._all_done):
             self._all_done.append((mode, out, code))
             if code == 0 and self._pending:
