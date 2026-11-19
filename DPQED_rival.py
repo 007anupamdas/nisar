@@ -1596,6 +1596,34 @@ def input_meta_files(input_path):
     return [p for _, p in sorted(found)]
 
 
+PRODUCT_NAME_RE = re.compile(
+    r"^([A-Z]\w{2})([A-Z]{2})(\d{9})[A-Z]{2}(\d{6})_S\d+_E\d+_(\d{2})(\d{2})(\d{4})")
+
+
+def title_from_name(path):
+    """{sat, sensor, session, strip, date} read from a product name such as
+    G1AHS026111104EX000006_S062321_E063509_11112026DIP_DQ_ort -- for when no
+    metadata is found. Empty values when the name does not follow it."""
+    name = os.path.basename(path or "")
+    m = PRODUCT_NAME_RE.search(name)
+    if not m:
+        return {"sat": "", "sensor": "", "session": "", "strip": "", "date": ""}
+    sat, sensor, session, strip, dd, mm, yyyy = m.groups()
+    return {"sat": sat, "sensor": sensor, "session": session, "strip": strip,
+            "date": f"{dd}-{mm}-{yyyy}"}
+
+
+def cog_source_of(path):
+    """The original scene a COG was built from (recorded beside it as
+    <cog>.source.txt by build), or path itself."""
+    try:
+        with open(path + ".source.txt", encoding="utf-8") as f:
+            src = f.read().strip()
+        return src or path
+    except OSError:
+        return path
+
+
 def scene_title(input_path):
     """'Satellite - Sensor - Session - Strip' from the product metadata beside
     the input: BAND_META.txt (key = value lines) or <tif stem>_META.xml (special
@@ -1622,6 +1650,8 @@ def scene_title(input_path):
     for field in TITLE_KEYS:
         got[field] = next((vals[k] for k in TITLE_KEYS[field]
                            if vals.get(k) and vals[k] not in ("-9999", "-9999.")), "")
+    if not any(got.values()):
+        got.update(title_from_name(input_path))
     dop = got.get("date", "")
     from datetime import datetime as _dt
     for fmt in ("%d-%b-%Y", "%d-%m-%Y", "%d/%m/%Y", "%Y-%m-%d"):
@@ -1672,6 +1702,10 @@ def plot_look_vectors(rows, png, title="", st=None, extent=None, background=None
         e0, e1, n0, n1 = x.min() - pad, x.max() + pad, y.min() - pad, y.max() + pad
     else:
         e0, e1, n0, n1 = 0.0, 1.0, 0.0, 1.0
+    # room for the arrows: one at the scene's edge is drawn whole, not cut
+    # by the frame -- the longest arrow is 6 % of the long side, so pad 7 %
+    pad = 0.07 * max(e1 - e0, n1 - n0)
+    e0, e1, n0, n1 = e0 - pad, e1 + pad, n0 - pad, n1 + pad
     W, H = max(e1 - e0, 1e-3), max(n1 - n0, 1e-3)
     wide = W >= H
     L = 15.0                     # the map, inches along its long side
@@ -1702,10 +1736,13 @@ def plot_look_vectors(rows, png, title="", st=None, extent=None, background=None
     dmax = max(float(d.max()) if len(d) else 0.0, 1.0)
     scale = (dmax / 1000.0) / (0.06 * max(W, H))   # longest arrow: 6% of the long side
     if len(x):
+        from matplotlib.colors import LinearSegmentedColormap
+        bright = LinearSegmentedColormap.from_list(
+            "rival_bright", [tuple(c / 255.0 for c in v) for v in VIRIDIS])
         q = ax.quiver(x, y, -dx / 1000.0, -dy / 1000.0, d / 1000.0, angles="xy",
                       scale_units="xy", scale=scale, units="inches", width=0.035,
-                      cmap="viridis", zorder=3)
-        ax.scatter(x, y, s=8, c="k", zorder=4)
+                      cmap=bright, zorder=3)
+        ax.scatter(x, y, s=14, c="white", edgecolors="0.35", linewidths=0.6, zorder=4)
         cb = fig.colorbar(q, cax=cax, orientation="horizontal" if wide else "vertical")
         cb.set_label("error of each point (km)")
         ref = float(10 ** np.floor(np.log10(dmax)))
@@ -1716,8 +1753,8 @@ def plot_look_vectors(rows, png, title="", st=None, extent=None, background=None
     ax.set_xlim(e0, e1)
     ax.set_ylim(n0, n1)
     ax.set_aspect("equal", adjustable="box")
-    ax.set_xlabel("E (km)")
-    ax.set_ylabel("N (km)")
+    ax.set_xlabel("E (km)", fontweight="bold")
+    ax.set_ylabel("N (km)", fontweight="bold")
     ax.grid(True, alpha=0.25)
     if to_ll and to_xy:
         try:
@@ -1747,8 +1784,8 @@ def plot_look_vectors(rows, png, title="", st=None, extent=None, background=None
                 return f"{abs(la):.2f}°{'N' if la >= 0 else 'S'}"
             ax.xaxis.set_major_formatter(FuncFormatter(lon_of))
             ax.yaxis.set_major_formatter(FuncFormatter(lat_of))
-            ax.set_xlabel("Longitude (along the scene's middle)")
-            ax.set_ylabel("Latitude (along the scene's middle)")
+            ax.set_xlabel("Longitude (along the scene's middle)", fontweight="bold")
+            ax.set_ylabel("Latitude (along the scene's middle)", fontweight="bold")
         except Exception:
             pass
     name = os.path.splitext(os.path.basename(png))[0].replace("_vectors", "")
@@ -1765,11 +1802,17 @@ def plot_look_vectors(rows, png, title="", st=None, extent=None, background=None
         if not wide:
             txt = txt.replace("    ", "\n").replace(":  ", ":\n")
         fig.text(*stat_xy, txt, ha=stat_ha, va=stat_va, fontsize=10, family="monospace")
+    # tick labels exist once the figure is drawn: draw, bold them, save
+    fig.canvas.draw()
+    for t in ax.get_xticklabels() + ax.get_yticklabels():
+        t.set_fontweight("bold")
     fig.savefig(png, dpi=150)
     return png
 
 
-VIRIDIS = ((68, 1, 84), (59, 82, 139), (33, 145, 140), (94, 201, 98), (253, 231, 37))
+# Bright only -- no dark end -- so every arrow stands out on the scene:
+# cyan (smallest error) -> green -> yellow -> orange -> red (largest).
+VIRIDIS = ((0, 200, 255), (0, 220, 120), (255, 230, 0), (255, 140, 0), (255, 40, 40))
 
 
 def _viridis(t):
@@ -1810,6 +1853,8 @@ def plot_look_vectors_qt(rows, png, title="", st=None, extent=None, background=N
         e0, e1, n0, n1 = min(xs) - pad, max(xs) + pad, min(ys) - pad, max(ys) + pad
     else:
         e0, e1, n0, n1 = 0.0, 1000.0, 0.0, 1000.0
+    pad = 0.07 * max(e1 - e0, n1 - n0)     # edge arrows drawn whole
+    e0, e1, n0, n1 = e0 - pad, e1 + pad, n0 - pad, n1 + pad
     W, H = max(e1 - e0, 1.0), max(n1 - n0, 1.0)
     L = 1800.0
     mw, mh = (L, max(300.0, L * H / W)) if W >= H else (max(300.0, L * W / H), L)
@@ -1844,6 +1889,7 @@ def plot_look_vectors_qt(rows, png, title="", st=None, extent=None, background=N
             pass
     # grid and ticks: lon / lat along the scene's middle, else E / N km
     font = QFont("Sans", 13)
+    font.setBold(True)                 # axis titles and ticks in bold
     p.setFont(font)
     grid = QPen(QColor(0, 0, 0, 40), 1)
     xticks, yticks = [], []
@@ -1908,9 +1954,9 @@ def plot_look_vectors_qt(rows, png, title="", st=None, extent=None, background=N
         a = px(r["in_x"], r["in_y"])
         t = (dd - dmin) / (dmax - dmin) if dmax > dmin else 1.0
         arrow(a, r["dx"], r["dy"], QColor(*_viridis(t)))
-        p.setBrush(QBrush(QColor(0, 0, 0)))
-        p.setPen(Qt.NoPen)
-        p.drawEllipse(a, 3.5, 3.5)
+        p.setBrush(QBrush(QColor(255, 255, 255)))
+        p.setPen(QPen(QColor(90, 90, 90), 1))
+        p.drawEllipse(a, 4.0, 4.0)
     p.restore()
     # colour scale and arrow key
     cy = top + mh + 75
@@ -1923,6 +1969,8 @@ def plot_look_vectors_qt(rows, png, title="", st=None, extent=None, background=N
     p.setPen(QPen(QColor(0, 0, 0), 1))
     p.setBrush(Qt.NoBrush)
     p.drawRect(QRectF(cx0, cy, cw, 22))
+    if dmax - dmin < 1e-6:
+        dmin = max(dmax - 1.0, 0.0)
     for v in _nice_ticks(dmin / 1000.0, dmax / 1000.0, 6):
         xx = cx0 + (v * 1000 - dmin) / max(dmax - dmin, 1e-9) * cw
         p.drawLine(QPointF(xx, cy + 22), QPointF(xx, cy + 28))
@@ -5569,8 +5617,11 @@ class QCDashboard(QMainWindow):
             return p.x(), p.y()
         try:
             os.makedirs(os.path.dirname(png), exist_ok=True)
+            title = scene_title(src)
+            print(f"[VECTORS] title '{title}' from "
+                  f"{', '.join(os.path.basename(m) for m in input_meta_files(src)) or 'the file name'}")
             plot_look_vectors(
-                rows, png, scene_title(src),
+                rows, png, title,
                 error_summary(self._ground_errors()), extent,
                 self._canvas_background() or self._scene_background(),
                 to_ll, to_xy)
@@ -5725,6 +5776,11 @@ class QCDashboard(QMainWindow):
                                  f"Could not build the COG for\n{src}\n"
                                  f"(see the Python console)")
             return
+        try:
+            with open(cog + ".source.txt", "w", encoding="utf-8") as f:
+                f.write(src)
+        except OSError:
+            pass
         self.load_input_path(cog, source=src, naming=naming)
 
     def _ask_band_mode(self, src, n, saved):
@@ -5977,7 +6033,9 @@ class QCDashboard(QMainWindow):
             pass
         if os.path.splitext(path)[0].endswith(COG_SUFFIX):
             # already a COG this tool made: no COG of a COG
-            self.load_input_path(path, naming="file")
+            # a COG opened directly: its scene (for meta, title, footprint)
+            # is the one recorded when it was built
+            self.load_input_path(path, source=cog_source_of(path), naming="file")
         else:
             self._load_as_cog(path, naming="file")
 

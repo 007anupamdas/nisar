@@ -817,6 +817,14 @@ check("an XML named after the tif (no 'meta' in it) is read",
        H["prod_corners"](os.path.join(_u, "scene.tif"))[0]), ("G1A: HS", (78.0, 17.0)))
 check("an unrelated text file is not", [os.path.basename(p) for p in
       H["input_meta_files"](os.path.join(_u, "scene.tif"))], ["scene.xml"])
+check("no metadata: title from the product name",
+      H["scene_title"](os.path.join(_tf.mkdtemp(),
+          "G1AHS026111104EX000006_S062321_E063509_11112026DIP_DQ_ort_b6_cog.tif")),
+      "G1A: HS 11-Nov-2026 026111104/000006")
+_c = _tf.mkdtemp(); _cog = os.path.join(_c, "x_b2_cog.tif")
+open(_cog + ".source.txt", "w").write("/srv/P/x.tif")
+check("a COG names the scene it came from", H["cog_source_of"](_cog), "/srv/P/x.tif")
+check("anything else is its own source", H["cog_source_of"]("/a/b.tif"), "/a/b.tif")
 check("no metadata, no title", H["scene_title"](os.path.join(_tf.mkdtemp(), "a.tif")), "")
 try:
     import matplotlib  # noqa: F401
