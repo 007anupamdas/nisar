@@ -1702,16 +1702,14 @@ def plot_look_vectors(rows, png, title="", st=None, extent=None, background=None
         e0, e1, n0, n1 = x.min() - pad, x.max() + pad, y.min() - pad, y.max() + pad
     else:
         e0, e1, n0, n1 = 0.0, 1.0, 0.0, 1.0
-    # room for the arrows: one at the scene's edge is drawn whole, not cut
-    # by the frame -- the longest arrow is 6 % of the long side, so pad 7 %
-    pad = 0.07 * max(e1 - e0, n1 - n0)
-    e0, e1, n0, n1 = e0 - pad, e1 + pad, n0 - pad, n1 + pad
     W, H = max(e1 - e0, 1e-3), max(n1 - n0, 1e-3)
     wide = W >= H
     L = 15.0                     # the map, inches along its long side
     if wide:
         mw, mh = L, max(2.0, L * H / W)
-        left, right, top, bottom = 0.9, 0.4, 0.8, 2.5
+        # page room beyond the map (not map margin) for an edge arrow: the
+        # longest is 6 % of the long side, 0.9 in
+        left, right, top, bottom = 1.2, 1.2, 1.0, 2.5
         fw, fh = left + mw + right, top + mh + bottom
         ax_r = (left / fw, bottom / fh, mw / fw, mh / fh)
         cax_r = ((left + 0.15 * mw) / fw, 1.45 / fh, 0.6 * mw / fw, 0.22 / fh)
@@ -1742,6 +1740,7 @@ def plot_look_vectors(rows, png, title="", st=None, extent=None, background=None
         q = ax.quiver(x, y, -dx / 1000.0, -dy / 1000.0, d / 1000.0, angles="xy",
                       scale_units="xy", scale=scale, units="inches", width=0.035,
                       cmap=bright, zorder=3)
+        q.set_clip_on(False)        # an arrow at the scene's edge may run past the frame
         ax.scatter(x, y, s=14, c="white", edgecolors="0.35", linewidths=0.6, zorder=4)
         cb = fig.colorbar(q, cax=cax, orientation="horizontal" if wide else "vertical")
         cb.set_label("error of each point (km)")
@@ -1853,12 +1852,10 @@ def plot_look_vectors_qt(rows, png, title="", st=None, extent=None, background=N
         e0, e1, n0, n1 = min(xs) - pad, max(xs) + pad, min(ys) - pad, max(ys) + pad
     else:
         e0, e1, n0, n1 = 0.0, 1000.0, 0.0, 1000.0
-    pad = 0.07 * max(e1 - e0, n1 - n0)     # edge arrows drawn whole
-    e0, e1, n0, n1 = e0 - pad, e1 + pad, n0 - pad, n1 + pad
     W, H = max(e1 - e0, 1.0), max(n1 - n0, 1.0)
     L = 1800.0
     mw, mh = (L, max(300.0, L * H / W)) if W >= H else (max(300.0, L * W / H), L)
-    left, right, top, bottom = 120, 60, 80, 260
+    left, right, top, bottom = 150, 150, 120, 260   # page room for edge arrows
     img = QImage(int(left + mw + right), int(top + mh + bottom), QImage.Format_ARGB32)
     img.fill(QColor(255, 255, 255))
     p = QPainter(img)
@@ -1948,8 +1945,7 @@ def plot_look_vectors_qt(rows, png, title="", st=None, extent=None, background=N
         p.setBrush(QBrush(col))
         p.setPen(Qt.NoPen)
         p.drawPolygon(head)
-    p.save()
-    p.setClipRect(frame)
+    p.save()                    # no clip: an edge arrow may run past the frame
     for r, dd in zip(rows, d):
         a = px(r["in_x"], r["in_y"])
         t = (dd - dmin) / (dmax - dmin) if dmax > dmin else 1.0
