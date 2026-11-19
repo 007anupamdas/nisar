@@ -1665,6 +1665,15 @@ def scene_title(input_path):
     return (f"{got['sat']}: " if got["sat"] else "") + body
 
 
+def vectors_title(title, st):
+    """'<scene>   RMSE: Northing y km, Easting x km' (the RMSE when known)."""
+    if not (st and st.get("n")):
+        return title
+    rm = (f"RMSE: Northing {st['rmse_y'] / 1000.0:.3f} km, "
+          f"Easting {st['rmse_x'] / 1000.0:.3f} km")
+    return f"{title}   {rm}" if title else rm
+
+
 def plot_look_vectors(rows, png, title="", st=None, extent=None, background=None,
                       to_ll=None, to_xy=None):
     """Look vectors: an arrow per point from its input position towards its
@@ -1709,18 +1718,18 @@ def plot_look_vectors(rows, png, title="", st=None, extent=None, background=None
         mw, mh = L, max(2.0, L * H / W)
         # page room beyond the map (not map margin) for an edge arrow: the
         # longest is 6 % of the long side, 0.9 in
-        left, right, top, bottom = 1.2, 1.2, 1.0, 2.5
+        left, right, top, bottom = 1.2, 1.2, 1.0, 1.6
         fw, fh = left + mw + right, top + mh + bottom
         ax_r = (left / fw, bottom / fh, mw / fw, mh / fh)
-        cax_r = ((left + 0.15 * mw) / fw, 1.45 / fh, 0.6 * mw / fw, 0.22 / fh)
-        key_xy = ((left + 0.80 * mw) / fw, 1.55 / fh)
+        cax_r = ((left + 0.35 * mw) / fw, 0.55 / fh, 0.3 * mw / fw, 0.12 / fh)
+        key_xy = ((left + 0.72 * mw) / fw, 0.6 / fh)
         stat_xy, stat_ha, stat_va = (0.5, 0.15 / fh), "center", "bottom"
     else:
         mh, mw = L, max(2.0, L * W / H)
         left, top, bottom = 0.9, 0.8, 0.8
-        fw, fh = left + mw + 0.3 + 0.25 + 1.1 + 4.6, top + mh + bottom
+        fw, fh = left + mw + 0.3 + 0.15 + 1.1, top + mh + bottom
         ax_r = (left / fw, bottom / fh, mw / fw, mh / fh)
-        cax_r = ((left + mw + 0.3) / fw, (bottom + 0.15 * mh) / fh, 0.25 / fw, 0.7 * mh / fh)
+        cax_r = ((left + mw + 0.3) / fw, (bottom + 0.35 * mh) / fh, 0.15 / fw, 0.3 * mh / fh)
         key_xy = ((left + mw + 0.3) / fw, (bottom + 0.08 * mh) / fh)
         stat_xy, stat_ha, stat_va = ((left + mw + 1.7) / fw, 0.5), "left", "center"
     fig = Figure(figsize=(fw, fh))
@@ -1743,7 +1752,8 @@ def plot_look_vectors(rows, png, title="", st=None, extent=None, background=None
         q.set_clip_on(False)        # an arrow at the scene's edge may run past the frame
         ax.scatter(x, y, s=14, c="white", edgecolors="0.35", linewidths=0.6, zorder=4)
         cb = fig.colorbar(q, cax=cax, orientation="horizontal" if wide else "vertical")
-        cb.set_label("error of each point (km)")
+        cb.ax.tick_params(labelsize=8)
+        cb.ax.set_title("error (km)", fontsize=9, loc="left" if wide else "center")
         ref = float(10 ** np.floor(np.log10(dmax)))
         ax.quiverkey(q, key_xy[0], key_xy[1], ref / 1000.0, f"arrow: {ref / 1000.0:g} km",
                      labelpos="E", coordinates="figure", color="k")
@@ -1752,8 +1762,8 @@ def plot_look_vectors(rows, png, title="", st=None, extent=None, background=None
     ax.set_xlim(e0, e1)
     ax.set_ylim(n0, n1)
     ax.set_aspect("equal", adjustable="box")
-    ax.set_xlabel("E (km)", fontweight="bold")
-    ax.set_ylabel("N (km)", fontweight="bold")
+    ax.set_xlabel("E (km)", fontweight="bold", fontsize=16)
+    ax.set_ylabel("N (km)", fontweight="bold", fontsize=16)
     ax.grid(True, alpha=0.25)
     if to_ll and to_xy:
         try:
@@ -1783,24 +1793,12 @@ def plot_look_vectors(rows, png, title="", st=None, extent=None, background=None
                 return f"{abs(la):.2f}°{'N' if la >= 0 else 'S'}"
             ax.xaxis.set_major_formatter(FuncFormatter(lon_of))
             ax.yaxis.set_major_formatter(FuncFormatter(lat_of))
-            ax.set_xlabel("Longitude (along the scene's middle)", fontweight="bold")
-            ax.set_ylabel("Latitude (along the scene's middle)", fontweight="bold")
+            ax.set_xlabel("Longitude", fontweight="bold", fontsize=16)
+            ax.set_ylabel("Latitude", fontweight="bold", fontsize=16)
         except Exception:
             pass
     name = os.path.splitext(os.path.basename(png))[0].replace("_vectors", "")
-    ax.set_title(title or name, fontsize=14, fontweight="bold")
-    if st and st.get("n"):
-        def km(v):
-            return f"{float(v or 0) / 1000.0:.3f} km"
-        txt = (f"{name}:  n {st['n']}    "
-               f"mean dE {km(st['mean_x'])}, dN {km(st['mean_y'])}    "
-               f"RMSE E {km(st['rmse_x'])}, N {km(st['rmse_y'])}    "
-               f"CE90 {km(st['ce90'])}"
-               + ("" if st.get("circular", True) else " (axes unequal)")
-               + f"    largest {km(st.get('max_r'))}")
-        if not wide:
-            txt = txt.replace("    ", "\n").replace(":  ", ":\n")
-        fig.text(*stat_xy, txt, ha=stat_ha, va=stat_va, fontsize=10, family="monospace")
+    ax.set_title(vectors_title(title or name, st), fontsize=14, fontweight="bold")
     # tick labels exist once the figure is drawn: draw, bold them, save
     fig.canvas.draw()
     for t in ax.get_xticklabels() + ax.get_yticklabels():
@@ -1855,7 +1853,7 @@ def plot_look_vectors_qt(rows, png, title="", st=None, extent=None, background=N
     W, H = max(e1 - e0, 1.0), max(n1 - n0, 1.0)
     L = 1800.0
     mw, mh = (L, max(300.0, L * H / W)) if W >= H else (max(300.0, L * W / H), L)
-    left, right, top, bottom = 150, 150, 120, 260   # page room for edge arrows
+    left, right, top, bottom = 150, 150, 120, 150   # page room for edge arrows
     img = QImage(int(left + mw + right), int(top + mh + bottom), QImage.Format_ARGB32)
     img.fill(QColor(255, 255, 255))
     p = QPainter(img)
@@ -1900,7 +1898,7 @@ def plot_look_vectors_qt(rows, png, title="", st=None, extent=None, background=N
                 xticks.append((to_xy(v, latc)[0], f"{abs(v):.2f}°{'E' if v >= 0 else 'W'}"))
             for v in _nice_ticks(lat0, lat1, 4 if W >= H else 10):
                 yticks.append((to_xy(lonc, v)[1], f"{abs(v):.2f}°{'N' if v >= 0 else 'S'}"))
-            xlabel, ylabel = "Longitude (along the scene's middle)", "Latitude"
+            xlabel, ylabel = "Longitude", "Latitude"
         except Exception:
             xticks, yticks = [], []
     if not xticks:
@@ -1923,12 +1921,16 @@ def plot_look_vectors_qt(rows, png, title="", st=None, extent=None, background=N
             p.drawText(QRectF(0, q.y() - 11, left - 8, 22), Qt.AlignRight | Qt.AlignVCenter, lab)
     p.setPen(QPen(QColor(0, 0, 0), 1.5))
     p.drawRect(frame)
-    p.drawText(QRectF(left, top + mh + 30, mw, 24), Qt.AlignHCenter, xlabel)
+    big = QFont("Sans", 17)
+    big.setBold(True)
+    p.setFont(big)
+    p.drawText(QRectF(left, top + mh + 30, mw, 30), Qt.AlignHCenter, xlabel)
     p.save()
-    p.translate(18, top + mh / 2)
+    p.translate(22, top + mh / 2)
     p.rotate(-90)
-    p.drawText(QRectF(-mh / 2, -12, mh, 24), Qt.AlignHCenter, ylabel)
+    p.drawText(QRectF(-mh / 2, -15, mh, 30), Qt.AlignHCenter, ylabel)
     p.restore()
+    p.setFont(font)
     # arrows: longest 6 % of the long side
     dmax = max(max(d) if d else 0.0, 1.0)
     dmin = min(d) if d else 0.0
@@ -1956,44 +1958,36 @@ def plot_look_vectors_qt(rows, png, title="", st=None, extent=None, background=N
     p.restore()
     # colour scale and arrow key
     cy = top + mh + 75
-    cx0, cw = left + 0.15 * mw, 0.6 * mw
+    cx0, cw = left + 0.35 * mw, 0.3 * mw          # a small scale
     p.setRenderHint(QPainter.Antialiasing, False)
     for i in range(int(cw)):
         p.setPen(QPen(QColor(*_viridis(i / max(cw - 1, 1))), 1))
-        p.drawLine(QPointF(cx0 + i, cy), QPointF(cx0 + i, cy + 22))
+        p.drawLine(QPointF(cx0 + i, cy), QPointF(cx0 + i, cy + 12))
     p.setRenderHint(QPainter.Antialiasing, True)
     p.setPen(QPen(QColor(0, 0, 0), 1))
     p.setBrush(Qt.NoBrush)
-    p.drawRect(QRectF(cx0, cy, cw, 22))
+    p.drawRect(QRectF(cx0, cy, cw, 12))
     if dmax - dmin < 1e-6:
         dmin = max(dmax - 1.0, 0.0)
     for v in _nice_ticks(dmin / 1000.0, dmax / 1000.0, 6):
         xx = cx0 + (v * 1000 - dmin) / max(dmax - dmin, 1e-9) * cw
-        p.drawLine(QPointF(xx, cy + 22), QPointF(xx, cy + 28))
-        p.drawText(QRectF(xx - 50, cy + 28, 100, 22), Qt.AlignHCenter, f"{v:g}")
-    p.drawText(QRectF(cx0, cy + 50, cw, 22), Qt.AlignHCenter, "error of each point (km)")
+        p.drawLine(QPointF(xx, cy + 12), QPointF(xx, cy + 17))
+        p.drawText(QRectF(xx - 50, cy + 17, 100, 22), Qt.AlignHCenter, f"{v:g}")
+    p.drawText(QRectF(cx0 - 260, cy - 5, 250, 22), Qt.AlignRight | Qt.AlignVCenter,
+               "error (km)")
     ref = float(10 ** math.floor(math.log10(dmax)))
-    ka = QPointF(left + 0.8 * mw, cy + 11)
+    ka = QPointF(left + 0.72 * mw, cy + 6)
     arrow(ka, -ref, 0.0, QColor(0, 0, 0), 3.0)      # points right, ref m long
     p.setPen(QColor(0, 0, 0))
-    p.drawText(QRectF(ka.x() + ref * k + 10, cy, 260, 22), Qt.AlignLeft | Qt.AlignVCenter,
+    p.drawText(QRectF(ka.x() + ref * k + 10, cy - 5, 260, 22), Qt.AlignLeft | Qt.AlignVCenter,
                f"arrow: {ref / 1000.0:g} km")
     # title and statistics
     name = os.path.splitext(os.path.basename(png))[0].replace("_vectors", "")
     tf = QFont("Sans", 20)
     tf.setBold(True)
     p.setFont(tf)
-    p.drawText(QRectF(0, 15, img.width(), 50), Qt.AlignHCenter, title or name)
-    if st and st.get("n"):
-        def km(v):
-            return f"{float(v or 0) / 1000.0:.3f} km"
-        txt = (f"{name}:  n {st['n']}    mean dE {km(st['mean_x'])}, dN {km(st['mean_y'])}    "
-               f"RMSE E {km(st['rmse_x'])}, N {km(st['rmse_y'])}    CE90 {km(st['ce90'])}"
-               + ("" if st.get("circular", True) else " (axes unequal)")
-               + f"    largest {km(st.get('max_r'))}")
-        p.setFont(QFont("Monospace", 12))
-        p.drawText(QRectF(10, img.height() - 60, img.width() - 20, 50),
-                   Qt.AlignHCenter | Qt.TextWordWrap, txt)
+    p.drawText(QRectF(0, 15, img.width(), 50), Qt.AlignHCenter,
+               vectors_title(title or name, st))
     p.end()
     if not img.save(png):
         raise IOError(f"could not write {png}")
