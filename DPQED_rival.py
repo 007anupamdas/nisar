@@ -1666,14 +1666,14 @@ def scene_title(input_path):
 
 
 def vectors_title(title, st):
-    """'<scene>   RMSE: Northing y km, Easting x km' (the RMSE when known)."""
+    """'<scene>' over 'RMSE n km N / e km E | Mean ... | Std ...'."""
     if not (st and st.get("n")):
         return title
     def ne(ky, kx):
-        return (f"Northing {st.get(ky, 0) / 1000.0:.3f} km, "
-                f"Easting {st.get(kx, 0) / 1000.0:.3f} km")
-    rm = (f"RMSE: {ne('rmse_y', 'rmse_x')}   |   Mean: {ne('mean_y', 'mean_x')}"
-          f"   |   Std: {ne('std_y', 'std_x')}")
+        return (f"{st.get(ky, 0) / 1000.0:.3f} km N / "
+                f"{st.get(kx, 0) / 1000.0:.3f} km E")
+    rm = (f"RMSE {ne('rmse_y', 'rmse_x')}   |   Mean {ne('mean_y', 'mean_x')}"
+          f"   |   Std {ne('std_y', 'std_x')}")
     return f"{title}\n{rm}" if title else rm      # RMSE on its own line, below
 
 
