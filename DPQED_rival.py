@@ -1650,8 +1650,9 @@ def scene_title(input_path):
             continue
     got = {}
     for field in TITLE_KEYS:
-        got[field] = next((vals[k] for k in TITLE_KEYS[field]
-                           if vals.get(k) and vals[k] not in ("-9999", "-9999.")), "")
+        v = next((vals[k] for k in TITLE_KEYS[field]
+                  if vals.get(k) and vals[k] not in ("-9999", "-9999.")), "")
+        got[field] = " ".join(str(v).strip().strip('"').split())   # no padding
     if not any(got.values()):
         got.update(title_from_name(input_path))
     dop = got.get("date", "")
@@ -1742,11 +1743,11 @@ def plot_look_vectors(rows, png, title="", st=None, extent=None, background=None
         mw, mh = L, max(2.0, L * H / W)
         # page room beyond the map (not map margin) for an edge arrow: the
         # longest is 6 % of the long side, 0.9 in
-        left, right, top, bottom = 1.2, 1.2, 0.9, 1.8
+        left, right, top, bottom = 1.2, 1.2, 0.75, 1.45
         fw, fh = left + mw + right, top + mh + bottom
         ax_r = (left / fw, bottom / fh, mw / fw, mh / fh)
-        cax_r = ((left + 0.35 * mw) / fw, 0.75 / fh, 0.3 * mw / fw, 0.12 / fh)
-        key_xy = ((left + 0.72 * mw) / fw, 0.8 / fh)
+        cax_r = ((left + 0.35 * mw) / fw, 0.55 / fh, 0.3 * mw / fw, 0.12 / fh)
+        key_xy = ((left + 0.72 * mw) / fw, 0.6 / fh)
         stat_xy, stat_ha, stat_va = (0.5, 0.15 / fh), "center", "bottom"
     else:
         mh, mw = L, max(2.0, L * W / H)
@@ -1825,7 +1826,7 @@ def plot_look_vectors(rows, png, title="", st=None, extent=None, background=None
     ax.set_title(vectors_title(title or name, st), fontsize=14, fontweight="bold", pad=4)
     foot = vectors_footer(st)
     if foot:
-        fig.text(0.5, 0.12 / fh, foot, ha="center", va="bottom", fontsize=11)
+        fig.text(0.5, 0.06 / fh, foot, ha="center", va="bottom", fontsize=11)
     # tick labels exist once the figure is drawn: draw, bold them, save
     fig.canvas.draw()
     for t in ax.get_xticklabels() + ax.get_yticklabels():
@@ -1888,7 +1889,7 @@ def plot_look_vectors_qt(rows, png, title="", st=None, extent=None, background=N
     W, H = max(e1 - e0, 1.0), max(n1 - n0, 1.0)
     L = 1800.0
     mw, mh = (L, max(300.0, L * H / W)) if W >= H else (max(300.0, L * W / H), L)
-    left, right, top, bottom = 150, 150, 100, 170   # page room for edge arrows
+    left, right, top, bottom = 150, 150, 90, 140    # page room for edge arrows
     img = QImage(int(left + mw + right), int(top + mh + bottom), QImage.Format_ARGB32)
     img.fill(QColor(255, 255, 255))
     p = QPainter(img)
@@ -1992,7 +1993,7 @@ def plot_look_vectors_qt(rows, png, title="", st=None, extent=None, background=N
         p.drawEllipse(a, 4.0, 4.0)
     p.restore()
     # colour scale and arrow key
-    cy = top + mh + 75
+    cy = top + mh + 68
     cx0, cw = left + 0.35 * mw, 0.3 * mw          # a small scale
     p.setRenderHint(QPainter.Antialiasing, False)
     for i in range(int(cw)):
@@ -2026,7 +2027,7 @@ def plot_look_vectors_qt(rows, png, title="", st=None, extent=None, background=N
     foot = vectors_footer(st)
     if foot:
         p.setFont(QFont("Sans", 13))           # not bold
-        p.drawText(QRectF(0, img.height() - 40, img.width(), 30),
+        p.drawText(QRectF(0, img.height() - 34, img.width(), 30),
                    Qt.AlignHCenter | Qt.AlignVCenter, foot)
     p.end()
     if not img.save(png):
