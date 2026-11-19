@@ -791,7 +791,7 @@ open(os.path.join(_d, "BAND_META.txt"), "w").write(
     "ProdURLon = 88.93\nProdLRLat = 25.53\nProdLRLon = 88.93\nProdLLLat = 25.53\n"
     "ProdLLLon = 71.84\n")
 check("title as the matcher's: Sat: Sensor date session/strip",
-      H["scene_title"](os.path.join(_d, "X_GTD_A_1.tif")), "G1A: HS 17-Nov-2026 026111104/6")
+      H["scene_title"](os.path.join(_d, "X_GTD_A_1.tif")), "G1A: HS DOP: 17-Nov-2026 Session: 026111104 Strip: 6")
 check("product corners from BAND_META", H["prod_corners"](os.path.join(_d, "X.tif"))[1],
       (88.93, 28.35))
 _x = _tf.mkdtemp()
@@ -800,12 +800,12 @@ open(os.path.join(_x, "P_ort_META.xml"), "w").write(
     "<STRIPID>000006</STRIPID><SESSION_NUMBER>026111104</SESSION_NUMBER>"
     "</IMAGE></AISD>")
 check("title from a special product's XML", H["scene_title"](os.path.join(_x, "P_ort.tif")),
-      "G1A: HS 026111104/000006")
+      "G1A: HS Session: 026111104 Strip: 6")
 _t = _tf.mkdtemp(); os.makedirs(os.path.join(_t, "META"))
 open(os.path.join(_t, "META", "BAND_META.txt"), "w").write(
     "SatID = G1A\nSensor = LISS4\nDateOfPass = 03-JAN-2026\n")
 check("Load Input TIF: meta in a META/ subfolder still found",
-      H["scene_title"](os.path.join(_t, "scene.tif")), "G1A: LISS4 03-Jan-2026")
+      H["scene_title"](os.path.join(_t, "scene.tif")), "G1A: LISS4 DOP: 03-Jan-2026")
 _u = _tf.mkdtemp()
 open(os.path.join(_u, "scene.xml"), "w").write(
     "<r><SATID>G1A</SATID><SENSORNAME>HS</SENSORNAME><UL_LAT>17</UL_LAT><UL_LON>78</UL_LON>"
@@ -820,7 +820,7 @@ check("an unrelated text file is not", [os.path.basename(p) for p in
 check("no metadata: title from the product name",
       H["scene_title"](os.path.join(_tf.mkdtemp(),
           "G1AHS026111104EX000006_S062321_E063509_11112026DIP_DQ_ort_b6_cog.tif")),
-      "G1A: HS 11-Nov-2026 026111104/000006")
+      "G1A: HS DOP: 11-Nov-2026 Session: 026111104 Strip: 6")
 _c = _tf.mkdtemp(); _cog = os.path.join(_c, "x_b2_cog.tif")
 open(_cog + ".source.txt", "w").write("/srv/P/x.tif")
 check("a COG names the scene it came from", H["cog_source_of"](_cog), "/srv/P/x.tif")

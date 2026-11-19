@@ -1660,8 +1660,14 @@ def scene_title(input_path):
             break
         except ValueError:
             pass
-    ss = "/".join(v for v in (got["session"], got["strip"]) if v)
-    body = " ".join(v for v in (got["sensor"], dop, ss) if v)
+    strip = got["strip"]
+    if strip.isdigit():
+        strip = str(int(strip))                  # 000006 -> 6
+    body = " ".join(v for v in (
+        got["sensor"],
+        f"DOP: {dop}" if dop else "",
+        f"Session: {got['session']}" if got["session"] else "",
+        f"Strip: {strip}" if strip else "") if v)
     return (f"{got['sat']}: " if got["sat"] else "") + body
 
 
@@ -1672,9 +1678,21 @@ def vectors_title(title, st):
     def ne(ky, kx):
         return (f"{st.get(ky, 0) / 1000.0:.3f} km N / "
                 f"{st.get(kx, 0) / 1000.0:.3f} km E")
-    rm = (f"RMSE {ne('rmse_y', 'rmse_x')}   |   Mean {ne('mean_y', 'mean_x')}"
-          f"   |   Std {ne('std_y', 'std_x')}")
+    rm = f"RMSE {ne('rmse_y', 'rmse_x')}"
     return f"{title}\n{rm}" if title else rm      # RMSE on its own line, below
+
+
+def vectors_footer(st):
+    """'Mean n km N / e km E   |   Std ...   |   CE90 c km' for below the plot."""
+    if not (st and st.get("n")):
+        return ""
+
+    def ne(ky, kx):
+        return (f"{st.get(ky, 0) / 1000.0:.3f} km N / "
+                f"{st.get(kx, 0) / 1000.0:.3f} km E")
+    return (f"Mean {ne('mean_y', 'mean_x')}   |   Std {ne('std_y', 'std_x')}"
+            f"   |   CE90 {st.get('ce90', 0) / 1000.0:.3f} km"
+            + ("" if st.get("circular", True) else " (axes unequal)"))
 
 
 def plot_look_vectors(rows, png, title="", st=None, extent=None, background=None,
@@ -1721,11 +1739,11 @@ def plot_look_vectors(rows, png, title="", st=None, extent=None, background=None
         mw, mh = L, max(2.0, L * H / W)
         # page room beyond the map (not map margin) for an edge arrow: the
         # longest is 6 % of the long side, 0.9 in
-        left, right, top, bottom = 1.2, 1.2, 0.9, 1.6
+        left, right, top, bottom = 1.2, 1.2, 0.9, 1.8
         fw, fh = left + mw + right, top + mh + bottom
         ax_r = (left / fw, bottom / fh, mw / fw, mh / fh)
-        cax_r = ((left + 0.35 * mw) / fw, 0.55 / fh, 0.3 * mw / fw, 0.12 / fh)
-        key_xy = ((left + 0.72 * mw) / fw, 0.6 / fh)
+        cax_r = ((left + 0.35 * mw) / fw, 0.75 / fh, 0.3 * mw / fw, 0.12 / fh)
+        key_xy = ((left + 0.72 * mw) / fw, 0.8 / fh)
         stat_xy, stat_ha, stat_va = (0.5, 0.15 / fh), "center", "bottom"
     else:
         mh, mw = L, max(2.0, L * W / H)
@@ -1802,6 +1820,9 @@ def plot_look_vectors(rows, png, title="", st=None, extent=None, background=None
             pass
     name = os.path.splitext(os.path.basename(png))[0].replace("_vectors", "")
     ax.set_title(vectors_title(title or name, st), fontsize=14, fontweight="bold", pad=4)
+    foot = vectors_footer(st)
+    if foot:
+        fig.text(0.5, 0.12 / fh, foot, ha="center", va="bottom", fontsize=11)
     # tick labels exist once the figure is drawn: draw, bold them, save
     fig.canvas.draw()
     for t in ax.get_xticklabels() + ax.get_yticklabels():
@@ -1864,7 +1885,7 @@ def plot_look_vectors_qt(rows, png, title="", st=None, extent=None, background=N
     W, H = max(e1 - e0, 1.0), max(n1 - n0, 1.0)
     L = 1800.0
     mw, mh = (L, max(300.0, L * H / W)) if W >= H else (max(300.0, L * W / H), L)
-    left, right, top, bottom = 150, 150, 100, 150   # page room for edge arrows
+    left, right, top, bottom = 150, 150, 100, 170   # page room for edge arrows
     img = QImage(int(left + mw + right), int(top + mh + bottom), QImage.Format_ARGB32)
     img.fill(QColor(255, 255, 255))
     p = QPainter(img)
@@ -1999,6 +2020,11 @@ def plot_look_vectors_qt(rows, png, title="", st=None, extent=None, background=N
     p.setFont(tf)
     p.drawText(QRectF(0, 4, img.width(), top - 8), Qt.AlignHCenter | Qt.AlignBottom,
                vectors_title(title or name, st))
+    foot = vectors_footer(st)
+    if foot:
+        p.setFont(QFont("Sans", 13))           # not bold
+        p.drawText(QRectF(0, img.height() - 40, img.width(), 30),
+                   Qt.AlignHCenter | Qt.AlignVCenter, foot)
     p.end()
     if not img.save(png):
         raise IOError(f"could not write {png}")
