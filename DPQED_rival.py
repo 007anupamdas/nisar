@@ -1653,8 +1653,13 @@ def plot_look_vectors(rows, png, title="", st=None, extent=None, background=None
     matcher's report.
     """
     import numpy as np
-    from matplotlib.figure import Figure
-    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    try:
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+    except ImportError:
+        # a shared QGIS server without matplotlib: draw it with Qt instead
+        return plot_look_vectors_qt(rows, png, title, st, extent, background,
+                                    to_ll, to_xy)
     x = np.asarray([r["in_x"] for r in rows], float) / 1000.0
     y = np.asarray([r["in_y"] for r in rows], float) / 1000.0
     dx = np.asarray([r["dx"] for r in rows], float)
@@ -1762,6 +1767,265 @@ def plot_look_vectors(rows, png, title="", st=None, extent=None, background=None
         fig.text(*stat_xy, txt, ha=stat_ha, va=stat_va, fontsize=10, family="monospace")
     fig.savefig(png, dpi=150)
     return png
+
+
+VIRIDIS = ((68, 1, 84), (59, 82, 139), (33, 145, 140), (94, 201, 98), (253, 231, 37))
+
+
+def _viridis(t):
+    """(r, g, b) of viridis at t in 0..1 (five stops, linear between)."""
+    t = min(max(float(t), 0.0), 1.0) * (len(VIRIDIS) - 1)
+    i = min(int(t), len(VIRIDIS) - 2)
+    f = t - i
+    a, b = VIRIDIS[i], VIRIDIS[i + 1]
+    return tuple(int(round(a[k] + (b[k] - a[k]) * f)) for k in range(3))
+
+
+def _nice_ticks(lo, hi, want):
+    for step in (0.01, 0.02, 0.05, 0.1, 0.2, 0.25, 0.5, 1, 2, 5, 10, 20, 25, 50,
+                 100, 200, 250, 500, 1000):
+        if (hi - lo) / step <= want:
+            k0 = math.ceil(lo / step)
+            return [round((k0 + i) * step, 6)
+                    for i in range(int(math.floor(hi / step)) - k0 + 1)]
+    return [lo, hi]
+
+
+def plot_look_vectors_qt(rows, png, title="", st=None, extent=None, background=None,
+                         to_ll=None, to_xy=None):
+    """plot_look_vectors drawn with Qt (QPainter on a QImage) -- the same plot
+    for a QGIS without matplotlib: arrows from input towards reference coloured
+    by length (viridis), the scene's shape, lat/lon (or E/N km) axes, a colour
+    scale and arrow key, the statistics, the title. Errors in km."""
+    import numpy as np
+    from PyQt5.QtCore import Qt, QPointF, QRectF
+    from PyQt5.QtGui import QImage, QPainter, QColor, QPen, QFont, QPolygonF, QBrush
+    xs = [r["in_x"] for r in rows]
+    ys = [r["in_y"] for r in rows]
+    d = [math.hypot(r["dx"], r["dy"]) for r in rows]
+    if extent:
+        e0, e1, n0, n1 = extent
+    elif xs:
+        pad = max(max(xs) - min(xs), max(ys) - min(ys), 1000.0) * 0.05
+        e0, e1, n0, n1 = min(xs) - pad, max(xs) + pad, min(ys) - pad, max(ys) + pad
+    else:
+        e0, e1, n0, n1 = 0.0, 1000.0, 0.0, 1000.0
+    W, H = max(e1 - e0, 1.0), max(n1 - n0, 1.0)
+    L = 1800.0
+    mw, mh = (L, max(300.0, L * H / W)) if W >= H else (max(300.0, L * W / H), L)
+    left, right, top, bottom = 120, 60, 80, 260
+    img = QImage(int(left + mw + right), int(top + mh + bottom), QImage.Format_ARGB32)
+    img.fill(QColor(255, 255, 255))
+    p = QPainter(img)
+    p.setRenderHint(QPainter.Antialiasing)
+
+    def px(x, y):
+        return QPointF(left + (x - e0) / W * mw, top + (n1 - y) / H * mh)
+    frame = QRectF(left, top, mw, mh)
+    if background is not None:
+        try:
+            arr, ext = background
+            a = np.asarray(arr)
+            if a.dtype != np.uint8:
+                a = (np.clip(a, 0, 1) * 255).astype(np.uint8)
+            if a.ndim == 2:
+                a = np.dstack([a, a, a, np.full_like(a, 255)])
+            if a.shape[2] == 3:
+                a = np.dstack([a, np.full(a.shape[:2], 255, np.uint8)])
+            a = np.ascontiguousarray(a)
+            qi = QImage(a.data, a.shape[1], a.shape[0], 4 * a.shape[1],
+                        QImage.Format_RGBA8888).copy()
+            tl, br = px(ext[0], ext[3]), px(ext[1], ext[2])
+            p.save()
+            p.setClipRect(frame)
+            p.drawImage(QRectF(tl, br), qi)
+            p.restore()
+        except Exception:
+            pass
+    # grid and ticks: lon / lat along the scene's middle, else E / N km
+    font = QFont("Sans", 13)
+    p.setFont(font)
+    grid = QPen(QColor(0, 0, 0, 40), 1)
+    xticks, yticks = [], []
+    if to_ll and to_xy:
+        try:
+            xc, yc = (e0 + e1) / 2.0, (n0 + n1) / 2.0
+            lonc, latc = to_ll(xc, yc)
+            lon0, lon1 = sorted([to_ll(e0, yc)[0], to_ll(e1, yc)[0]])
+            lat0, lat1 = sorted([to_ll(xc, n0)[1], to_ll(xc, n1)[1]])
+            for v in _nice_ticks(lon0, lon1, 10 if W >= H else 4):
+                xticks.append((to_xy(v, latc)[0], f"{abs(v):.2f}°{'E' if v >= 0 else 'W'}"))
+            for v in _nice_ticks(lat0, lat1, 4 if W >= H else 10):
+                yticks.append((to_xy(lonc, v)[1], f"{abs(v):.2f}°{'N' if v >= 0 else 'S'}"))
+            xlabel, ylabel = "Longitude (along the scene's middle)", "Latitude"
+        except Exception:
+            xticks, yticks = [], []
+    if not xticks:
+        xticks = [(v * 1000, f"{v:g}") for v in _nice_ticks(e0 / 1000, e1 / 1000, 10)]
+        yticks = [(v * 1000, f"{v:g}") for v in _nice_ticks(n0 / 1000, n1 / 1000, 6)]
+        xlabel, ylabel = "E (km)", "N (km)"
+    for x, lab in xticks:
+        q = px(x, n0)
+        if left <= q.x() <= left + mw:
+            p.setPen(grid)
+            p.drawLine(QPointF(q.x(), top), QPointF(q.x(), top + mh))
+            p.setPen(QColor(0, 0, 0))
+            p.drawText(QRectF(q.x() - 70, top + mh + 6, 140, 22), Qt.AlignHCenter, lab)
+    for y, lab in yticks:
+        q = px(e0, y)
+        if top <= q.y() <= top + mh:
+            p.setPen(grid)
+            p.drawLine(QPointF(left, q.y()), QPointF(left + mw, q.y()))
+            p.setPen(QColor(0, 0, 0))
+            p.drawText(QRectF(0, q.y() - 11, left - 8, 22), Qt.AlignRight | Qt.AlignVCenter, lab)
+    p.setPen(QPen(QColor(0, 0, 0), 1.5))
+    p.drawRect(frame)
+    p.drawText(QRectF(left, top + mh + 30, mw, 24), Qt.AlignHCenter, xlabel)
+    p.save()
+    p.translate(18, top + mh / 2)
+    p.rotate(-90)
+    p.drawText(QRectF(-mh / 2, -12, mh, 24), Qt.AlignHCenter, ylabel)
+    p.restore()
+    # arrows: longest 6 % of the long side
+    dmax = max(max(d) if d else 0.0, 1.0)
+    dmin = min(d) if d else 0.0
+    k = 0.06 * max(mw, mh) / dmax                # px per metre of error
+
+    def arrow(a, dxm, dym, col, width=4.0):
+        b = QPointF(a.x() - dxm * k, a.y() + dym * k)
+        p.setPen(QPen(col, width, Qt.SolidLine, Qt.RoundCap))
+        p.drawLine(a, b)
+        ang = math.atan2(b.y() - a.y(), b.x() - a.x())
+        hl = 14.0
+        head = QPolygonF([b, QPointF(b.x() - hl * math.cos(ang - 0.4), b.y() - hl * math.sin(ang - 0.4)),
+                          QPointF(b.x() - hl * math.cos(ang + 0.4), b.y() - hl * math.sin(ang + 0.4))])
+        p.setBrush(QBrush(col))
+        p.setPen(Qt.NoPen)
+        p.drawPolygon(head)
+    p.save()
+    p.setClipRect(frame)
+    for r, dd in zip(rows, d):
+        a = px(r["in_x"], r["in_y"])
+        t = (dd - dmin) / (dmax - dmin) if dmax > dmin else 1.0
+        arrow(a, r["dx"], r["dy"], QColor(*_viridis(t)))
+        p.setBrush(QBrush(QColor(0, 0, 0)))
+        p.setPen(Qt.NoPen)
+        p.drawEllipse(a, 3.5, 3.5)
+    p.restore()
+    # colour scale and arrow key
+    cy = top + mh + 75
+    cx0, cw = left + 0.15 * mw, 0.6 * mw
+    p.setRenderHint(QPainter.Antialiasing, False)
+    for i in range(int(cw)):
+        p.setPen(QPen(QColor(*_viridis(i / max(cw - 1, 1))), 1))
+        p.drawLine(QPointF(cx0 + i, cy), QPointF(cx0 + i, cy + 22))
+    p.setRenderHint(QPainter.Antialiasing, True)
+    p.setPen(QPen(QColor(0, 0, 0), 1))
+    p.setBrush(Qt.NoBrush)
+    p.drawRect(QRectF(cx0, cy, cw, 22))
+    for v in _nice_ticks(dmin / 1000.0, dmax / 1000.0, 6):
+        xx = cx0 + (v * 1000 - dmin) / max(dmax - dmin, 1e-9) * cw
+        p.drawLine(QPointF(xx, cy + 22), QPointF(xx, cy + 28))
+        p.drawText(QRectF(xx - 50, cy + 28, 100, 22), Qt.AlignHCenter, f"{v:g}")
+    p.drawText(QRectF(cx0, cy + 50, cw, 22), Qt.AlignHCenter, "error of each point (km)")
+    ref = float(10 ** math.floor(math.log10(dmax)))
+    ka = QPointF(left + 0.8 * mw, cy + 11)
+    arrow(ka, -ref, 0.0, QColor(0, 0, 0), 3.0)      # points right, ref m long
+    p.setPen(QColor(0, 0, 0))
+    p.drawText(QRectF(ka.x() + ref * k + 10, cy, 260, 22), Qt.AlignLeft | Qt.AlignVCenter,
+               f"arrow: {ref / 1000.0:g} km")
+    # title and statistics
+    name = os.path.splitext(os.path.basename(png))[0].replace("_vectors", "")
+    tf = QFont("Sans", 20)
+    tf.setBold(True)
+    p.setFont(tf)
+    p.drawText(QRectF(0, 15, img.width(), 50), Qt.AlignHCenter, title or name)
+    if st and st.get("n"):
+        def km(v):
+            return f"{float(v or 0) / 1000.0:.3f} km"
+        txt = (f"{name}:  n {st['n']}    mean dE {km(st['mean_x'])}, dN {km(st['mean_y'])}    "
+               f"RMSE E {km(st['rmse_x'])}, N {km(st['rmse_y'])}    CE90 {km(st['ce90'])}"
+               + ("" if st.get("circular", True) else " (axes unequal)")
+               + f"    largest {km(st.get('max_r'))}")
+        p.setFont(QFont("Monospace", 12))
+        p.drawText(QRectF(10, img.height() - 60, img.width() - 20, 50),
+                   Qt.AlignHCenter | Qt.TextWordWrap, txt)
+    p.end()
+    if not img.save(png):
+        raise IOError(f"could not write {png}")
+    return png
+
+
+LOG_DIR = "~/RIVAL_logs"     # per user; the Log Folder button overrides it
+LOG_FOLDER_KEY = "log_folder"
+
+
+def session_identity(env=None):
+    """(user, workstation, host) for this session.
+
+    On a shared QGIS server reached by Remote Desktop from several
+    workstations at once, the host is the same for everyone; CLIENTNAME is the
+    workstation the session comes from. Run locally it is just the machine."""
+    import getpass
+    import socket
+    env = os.environ if env is None else env
+    try:
+        user = env.get("USERNAME") or env.get("USER") or getpass.getuser()
+    except Exception:
+        user = "user"
+    host = env.get("COMPUTERNAME") or socket.gethostname() or "host"
+    client = env.get("CLIENTNAME") or ""
+    if not client or client.lower() == "console":
+        client = host
+    return user, client, host
+
+
+def log_file_name(user, client, host, when, pid):
+    """RIVAL_<yyyymmdd_hhmmss>_<user>_<workstation>[@<host>]_<pid>.log --
+    unique per session even with many users on one server at once."""
+    def safe(v):
+        return re.sub(r"[^A-Za-z0-9_.-]+", "-", str(v)).strip("-") or "x"
+    who = safe(client) if client == host else f"{safe(client)}@{safe(host)}"
+    return f"RIVAL_{when:%Y%m%d_%H%M%S}_{safe(user)}_{who}_{int(pid)}.log"
+
+
+class TeeLog:
+    """A stream that writes to the original (the QGIS console) and to a log
+    file, each new line stamped with the time. Line-buffered and flushed, so
+    the file is complete up to a crash."""
+
+    def __init__(self, stream, fh):
+        self.stream, self.fh, self._bol = stream, fh, True
+
+    def write(self, text):
+        try:
+            if self.stream is not None:
+                self.stream.write(text)
+        except Exception:
+            pass
+        try:
+            from datetime import datetime as _dt
+            out = []
+            for part in str(text).splitlines(True):
+                if self._bol and part.strip():
+                    out.append(f"{_dt.now():%H:%M:%S} ")
+                out.append(part)
+                self._bol = part.endswith("\n")
+            self.fh.write("".join(out))
+            self.fh.flush()
+        except Exception:
+            pass
+        return len(text)
+
+    def flush(self):
+        for f in (self.stream, self.fh):
+            try:
+                f.flush()
+            except Exception:
+                pass
+
+    def __getattr__(self, name):
+        return getattr(self.stream, name)
 
 # ── END PURE HELPERS ──────────────────────────────────────────────────────────
 
@@ -2386,6 +2650,8 @@ class DropdownResizeFilter(QObject):
 class QCDashboard(QMainWindow):
     def __init__(self):
         super().__init__()
+        self._log_fh = None
+        self.start_log()
         self.setWindowTitle("RIVAL - Reference Image Validation and Accuracy Logger")
         self.resize(1500, 900)
 
@@ -2537,6 +2803,10 @@ class QCDashboard(QMainWindow):
             "bearing, so two scenes over one area overlay as quiver plots.")
         self.btn_out_folder = QPushButton("Output Folder")
         self.btn_out_folder.setToolTip("Where Export CSV / SHP write -- kept until changed")
+        self.btn_log_folder = QPushButton("Log Folder")
+        self.btn_log_folder.setToolTip(
+            "Folder the session log files go to -- one file per session, named\n"
+            "time_user_workstation@server_pid, so parallel sessions never clash")
         self.btn_cog_folder = QPushButton("COG Folder")
         self.btn_cog_folder.setToolTip(
             "Local folder the COGs are built in (not the server's product folder)\n"
@@ -2619,7 +2889,7 @@ class QCDashboard(QMainWindow):
                    self.btn_reference_folder,
                    self.btn_load, self.btn_add, self.btn_export,
                    self.btn_del, self.btn_clear, self.btn_out_folder,
-                   self.btn_cog_folder]
+                   self.btn_cog_folder, self.btn_log_folder]
                   + [self.tool_buttons[m] for m in MAP_TOOLS]
                   + [self.cb_sync, self.cb_auto_mark]):
             btn_layout.addWidget(w)
@@ -2639,6 +2909,7 @@ class QCDashboard(QMainWindow):
         self.btn_clear_input.clicked.connect(self.clear_input)
         self.btn_out_folder.clicked.connect(self.choose_output_folder)
         self.btn_cog_folder.clicked.connect(self.choose_cog_folder)
+        self.btn_log_folder.clicked.connect(self.choose_log_folder)
         self.btn_reference_folder.clicked.connect(self.select_reference_folder)
         self.btn_load.clicked.connect(self.load_csv_smart)
         self.btn_add.clicked.connect(self.add_manual_row)
@@ -4244,6 +4515,98 @@ class QCDashboard(QMainWindow):
 
         self.markers[key] = [cross]
         canvas.refresh()
+
+    def _log_folder(self):
+        try:
+            v = str(QSettings(SETTINGS_ORG, SETTINGS_APP).value(LOG_FOLDER_KEY, "") or "")
+        except Exception:
+            v = ""
+        return v or os.path.expanduser(LOG_DIR)
+
+    def start_log(self):
+        """Copy everything RIVAL prints (and every traceback) to a log file of
+        this session: RIVAL_<time>_<user>_<workstation>@<server>_<pid>.log in
+        the log folder. Several workstations on one QGIS server each get their
+        own file. Never stops RIVAL from starting."""
+        import sys as _sys
+        from datetime import datetime as _dt
+        try:
+            folder = self._log_folder()
+            os.makedirs(folder, exist_ok=True)
+            user, client, host = session_identity()
+            path = os.path.join(folder, log_file_name(user, client, host,
+                                                      _dt.now(), os.getpid()))
+            self._log_fh = open(path, "a", encoding="utf-8")
+            self._log_streams = (_sys.stdout, _sys.stderr)
+            _sys.stdout = TeeLog(_sys.stdout, self._log_fh)
+            _sys.stderr = TeeLog(_sys.stderr, self._log_fh)
+            self.log_path = path
+            prev_hook = _sys.excepthook
+            fh = self._log_fh
+
+            def hook(t, v, tb, _prev=prev_hook, _fh=fh):
+                # QGIS shows a slot's exception in its own dialog, not stdout:
+                # put it in the log too
+                try:
+                    import traceback
+                    if not _fh.closed:
+                        _fh.write("".join(traceback.format_exception(t, v, tb)))
+                        _fh.flush()
+                except Exception:
+                    pass
+                _prev(t, v, tb)
+            self._prev_excepthook = prev_hook
+            _sys.excepthook = hook
+            try:
+                from qgis.core import Qgis
+                qv = Qgis.QGIS_VERSION
+            except Exception:
+                qv = "?"
+            print(f"[LOG] RIVAL session: user {user}, workstation {client}, "
+                  f"host {host}, pid {os.getpid()}, QGIS {qv}, "
+                  f"Python {_sys.version.split()[0]}")
+            print(f"[LOG] {path}")
+        except Exception as e:
+            self.log_path = None
+            print(f"[LOG] no log file: {e}")
+
+    def stop_log(self):
+        import sys as _sys
+        if not getattr(self, "_log_fh", None):
+            return
+        print("[LOG] session closed")
+        try:
+            if isinstance(_sys.stdout, TeeLog):
+                _sys.stdout = self._log_streams[0]
+            if isinstance(_sys.stderr, TeeLog):
+                _sys.stderr = self._log_streams[1]
+            if getattr(self, "_prev_excepthook", None):
+                _sys.excepthook = self._prev_excepthook
+            self._log_fh.close()
+        except Exception:
+            pass
+        self._log_fh = None
+
+    def choose_log_folder(self):
+        """Pick the folder session logs go to (e.g. a shared one); remembered,
+        used from the next session."""
+        folder = QFileDialog.getExistingDirectory(
+            self, "Folder for RIVAL log files", self._log_folder())
+        if not folder:
+            return None
+        try:
+            self._settings().setValue(LOG_FOLDER_KEY, folder)
+        except Exception:
+            pass
+        print(f"[LOG] log files go to {folder} from the next session")
+        return folder
+
+    def closeEvent(self, event):
+        self.stop_log()
+        try:
+            super().closeEvent(event)
+        except Exception:
+            pass
 
     def _cog_folder(self):
         """The local COG folder: the one chosen with COG Folder, else

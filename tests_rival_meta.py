@@ -851,6 +851,44 @@ check("corners from XML tags with underscores, -9999 skipped", f(
     "<LL_LON>78</LL_LON>")[0], (78.0, 17.0))
 check("incomplete corners", f("ULLAT = 1\nULLON = 2"), None)
 
+# ── 23d. session logs ─────────────────────────────────────────────────────
+import datetime as _dtm
+si = H["session_identity"]
+check("RDP to a shared server: the workstation is CLIENTNAME",
+      si({"USERNAME": "anupam", "COMPUTERNAME": "QGISSRV", "CLIENTNAME": "WS-12"}),
+      ("anupam", "WS-12", "QGISSRV"))
+check("on its own workstation (console session)",
+      si({"USERNAME": "anupam", "COMPUTERNAME": "WS-12", "CLIENTNAME": "Console"}),
+      ("anupam", "WS-12", "WS-12"))
+lf = H["log_file_name"]
+when = _dtm.datetime(2026, 11, 19, 9, 5, 7)
+check("log name on a shared server", lf("anupam", "WS-12", "QGISSRV", when, 4242),
+      "RIVAL_20261119_090507_anupam_WS-12@QGISSRV_4242.log")
+check("log name locally", lf("a b", "WS-12", "WS-12", when, 1),
+      "RIVAL_20261119_090507_a-b_WS-12_1.log")
+import io as _io
+_buf, _fh = _io.StringIO(), _io.StringIO()
+t = H["TeeLog"](_buf, _fh)
+t.write("[A] one\n[B] two")
+t.write(" more\n")
+check("tee: console unchanged", _buf.getvalue(), "[A] one\n[B] two more\n")
+check("tee: file lines time-stamped once each",
+      [l[9:] for l in _fh.getvalue().splitlines()], ["[A] one", "[B] two more"])
+_q = _tf.mkdtemp()
+try:
+    import os as _os
+    _os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt5.QtGui import QGuiApplication
+    _app = QGuiApplication.instance() or QGuiApplication([])
+    pq = os.path.join(_q, "Q_vectors.png")
+    rows = [{"in_x": 500000.0 + 20000 * i, "in_y": 3000000.0 + 3000 * i,
+             "dx": 100.0 + 40 * i, "dy": -50.0 + 10 * i} for i in range(6)]
+    H["plot_look_vectors_qt"](rows, pq, "G1A: HS", H["error_summary"](
+        [(r["dx"], r["dy"]) for r in rows]), (480000.0, 640000.0, 2990000.0, 3025000.0))
+    check("without matplotlib: the Qt look-vector plot is written", os.path.getsize(pq) > 5000, True)
+except ImportError:
+    print("  (PyQt5 missing: Qt plot not exercised)")
+
 # ── 24. remembered display bands ─────────────────────────────────────────────
 print("\n-- display bands --")
 f = H["parse_band_choice"]
