@@ -786,12 +786,12 @@ check("unknown pixel size", w(None, 800), None)
 import tempfile as _tf
 _d = _tf.mkdtemp()
 open(os.path.join(_d, "BAND_META.txt"), "w").write(
-    "SatID = G1A\nSensor = HS\nSessionNumber = 026111104\nStripNumber = 6\n"
+    "SatID = G1A\nSensor = MV\nImgDirection = Descending\nSessionNumber = 026111104\nStripNumber = 6\n"
     "DateOfPass = 17-NOV-2026\nProdULLat = 28.35\nProdULLon = 71.84\nProdURLat = 28.35\n"
     "ProdURLon = 88.93\nProdLRLat = 25.53\nProdLRLon = 88.93\nProdLLLat = 25.53\n"
     "ProdLLLon = 71.84\n")
 check("title as the matcher's: Sat: Sensor date session/strip",
-      H["scene_title"](os.path.join(_d, "X_GTD_A_1.tif")), "G1A: HS DOP: 17-Nov-2026 Session: 026111104 Strip: 6")
+      H["scene_title"](os.path.join(_d, "X_GTD_A_1.tif")), "G1A: MV Direction: Descending DOP: 17-Nov-2026 Session: 026111104 Strip: 6")
 check("product corners from BAND_META", H["prod_corners"](os.path.join(_d, "X.tif"))[1],
       (88.93, 28.35))
 _x = _tf.mkdtemp()

@@ -1542,6 +1542,7 @@ TITLE_KEYS = {          # BAND_META.txt keys, then the special products' XML tag
     "session": ("SessionNumber", "SessionNo", "Session", "SESSION_NUMBER"),
     "strip":   ("StripNumber", "StripNo", "StripId", "STRIPID"),
     "date":    ("DateOfPass", "DateofPass", "DOP", "DATEOFPASS"),
+    "direction": ("ImgDirection", "ImagingDirection", "IMAGING_DIRECTION"),
 }
 
 
@@ -1607,7 +1608,8 @@ def title_from_name(path):
     name = os.path.basename(path or "")
     m = PRODUCT_NAME_RE.search(name)
     if not m:
-        return {"sat": "", "sensor": "", "session": "", "strip": "", "date": ""}
+        return {"sat": "", "sensor": "", "session": "", "strip": "", "date": "",
+                "direction": ""}
     sat, sensor, session, strip, dd, mm, yyyy = m.groups()
     return {"sat": sat, "sensor": sensor, "session": session, "strip": strip,
             "date": f"{dd}-{mm}-{yyyy}"}
@@ -1665,6 +1667,7 @@ def scene_title(input_path):
         strip = str(int(strip))                  # 000006 -> 6
     body = " ".join(v for v in (
         got["sensor"],
+        f"Direction: {got['direction']}" if got.get("direction") else "",
         f"DOP: {dop}" if dop else "",
         f"Session: {got['session']}" if got["session"] else "",
         f"Strip: {strip}" if strip else "") if v)
