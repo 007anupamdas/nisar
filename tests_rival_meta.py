@@ -806,6 +806,17 @@ open(os.path.join(_t, "META", "BAND_META.txt"), "w").write(
     "SatID = G1A\nSensor = LISS4\nDateOfPass = 03-JAN-2026\n")
 check("Load Input TIF: meta in a META/ subfolder still found",
       H["scene_title"](os.path.join(_t, "scene.tif")), "G1A: LISS4 03-Jan-2026")
+_u = _tf.mkdtemp()
+open(os.path.join(_u, "scene.xml"), "w").write(
+    "<r><SATID>G1A</SATID><SENSORNAME>HS</SENSORNAME><UL_LAT>17</UL_LAT><UL_LON>78</UL_LON>"
+    "<UR_LAT>17</UR_LAT><UR_LON>79</UR_LON><LR_LAT>16</LR_LAT><LR_LON>79</LR_LON>"
+    "<LL_LAT>16</LL_LAT><LL_LON>78</LL_LON></r>")
+open(os.path.join(_u, "notes.txt"), "w").write("ULLAT = 1")
+check("an XML named after the tif (no 'meta' in it) is read",
+      (H["scene_title"](os.path.join(_u, "scene.tif")),
+       H["prod_corners"](os.path.join(_u, "scene.tif"))[0]), ("G1A: HS", (78.0, 17.0)))
+check("an unrelated text file is not", [os.path.basename(p) for p in
+      H["input_meta_files"](os.path.join(_u, "scene.tif"))], ["scene.xml"])
 check("no metadata, no title", H["scene_title"](os.path.join(_tf.mkdtemp(), "a.tif")), "")
 try:
     import matplotlib  # noqa: F401

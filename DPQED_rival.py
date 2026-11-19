@@ -1584,9 +1584,12 @@ def input_meta_files(input_path):
             continue
         for n in names:
             low = n.lower()
-            if not low.endswith((".txt", ".xml")) or "meta" not in low:
-                if not (d != folder and low.endswith((".txt", ".xml"))):
-                    continue
+            if not low.endswith((".txt", ".xml")):
+                continue
+            # text or XML: named after the tif (scene.xml, scene_info.txt),
+            # or with 'meta' in the name, or anything in a meta/ subfolder
+            if not (low.startswith(stem) or "meta" in low or d != folder):
+                continue
             rank = (0 if low.startswith(stem) else
                     1 if low == "band_meta.txt" else 2)
             found.append((rank, os.path.join(d, n)))
