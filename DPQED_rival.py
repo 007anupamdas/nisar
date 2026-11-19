@@ -1671,7 +1671,7 @@ def vectors_title(title, st):
         return title
     rm = (f"RMSE: Northing {st['rmse_y'] / 1000.0:.3f} km, "
           f"Easting {st['rmse_x'] / 1000.0:.3f} km")
-    return f"{title}   {rm}" if title else rm
+    return f"{title}\n{rm}" if title else rm      # RMSE on its own line, below
 
 
 def plot_look_vectors(rows, png, title="", st=None, extent=None, background=None,
@@ -1718,7 +1718,7 @@ def plot_look_vectors(rows, png, title="", st=None, extent=None, background=None
         mw, mh = L, max(2.0, L * H / W)
         # page room beyond the map (not map margin) for an edge arrow: the
         # longest is 6 % of the long side, 0.9 in
-        left, right, top, bottom = 1.2, 1.2, 1.0, 1.6
+        left, right, top, bottom = 1.2, 1.2, 1.3, 1.6
         fw, fh = left + mw + right, top + mh + bottom
         ax_r = (left / fw, bottom / fh, mw / fw, mh / fh)
         cax_r = ((left + 0.35 * mw) / fw, 0.55 / fh, 0.3 * mw / fw, 0.12 / fh)
@@ -1726,7 +1726,7 @@ def plot_look_vectors(rows, png, title="", st=None, extent=None, background=None
         stat_xy, stat_ha, stat_va = (0.5, 0.15 / fh), "center", "bottom"
     else:
         mh, mw = L, max(2.0, L * W / H)
-        left, top, bottom = 0.9, 0.8, 0.8
+        left, top, bottom = 0.9, 1.1, 0.8
         fw, fh = left + mw + 0.3 + 0.15 + 1.1, top + mh + bottom
         ax_r = (left / fw, bottom / fh, mw / fw, mh / fh)
         cax_r = ((left + mw + 0.3) / fw, (bottom + 0.35 * mh) / fh, 0.15 / fw, 0.3 * mh / fh)
@@ -1853,7 +1853,7 @@ def plot_look_vectors_qt(rows, png, title="", st=None, extent=None, background=N
     W, H = max(e1 - e0, 1.0), max(n1 - n0, 1.0)
     L = 1800.0
     mw, mh = (L, max(300.0, L * H / W)) if W >= H else (max(300.0, L * W / H), L)
-    left, right, top, bottom = 150, 150, 120, 150   # page room for edge arrows
+    left, right, top, bottom = 150, 150, 150, 150   # page room for edge arrows
     img = QImage(int(left + mw + right), int(top + mh + bottom), QImage.Format_ARGB32)
     img.fill(QColor(255, 255, 255))
     p = QPainter(img)
@@ -1986,7 +1986,7 @@ def plot_look_vectors_qt(rows, png, title="", st=None, extent=None, background=N
     tf = QFont("Sans", 20)
     tf.setBold(True)
     p.setFont(tf)
-    p.drawText(QRectF(0, 15, img.width(), 50), Qt.AlignHCenter,
+    p.drawText(QRectF(0, 8, img.width(), top - 20), Qt.AlignHCenter,
                vectors_title(title or name, st))
     p.end()
     if not img.save(png):
