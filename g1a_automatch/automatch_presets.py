@@ -316,7 +316,7 @@ def job_for(sensor: str, input_path: str, reference_dir: str, output_dir: str, t
             cloud: Optional[bool] = None, weights_dir: str = '', presets: Optional[Dict] = None,
             crispest: int = 0, top_n: Optional[int] = None, agree: Optional[int] = None,
             mode: str = 'fast', final_points: Optional[int] = None, temp_dir: str = '',
-            cell_px: Optional[int] = None) -> Tuple[Dict, str]:
+            cell_px: Optional[int] = None, cloud_conf: Optional[float] = None) -> Tuple[Dict, str]:
     """(job, note): the sensor's preset with this run's paths and the few
     things chosen in the window (search range without truth, device, clouds
     on / off) and the band(s): the user's; else, when asked, the crispest N;
@@ -358,6 +358,8 @@ def job_for(sensor: str, input_path: str, reference_dir: str, output_dir: str, t
         job['device'] = device
     if cloud is not None:
         job['cloud_mask'] = 'on' if cloud else 'none'
+    if cloud_conf:                           # a pixel is cloud only when the mask is this sure
+        job['cloud_min_confidence'] = round(float(cloud_conf), 2)
     if weights_dir:
         job['weights_cache_dir'] = weights_dir
     if final_points is not None:

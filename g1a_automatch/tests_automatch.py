@@ -1451,6 +1451,19 @@ def test_presets(tmp):
         picks.append(P.auto_next(P.rigid_share(cs))[0])
     check('presets auto: by the rigid share (the coarsest level): stop / fast / medium',
           (picks, P.auto_next(None)[0]), ([None, 'fast', 'medium'], 'fast'))
+    import automatch_cross as _C
+    pn = os.path.join(tmp, 'pn_job')
+    os.makedirs(pn, exist_ok=True)
+    with open(os.path.join(pn, 'job_used.json'), 'w') as _f:
+        json.dump({'input_path': '/data/req_4711/G1A_MV_scene.tif'}, _f)
+    src = os.path.join(pn, 'RIVAL_FINAL_band3_64px.csv')
+    open(src, 'w').write('x\n')
+    named = _C.save_named(src, pn, 'band3', '_64px')
+    with open(os.path.join(pn, 'job_used.json'), 'w') as _f:
+        json.dump({'input_path': 'D:\\data\\G1A_HS_x\\G1A_HS_x_L1.tif'}, _f)
+    check('final CSV under the product\'s name: <input folder>_<file stem>_<band><level>.csv (the folder left out '
+          'when the file name starts with it)',
+          (os.path.basename(named), _C.product_name(pn)), ('req_4711_G1A_MV_scene_band3_64px.csv', 'G1A_HS_x_L1'))
     passes = []
     for row in ({'reliable': True, 'final_tiles_64px': 24, 'final_tiles_ok_64px': 22, 'final_tiles_128px': 24,
                  'final_tiles_ok_128px': 10},
@@ -1522,7 +1535,7 @@ def test_gui_run(tmp):
     check('run window: the preset of the file\'s sensor is shown; unknown asks; choosing a sensor sets it; '
           'top X / top Y fields follow the sensor',
           ('HS preset' in shown and 'imw-minima-roma' in shown, 'choose it' in unknown, 'MV preset' in w.summary.text(),
-           w.top_n.value(), w.agree.value()), (True, True, True, 5, 3))
+           w.top_n.value(), w.agree.value()), (True, True, True, 10, 3))
     w.top_n.setValue(2)
     w.agree.setValue(2)
     data = os.path.join(tmp, 'synth')
@@ -1531,6 +1544,31 @@ def test_gui_run(tmp):
     w.mode.setCurrentText('fastest')
     fast_txt = w.summary.text()
     w.mode.setCurrentText('fast')
+    f0 = w.fields()
+    w.input.edit.setText('/q/G1A_MV_a.tif')
+    w.reference.edit.setText('/q/ref')
+    w.output.edit.setText('/q/out_a')
+    w.bands.setText('3')
+    w.cloud_conf.setValue(0.85)
+    nq = len(w._wq)
+    w.queue_what.setCurrentText('Run auto')
+    w.queue_add()
+    w.output.edit.setText('/q/out_b')
+    w.queue_what.setCurrentText('Run')
+    w.queue_add()
+    w.queue_list.setCurrentRow(nq + 1)
+    w.queue_up()
+    order = [e['fields']['output'] for e in w._wq[nq:]]
+    w.set_fields(f0)
+    w.queue_load(nq)
+    jq = w.job('fastest', 'fastest')
+    check('run window: queue runs with their own settings (added, reordered, persisted, loaded back); the cloud '
+          'mask threshold goes to the job',
+          (order, w.output.text(), json.loads(w.settings.value('run_queue'))[nq]['what'], jq['cloud_min_confidence']),
+          (['/q/out_b', '/q/out_a'], '/q/out_b', 'Run', 0.85))
+    w._wq = w._wq[:nq]
+    w._queue_show()
+    w.set_fields(f0)
     check('run window: the fastest tier shows its list; fast sets top 10 / 3', ('fastest' in fast_txt and 'imw-sfd2-nn'
           in fast_txt, w.top_n.value(), w.agree.value()), (True, 10, 3))
     w.top_n.setValue(2)
@@ -1571,7 +1609,7 @@ def test_gui_run(tmp):
           'agreement cells',
           (os.path.basename(jf['output_dir']), jf['temp_dir'] == os.path.join(tmp, 'out_runwin', '_cache'),
            jf['cross_top_n'], jf['final_points'], jf['cross_cell_px'], [m.replace(' ', '_') for m in G.P.MODES]),
-          ('fastest', True, 5, 24, [32, 96], ['fastest', 'fast', 'medium', 'slow']))
+          ('fastest', True, 3, 24, [32, 96], ['fastest', 'fast', 'medium', 'slow']))
     check('run window: the job carries the paths and choices (top 2, 2 agreeing); Check runs the preflight and reports',
           (job['detectors'], job['device'], job['cloud_mask'], job['max_expected_error_m'], ok, job['cross_min_agree'],
            os.path.exists(os.path.join(tmp, 'out_runwin', 'job_preset.json')), w.stage.text()),

@@ -225,6 +225,15 @@ class RunWindow(QtWidgets.QMainWindow):
         self.cloud.setChecked(True)
         self.cloud.setToolTip('By the sensor: MV OmniCloudMask on bands 5, 4, 6 (needs it installed); HV VNIR, '
                               'HS SWIR, ML infrared tests')
+        self.cloud_conf = QtWidgets.QDoubleSpinBox()
+        self.cloud_conf.setRange(0.3, 0.99)
+        self.cloud_conf.setSingleStep(0.05)
+        self.cloud_conf.setValue(0.7)
+        self.cloud_conf.setPrefix('sure ≥ ')
+        self.cloud_conf.setToolTip('Cloud mask threshold: a pixel is cloud / shadow only when the mask is this sure '
+                                   '(0.7 default). Raise it (0.85) when bright ground is masked as cloud, lower it '
+                                   '(0.5) when thin cloud gets through')
+        self.cloud.toggled.connect(self.cloud_conf.setEnabled)
         h = QtWidgets.QHBoxLayout()
         for label, wid in (('Sensor', self.sensor), ('Preset', self.mode), ('Band(s)', self.bands), ('Max error (no truth)', self.max_err),
                            ('Detectors: top', self.top_n), ('error from top', self.agree),
@@ -235,6 +244,7 @@ class RunWindow(QtWidgets.QMainWindow):
             if wid is self.bands:
                 h.addWidget(self.crispest)
         h.addWidget(self.cloud)
+        h.addWidget(self.cloud_conf)
         h.addStretch(1)
         v.addLayout(h)
         self.summary = QtWidgets.QLabel()
@@ -265,6 +275,35 @@ class RunWindow(QtWidgets.QMainWindow):
             hb.addWidget(b)
         hb.addStretch(1)
         v.addLayout(hb)
+        # the queue: runs one after another, each with the window's settings as they were when added
+        self.queue_list = QtWidgets.QListWidget()
+        self.queue_list.setMaximumHeight(90)
+        self.queue_list.setToolTip('Queued runs, top first: each keeps the settings of this window as they were when '
+                                   'added (input, output, band, preset, ...)')
+        hq = QtWidgets.QHBoxLayout()
+        self.queue_what = QtWidgets.QComboBox()
+        self.queue_what.addItems(['Run', 'Run auto', 'Run all 4 tiers'])
+        self.btn_q_add = QtWidgets.QPushButton('Add to queue')
+        self.btn_q_add.setToolTip('Queue a run of the settings as they are now; then change them for the next one')
+        self.btn_q_remove = QtWidgets.QPushButton('Remove')
+        self.btn_q_up = QtWidgets.QPushButton('Up')
+        self.btn_q_load = QtWidgets.QPushButton('Load')
+        self.btn_q_load.setToolTip('Put the selected run\'s settings back in the window (to check or change; '
+                                   'add it again and remove the old one)')
+        self.btn_q_run = QtWidgets.QPushButton('Run the queue')
+        self.btn_q_run.setToolTip('Start the queued runs one after another (Stop pauses the queue)')
+        for wq in (QtWidgets.QLabel('Queue:'), self.queue_what, self.btn_q_add, self.btn_q_up, self.btn_q_remove,
+                   self.btn_q_load, self.btn_q_run):
+            hq.addWidget(wq)
+        hq.addStretch(1)
+        v.addLayout(hq)
+        v.addWidget(self.queue_list)
+        self.btn_q_add.clicked.connect(self.queue_add)
+        self.btn_q_remove.clicked.connect(self.queue_remove)
+        self.btn_q_up.clicked.connect(self.queue_up)
+        self.btn_q_load.clicked.connect(lambda: self.queue_load(self.queue_list.currentRow()))
+        self.btn_q_run.clicked.connect(self.queue_start)
+        self._wq, self._q_running = [], False
         self.bar = QtWidgets.QProgressBar()
         self.stage = QtWidgets.QLabel('')
         v.addWidget(self.bar)
@@ -292,6 +331,12 @@ class RunWindow(QtWidgets.QMainWindow):
             row.edit.setText(self.settings.value(key, '') or '')
         self.device.setCurrentText(self.settings.value('device', 'all') or 'all')
         self.cloud.setChecked(str(self.settings.value('cloud', 'true')).lower() == 'true')
+        try:
+            self.cloud_conf.setValue(float(self.settings.value('cloud_conf', 0.7)))
+            self._wq = json.loads(self.settings.value('run_queue', '[]') or '[]')
+        except (TypeError, ValueError):
+            pass
+        self._queue_show()
         try:
             self.max_err.setValue(float(self.settings.value('max_err', 25.0)))
         except (TypeError, ValueError):
@@ -337,6 +382,7 @@ class RunWindow(QtWidgets.QMainWindow):
                            agree=(top_agree[1] if top_agree else None if mode else self.agree.value()),
                            mode=mode or self.mode.currentText(), final_points=self.final_points.value(),
                            cell_px=P.parse_levels(self.cell_px.text()),
+                           cloud_conf=self.cloud_conf.value() if self.cloud.isChecked() else None,
                            temp_dir=os.path.join(self.output.text(), '_cache'))
         if '[window' in note:
             self.log.appendPlainText('--- ' + note[note.index('[window') + 1:].rstrip(']'))
@@ -399,6 +445,7 @@ class RunWindow(QtWidgets.QMainWindow):
         self.settings.setValue('device', self.device.currentText())
         self.settings.setValue('mode', self.mode.currentText())
         self.settings.setValue('cloud', 'true' if self.cloud.isChecked() else 'false')
+        self.settings.setValue('cloud_conf', self.cloud_conf.value())
         self.settings.setValue('max_err', self.max_err.value())
         self.log.appendPlainText(f'--- {kind}: {self.current_sensor()} preset, {mode}, settings in {path}')
         self._kind, self._buf = kind, ''
@@ -486,8 +533,11 @@ class RunWindow(QtWidgets.QMainWindow):
             self.stage.setText(f"done in {ev.get('minutes')} min")
 
     def stop(self):
-        self._pending = []                       # Stop ends the three-preset sequence too
+        self._pending = []                       # Stop ends the preset sequence too
         self._auto = None
+        if self._q_running:
+            self._q_running = False
+            self.log.appendPlainText(f'--- queue paused ({len(self._wq)} queued): Run the queue to go on')
         if self.proc is not None:
             kill_tree(self.proc)                 # the run and its GPU workers
 
@@ -495,10 +545,22 @@ class RunWindow(QtWidgets.QMainWindow):
         """The files for RIVAL in the output folder."""
         out = out or self.output.text()
         names = sorted(os.listdir(out)) if os.path.isdir(out) else []
-        return ([os.path.join(out, n) for n in names if n.startswith('RIVAL_FINAL_') and '_detail' not in n],
+        try:
+            import automatch_cross as C
+            prod = C.product_name(out)
+        except Exception:
+            prod = ''
+        named = [os.path.join(out, n) for n in names if prod and n.startswith(prod + '_') and n.endswith('.csv')]
+        return (sorted(named, key=len) + [os.path.join(out, n) for n in names
+                                          if n.startswith('RIVAL_FINAL_') and '_detail' not in n],
                 [os.path.join(out, n) for n in names if n.startswith('RIVAL_BEST_FINAL_')])
 
     def finished(self, code, *_):
+        self._finished(code)
+        if self.proc is None and self._q_running:       # the run (or its sequence) is over: the next queued
+            QtCore.QTimer.singleShot(0, self.queue_next)
+
+    def _finished(self, code):
         if self._buf:
             self.line(self._buf)
         kind, self.proc = self._kind, None
@@ -563,6 +625,95 @@ class RunWindow(QtWidgets.QMainWindow):
             self.stage.setText('done: load ' + os.path.basename((final or best)[0]) + ' in RIVAL')
         elif code != 0:
             self.stage.setText(f'ended with code {code} (see the log)')
+
+    # ── the queue ────────────────────────────────────────────────────────────
+    def fields(self) -> dict:
+        """The window's settings, to queue and restore."""
+        return {'input': self.input.text(), 'reference': self.reference.text(),
+                'reference_c1': self.reference_c1.text(), 'output': self.output.text(), 'truth': self.truth.text(),
+                'weights': self.weights.text(), 'sensor': self.sensor.currentText(), 'mode': self.mode.currentText(),
+                'bands': self.bands.text(), 'crispest': self.crispest.isChecked(), 'max_err': self.max_err.value(),
+                'device': self.device.currentText(), 'top_n': self.top_n.value(), 'agree': self.agree.value(),
+                'final_points': self.final_points.value(), 'cell_px': self.cell_px.text(),
+                'cloud': self.cloud.isChecked(), 'cloud_conf': self.cloud_conf.value()}
+
+    def set_fields(self, f: dict):
+        for key, row in (('input', self.input), ('reference', self.reference), ('reference_c1', self.reference_c1),
+                         ('output', self.output), ('truth', self.truth), ('weights', self.weights)):
+            row.edit.setText(f.get(key, ''))
+        self.sensor.setCurrentText(f.get('sensor', self.sensor.currentText()))
+        self.mode.setCurrentText(f.get('mode', self.mode.currentText()))
+        self.bands.setText(f.get('bands', ''))
+        self.crispest.setChecked(bool(f.get('crispest')))
+        self.max_err.setValue(float(f.get('max_err', self.max_err.value())))
+        self.device.setCurrentText(f.get('device', self.device.currentText()))
+        self.top_n.setValue(int(f.get('top_n', self.top_n.value())))       # after the preset: its numbers reset these
+        self.agree.setValue(int(f.get('agree', self.agree.value())))
+        self.final_points.setValue(int(f.get('final_points', self.final_points.value())))
+        self.cell_px.setText(f.get('cell_px', self.cell_px.text()))
+        self.cloud.setChecked(bool(f.get('cloud', True)))
+        self.cloud_conf.setValue(float(f.get('cloud_conf', 0.7)))
+
+    def _queue_show(self):
+        self.queue_list.clear()
+        for e in self._wq:
+            f = e['fields']
+            self.queue_list.addItem(f"{e['what']}: {os.path.basename(f.get('input', ''))}  band {f.get('bands') or '-'}"
+                                    f"  {f.get('mode', '')}  -> {f.get('output', '')}")
+        self.settings.setValue('run_queue', json.dumps(self._wq))
+
+    def queue_add(self):
+        f = self.fields()
+        if not (f['input'] and f['output']):
+            QtWidgets.QMessageBox.warning(self, 'Queue', 'set the input image and the output folder first')
+            return
+        same = [e for e in self._wq if os.path.normcase(os.path.normpath(e['fields']['output'])) ==
+                os.path.normcase(os.path.normpath(f['output']))]
+        if same:
+            QtWidgets.QMessageBox.warning(self, 'Queue', f"{f['output']} is already the output of a queued run: "
+                                                         'choose another output folder')
+            return
+        self._wq.append({'what': self.queue_what.currentText(), 'fields': f})
+        self._queue_show()
+
+    def queue_remove(self):
+        i = self.queue_list.currentRow()
+        if 0 <= i < len(self._wq):
+            del self._wq[i]
+            self._queue_show()
+
+    def queue_up(self):
+        i = self.queue_list.currentRow()
+        if 0 < i < len(self._wq):
+            self._wq[i - 1], self._wq[i] = self._wq[i], self._wq[i - 1]
+            self._queue_show()
+            self.queue_list.setCurrentRow(i - 1)
+
+    def queue_load(self, i: int):
+        if 0 <= i < len(self._wq):
+            self.set_fields(self._wq[i]['fields'])
+
+    def queue_start(self):
+        self._q_running = True
+        self.queue_next()
+
+    def queue_next(self):
+        """Start the first queued run when nothing runs (the queue on)."""
+        if not self._q_running or self.proc is not None:
+            return
+        if not self._wq:
+            self._q_running = False
+            self.log.appendPlainText('--- queue: all runs done')
+            return
+        e = self._wq.pop(0)
+        self._queue_show()
+        self.set_fields(e['fields'])
+        self.log.appendPlainText(f"--- queue: {e['what']} of {e['fields'].get('input')} "
+                                 f"({len(self._wq)} more queued)")
+        {'Run auto': self.run_auto, 'Run all 4 tiers': self.run_all}.get(e['what'], lambda: self.start('run'))()
+        if self.proc is None:                 # it did not start (a setting missing): on to the next
+            self.log.appendPlainText('--- queue: that run did not start; next')
+            QtCore.QTimer.singleShot(0, self.queue_next)
 
     def open_output(self):
         if os.path.isdir(self.output.text()):

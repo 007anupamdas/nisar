@@ -121,6 +121,19 @@ what the tiers below it ran. The earlier names still work: *accurate* = fast,
 | 6-10 | sift, keynet, imw-liftfeat-nn, imw-xfeat-lg, imw-eloftr | imw-minima-loftr, dog, imw-sfd2-nn, imw-lanet-nn, imw-darkfeat-nn | gftt, dedode, keynet, loftr, imw-sfd2-nn |
 | 11-20 | imw-topicfm, imw-minima-loftr, gftt, imw-minima-roma, imw-rdd-nn, imw-aliked-lg, imw-d2net-nn, hessian, imw-gim-roma, dedode | imw-liftfeat-nn, imw-d2net-nn, loftr, imw-ripe-nn, imw-aspanformer, imw-minima-roma, imw-rdd-nn, imw-gim-roma, imw-roma, loftr-windoor | imw-eloftr, imw-minima-loftr, hessian, imw-ripe-nn, imw-topicfm, imw-xfeat-lg, imw-d2net-nn, imw-minima-roma, imw-aspanformer, imw-rdd-nn |
 
+**Queue** (run window): *Add to queue* keeps the window's settings as they
+are (input, output, band, preset, cloud threshold, ...) with what to do (Run,
+Run auto, Run all 4 tiers); *Run the queue* runs them one after another, Stop
+pauses it, *Load* puts a queued run's settings back in the window. The queue
+is kept between sessions. **sure ≥** beside *mask clouds* is the cloud mask
+threshold (`cloud_min_confidence`, 0.7).
+
+**Final points under the product's name**: beside `RIVAL_FINAL_<band>*.csv`
+each job also writes `<input folder>_<input file stem>_<band>.csv` (the finest
+agreement level), `..._<band>_<L>px.csv` per level, `..._<L>px_rigid.csv` and
+`..._best.csv` (both windows; the folder is left out when the file name
+already starts with it).
+
 **Run auto** climbs the ranked list: top 3 with 2 agreeing; if that fails,
 top 5 with 3; then top 10 with 5; then top 20 with 5 (each into
 `<output>/auto_topN_agreeK`, one cache, so a step only adds detectors). A step

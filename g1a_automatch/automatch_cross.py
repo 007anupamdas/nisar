@@ -462,6 +462,35 @@ def _job_final_points(d: str) -> int:
     return _job_setting(d, 'final_points', FINAL_POINTS)
 
 
+def product_name(output_dir: str) -> str:
+    """'<input folder>_<input file stem>' of a job (job_used.json), the folder
+    left out when the file name already starts with it; '' when unknown."""
+    import json
+    try:
+        with open(os.path.join(output_dir, 'job_used.json'), encoding='utf-8') as f:
+            inp = str(json.load(f).get('input_path') or '')
+    except (OSError, ValueError):
+        return ''
+    if not inp:
+        return ''
+    inp = inp.replace('\\', '/').rstrip('/')
+    stem = os.path.splitext(os.path.basename(inp))[0]
+    folder = os.path.basename(os.path.dirname(inp))
+    return stem if not folder or stem.startswith(folder) else f'{folder}_{stem}'
+
+
+def save_named(src_csv: str, output_dir: str, channel: str, suffix: str = '', out_dir: str = '') -> str:
+    """Copy a final CSV to <input folder>_<input file stem>_<band><suffix>.csv
+    beside it (out_dir), so the file says which product and band it is."""
+    import shutil
+    name = product_name(output_dir)
+    if not name or not src_csv or not os.path.exists(src_csv):
+        return ''
+    dst = os.path.join(out_dir or os.path.dirname(src_csv), f'{name}_{channel}{suffix}.csv')
+    shutil.copyfile(src_csv, dst)
+    return dst
+
+
 def final_of(rival_csv: str, crs: str, final_points: int = FINAL_POINTS, output_dir: str = '') -> str:
     """RIVAL_BEST_<...>.csv -> RIVAL_BEST_FINAL_<...>.csv beside it: the same
     per-tile pick (final_grid) for the best single configuration's file. ''
@@ -507,6 +536,8 @@ def final_of(rival_csv: str, crs: str, final_points: int = FINAL_POINTS, output_
     fin, tiles = final_grid(pts, extent, final_points, covered)
     out = os.path.join(os.path.dirname(rival_csv), name.replace('RIVAL_BEST_', 'RIVAL_BEST_FINAL_', 1))
     R.write_rival_csv(fin, crs, out)
+    if ch:
+        save_named(out, output_dir or os.path.dirname(rival_csv), ch.group(1), '_best', os.path.dirname(rival_csv))
     ok = int((tiles['status'] == 'ok').sum()) if len(tiles) else 0
     print(f'[Cross] {name}: {len(pts)} points -> {len(fin)} best, one per sub-tile ({ok} of {len(tiles)} tiles) -> {out}')
     return out
@@ -624,6 +655,7 @@ def run(output_dir: str, top_n: int = 5, min_agree: int = 0, cell_km: float = 25
                     fin_r, tiles_r = final_grid(rig, ext_r, final_points, cov_r)
                     rpath = os.path.join(out_dir, f'RIVAL_FINAL_{ch}{sfx}_rigid.csv')
                     R.write_rival_csv(fin_r, crs, rpath, rpath[:-4] + '_detail.csv')
+                    save_named(rpath, output_dir, ch, f'{sfx}_rigid', out_dir)
                     tiles_r.to_csv(os.path.join(out_dir, f'FINAL_TILES_{ch}{sfx}_rigid.csv'), index=False)
                     res.update({f'rigid_offset_dE_m{sfx}': round(mE, 1), f'rigid_offset_dN_m{sfx}': round(mN, 1),
                                 f'rigid_share{sfx}': round(len(rig) / float(len(pool)), 3),
@@ -642,8 +674,10 @@ def run(output_dir: str, top_n: int = 5, min_agree: int = 0, cell_km: float = 25
                     res.update({f'final_csv{sfx}': fpath, f'final_points{sfx}': int(len(fin)),
                                 f'final_tiles{sfx}': int(len(tiles)), f'final_tiles_ok{sfx}': n_ok,
                                 'final_extent_from': src})
-                    if 'final_csv' not in res:
+                    if 'final_csv' not in res:     # the finest level: also under the product's own name
                         res['final_csv'] = fpath
+                        res['named_csv'] = save_named(fpath, output_dir, ch, '', out_dir)
+                    save_named(fpath, output_dir, ch, sfx, out_dir)
                     if truth is not None and len(fin):
                         s, _ = T.score_config({'points': fin.assign(chip=fin['source_file'])[
                             ['E', 'N', 'dE', 'dN', 'chip']]}, truth, 5000.0)
@@ -681,6 +715,9 @@ def run(output_dir: str, top_n: int = 5, min_agree: int = 0, cell_km: float = 25
                           + (f" (truth RMSE {res[f'rigid_truth_rmse_m{sfx}']:.0f} m)"
                              if res.get(f'rigid_truth_rmse_m{sfx}') is not None else '')
                           + f" -> {res[f'rigid_csv{sfx}']}")
+                if L == ([int(v) for v in cell_px if int(v) > 0] or [0])[0] and res.get('named_csv'):
+                    print(f"[Cross] {ch}: the final points under the product's name: {res['named_csv']} "
+                          f"(and _<level>px, _<level>px_rigid, _best beside it)")
                 if res.get(f'final_csv{sfx}'):
                     print(f"[Cross] {ch}: {L} px: for RIVAL: {res[f'final_points{sfx}']} best points, one per sub-tile "
                           f"({res[f'final_tiles_ok{sfx}']} of {res[f'final_tiles{sfx}']} tiles have one; "
