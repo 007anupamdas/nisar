@@ -240,6 +240,26 @@ check("manual and auto in one table; auto product from its job folder; sets kept
                             ("auto", "266697511", "2", "RIVAL_BEST_FINAL", "LISS4"),
                             ("auto", SP, "6", "RIVAL_FINAL", "HS")])))
 
+# ── date-wise ──────────────────────────────────────────────────────────────
+check("dates in the metadata's forms", [str(C.parse_date(t)) for t in
+      ("12-MAR-2025", "11-11-2026", "2026-11-11", "junk")],
+      ["2025-03-12", "2026-11-11", "2026-11-11", "None"])
+out7 = os.path.join(man6, "dated.csv")
+n7 = C.consolidate({"manual": man6, "auto": auto6}, [pa, pb, pc], out7, lambda *a: None,
+                   date_from="01-11-2026", date_to="30-11-2026", by_date=True)
+check("date range keeps only that month (the 11-11-2026 special product)", n7, 1)
+bd = list(csv.DictReader(open(os.path.join(man6, "dated_by_date.csv"), encoding="utf-8-sig")))
+check("date-wise summary: one row per date and source",
+      [(r["date"], r["source"], r["n_products"]) for r in bd], [("2026-11-11", "auto", "1")])
+open(os.path.join(pa, "266697511", "BAND_META.txt"), "w").write(
+    "Sensor = LISS4\nDateOfPass = 11-NOV-2026\n")
+C.consolidate({"manual": man6, "auto": auto6}, [pa, pb, pc], out7, lambda *a: None, by_date=True)
+bd = {(r["date"], r["source"]): r for r in csv.DictReader(
+      open(os.path.join(man6, "dated_by_date.csv"), encoding="utf-8-sig"))}
+check("points of one day pooled across products",
+      (bd[("2026-11-11", "auto")]["n_products"], bd[("2026-11-11", "auto")]["n_points"]),
+      ("3", "6"))
+
 if failures:
     print(f"{len(failures)} FAILURE(S)")
     for x in failures:

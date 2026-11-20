@@ -453,16 +453,69 @@ def product_folders(products):
             and os.path.isdir(p.strip())]
 
 
-def consolidate(results_folder, products_folder, out_csv, log=print):
+DATE_FORMATS = ("%d-%b-%Y", "%d-%m-%Y", "%d/%m/%Y", "%Y-%m-%d", "%d%m%Y",
+                "%Y%m%d", "%d-%B-%Y", "%d %b %Y")
+
+
+def parse_date(text):
+    """A date of pass as a datetime.date, from the forms metadata uses
+    (12-MAR-2025, 11-11-2026, 2026-11-11 ...), or None."""
+    from datetime import datetime
+    t = " ".join(str(text or "").split())
+    for fmt in DATE_FORMATS:
+        try:
+            return datetime.strptime(t.title() if "%b" in fmt or "%B" in fmt else t,
+                                     fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+BY_DATE_COLUMNS = ["date", "source", "n_products", "n_points", "mean_dx", "mean_dy",
+                   "std_dx", "std_dy", "rmse_dx", "rmse_dy", "rmse_radial",
+                   "max_radial", "ce90", "products"]
+
+
+def summarise_by_date(rows):
+    """One row per date of pass (and source): every point of that day pooled,
+    the same statistics as per product, and which products went into it."""
+    groups = {}
+    for r in rows:
+        d = parse_date(r.get("date"))
+        key = (d.isoformat() if d else "unknown", r.get("source") or "")
+        g = groups.setdefault(key, {"errs": [], "products": []})
+        g["errs"] += r.get("_errs") or []
+        g["products"].append(r["product_id"] + (f" b{r['band']}" if r.get("band") else ""))
+    out = []
+    for (date, source), g in sorted(groups.items()):
+        st = error_summary(g["errs"])
+        row = {"date": date, "source": source, "n_products": len(g["products"]),
+               "n_points": st["n"], "products": " ".join(g["products"])}
+        if st["n"]:
+            row.update({k: _fmt(st[v]) for k, v in (
+                ("mean_dx", "mean_x"), ("mean_dy", "mean_y"), ("std_dx", "std_x"),
+                ("std_dy", "std_y"), ("rmse_dx", "rmse_x"), ("rmse_dy", "rmse_y"),
+                ("rmse_radial", "rmse_r"), ("max_radial", "max_r"), ("ce90", "ce90"))})
+        out.append(row)
+    return out
+
+
+def consolidate(results_folder, products_folder, out_csv, log=print,
+                date_from=None, date_to=None, by_date=False):
     """products_folder: one input product folder or several (up to the GUI's
-    three) -- each product's metadata is looked for in all of them."""
+    three) -- each product's metadata is looked for in all of them.
+
+    date_from / date_to (dates or text, either may be None): keep only the
+    products whose date of pass lies in that range. by_date: also write
+    <out>_by_date.csv, one row per date of pass with all its points pooled."""
     folders = product_folders(products_folder)
     xml_index = {}
     for f in reversed(folders):                 # the first folder wins a clash
         xml_index.update(index_meta_xml(f))
     sources = (results_folder if isinstance(results_folder, dict)
                else {"manual": results_folder})
-    return _consolidate(sources, folders, xml_index, out_csv, log)
+    return _consolidate(sources, folders, xml_index, out_csv, log,
+                        date_from, date_to, by_date)
 
 
 def _band_meta_path(folders, pid):
@@ -473,7 +526,8 @@ def _band_meta_path(folders, pid):
     return os.path.join(folders[0], pid, BAND_META_NAME) if folders else ""
 
 
-def _consolidate(sources, folders, xml_index, out_csv, log=print):
+def _consolidate(sources, folders, xml_index, out_csv, log=print,
+                 date_from=None, date_to=None, by_date=False):
     """Build the table. Returns the number of products written."""
     found, dupes = {}, []
     for src_name, folder in sources.items():
@@ -540,10 +594,31 @@ def _consolidate(sources, folders, xml_index, out_csv, log=print):
         if lonlats:
             row["gcp_mean_lon"] = _fmt(sum(p[0] for p in lonlats) / len(lonlats), 6)
             row["gcp_mean_lat"] = _fmt(sum(p[1] for p in lonlats) / len(lonlats), 6)
+        row["_errs"] = errs
         rows.append(row)
         log(f"[OK] {pid}: n={st['n']}"
             + (f", CE90 {st['ce90']:.3f} m" if st["n"] else " (no fully marked rows)"))
+    lo = parse_date(date_from) if isinstance(date_from, str) else date_from
+    hi = parse_date(date_to) if isinstance(date_to, str) else date_to
+    if lo or hi:
+        kept = []
+        for r in rows:
+            d = parse_date(r.get("date"))
+            if d and (not lo or d >= lo) and (not hi or d <= hi):
+                kept.append(r)
+        log(f"[DATE] {len(kept)} of {len(rows)} product(s) dated "
+            f"{lo or '...'} .. {hi or '...'} (undated ones left out)")
+        rows = kept
     os.makedirs(os.path.dirname(os.path.abspath(out_csv)), exist_ok=True)
+    if by_date:
+        bd = os.path.splitext(out_csv)[0] + "_by_date.csv"
+        summ = summarise_by_date(rows)
+        with open(bd, "w", newline="", encoding="utf-8-sig") as f:
+            w = csv.DictWriter(f, fieldnames=BY_DATE_COLUMNS, extrasaction="ignore")
+            w.writeheader()
+            for r in summ:
+                w.writerow({k: ("" if r.get(k) is None else r.get(k)) for k in BY_DATE_COLUMNS})
+        log(f"[DATE] {len(summ)} date(s) -> {bd}")
     with open(out_csv, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=OUT_COLUMNS, extrasaction="ignore")
         w.writeheader()
@@ -593,6 +668,20 @@ def run_gui():
     row(3, "Product folder 2 (optional):", "products2")
     row(4, "Product folder 3 (optional):", "products3")
     row(5, "Consolidated CSV:", "out", pick_file=True)
+    from PyQt5.QtWidgets import QCheckBox, QHBoxLayout
+    drow = QHBoxLayout()
+    drow.addWidget(QLabel("Date of pass from:"))
+    d_from = QLineEdit(str(settings.value("date_from", "") or ""))
+    d_from.setPlaceholderText("e.g. 01-11-2026 (blank: no limit)")
+    drow.addWidget(d_from)
+    drow.addWidget(QLabel("to:"))
+    d_to = QLineEdit(str(settings.value("date_to", "") or ""))
+    d_to.setPlaceholderText("e.g. 30-11-2026")
+    drow.addWidget(d_to)
+    by_date = QCheckBox("Also summarise date-wise (<out>_by_date.csv)")
+    by_date.setChecked(str(settings.value("by_date", "false")).lower() == "true")
+    drow.addWidget(by_date)
+    grid.addLayout(drow, 8, 0, 1, 3)
     log_box = QPlainTextEdit()
     log_box.setReadOnly(True)
     grid.addWidget(log_box, 7, 0, 1, 3)
@@ -612,10 +701,19 @@ def run_gui():
                                 "Choose a manual and/or an auto results folder, at "
                                 "least one input product folder and the output CSV.")
             return
+        df, dt = d_from.text().strip(), d_to.text().strip()
+        for txt in (df, dt):
+            if txt and not parse_date(txt):
+                QMessageBox.warning(win, "Consolidate", f"Cannot read the date '{txt}'.")
+                return
+        settings.setValue("date_from", df)
+        settings.setValue("date_to", dt)
+        settings.setValue("by_date", "true" if by_date.isChecked() else "false")
         log_box.clear()
         log(f"[INFO] product folders: {', '.join(prods)}")
         try:
-            n = consolidate({"manual": res, "auto": auto}, prods, out, log)
+            n = consolidate({"manual": res, "auto": auto}, prods, out, log,
+                            df or None, dt or None, by_date.isChecked())
         except Exception as e:
             QMessageBox.critical(win, "Consolidate", f"Failed:\n{e}")
             return
@@ -637,10 +735,15 @@ if __name__ == "__main__":
         ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
         ap.add_argument("--results", required=True, help="manual RIVAL CSVs")
         ap.add_argument("--auto", default="", help="automatic matcher results")
+        ap.add_argument("--from", dest="date_from", default=None, help="date of pass from")
+        ap.add_argument("--to", dest="date_to", default=None, help="date of pass to")
+        ap.add_argument("--by-date", action="store_true",
+                        help="also write <out>_by_date.csv")
         ap.add_argument("--products", required=True, nargs="+",
                         help="one or more input product folders")
         ap.add_argument("--out", required=True)
         a = ap.parse_args()
-        consolidate({"manual": a.results, "auto": a.auto}, a.products, a.out)
+        consolidate({"manual": a.results, "auto": a.auto}, a.products, a.out,
+                    date_from=a.date_from, date_to=a.date_to, by_date=a.by_date)
     else:
         run_gui()
