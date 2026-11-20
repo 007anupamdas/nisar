@@ -260,6 +260,32 @@ check("points of one day pooled across products",
       (bd[("2026-11-11", "auto")]["n_products"], bd[("2026-11-11", "auto")]["n_points"]),
       ("3", "6"))
 
+# ── a truth without DOP: the date from the product / folder name ───────────
+check("date from a scene name", C.date_from_path(
+    "/r/G1AHS026111104EX000006_S062321_E063509_11112026DIP_DQ_ort_rival_band6.csv"),
+    "11-11-2026")
+check("date from a folder above the CSV", C.date_from_path(
+    "/truth/266697511_05032026/266697511_rival.csv"), "05-03-2026")
+check("no date in the names", C.date_from_path("/r/266697511_rival.csv"), None)
+man8 = tempfile.mkdtemp()
+os.makedirs(os.path.join(man8, "x_17112026"))
+write(os.path.join(man8, "x_17112026", "266697521_rival.csv"), new)
+out8 = os.path.join(man8, "o.csv")
+C.consolidate(man8, [pb], out8, lambda *a: None)
+r8 = next(csv.DictReader(open(out8, encoding="utf-8-sig")))
+check("a truth with no DOP in its meta is dated from its folder name",
+      (r8["date"], r8["date_source"]), ("17-11-2026", "name"))
+
+pd9 = tempfile.mkdtemp(); os.makedirs(os.path.join(pd9, "266697531"))
+open(os.path.join(pd9, "266697531", "BAND_META.txt"), "w").write("Sensor = LISS4\n")
+open(os.path.join(pd9, "266697531", "G1AMV026101205EL000002_S073537_E073751_12102026DIP_GTD_1.tif"), "w").close()
+man9 = tempfile.mkdtemp()
+write(os.path.join(man9, "266697531_rival.csv"), new)
+C.consolidate(man9, [pd9], os.path.join(man9, "o.csv"), lambda *a: None)
+r9 = next(csv.DictReader(open(os.path.join(man9, "o.csv"), encoding="utf-8-sig")))
+check("only a product folder id: dated from the files in that product folder",
+      (r9["date"], r9["date_source"]), ("12-10-2026", "product folder files"))
+
 if failures:
     print(f"{len(failures)} FAILURE(S)")
     for x in failures:

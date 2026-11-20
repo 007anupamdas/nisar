@@ -83,7 +83,7 @@ PICK_COLUMNS = {
 
 OUT_COLUMNS = [
     "product_id", "request_id", "product_no", "band", "sensor", "date", "session_id",
-    "strip_id", "prod_code", "product_kind", "source", "result_set",
+    "strip_id", "prod_code", "product_kind", "source", "result_set", "date_source",
     "centre_lat", "centre_lon", "n_points",
     "mean_dx", "mean_dy", "std_dx", "std_dy", "rmse_dx", "rmse_dy",
     "mean_radial", "rmse_radial", "max_radial", "ce90", "axis_ratio",
@@ -471,6 +471,37 @@ def parse_date(text):
     return None
 
 
+NAME_DATE_RE = re.compile(r"(?:^|_)(?:S\d{6}_E\d{6}_)?(\d{2})(\d{2})(20\d{2})(?=[A-Za-z_]|$)")
+
+
+def date_from_path(path):
+    """A date of pass read from the names along a path, when the metadata has
+    none: a scene name such as ..._S062321_E063509_11112026DIP... (ddmmyyyy),
+    in the CSV's name or any folder above it. 'dd-mm-yyyy' or None."""
+    for part in reversed(re.split(r"[\\/]", path or "")):
+        for m in NAME_DATE_RE.finditer(part):
+            d = parse_date("".join(m.groups()))
+            if d:
+                return d.strftime("%d-%m-%Y")
+    return None
+
+
+def date_from_product_folder(folders, pid):
+    """A date from the names of the files in the product's own folder
+    (<product folder>/<id>/ ... *_11112026DIP*.tif), or None -- for a truth
+    whose only link is its product folder id."""
+    for f in folders or []:
+        d0 = os.path.join(f, pid)
+        if not os.path.isdir(d0):
+            continue
+        for root, _dirs, files in os.walk(d0):
+            for n in sorted(files):
+                d = date_from_path(n)
+                if d:
+                    return d
+    return None
+
+
 BY_DATE_COLUMNS = ["date", "source", "n_products", "n_points", "mean_dx", "mean_dy",
                    "std_dx", "std_dy", "rmse_dx", "rmse_dy", "rmse_radial",
                    "max_radial", "ce90", "products"]
@@ -574,7 +605,13 @@ def _consolidate(sources, folders, xml_index, out_csv, log=print,
             "product_id": pid, "request_id": req, "product_no": prodno,
             "band": band, "product_kind": kind,
             "source": source, "result_set": rset,
-            "date": anc["date"], "session_id": anc["session_id"],
+            "date": (anc["date"] or date_from_path(path) or date_from_path(meta_path)
+                     or date_from_product_folder(folders, pid)),
+            "date_source": ("meta" if anc["date"] else
+                            "name" if (date_from_path(path) or date_from_path(meta_path))
+                            else "product folder files"
+                            if date_from_product_folder(folders, pid) else ""),
+            "session_id": anc["session_id"],
             "strip_id": anc["strip_id"], "sensor": anc["sensor"],
             "prod_code": anc.get("prod_code"),
             "centre_lat": _fmt(anc["centre_lat"], 6),
