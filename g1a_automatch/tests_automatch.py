@@ -1451,6 +1451,18 @@ def test_presets(tmp):
         picks.append(P.auto_next(P.rigid_share(cs))[0])
     check('presets auto: by the rigid share (the coarsest level): stop / fast / medium',
           (picks, P.auto_next(None)[0]), ([None, 'fast', 'medium'], 'fast'))
+    jb, _ = P.job_for('MV', '/d/G1A_MV_x.tif', '/ref', '/out', '/t/pts_band4.csv', presets=pre, mode='fast')
+    nb = J.normalize(jb)
+    check('presets: each detector runs only its best method for the sensor (matcher and variant), not every matcher',
+          (nb['matchers'].get('disk'), nb['detector_params'].get('disk'), set(nb['matchers']) <= set(nb['detectors'])),
+          (['ada'], {'checkpoint': ['epipolar']}, True))
+    import automatch_cross as _Cx
+    _cf = [dict(channel='band3', sweep='w', detector=d, matcher='m', ransac='r') for d in
+           ('disk_depth', 'disk_epipolar', 'sift')]
+    _rk = _pd.DataFrame([dict(c, rank=i + 1) for i, c in enumerate(_cf)])
+    tops, _ = _Cx.pick_top(_cf, 2, 1.0, 1.0, _rk)
+    check('cross-check: the top N are N detector families (disk_depth and disk_epipolar are one)',
+          [c['detector'] for c in tops], ['disk_depth', 'sift'])
     import automatch_cross as _C
     pn = os.path.join(tmp, 'pn_job')
     os.makedirs(pn, exist_ok=True)

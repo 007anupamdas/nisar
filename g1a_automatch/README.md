@@ -121,6 +121,13 @@ what the tiers below it ran. The earlier names still work: *accurate* = fast,
 | 6-10 | sift, keynet, imw-liftfeat-nn, imw-xfeat-lg, imw-eloftr | imw-minima-loftr, dog, imw-sfd2-nn, imw-lanet-nn, imw-darkfeat-nn | gftt, dedode, keynet, loftr, imw-sfd2-nn |
 | 11-20 | imw-topicfm, imw-minima-loftr, gftt, imw-minima-roma, imw-rdd-nn, imw-aliked-lg, imw-d2net-nn, hessian, imw-gim-roma, dedode | imw-liftfeat-nn, imw-d2net-nn, loftr, imw-ripe-nn, imw-aspanformer, imw-minima-roma, imw-rdd-nn, imw-gim-roma, imw-roma, loftr-windoor | imw-eloftr, imw-minima-loftr, hessian, imw-ripe-nn, imw-topicfm, imw-xfeat-lg, imw-d2net-nn, imw-minima-roma, imw-aspanformer, imw-rdd-nn |
 
+**One method per detector**: a preset runs each detector with only its best
+matcher and variant for the sensor (`BEST_METHOD` in `automatch_presets.py`,
+from the truth jobs), e.g. MV: DISK epipolar + AdaLAM, DoG HardNet8 + AdaLAM,
+KeyNet + LightGlue; before, DISK ran every matcher and could fill the top N on
+its own. The cross-check's top N are also N detector families (DISK depth and
+epipolar count as one).
+
 **Queue** (run window): *Add to queue* keeps the window's settings as they
 are (input, output, band, preset, cloud threshold, ...) with what to do (Run,
 Run auto, Run all 4 tiers); *Run the queue* runs them one after another, Stop

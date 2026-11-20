@@ -172,6 +172,23 @@ SENSORS: Dict[str, Dict] = {
 }
 
 
+# Per detector, the matcher and variant that did best for the sensor (truth jobs:
+# the best mean per-job percentile), so a run tries that one method per detector
+# instead of every matcher (disk ran smnn, lgm, ada, mnn, ... before).
+BEST_METHOD: Dict[str, Dict] = {
+    'HS': {'matchers': {'dedode': 'lgm', 'disk': 'mnn', 'dog': 'mnn', 'gftt': 'mnn', 'hessian': 'mnn', 'keynet': 'lgm', 'sift': 'ada'},
+           'detector_params': {'dedode': {'detector_weights': ['L-C4-v2'], 'descriptor_weights': ['B-upright']}, 'disk': {'checkpoint': ['epipolar']}, 'dog': {'descriptor': ['sosnet']}}},
+    'HV': {'matchers': {'dedode': 'lgm', 'disk': 'mnn', 'dog': 'mnn', 'gftt': 'mnn', 'hessian': 'smnn', 'keynet': 'mnn', 'sift': 'mnn'},
+           'detector_params': {'dedode': {'detector_weights': ['L-C4'], 'descriptor_weights': ['B-upright']}, 'disk': {'checkpoint': ['depth']}, 'dog': {'descriptor': ['sosnet']}}},
+    'MV': {'matchers': {'dedode': 'lgm', 'disk': 'ada', 'dog': 'ada', 'gftt': 'smnn', 'hessian': 'ada', 'keynet': 'lgm', 'sift': 'mnn'},
+           'detector_params': {'dedode': {'detector_weights': ['L-C4'], 'descriptor_weights': ['B-upright']}, 'disk': {'checkpoint': ['epipolar']}, 'dog': {'descriptor': ['hardnet8']}}},
+    'C3': {'matchers': {'dedode': 'lgm', 'disk': 'ada', 'dog': 'ada', 'gftt': 'smnn', 'hessian': 'ada', 'keynet': 'lgm', 'sift': 'mnn'},
+           'detector_params': {'dedode': {'detector_weights': ['L-C4'], 'descriptor_weights': ['B-upright']}, 'disk': {'checkpoint': ['epipolar']}, 'dog': {'descriptor': ['hardnet8']}}},
+    'ML': {'matchers': {'dedode': 'lgm', 'disk': 'mnn', 'dog': 'mnn', 'gftt': 'mnn', 'hessian': 'mnn', 'keynet': 'lgm', 'sift': 'ada'},
+           'detector_params': {'dedode': {'detector_weights': ['L-C4-v2'], 'descriptor_weights': ['B-upright']}, 'disk': {'checkpoint': ['epipolar']}, 'dog': {'descriptor': ['sosnet']}}},
+}
+
+
 def load(path: Optional[str] = None) -> Dict[str, Dict]:
     """{sensor: preset} = COMMON + SENSORS + the presets file (per sensor, key by key)."""
     out = {s: {**copy.deepcopy(COMMON), **copy.deepcopy(v)} for s, v in SENSORS.items()}
@@ -336,6 +353,12 @@ def job_for(sensor: str, input_path: str, reference_dir: str, output_dir: str, t
     job.pop('top_n', None)
     job.pop('agree', None)
     job['detectors'] = list(job.get('detectors') or [])[:n]       # the sensor's list is ranked, best first
+    bm = BEST_METHOD.get(sensor, {})              # one method per detector: its best matcher and variant
+    dets = set(job['detectors'])
+    if not job.get('matchers'):
+        job['matchers'] = {d: [m] for d, m in bm.get('matchers', {}).items() if d in dets}
+    if not job.get('detector_params'):
+        job['detector_params'] = {d: v for d, v in bm.get('detector_params', {}).items() if d in dets}
     job['cross_top_n'] = min(n, len(job['detectors'])) if job['detectors'] else n
     job['cross_min_agree'] = max(1, min(k, job['cross_top_n']))
     job.update(input_path=input_path, reference_dir=reference_dir, output_dir=output_dir)

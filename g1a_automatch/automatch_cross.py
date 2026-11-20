@@ -152,10 +152,11 @@ def pick_top(cfgs: List[Dict], top_n: int, cell_m: float, tol_m: float,
         ranked = [c for _, c in sorted(zip(sc, cfgs), key=lambda s: -s[0])]
         how = 'agreement with the other configurations'
     top, seen = [], set()
-    for c in ranked:
-        if c['detector'] in seen:
+    for c in ranked:                       # one per detector family: disk_depth and disk_epipolar are one
+        fam = re.sub(r'^(disk|dog|dedode)_.*$', r'\1', re.sub(r'[-_](kt0p2|fm1|fsp1).*$', '', str(c['detector'])))
+        if fam in seen:
             continue
-        seen.add(c['detector'])
+        seen.add(fam)
         top.append(c)
         if len(top) >= top_n:
             break
