@@ -219,6 +219,27 @@ check("three product folders, one results folder: each product's meta found",
       (3, "LISS4", "AWiFS", "HS"))
 check("';'-separated folders too", len(C.product_folders(f"{pa};{pb};")), 2)
 
+# ── two sources of CSVs: manual (RIVAL) and auto (matcher job folders) ─────
+man6, auto6 = tempfile.mkdtemp(), tempfile.mkdtemp()
+write(os.path.join(man6, "266697511_rival_band2.csv"), old)
+job = os.path.join(auto6, "jobs", "266697511_ITD_A_1")
+os.makedirs(job)
+write(os.path.join(job, "RIVAL_FINAL_band2.csv"), new)
+write(os.path.join(job, "RIVAL_BEST_FINAL_band2.csv"), new)
+write(os.path.join(job, "RIVAL_FINAL_band2_detail.csv"), new)
+sj = os.path.join(auto6, SP)
+os.makedirs(sj)
+write(os.path.join(sj, "RIVAL_FINAL_band6.csv"), new)
+out6 = os.path.join(man6, "all.csv")
+n6 = C.consolidate({"manual": man6, "auto": auto6}, [pa, pb, pc], out6, lambda *a: None)
+r6 = sorted((r["source"], r["product_id"], r["band"], r["result_set"], r["sensor"])
+            for r in csv.DictReader(open(out6, encoding="utf-8-sig")))
+check("manual and auto in one table; auto product from its job folder; sets kept apart",
+      (n6, r6), (4, sorted([("manual", "266697511", "2", "", "LISS4"),
+                            ("auto", "266697511", "2", "RIVAL_FINAL", "LISS4"),
+                            ("auto", "266697511", "2", "RIVAL_BEST_FINAL", "LISS4"),
+                            ("auto", SP, "6", "RIVAL_FINAL", "HS")])))
+
 if failures:
     print(f"{len(failures)} FAILURE(S)")
     for x in failures:

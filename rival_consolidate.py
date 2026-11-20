@@ -83,7 +83,7 @@ PICK_COLUMNS = {
 
 OUT_COLUMNS = [
     "product_id", "request_id", "product_no", "band", "sensor", "date", "session_id",
-    "strip_id", "prod_code", "product_kind",
+    "strip_id", "prod_code", "product_kind", "source", "result_set",
     "centre_lat", "centre_lon", "n_points",
     "mean_dx", "mean_dy", "std_dx", "std_dy", "rmse_dx", "rmse_dy",
     "mean_radial", "rmse_radial", "max_radial", "ce90", "axis_ratio",
@@ -381,38 +381,62 @@ def parse_meta_xml(path):
     return out
 
 
-def find_results(folder, meta_xml=None):
-    """Every results CSV under folder (recursively), keyed by (product id, band).
+def _ids_for(name, meta_xml):
+    """(ids, kind) for a file or folder name, or (None, None)."""
+    ids = product_id_of(name if name.lower().endswith(".csv") else name + ".csv")
+    if ids:
+        return ids, "regular"
+    if meta_xml:
+        stem = results_stem(name)
+        if stem.lower() in meta_xml:
+            return (stem, "", ""), "special"
+    return None, None
+
+
+def find_results(folder, meta_xml=None, source="manual"):
+    """Every results CSV under folder (recursively), keyed by
+    (source, product id, band, result set).
 
     Values are ((product_id, request_id, product_no), path, kind). kind is
     'regular' for a 26<reqid><prodno>1 name, 'special' for a name whose scene
-    has a *_META.xml in meta_xml (index_meta_xml); any other CSV is ignored.
+    has a *_META.xml in meta_xml (index_meta_xml).
 
-    Each band of a product is its own result (RIVAL writes X_rival_band6.csv per
-    band marked on). When one product and band has several CSVs -- written by different RIVAL versions --
-    the most recently modified wins, and the others are reported.
+    The product is read from the CSV's name (RIVAL: X_rival_band6.csv) or,
+    failing that, from the nearest folder above it named after a product --
+    the automatic matcher writes RIVAL_FINAL_band6.csv into a job folder
+    named after the scene. Its several sets (FINAL, BEST_FINAL, DENSE ...)
+    are kept apart as the result set. When one key has several CSVs the
+    newest wins and the others are reported.
     """
     found, dupes = {}, []
     for root, _dirs, files in os.walk(folder):
         for f in files:
-            ids, kind = product_id_of(f), "regular"
+            low = f.lower()
+            if not low.endswith(".csv") or SKIP_TOKEN in low or low.endswith("_detail.csv"):
+                continue
+            ids, kind = _ids_for(f, meta_xml)
             if not ids:
-                if (not f.lower().endswith(".csv") or SKIP_TOKEN in f.lower()
-                        or not meta_xml):
-                    continue
-                stem = results_stem(f)
-                if stem.lower() not in meta_xml:
-                    continue
-                ids, kind = (stem, "", ""), "special"
+                rel = os.path.relpath(root, folder)
+                parts = [] if rel == "." else rel.split(os.sep)
+                for part in reversed(parts):
+                    ids, kind = _ids_for(part, meta_xml)
+                    if ids:
+                        break
+            if not ids:
+                continue
             path = os.path.join(root, f)
-            pid = (ids[0], band_of(f))
-            if pid in found:
-                keep, drop = sorted([found[pid][1], path], key=os.path.getmtime,
+            stem = os.path.splitext(f)[0]
+            rset = ""
+            if not product_id_of(f) and not results_stem(f).lower() in (meta_xml or {}):
+                rset = re.sub(r"_band[\d-]+", "", stem, flags=re.IGNORECASE)
+            key = (source, ids[0], band_of(f), rset)
+            if key in found:
+                keep, drop = sorted([found[key][1], path], key=os.path.getmtime,
                                     reverse=True)
-                dupes.append((pid, drop))
-                found[pid] = (ids, keep, kind)
+                dupes.append((key, drop))
+                found[key] = (ids, keep, kind)
             else:
-                found[pid] = (ids, path, kind)
+                found[key] = (ids, path, kind)
     return found, dupes
 
 
@@ -436,7 +460,9 @@ def consolidate(results_folder, products_folder, out_csv, log=print):
     xml_index = {}
     for f in reversed(folders):                 # the first folder wins a clash
         xml_index.update(index_meta_xml(f))
-    return _consolidate(results_folder, folders, xml_index, out_csv, log)
+    sources = (results_folder if isinstance(results_folder, dict)
+               else {"manual": results_folder})
+    return _consolidate(sources, folders, xml_index, out_csv, log)
 
 
 def _band_meta_path(folders, pid):
@@ -447,18 +473,24 @@ def _band_meta_path(folders, pid):
     return os.path.join(folders[0], pid, BAND_META_NAME) if folders else ""
 
 
-def _consolidate(results_folder, folders, xml_index, out_csv, log=print):
+def _consolidate(sources, folders, xml_index, out_csv, log=print):
     """Build the table. Returns the number of products written."""
-    found, dupes = find_results(results_folder, xml_index)
+    found, dupes = {}, []
+    for src_name, folder in sources.items():
+        if folder and os.path.isdir(folder):
+            f_, d_ = find_results(folder, xml_index, src_name)
+            found.update(f_)
+            dupes += d_
+    results_folder = ", ".join(f"{k}: {v}" for k, v in sources.items() if v)
     for pid, drop in dupes:
-        log(f"[DUP] {pid[0]} band {pid[1] or '-'}: also {drop} -- the newer file is used")
+        log(f"[DUP] {pid[0]} {pid[1]} band {pid[2] or '-'}: also {drop} -- the newer file is used")
     if not found:
         log(f"[WARN] no 26<reqid><prodno>1*.csv, nor a CSV named after a "
             f"*{META_XML_SUFFIX} product, under {results_folder}")
     rows = []
     for key in sorted(found):
         (pid, req, prodno), path, kind = found[key]
-        band = key[1]
+        source, band, rset = key[0], key[2], key[3]
         with open(path, newline="", encoding="utf-8-sig") as f:
             errs, lonlats, frame = pick_errors(csv.DictReader(f))
         st = error_summary(errs)
@@ -487,6 +519,7 @@ def _consolidate(results_folder, folders, xml_index, out_csv, log=print):
         row = {
             "product_id": pid, "request_id": req, "product_no": prodno,
             "band": band, "product_kind": kind,
+            "source": source, "result_set": rset,
             "date": anc["date"], "session_id": anc["session_id"],
             "strip_id": anc["strip_id"], "sensor": anc["sensor"],
             "prod_code": anc.get("prod_code"),
@@ -554,34 +587,35 @@ def run_gui():
         grid.addWidget(btn, r, 2)
         fields[key] = edit
 
-    row(0, "Results folder (RIVAL CSVs):", "results")
-    row(1, "Product folder 1 (<id>/BAND_META.txt, *_META.xml):", "products")
-    row(2, "Product folder 2 (optional):", "products2")
-    row(3, "Product folder 3 (optional):", "products3")
-    row(4, "Consolidated CSV:", "out", pick_file=True)
+    row(0, "Manual results (RIVAL CSVs):", "results")
+    row(1, "Auto results (matcher job folders, optional):", "auto")
+    row(2, "Product folder 1 (<id>/BAND_META.txt, *_META.xml):", "products")
+    row(3, "Product folder 2 (optional):", "products2")
+    row(4, "Product folder 3 (optional):", "products3")
+    row(5, "Consolidated CSV:", "out", pick_file=True)
     log_box = QPlainTextEdit()
     log_box.setReadOnly(True)
-    grid.addWidget(log_box, 6, 0, 1, 3)
+    grid.addWidget(log_box, 7, 0, 1, 3)
 
     def log(msg):
         log_box.appendPlainText(msg)
         QApplication.processEvents()
 
     def go():
-        keys = ("results", "products", "products2", "products3", "out")
-        res, p1, p2, p3, out = (fields[k].text().strip() for k in keys)
+        keys = ("results", "products", "products2", "products3", "out", "auto")
+        res, p1, p2, p3, out, auto = (fields[k].text().strip() for k in keys)
         for k in keys:
             settings.setValue(k, fields[k].text().strip())
         prods = product_folders([p1, p2, p3])
-        if not (os.path.isdir(res) and prods and out):
+        if not ((os.path.isdir(res) or os.path.isdir(auto)) and prods and out):
             QMessageBox.warning(win, "Consolidate",
-                                "Choose the results folder, at least one input "
-                                "product folder and the output CSV.")
+                                "Choose a manual and/or an auto results folder, at "
+                                "least one input product folder and the output CSV.")
             return
         log_box.clear()
         log(f"[INFO] product folders: {', '.join(prods)}")
         try:
-            n = consolidate(res, prods, out, log)
+            n = consolidate({"manual": res, "auto": auto}, prods, out, log)
         except Exception as e:
             QMessageBox.critical(win, "Consolidate", f"Failed:\n{e}")
             return
@@ -589,7 +623,7 @@ def run_gui():
 
     run = QPushButton("Consolidate")
     run.clicked.connect(go)
-    grid.addWidget(run, 5, 0, 1, 3)
+    grid.addWidget(run, 6, 0, 1, 3)
     win.resize(820, 480)
     win.show()
     if own_app:
@@ -601,11 +635,12 @@ if __name__ == "__main__":
     if "--results" in sys.argv:
         import argparse
         ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-        ap.add_argument("--results", required=True)
+        ap.add_argument("--results", required=True, help="manual RIVAL CSVs")
+        ap.add_argument("--auto", default="", help="automatic matcher results")
         ap.add_argument("--products", required=True, nargs="+",
                         help="one or more input product folders")
         ap.add_argument("--out", required=True)
         a = ap.parse_args()
-        consolidate(a.results, a.products, a.out)
+        consolidate({"manual": a.results, "auto": a.auto}, a.products, a.out)
     else:
         run_gui()
