@@ -242,7 +242,8 @@ def filter_job(job_dir: str, overrides: Optional[Dict] = None, classes=None, dil
             xr = X.run(job_dir, int(c.get('top_n', 5)), int(c.get('min_agree', 0)), float(c.get('cell_km', 25.0)),
                        truth_csv=truth_csv, working_crs=crs, quiet=True, out_dir=out,
                        max_points=X._job_max_points(job_dir),
-                       ranking_csv=os.path.join(out, 'TRUTH_RANKING.csv'))
+                       ranking_csv=os.path.join(out, 'TRUTH_RANKING.csv'),
+                       final_points=c.get('final_points'), cell_px=c.get('cell_px'))
             for ch, r in xr.items():
                 row[f'cross_{ch}_points'] = r.get('points')
                 if r.get('truth_rmse_m') is not None:
@@ -317,6 +318,10 @@ def main(argv: Optional[List[str]] = None, kinds=('cloud',)) -> int:
     ap.add_argument('--top', type=int, default=5, help='cross-check: configurations compared (0: off)')
     ap.add_argument('--min-agree', type=int, default=3, help='cross-check: how many must agree')
     ap.add_argument('--cell-km', type=float, default=25.0)
+    ap.add_argument('--cell-px', type=int, nargs='+', default=None,
+                    help="agreement levels in pixels (consistent points, final picks; default the job's, else 64 128)")
+    ap.add_argument('--final-points', type=int, default=None,
+                    help="refined points over the scene (default the job's, else 24)")
     if 'interior' in kinds:
         ap.add_argument('--no-cloud', action='store_true', help='only the interior filter')
         ap.add_argument('--no-interior', action='store_true', help='only the cloud filter')
@@ -339,7 +344,8 @@ def main(argv: Optional[List[str]] = None, kinds=('cloud',)) -> int:
         over['cloud_device'] = J.use_gpu(a.device)
     io = {'edge_px': a.edge_px} if getattr(a, 'edge_px', None) is not None else None
     batch(a.folder, a.jobs, overrides=over, classes=a.classes, dilate_px=a.dilate,
-          cross={'top_n': a.top, 'min_agree': a.min_agree, 'cell_km': a.cell_km}, kinds=kinds,
+          cross={'top_n': a.top, 'min_agree': a.min_agree, 'cell_km': a.cell_km, 'cell_px': a.cell_px,
+                 'final_points': a.final_points}, kinds=kinds,
           interior_opts=io)
     return 0
 

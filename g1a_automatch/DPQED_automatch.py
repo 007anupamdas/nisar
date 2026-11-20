@@ -818,10 +818,20 @@ class PackDialog(QtWidgets.QDialog):
         lay.addLayout(f)
         bb = _DBB(BTN_OK | BTN_CANCEL)
         bb.button(BTN_OK).setText('Pack')
+        self.queued = False
+        self.btn_queue = bb.addButton('Add to pack queue', _DBB.ButtonRole.ActionRole
+                                      if QT_API != 'PyQt5' else _DBB.ActionRole)
+        self.btn_queue.setToolTip('Keep this pack (the job as it is now, with these settings) in the pack queue; '
+                                  'load the next scene and add it too, then Run the pack queue')
+        self.btn_queue.clicked.connect(self._queue_accept)
         bb.accepted.connect(self._accept)
         bb.rejected.connect(self.reject)
         lay.addWidget(bb)
         self.local.edit.textChanged.connect(self._suggest_server)
+
+    def _queue_accept(self):
+        self.queued = True
+        self._accept()
 
     def _suggest_server(self, text):
         """V:\\X\\Y -> /maintenance/X/Y with the share mapping."""
@@ -1192,6 +1202,28 @@ class FilterDialog(QtWidgets.QDialog):
         self.edge.setSuffix(' px')
         self.edge.setToolTip('A match is inside when no textured pixel lies within this distance (input pixels)')
         f.addRow('Edge distance', self.edge)
+        # the cross-check on the filtered matches: consistent points, final picks, RIVAL files
+        self.top = QtWidgets.QSpinBox()
+        self.top.setRange(2, 40)
+        self.top.setValue(int(settings.value('filter_top', 5) or 5))
+        self.agree = QtWidgets.QSpinBox()
+        self.agree.setRange(1, 40)
+        self.agree.setValue(int(settings.value('filter_agree', 3) or 3))
+        self.cell_px = QtWidgets.QLineEdit(settings.value('filter_cell_px', '64, 128') or '64, 128')
+        self.cell_px.setMaximumWidth(90)
+        self.cell_px.setToolTip('Agreement levels (px): consistent points where the top detectors agree in cells '
+                                'of this size, and a final pick from each level')
+        self.final_points = QtWidgets.QSpinBox()
+        self.final_points.setRange(0, 1000)
+        self.final_points.setValue(int(settings.value('filter_final_points', 24) or 24))
+        self.final_points.setToolTip('Refined points over the scene (one per sub-tile); 0: none')
+        row2 = QtWidgets.QHBoxLayout()
+        for label, wid in (('top', self.top), ('agreeing', self.agree), ('cells', self.cell_px),
+                           ('refined points', self.final_points)):
+            row2.addWidget(QtWidgets.QLabel(label))
+            row2.addWidget(wid)
+        row2.addStretch(1)
+        f.addRow('Consistent points', row2)
         bb = QtWidgets.QDialogButtonBox()
         bb.addButton('Filter', QtWidgets.QDialogButtonBox.ButtonRole.AcceptRole
                      if QT_API != 'PyQt5' else QtWidgets.QDialogButtonBox.AcceptRole)
@@ -1210,12 +1242,26 @@ class FilterDialog(QtWidgets.QDialog):
             return
         self.settings.setValue('filter_folder', self.folder.text().strip())
         self.settings.setValue('filter_jobs', self.jobs.text().strip())
+        try:
+            import automatch_cross as X
+            X.cell_levels(self.cell_px.text())
+        except ValueError:
+            QtWidgets.QMessageBox.warning(self, 'Filter', 'Agreement cells: numbers in pixels, e.g. 64, 128')
+            return
+        for key, v in (('filter_top', self.top.value()), ('filter_agree', self.agree.value()),
+                       ('filter_cell_px', self.cell_px.text()), ('filter_final_points', self.final_points.value())):
+            self.settings.setValue(key, v)
         self.settings.setValue('pack/share_local', self.share_local.text().strip())
         self.settings.setValue('pack/share_server', self.share_server.text().strip())
         self.accept()
 
     def args(self):
-        a = ['filter', self.folder.text().strip(), '--edge-px', f'{self.edge.value():g}']
+        import automatch_cross as X
+        a = ['filter', self.folder.text().strip(), '--edge-px', f'{self.edge.value():g}',
+             '--top', str(self.top.value()), '--min-agree', str(self.agree.value()),
+             '--final-points', str(self.final_points.value())]
+        lv = X.cell_levels(self.cell_px.text())
+        a += ['--cell-px'] + [str(v) for v in (lv or [0])]
         if self.jobs.text().strip():
             a += ['--jobs', self.jobs.text().strip()]
         if not self.cloud.isChecked():
@@ -2906,6 +2952,29 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.btn_queue_back.setVisible(False)
         row.addWidget(self.btn_queue_back)
         f.addRow(row)
+        # queued packs for the GPU server (Pack for server… -> Add to pack queue)
+        self.pack_queue_list = QtWidgets.QListWidget()
+        self.pack_queue_list.setMaximumHeight(90)
+        self.pack_queue_list.setToolTip('Packs waiting, top first: each keeps its job and pack settings as they '
+                                        'were when added')
+        f.addRow('Queued packs', self.pack_queue_list)
+        prow = QtWidgets.QHBoxLayout()
+        self.btn_pack_queue = QtWidgets.QPushButton('Run the pack queue')
+        self.btn_pack_queue.setToolTip('Pack the queued scenes one after another (Stop pauses it)')
+        self.btn_pack_queue.clicked.connect(self._pack_queue_start)
+        prow.addWidget(self.btn_pack_queue)
+        prow.addStretch(1)
+        for label, slot in (('Up', self._pack_queue_up), ('Remove', self._pack_queue_remove)):
+            b = QtWidgets.QPushButton(label)
+            b.clicked.connect(slot)
+            prow.addWidget(b)
+        f.addRow(prow)
+        try:
+            self._pack_queue = json.loads(self.settings.value('pack_queue') or '[]')
+        except (TypeError, ValueError):
+            self._pack_queue = []
+        self._pack_queue_on = False
+        self._pack_queue_changed()
 
     # ── job <-> widgets ──────────────────────────────────────────────────────
     def set_job(self, job):
@@ -3372,6 +3441,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             self._running_output = ''
         if self._queue:
             QtCore.QTimer.singleShot(0, lambda: self._start(*self._queue.pop(0)))
+        QtCore.QTimer.singleShot(0, self._pack_next)
         QtCore.QTimer.singleShot(0, self._maybe_start_queued)
         self.btn_run.setEnabled(True)
         self.btn_preflight.setEnabled(True)
@@ -3803,22 +3873,87 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, 'Pack', str(e))
             return None
         dlg = PackDialog(self.settings, job, self)
-        dlg.accepted.connect(lambda: self._start_pack(dlg))
+        dlg.accepted.connect(lambda: self._queue_pack(dlg) if dlg.queued else self._start_pack(dlg))
         if run:
             dlg.exec() if hasattr(dlg, 'exec') else dlg.exec_()
         return dlg
 
     def _start_pack(self, dlg):
         args, job = dlg.args()
+        return self._start_pack_item(args, job, dlg.local.text(), dlg.dry.isChecked())
+
+    def _start_pack_item(self, args, job, dest, dry):
         fd, path = tempfile.mkstemp(prefix='automatch_pack_', suffix='.json')
         with os.fdopen(fd, 'w', encoding='utf-8') as f:
             json.dump(job, f, indent=2)
         self._pack_job_file = path
-        self._pack_dest = dlg.local.text()
-        self._pack_dry = dlg.dry.isChecked()
+        self._pack_dest = dest
+        self._pack_dry = dry
         self._pack_lines = []
         self.log.appendPlainText(f'--- pack to {self._pack_dest}')
-        self._start(['pack', path] + args, 'pack')
+        return self._start(['pack', path] + args, 'pack')
+
+    # ── the pack queue: packs one after another ──────────────────────────────
+    def _queue_pack(self, dlg):
+        args, job = dlg.args()
+        dest = dlg.local.text()
+        if any(os.path.normcase(os.path.normpath(e['dest'])) == os.path.normcase(os.path.normpath(dest))
+               for e in self._pack_queue):
+            QtWidgets.QMessageBox.warning(self, 'Pack queue', f'{dest} is already the folder of a queued pack: '
+                                                              'give each pack its own folder.')
+            return
+        self._pack_queue.append({'args': args, 'job': job, 'dest': dest, 'dry': dlg.dry.isChecked(),
+                                 'label': f"{os.path.basename(job.get('input_path') or '')} -> {dest}"})
+        self._pack_queue_changed()
+        self.lbl_status.setText(f'Pack queued ({len(self._pack_queue)} in the pack queue): Run the pack queue to '
+                                'start')
+
+    def _pack_queue_changed(self):
+        self.pack_queue_list.clear()
+        for e in self._pack_queue:
+            self.pack_queue_list.addItem(e['label'] + ('  (list only)' if e.get('dry') else ''))
+        try:
+            self.settings.setValue('pack_queue', json.dumps(self._pack_queue))
+        except (TypeError, ValueError):
+            pass
+
+    def _pack_queue_start(self):
+        if not self._pack_queue:
+            self.lbl_status.setText('The pack queue is empty: Pack for server… -> Add to pack queue')
+            return
+        self._pack_queue_on = True
+        self._pack_next()
+
+    def _pack_next(self):
+        """The next queued pack, when the pack queue runs and nothing else does."""
+        if not getattr(self, '_pack_queue_on', False):
+            return
+        if self.proc is not None and self.proc.state() != PROC_NOT_RUNNING:
+            return                                   # after what runs now (_finished calls again)
+        if not self._pack_queue:
+            self._pack_queue_on = False
+            self.log.appendPlainText('--- pack queue: all packed')
+            return
+        e = self._pack_queue.pop(0)
+        self._pack_queue_changed()
+        self.log.appendPlainText(f"--- pack queue: {e['label']} ({len(self._pack_queue)} more)")
+        if not self._start_pack_item(e['args'], e['job'], e['dest'], e.get('dry', False)):
+            self._pack_queue.insert(0, e)
+            self._pack_queue_changed()
+
+    def _pack_queue_up(self):
+        i = self.pack_queue_list.currentRow()
+        if 0 < i < len(self._pack_queue):
+            q = self._pack_queue
+            q[i - 1], q[i] = q[i], q[i - 1]
+            self._pack_queue_changed()
+            self.pack_queue_list.setCurrentRow(i - 1)
+
+    def _pack_queue_remove(self):
+        i = self.pack_queue_list.currentRow()
+        if 0 <= i < len(self._pack_queue):
+            del self._pack_queue[i]
+            self._pack_queue_changed()
 
     def _pack_finished(self, code):
         if getattr(self, '_pack_job_file', None):
@@ -4038,6 +4173,10 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         if self.proc_kind == 'run' and self._run_queue and self.queue_on.isChecked():
             self.queue_on.setChecked(False)
             self.log.appendPlainText(f'--- queue paused ({len(self._run_queue)} waiting): tick "Run the queue" '
+                                     f'to go on')
+        if self.proc_kind == 'pack' and getattr(self, '_pack_queue_on', False):
+            self._pack_queue_on = False
+            self.log.appendPlainText(f'--- pack queue paused ({len(self._pack_queue)} waiting): Run the pack queue '
                                      f'to go on')
         self.lbl_status.setText('Stopping … (the run and its GPU workers)')
         kill_tree(self.proc)

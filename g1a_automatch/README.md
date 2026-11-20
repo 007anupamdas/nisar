@@ -203,10 +203,20 @@ deviation above 3 x the image's noise). New jobs leave such matches out
 everywhere (`interior_filter`, on by default; `INTERIOR_MASK_<band>.tif`
 in the job folder). For finished jobs, workstation or server: Tools →
 **Filter points…**, or `python automatch_job.py filter <job | folder of jobs>
-[--jobs 1064-1069] [--no-cloud] [--no-interior] [--edge-px 4] --share-local V:\
---share-server /maintenance/` — cloud and interior masks, the job scored again
-into `<job>/FILTERED/` (ranking, cross-check, RIVAL_FINAL, REPORT,
-FILTERED_SUMMARY.csv; FILTERED_ALL.csv for a folder of jobs).
+[--jobs 1064-1069] [--no-cloud] [--no-interior] [--edge-px 4] [--top 5 --min-agree 3]
+[--cell-px 64 128] [--final-points 24] --share-local V:\ --share-server /maintenance/`
+— cloud and interior masks, the job scored again into `<job>/FILTERED/`
+(ranking, consistent points per agreement level, final and rigid picks, the
+product-named CSVs, REPORT, FILTERED_SUMMARY.csv; FILTERED_ALL.csv for a
+folder of jobs). The dialog has the same settings under *Consistent points*.
+Without filtering, `python automatch_cross.py <job> --cell-px 64 128
+--final-points 24` (or `<folder of jobs> --batch --jobs 1064-1080
+--recompute`) redoes only the consistent points and final picks.
+
+**Pack queue.** In *Pack for server…*, **Add to pack queue** keeps that pack
+(the job as it is, with the pack settings); load the next scene and add it
+too, then **Run the pack queue** (under *Queued packs*) packs them one after
+another. Stop pauses it; the queue is kept between sessions.
 
 **Final points.** `RIVAL_FINAL_<band>.csv` is now one point per sub-tile of
 a grid of `final_points` (24) tiles over the whole scene (the image's extent,

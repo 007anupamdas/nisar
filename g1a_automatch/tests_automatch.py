@@ -2232,6 +2232,35 @@ def test_gui_dialog():
               ('/maintenance/ICIGDev/GPUPOC/input/dqe/g1a/set9',
                '/maintenance/ICIGDev/GPUPOC/input/dqe/imw_runtime/imw_cache', '40000', False, True, True))
         pd_.close()
+        w._pack_queue = []
+        w._pack_queue_changed()
+        for set_ in ('set10', 'set11'):
+            pq = w.pack_dialog(run=False)
+            pq.local.setText('V:\\ICIGDev\\GPUPOC\\input\\dqe\\g1a\\' + set_)
+            pq._queue_accept()
+        started = []
+        orig_item = w._start_pack_item
+        w._start_pack_item = lambda args, job, dest, dry: started.append(dest) or True
+        try:
+            w._pack_queue_start()                 # the first one
+            w._pack_next()                        # as _finished does after it
+            w._pack_next()                        # queue empty: done
+        finally:
+            w._start_pack_item = orig_item
+        check('gui pack queue: packs queued with their settings, run one after another, the queue kept',
+              ([d.replace('\\', '/').rsplit('/', 1)[-1] for d in started], w._pack_queue, w._pack_queue_on,
+               json.loads(w.settings.value('pack_queue'))),
+              (['set10', 'set11'], [], False, []))
+        fd_ = G.FilterDialog(w.settings, w)
+        fd_.folder.setText(tempfile.gettempdir())
+        fd_.cell_px.setText('64')
+        fd_.final_points.setValue(30)
+        fa = fd_.args()
+        check('gui filter: the consistent-points settings go to the filter (levels, refined points, top / agree)',
+              (fa[fa.index('--cell-px') + 1], fa[fa.index('--final-points') + 1], fa[fa.index('--top') + 1]),
+              ('64', '30', '5'))
+        fd_.close()
+        pd_.close()
         w._show_truth({'event': 'truth', 'n_truth': 3, 'files': {}, 'top': [
             {'rank': 1, 'channel': 'band1', 'detector': 'sift', 'matcher_family': 'lgm',
              'best_matcher_setting': 'lgm', 'ransac': 'magsac2', 'truth_rmse_m': 12.5,
