@@ -1,0 +1,831 @@
+#!/usr/bin/env python3
+"""
+Streaming reader for NISAR HDF5 products (GSLC / GCOV / RSLC).
+
+Why this exists
+---------------
+ASF publishes NISAR L2 products as a single HDF5 file and nothing else -- there
+is no COG. The GSLC granule that prompted this is 22 GB. Downloading that to
+look at one corner reflector is absurd, so this reads the file the way a COG is
+read: over HTTP range requests, pulling only the HDF5 chunks that intersect the
+window you asked for.
+
+h5py can open any seekable file-like object, so the whole trick is supplying one
+backed by `Range:` requests with a block cache. HDF5's own chunked layout does
+the rest.
+
+s3:// URLs
+----------
+CMR advertises a direct-access s3:// link for every granule. It works only from
+inside AWS us-west-2 -- ASF issues in-region-only credentials, and says so in
+its own s3credentialsREADME. Passed an s3:// URL, this module uses direct S3
+when it detects it is in-region, and otherwise resolves to the HTTPS URL for the
+same object (verified with a HEAD) so the read still works from a laptop or an
+on-prem box.
+
+Credentials
+-----------
+ASF gates the data GET behind Earthdata Login. This reads them from the places
+they already live and NEVER takes them on a command line, where they would end
+up in your shell history and in the process table:
+
+  1. $EARTHDATA_TOKEN  -- an Earthdata Login bearer token (preferred: scoped,
+                          revocable, and not your password)
+  2. ~/.netrc          -- the standard NASA/ASF mechanism:
+                             machine urs.earthdata.nasa.gov
+                               login YOUR_USERNAME
+                               password YOUR_PASSWORD
+                          chmod 600 it.
+
+Get a token at https://urs.earthdata.nasa.gov/profile -> Generate Token.
+
+Nothing here logs, echoes or persists a credential.
+"""
+
+from __future__ import annotations
+
+import io
+import math
+import netrc
+import os
+import re
+import time
+import threading
+from collections import OrderedDict
+from typing import Dict, List, Optional, Tuple
+from urllib.parse import urlparse
+
+import numpy as np
+
+URS_HOST = "urs.earthdata.nasa.gov"
+
+# Corporate TLS-inspecting proxies (Cisco WSA, Zscaler, Blue Coat) re-sign every
+# connection, so the system trust store is useless and the proxy's own CA has to
+# be trusted explicitly. Different libraries read different variables, and a
+# machine that has one set usually means all of them, so resolve once here and
+# hand the answer to both requests and GDAL.
+CA_BUNDLE_VARS = ("GDAL_HTTP_CAINFO", "CURL_CA_BUNDLE",
+                  "REQUESTS_CA_BUNDLE", "SSL_CERT_FILE")
+
+
+def ca_bundle_source() -> Tuple[Optional[str], Optional[str]]:
+    """(variable, path) of the CA bundle to use, highest priority first.
+
+    Several of these are often set at once and can disagree, so the variable
+    name travels with the path -- an error that names only a file leaves you
+    guessing which line of your shell profile produced it.
+    """
+    for var in CA_BUNDLE_VARS:
+        path = os.environ.get(var)
+        if path and os.path.exists(path):
+            return var, path
+    return None, None
+
+
+def ca_bundle() -> Optional[str]:
+    """The CA bundle this environment wants used, if any is configured."""
+    return ca_bundle_source()[1]
+
+
+def check_ca_bundle(path: str) -> Optional[str]:
+    """Return a human-readable reason `path` is unusable as a CA bundle.
+
+    Two traps, both of which surface as the same unhelpful message,
+    'unable to get local issuer certificate':
+
+    1. A DER-encoded .crt. OpenSSL only loads PEM into a bundle and ignores DER
+       silently, leaving verification to fall back to the system store.
+    2. A bundle holding only the proxy's own CA. These variables REPLACE the
+       trust store rather than adding to it, so every host the proxy does not
+       intercept presents a real certificate that now chains to nothing.
+    """
+    try:
+        with open(path, "rb") as fh:
+            blob = fh.read(16 << 20)
+    except OSError as exc:
+        return f"cannot read it ({exc.strerror})"
+    if not blob:
+        return "the file is empty"
+
+    # Search the whole file: a real bundle often opens with comment lines, so
+    # inspecting only the first few bytes misreads valid PEM as DER.
+    n_certs = blob.count(b"-----BEGIN CERTIFICATE-----")
+    if n_certs == 0:
+        hint = " (probably DER-encoded)" if blob[:1] == b"\x30" else ""
+        return (f"it contains no PEM certificate{hint}. Convert it:\n"
+                f"      openssl x509 -inform DER -in {path} -out ca.pem")
+
+    try:
+        import ssl
+        ssl.create_default_context(cafile=path)
+    except Exception as exc:
+        return f"OpenSSL rejected it: {exc}"
+
+    # A public trust store carries ~100+ roots; a handful means proxy-CA-only.
+    if n_certs < 5:
+        return (
+            f"it holds only {n_certs} certificate"
+            f"{'' if n_certs == 1 else 's'}, so it has REPLACED the public "
+            "trust store\n"
+            "      rather than added to it. Hosts the proxy does NOT intercept "
+            "present their\n"
+            "      real certificates, which now chain to nothing. Concatenate "
+            "it with the\n"
+            "      public roots instead:\n"
+            "        cat \"$(python -c 'import certifi;print(certifi.where())')\" "
+            f"\"{path}\" > ~/ca-combined.pem\n"
+            "        export SSL_CERT_FILE=~/ca-combined.pem "
+            "REQUESTS_CA_BUNDLE=~/ca-combined.pem \\\n"
+            "               CURL_CA_BUNDLE=~/ca-combined.pem "
+            "GDAL_HTTP_CAINFO=~/ca-combined.pem")
+    return None
+
+
+# =============================================================================
+# Authenticated, seekable HTTP file object
+# =============================================================================
+class _EarthdataSession:
+    """requests.Session that keeps Basic auth across the URS redirect chain.
+
+    Earthdata bounces a data GET through urs.earthdata.nasa.gov and back out to
+    a signed CloudFront URL. requests drops the Authorization header on a
+    cross-host redirect (rightly), which breaks that dance, so we re-attach it
+    for the URS host only -- and never for the signed CDN URL, which must not
+    see your credentials.
+    """
+
+    def __new__(cls, token: Optional[str], basic: Optional[Tuple[str, str]]):
+        import requests
+
+        class Session(requests.Session):
+            def rebuild_auth(self, prepared_request, response):
+                headers = prepared_request.headers
+                orig = urlparse(response.request.url).hostname
+                dest = urlparse(prepared_request.url).hostname
+                if "Authorization" in headers and orig != dest:
+                    if URS_HOST not in (orig, dest):
+                        del headers["Authorization"]
+
+        s = Session()
+        s.trust_env = True
+        if token:
+            s.headers["Authorization"] = f"Bearer {token}"
+        elif basic:
+            s.auth = basic
+        return s
+
+
+def _find_credentials(url: str, allow_netrc: bool = True
+                      ) -> Tuple[Optional[str], Optional[Tuple[str, str]]]:
+    """Locate an Earthdata credential without ever surfacing its value."""
+    token = os.environ.get("EARTHDATA_TOKEN") or os.environ.get("EDL_TOKEN")
+    if token:
+        return token.strip(), None
+    if allow_netrc:
+        for path in (os.environ.get("NETRC"), os.path.expanduser("~/.netrc"),
+                     os.path.expanduser("~/_netrc")):
+            if not path or not os.path.exists(path):
+                continue
+            try:
+                auth = netrc.netrc(path).authenticators(URS_HOST)
+            except Exception:
+                continue
+            if auth and auth[0] and auth[2]:
+                return None, (auth[0], auth[2])
+    return None, None
+
+
+class _BlockCachedFile(io.RawIOBase):
+    """Seekable file-like object with an LRU block cache over ranged reads.
+
+    HDF5 issues many small, scattered metadata reads. Serving them from cached
+    blocks collapses those into a handful of round trips, which is the whole
+    reason streaming a 22 GB file is practical. Subclasses supply the transport
+    by implementing `_fetch_range`.
+    """
+
+    block = 1 << 20
+    max_blocks = 512
+
+    def _init_cache(self):
+        self._lock = threading.Lock()
+        self._cache: "OrderedDict[int, bytes]" = OrderedDict()
+        self.n_requests = 0
+        self.n_bytes = 0
+        self._pos = 0
+
+    def _fetch_range(self, lo: int, hi: int) -> bytes:
+        raise NotImplementedError
+
+    def _block_at(self, idx: int) -> bytes:
+        with self._lock:
+            hit = self._cache.get(idx)
+            if hit is not None:
+                self._cache.move_to_end(idx)
+                return hit
+        lo = idx * self.block
+        hi = min(lo + self.block, self.size) - 1
+        data = self._fetch_range(lo, hi)
+        with self._lock:
+            self._cache[idx] = data
+            self._cache.move_to_end(idx)
+            while len(self._cache) > self.max_blocks:
+                self._cache.popitem(last=False)
+            self.n_requests += 1
+            self.n_bytes += len(data)
+        return data
+
+    def readable(self) -> bool: return True
+    def seekable(self) -> bool: return True
+    def writable(self) -> bool: return False
+    def tell(self) -> int: return self._pos
+
+    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        if whence == io.SEEK_SET:
+            self._pos = offset
+        elif whence == io.SEEK_CUR:
+            self._pos += offset
+        else:
+            self._pos = self.size + offset
+        return self._pos
+
+    def readinto(self, buf) -> int:
+        n = min(len(buf), self.size - self._pos)
+        if n <= 0:
+            return 0
+        got = 0
+        while got < n:
+            idx = (self._pos + got) // self.block
+            blk = self._block_at(idx)
+            off = (self._pos + got) - idx * self.block
+            take = min(n - got, len(blk) - off)
+            if take <= 0:
+                break
+            buf[got:got + take] = blk[off:off + take]
+            got += take
+        self._pos += got
+        return got
+
+    @property
+    def stats(self) -> Dict:
+        return {"requests": self.n_requests, "bytes": self.n_bytes,
+                "file_size": self.size}
+
+
+class HttpRangeFile(_BlockCachedFile):
+    """Block-cached reads over HTTP `Range:` requests.
+
+    `stats` reports what it actually cost, which is the number worth watching
+    on a metered or slow link.
+    """
+
+    def __init__(self, url: str, block: int = 1 << 20, max_blocks: int = 512,
+                 timeout: int = 120, session=None):
+        import requests  # noqa: F401  (import here to keep the module optional)
+
+        self.url = url
+        self.block = int(block)
+        self.max_blocks = int(max_blocks)
+        self.timeout = timeout
+        self._init_cache()
+
+        if session is not None:
+            self.s = session
+        else:
+            token, basic = _find_credentials(url)
+            self.s = _EarthdataSession(token, basic)
+
+        bundle_var, bundle = ca_bundle_source()
+        if bundle:
+            # Set it explicitly rather than leaving it to trust_env, so the
+            # bundle actually used is the one the error message names.
+            self.s.verify = bundle
+        try:
+            r = self.s.head(url, allow_redirects=True, timeout=timeout)
+        except Exception as exc:
+            raise OSError(_reach_hint(url, exc, bundle, bundle_var)) from None
+        if r.status_code in (401, 403):
+            raise PermissionError(_auth_hint(url, r.status_code))
+        r.raise_for_status()
+        length = r.headers.get("Content-Length")
+        if not length:
+            raise OSError(f"{url}: server did not report a Content-Length; "
+                          "cannot range-read it")
+        self.size = int(length)
+
+        # A server that ignores Range would silently return the whole 22 GB.
+        probe = self.s.get(url, headers={"Range": "bytes=0-1"},
+                           allow_redirects=True, timeout=timeout)
+        if probe.status_code in (401, 403):
+            raise PermissionError(_auth_hint(url, probe.status_code))
+        probe.raise_for_status()
+        if probe.status_code != 206 or len(probe.content) != 2:
+            raise OSError(
+                f"{url}: server does not honour Range requests "
+                f"(status {probe.status_code}, {len(probe.content)} bytes for a "
+                "2-byte request). Streaming this file is not possible; it would "
+                "have to be downloaded.")
+        self.n_requests += 1
+        self.n_bytes += len(probe.content)
+
+    def _fetch_range(self, lo: int, hi: int) -> bytes:
+        r = self.s.get(self.url, headers={"Range": f"bytes={lo}-{hi}"},
+                       allow_redirects=True, timeout=self.timeout)
+        if r.status_code in (401, 403):
+            raise PermissionError(_auth_hint(self.url, r.status_code))
+        r.raise_for_status()
+        return r.content
+
+
+def _reach_hint(url: str, exc: Exception, bundle: Optional[str],
+                bundle_var: Optional[str] = None) -> str:
+    """Explain a connection failure, with TLS spelled out separately.
+
+    Behind an inspecting proxy a certificate error is the norm rather than the
+    exception, and 'check your network' is useless advice for it.
+    """
+    msg = [f"cannot reach {url}", f"  {type(exc).__name__}: {exc}"]
+    if "SSL" in type(exc).__name__ or "CERTIFICATE_VERIFY_FAILED" in str(exc):
+        msg.append("")
+        msg.append("  TLS verification failed. Behind a corporate proxy that "
+                   "inspects HTTPS,")
+        msg.append("  its CA certificate has to be trusted explicitly:")
+        if bundle:
+            why = check_ca_bundle(bundle)
+            msg.append(f"    Using CA bundle: {bundle}"
+                       + (f"  (from ${bundle_var})" if bundle_var else ""))
+            others = [v for v in CA_BUNDLE_VARS
+                      if v != bundle_var and os.environ.get(v)
+                      and os.environ.get(v) != bundle]
+            if others:
+                msg.append("    Note: " + ", ".join(f"${v}" for v in others)
+                           + " point elsewhere -- make them agree.")
+            if why:
+                msg.append(f"    That file looks unusable -- {why}")
+            else:
+                msg.append("    The file parses as PEM and OpenSSL accepts it, "
+                           "so the chain itself")
+                msg.append("    is likely incomplete or the proxy CA has been "
+                           "rotated. Ask IT for")
+                msg.append("    the current CA (root AND any intermediates) and "
+                           "concatenate them.")
+        else:
+            msg.append("    No CA bundle is configured. Set one of "
+                       + ", ".join(CA_BUNDLE_VARS))
+            msg.append("    to the PEM file holding your proxy's CA "
+                       "certificate.")
+        msg.append("  Never disable verification to work around this.")
+    else:
+        msg.append("  Check the URL, your network, and any proxy settings "
+                   "(HTTPS_PROXY / NO_PROXY).")
+    return "\n".join(msg)
+
+
+def _auth_hint(url: str, code: int) -> str:
+    return (
+        f"Earthdata Login required for {url} (HTTP {code}).\n"
+        "This is expected: ASF gates NISAR data behind Earthdata Login.\n"
+        "Set one of these up on YOUR machine -- do not paste credentials into a\n"
+        "command line, a chat, or a shared terminal:\n"
+        "  1. A bearer token (preferred -- scoped and revocable):\n"
+        "       https://urs.earthdata.nasa.gov/profile -> Generate Token\n"
+        "       export EARTHDATA_TOKEN='...'\n"
+        "  2. Or ~/.netrc (the standard NASA/ASF mechanism):\n"
+        f"       machine {URS_HOST}\n"
+        "         login YOUR_USERNAME\n"
+        "         password YOUR_PASSWORD\n"
+        "       chmod 600 ~/.netrc\n"
+        "You must also have accepted the NISAR EULA once, by downloading any\n"
+        "granule through the Earthdata web UI while logged in."
+    )
+
+
+# =============================================================================
+# Earthdata S3 direct access
+# =============================================================================
+# ASF's own s3credentialsREADME is explicit about the catch:
+#
+#   "the credentials are only valid for in-region requests, so using them with
+#    your AWS CLI will not work! You must make your requests from an AWS service
+#    such as Lambda or EC2 in the same region as the source bucket"
+#
+# So an s3:// URL is the fast path from inside us-west-2 and useless outside it.
+# Rather than fail, we detect which situation we are in and fall back to the
+# HTTPS URL for the same object, which works from anywhere.
+S3_REGION = "us-west-2"
+
+# A private S3-compatible store (MinIO, Ceph, NRSC's own) is reached by giving
+# boto3 an endpoint and letting its normal credential chain apply. None of the
+# Earthdata machinery -- in-region checks, DAAC credential fetches, HTTPS
+# fallback -- applies there, so an endpoint switches all of it off.
+S3_ENDPOINT_VARS = ("COG_LOCATE_S3_ENDPOINT", "AWS_ENDPOINT_URL_S3",
+                    "AWS_ENDPOINT_URL", "AWS_S3_ENDPOINT")
+
+
+def s3_endpoint(explicit: Optional[str] = None) -> Optional[str]:
+    """The S3 endpoint to use, if this is a private store rather than AWS."""
+    if explicit:
+        return explicit
+    for var in S3_ENDPOINT_VARS:
+        val = os.environ.get(var)
+        if val:
+            # AWS_S3_ENDPOINT is conventionally bare host[:port]; the others are
+            # full URLs. Normalise so callers always get something openable.
+            return val if "://" in val else "https://" + val
+    return None
+
+# Bucket -> (HTTPS host, path prefix). ASF splits products and browse imagery
+# into sibling buckets that map onto sibling prefixes on the same host.
+ASF_S3_TO_HTTPS = {
+    "sds-n-cumulus-prod-nisar-products": ("nisar.asf.earthdatacloud.nasa.gov", "NISAR"),
+    "sds-n-cumulus-prod-nisar-browse": ("nisar.asf.earthdatacloud.nasa.gov", "BROWSE"),
+}
+
+
+def split_s3(uri: str) -> Tuple[str, str]:
+    rest = uri[len("s3://"):]
+    bucket, _, key = rest.partition("/")
+    return bucket, key
+
+
+def in_aws_region(region: str = S3_REGION, timeout: float = 0.4) -> bool:
+    """Are we running inside `region`? Checked via EC2 instance metadata.
+
+    Deliberately short-timeout: off EC2 there is nothing at 169.254.169.254 and
+    we do not want to stall the CLI waiting to find that out.
+    """
+    env = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+    if env:
+        return env.strip() == region
+    try:
+        import requests
+        tok = requests.put(
+            "http://169.254.169.254/latest/api/token",
+            headers={"X-aws-ec2-metadata-token-ttl-seconds": "60"},
+            timeout=timeout)
+        headers = ({"X-aws-ec2-metadata-token": tok.text}
+                   if tok.status_code == 200 else {})
+        r = requests.get("http://169.254.169.254/latest/meta-data/placement/region",
+                         headers=headers, timeout=timeout)
+        return r.status_code == 200 and r.text.strip() == region
+    except Exception:
+        return False
+
+
+def s3_to_https(uri: str, session=None, timeout: int = 60) -> Optional[str]:
+    """Map an Earthdata s3:// URL to its HTTPS equivalent, verified by a HEAD.
+
+    The mapping is a convention, not a guarantee, so the translation is checked
+    before it is handed back -- a wrong guess would otherwise surface much later
+    as a confusing 404.
+    """
+    bucket, key = split_s3(uri)
+    entry = ASF_S3_TO_HTTPS.get(bucket)
+    if not entry or not key:
+        return None
+    host, prefix = entry
+    url = f"https://{host}/{prefix}/{key}"
+    try:
+        import requests
+        s = session or requests.Session()
+        r = s.head(url, allow_redirects=True, timeout=timeout)
+        # 401/403 means it is there but gated -- the URL itself is right.
+        if r.status_code < 400 or r.status_code in (401, 403):
+            return url
+    except Exception:
+        return None
+    return None
+
+
+def _daac_s3_credentials(host: str, session, timeout: int = 60) -> Dict:
+    """Fetch 1-hour temporary S3 credentials from a DAAC /s3credentials endpoint."""
+    url = f"https://{host}/s3credentials"
+    r = session.get(url, allow_redirects=True, timeout=timeout)
+    if r.status_code in (401, 403):
+        raise PermissionError(_auth_hint(url, r.status_code))
+    r.raise_for_status()
+    creds = r.json()
+    missing = [k for k in ("accessKeyId", "secretAccessKey", "sessionToken")
+               if k not in creds]
+    if missing:
+        raise OSError(f"{url}: credential response missing {missing}")
+    return creds
+
+
+def _private_s3_client(endpoint_url: str, region: str, anon: bool = False,
+                       addressing: str = "path"):
+    """boto3 client for a private S3-compatible store.
+
+    Credentials come from boto3's normal chain, so a machine already set up for
+    `aws s3 cp` needs nothing extra. If that chain turns up empty we retry
+    unsigned rather than failing: a read-only store open to its network is a
+    real deployment, and boto3 refuses to even send a request without either
+    credentials or an explicit unsigned config.
+    """
+    import boto3
+    from botocore.client import Config
+    from botocore import UNSIGNED
+
+    def build(unsigned: bool):
+        cfg = Config(s3={"addressing_style": addressing},
+                     **({"signature_version": UNSIGNED} if unsigned else {}))
+        return boto3.client(
+            "s3", endpoint_url=endpoint_url,
+            region_name=os.environ.get("AWS_DEFAULT_REGION") or region,
+            config=cfg)
+
+    if anon:
+        return build(True)
+
+    from botocore.exceptions import NoCredentialsError
+    client = build(False)
+    try:
+        client.list_buckets()          # cheapest call that forces signing
+    except NoCredentialsError:
+        return build(True)
+    except Exception:
+        pass                           # reachable and signing; other errors
+    return client                      # (e.g. AccessDenied on ListBuckets) are
+                                       # not our business here
+
+
+class S3RangeFile(_BlockCachedFile):
+    """Block-cached ranged reads straight from S3, for in-region use.
+
+    Credentials last an hour, so they are refreshed on expiry rather than
+    fetched once -- a long session would otherwise die partway through.
+    """
+
+    def __init__(self, uri: str, block: int = 1 << 20, max_blocks: int = 512,
+                 region: str = S3_REGION, timeout: int = 120,
+                 endpoint_url: Optional[str] = None, anon: bool = False,
+                 addressing: str = "path"):
+        try:
+            import boto3  # noqa: F401
+        except ImportError as exc:
+            raise OSError(
+                "boto3 is required for s3:// direct access "
+                f"(pip install boto3). Import error: {exc}\n"
+                "  Or just use the https:// URL for the same object, which "
+                "works from anywhere.") from None
+
+        self.uri = uri
+        self.bucket, self.key = split_s3(uri)
+        self.block = int(block)
+        self.max_blocks = int(max_blocks)
+        self.region = region
+        self.timeout = timeout
+        self.endpoint_url = endpoint_url
+        self._init_cache()
+        self._client = None
+        self._expiry = float("inf")
+
+        if endpoint_url:
+            # Private store: boto3's own credential chain (env, ~/.aws/
+            # credentials, IAM role) and no expiry to manage.
+            self._client = _private_s3_client(endpoint_url, region,
+                                              anon=anon, addressing=addressing)
+        else:
+            # The DAAC that fronts this bucket also issues its credentials.
+            self._cred_host = ASF_S3_TO_HTTPS.get(
+                self.bucket, ("nisar.asf.earthdatacloud.nasa.gov",))[0]
+            token, basic = _find_credentials(uri)
+            self._edl = _EarthdataSession(token, basic)
+            self._expiry = 0.0
+            self._refresh()
+
+        try:
+            head = self._client.head_object(Bucket=self.bucket, Key=self.key)
+        except Exception as exc:
+            raise OSError(
+                f"cannot read s3://{self.bucket}/{self.key}\n"
+                f"  {type(exc).__name__}: {exc}\n"
+                + (f"  endpoint: {endpoint_url}\n"
+                   "  Check the bucket/key, the endpoint, and that credentials "
+                   "are available\n"
+                   "  (AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, ~/.aws/"
+                   "credentials, or an IAM role);\n"
+                   "  an unsigned read is tried automatically when none are "
+                   "found. If the store\n"
+                   "  uses virtual-hosted buckets, add --s3-addressing virtual."
+                   if endpoint_url else
+                   "  Earthdata S3 works only from inside AWS " + S3_REGION
+                   + ".")) from None
+        self.size = int(head["ContentLength"])
+
+    def _refresh(self):
+        import boto3
+        creds = _daac_s3_credentials(self._cred_host, self._edl, self.timeout)
+        self._client = boto3.client(
+            "s3", region_name=self.region,
+            aws_access_key_id=creds["accessKeyId"],
+            aws_secret_access_key=creds["secretAccessKey"],
+            aws_session_token=creds["sessionToken"])
+        # Renew a few minutes early rather than racing the expiry.
+        self._expiry = time.time() + 50 * 60
+
+    def _fetch_range(self, lo: int, hi: int) -> bytes:
+        if time.time() > self._expiry:
+            self._refresh()  # Earthdata only; a private endpoint never expires
+        r = self._client.get_object(Bucket=self.bucket, Key=self.key,
+                                    Range=f"bytes={lo}-{hi}")
+        return r["Body"].read()
+
+
+def resolve_uri(uri: str, verbose: bool = True,
+                endpoint: Optional[str] = None) -> Tuple[str, str]:
+    """Decide how to read `uri`. Returns (mode, resolved_uri).
+
+    mode is "s3" (direct), "http", or "local".
+    """
+    if not uri.startswith("s3://"):
+        return ("http" if uri.startswith(("http://", "https://")) else "local"), uri
+
+    # A configured endpoint means a private store, which has none of Earthdata's
+    # in-region restrictions -- read it directly from wherever we are.
+    if s3_endpoint(endpoint):
+        return "s3", uri
+
+    if in_aws_region():
+        return "s3", uri
+
+    https = s3_to_https(uri)
+    if https:
+        if verbose:
+            print("note: s3:// direct access only works from inside AWS "
+                  f"{S3_REGION} (ASF issues in-region-only credentials).\n"
+                  "      Falling back to the HTTPS URL for the same object:\n"
+                  f"      {https}")
+        return "http", https
+
+    raise SystemExit(
+        f"cannot read {uri}\n"
+        f"  Earthdata s3:// access needs to run inside AWS {S3_REGION} -- ASF's\n"
+        "  temporary credentials are in-region only, so this fails from a\n"
+        "  laptop, an on-prem box, or the AWS CLI anywhere else.\n"
+        "  No HTTPS equivalent could be derived for this bucket either.\n"
+        "  Use the https:// download URL instead -- `cog_locate.py find` and\n"
+        "  CMR both give it directly.")
+
+
+def open_h5(uri: str, block: int = 1 << 20, endpoint: Optional[str] = None,
+            anon: bool = False, addressing: str = "path"):
+    """Open a NISAR HDF5, local or remote. Returns (h5py.File, backing_or_None)."""
+    try:
+        import h5py
+    except ImportError as exc:
+        raise SystemExit(
+            "h5py is required to read NISAR HDF5 products.\n"
+            f"  pip install h5py        (import error: {exc})")
+
+    ep = s3_endpoint(endpoint)
+    mode, resolved = resolve_uri(uri, endpoint=endpoint)
+    if mode == "local":
+        return h5py.File(resolved, "r"), None
+
+    backing = (S3RangeFile(resolved, block=block, endpoint_url=ep,
+                          anon=anon, addressing=addressing)
+               if mode == "s3" else HttpRangeFile(resolved, block=block))
+    # A generous chunk cache pays for itself when neighbouring image chunks
+    # share HDF5 metadata blocks.
+    return h5py.File(backing, "r", rdcc_nbytes=128 * 1024 * 1024), backing
+
+
+# =============================================================================
+# NISAR product structure
+# =============================================================================
+# Products differ in where the imagery lives, but all follow
+# /science/<L|S>SAR/<PRODUCT>/grids|swaths/frequency<A|B>/<POL>.
+_GRID_RE = re.compile(
+    r"^/science/(?P<band>[LS]SAR)/(?P<product>[A-Z]+)/(?:grids|swaths)"
+    r"(?:/frequency(?P<freq>[AB]))?")
+
+POL_NAMES = ("HH", "HV", "VH", "VV", "RH", "RV",
+             "HHHH", "HVHV", "VHVH", "VVVV", "HHHV", "HHVV", "HVVV")
+
+
+def describe(h5) -> Dict:
+    """Inventory a NISAR file: band, product, frequencies, polarizations, grid."""
+    import h5py
+
+    out: Dict = {"band": None, "product": None, "frequencies": {}}
+
+    def visit(name, obj):
+        if not isinstance(obj, h5py.Dataset):
+            return
+        path = "/" + name
+        m = _GRID_RE.match(path)
+        if not m:
+            return
+        leaf = path.rsplit("/", 1)[-1]
+        freq = m.group("freq")
+        out["band"] = out["band"] or m.group("band")
+        out["product"] = out["product"] or m.group("product")
+        if freq is None:
+            return
+        f = out["frequencies"].setdefault(
+            freq, {"pols": {}, "x": None, "y": None, "epsg": None, "extra": {}})
+        if leaf in POL_NAMES and obj.ndim == 2:
+            f["pols"][leaf] = {"path": path, "shape": tuple(obj.shape),
+                               "dtype": str(obj.dtype),
+                               "chunks": tuple(obj.chunks) if obj.chunks else None,
+                               "complex": _is_complex(obj.dtype)}
+        elif leaf in ("xCoordinates", "xCoordinateSpacing"):
+            f["x"] = f["x"] or (path if leaf == "xCoordinates" else None)
+        elif leaf in ("yCoordinates", "yCoordinateSpacing"):
+            f["y"] = f["y"] or (path if leaf == "yCoordinates" else None)
+        elif leaf == "projection":
+            try:
+                f["epsg"] = int(np.asarray(obj[()]).ravel()[0])
+            except Exception:
+                for key in ("epsg_code", "EPSG", "spatial_ref"):
+                    if key in obj.attrs:
+                        try:
+                            f["epsg"] = int(np.asarray(obj.attrs[key]).ravel()[0])
+                        except Exception:
+                            pass
+
+    h5.visititems(visit)
+    return out
+
+
+def _is_complex(dtype) -> bool:
+    dt = np.dtype(dtype)
+    if np.issubdtype(dt, np.complexfloating):
+        return True
+    # NISAR GSLC often stores complex as a compound {r, i} pair.
+    return bool(dt.names) and set(n.lower() for n in dt.names) in (
+        {"r", "i"}, {"real", "imag"}, {"re", "im"})
+
+
+def _to_complex(arr: np.ndarray) -> np.ndarray:
+    dt = arr.dtype
+    if np.issubdtype(dt, np.complexfloating):
+        return arr
+    if dt.names:
+        names = list(dt.names)
+        return (arr[names[0]].astype(np.float32)
+                + 1j * arr[names[1]].astype(np.float32))
+    return arr
+
+
+def read_window(h5, path: str, row0: int, col0: int, nrow: int, ncol: int,
+                dec: int = 1) -> np.ndarray:
+    """Read a window, converting complex to intensity |z|^2.
+
+    GSLC is complex: the meaningful display and peak-location quantity is power,
+    not the real part. Decimation is a strided read, which is what keeps a
+    whole-scene overview from pulling the entire array over the wire.
+    """
+    ds = h5[path]
+    H, W = ds.shape[0], ds.shape[1]
+    r0 = max(0, min(row0, H))
+    c0 = max(0, min(col0, W))
+    r1 = max(r0, min(row0 + nrow, H))
+    c1 = max(c0, min(col0 + ncol, W))
+    if r1 <= r0 or c1 <= c0:
+        raise SystemExit(
+            f"requested window is entirely outside {path} "
+            f"(array is {H} x {W} px; asked for rows {row0}..{row0+nrow}, "
+            f"cols {col0}..{col0+ncol})")
+
+    raw = ds[r0:r1:dec, c0:c1:dec]
+    arr = _to_complex(np.asarray(raw))
+    if np.iscomplexobj(arr):
+        out = (arr.real.astype(np.float32) ** 2 + arr.imag.astype(np.float32) ** 2)
+    else:
+        out = arr.astype(np.float32)
+    return out, (r0, c0)
+
+
+def grid_transform(h5, freq_info: Dict):
+    """Affine transform + CRS from the product's coordinate arrays.
+
+    NISAR stores pixel-CENTRE coordinates, so the transform's origin is shifted
+    back by half a pixel to the corner convention GDAL and this tool use.
+    """
+    from affine import Affine
+
+    xp, yp = freq_info.get("x"), freq_info.get("y")
+    if not xp or not yp:
+        raise SystemExit("product has no xCoordinates/yCoordinates arrays; "
+                         "cannot georeference it")
+    x = np.asarray(h5[xp][()], dtype=np.float64)
+    y = np.asarray(h5[yp][()], dtype=np.float64)
+    if x.size < 2 or y.size < 2:
+        raise SystemExit("coordinate arrays too short to derive a pixel size")
+
+    dx = float(np.median(np.diff(x)))
+    dy = float(np.median(np.diff(y)))
+    tf = Affine(dx, 0.0, float(x[0]) - dx / 2.0,
+                0.0, dy, float(y[0]) - dy / 2.0)
+
+    crs = None
+    epsg = freq_info.get("epsg")
+    if epsg:
+        try:
+            from rasterio.crs import CRS
+            crs = CRS.from_epsg(int(epsg))
+        except Exception:
+            crs = None
+    return tf, crs, (dx, dy)
