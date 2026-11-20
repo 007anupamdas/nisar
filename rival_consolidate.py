@@ -420,9 +420,35 @@ def _fmt(v, nd=3):
     return "" if v is None else (f"{v:.{nd}f}" if isinstance(v, float) else str(v))
 
 
+def product_folders(products):
+    """A product folder, or several (a list, or ';'-separated), as a list of
+    the existing ones."""
+    if isinstance(products, str):
+        products = [p for p in products.split(";")]
+    return [p.strip() for p in (products or []) if p and p.strip()
+            and os.path.isdir(p.strip())]
+
+
 def consolidate(results_folder, products_folder, out_csv, log=print):
+    """products_folder: one input product folder or several (up to the GUI's
+    three) -- each product's metadata is looked for in all of them."""
+    folders = product_folders(products_folder)
+    xml_index = {}
+    for f in reversed(folders):                 # the first folder wins a clash
+        xml_index.update(index_meta_xml(f))
+    return _consolidate(results_folder, folders, xml_index, out_csv, log)
+
+
+def _band_meta_path(folders, pid):
+    for f in folders:
+        p = os.path.join(f, pid, BAND_META_NAME)
+        if os.path.isfile(p):
+            return p
+    return os.path.join(folders[0], pid, BAND_META_NAME) if folders else ""
+
+
+def _consolidate(results_folder, folders, xml_index, out_csv, log=print):
     """Build the table. Returns the number of products written."""
-    xml_index = index_meta_xml(products_folder)
     found, dupes = find_results(results_folder, xml_index)
     for pid, drop in dupes:
         log(f"[DUP] {pid[0]} band {pid[1] or '-'}: also {drop} -- the newer file is used")
@@ -437,7 +463,7 @@ def consolidate(results_folder, products_folder, out_csv, log=print):
             errs, lonlats, frame = pick_errors(csv.DictReader(f))
         st = error_summary(errs)
         meta_path = (xml_index.get(pid.lower(), "") if kind == "special"
-                     else os.path.join(products_folder, pid, BAND_META_NAME))
+                     else _band_meta_path(folders, pid))
         anc = {"sensor": None, "date": None, "session_id": None, "strip_id": None,
                "centre_lat": None, "centre_lon": None, "sources": {}}
         if kind == "special" and meta_path:
@@ -529,28 +555,33 @@ def run_gui():
         fields[key] = edit
 
     row(0, "Results folder (RIVAL CSVs):", "results")
-    row(1, "Input product folder (<id>/BAND_META.txt):", "products")
-    row(2, "Consolidated CSV:", "out", pick_file=True)
+    row(1, "Product folder 1 (<id>/BAND_META.txt, *_META.xml):", "products")
+    row(2, "Product folder 2 (optional):", "products2")
+    row(3, "Product folder 3 (optional):", "products3")
+    row(4, "Consolidated CSV:", "out", pick_file=True)
     log_box = QPlainTextEdit()
     log_box.setReadOnly(True)
-    grid.addWidget(log_box, 4, 0, 1, 3)
+    grid.addWidget(log_box, 6, 0, 1, 3)
 
     def log(msg):
         log_box.appendPlainText(msg)
         QApplication.processEvents()
 
     def go():
-        res, prod, out = (fields[k].text().strip() for k in ("results", "products", "out"))
-        for k in ("results", "products", "out"):
+        keys = ("results", "products", "products2", "products3", "out")
+        res, p1, p2, p3, out = (fields[k].text().strip() for k in keys)
+        for k in keys:
             settings.setValue(k, fields[k].text().strip())
-        if not (os.path.isdir(res) and os.path.isdir(prod) and out):
+        prods = product_folders([p1, p2, p3])
+        if not (os.path.isdir(res) and prods and out):
             QMessageBox.warning(win, "Consolidate",
-                                "Choose the results folder, the input product "
-                                "folder and the output CSV.")
+                                "Choose the results folder, at least one input "
+                                "product folder and the output CSV.")
             return
         log_box.clear()
+        log(f"[INFO] product folders: {', '.join(prods)}")
         try:
-            n = consolidate(res, prod, out, log)
+            n = consolidate(res, prods, out, log)
         except Exception as e:
             QMessageBox.critical(win, "Consolidate", f"Failed:\n{e}")
             return
@@ -558,7 +589,7 @@ def run_gui():
 
     run = QPushButton("Consolidate")
     run.clicked.connect(go)
-    grid.addWidget(run, 3, 0, 1, 3)
+    grid.addWidget(run, 5, 0, 1, 3)
     win.resize(820, 480)
     win.show()
     if own_app:
@@ -571,7 +602,8 @@ if __name__ == "__main__":
         import argparse
         ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
         ap.add_argument("--results", required=True)
-        ap.add_argument("--products", required=True)
+        ap.add_argument("--products", required=True, nargs="+",
+                        help="one or more input product folders")
         ap.add_argument("--out", required=True)
         a = ap.parse_args()
         consolidate(a.results, a.products, a.out)

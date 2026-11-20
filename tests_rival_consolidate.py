@@ -200,6 +200,25 @@ open(os.path.join(prod4, "HS_ONE", SP + "_META.xml"), "w").write(XML)
 check("folder-named export matches a folder holding one XML",
       "hs_one" in C.index_meta_xml(prod4), True)
 
+# ── several product folders, one results folder ────────────────────────────
+res5, pa, pb, pc = (tempfile.mkdtemp() for _ in range(4))
+os.makedirs(os.path.join(pa, "266697511"))
+open(os.path.join(pa, "266697511", "BAND_META.txt"), "w").write("Sensor = LISS4\n")
+os.makedirs(os.path.join(pb, "266697521"))
+open(os.path.join(pb, "266697521", "BAND_META.txt"), "w").write("Sensor = AWiFS\n")
+os.makedirs(os.path.join(pc, "HS"))
+open(os.path.join(pc, "HS", SP + "_META.xml"), "w").write(XML)
+write(os.path.join(res5, "266697511_rival.csv"), old)
+write(os.path.join(res5, "266697521_rival.csv"), new)
+write(os.path.join(res5, SP + "_rival_band6.csv"), new)
+out5 = os.path.join(res5, "all.csv")
+n5 = C.consolidate(res5, [pa, pb, pc], out5, lambda *a: None)
+r5 = {r["product_id"]: r for r in csv.DictReader(open(out5, encoding="utf-8-sig"))}
+check("three product folders, one results folder: each product's meta found",
+      (n5, r5["266697511"]["sensor"], r5["266697521"]["sensor"], r5[SP]["sensor"]),
+      (3, "LISS4", "AWiFS", "HS"))
+check("';'-separated folders too", len(C.product_folders(f"{pa};{pb};")), 2)
+
 if failures:
     print(f"{len(failures)} FAILURE(S)")
     for x in failures:
