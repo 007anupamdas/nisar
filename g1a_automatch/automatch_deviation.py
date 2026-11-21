@@ -49,6 +49,9 @@ def job_distortion(log_dir: str, job: str) -> Dict:
     txt = ''.join(open(p, errors='ignore').read() for p in sorted(glob.glob(os.path.join(log_dir, f'automatch_{base}*.log'))))
     m = SENSOR_RE.search(txt)
     r = {'job': job, 'sensor': m.group(1) if m else ''}
+    ts = re.search(r'(20\d\d)[-/](\d\d)[-/](\d\d)[ T](\d\d):(\d\d)', txt)
+    if ts:
+        r['started'] = '{}-{}-{} {}:{}'.format(*ts.groups())
     mm = MANUAL_RE.search(txt)
     if mm:
         n, me, mn, rme, rmn = map(float, mm.groups())
@@ -237,7 +240,32 @@ def top_detectors(t, top: int, min_reach: float = 0.5):
     return med.index[:top].tolist(), med
 
 
-def plot_lines(table, png: str, top: int = 5, min_reach: float = 0.5) -> str:
+def _smooth(x, y, n: int = 24):
+    """A smooth curve through (x, y) on a log y axis: shape-preserving cubic
+    (PCHIP) in log10(y), so it never overshoots between two methods; NaN gaps
+    split it."""
+    import numpy as np
+    from scipy.interpolate import PchipInterpolator
+    out = []
+    ok = np.isfinite(y)
+    i = 0
+    while i < len(x):
+        if not ok[i]:
+            i += 1
+            continue
+        j = i
+        while j + 1 < len(x) and ok[j + 1]:
+            j += 1
+        xs, ys = np.asarray(x[i:j + 1], float), np.log10(np.asarray(y[i:j + 1], float))
+        if len(xs) >= 2:
+            xx = np.linspace(xs[0], xs[-1], n * (len(xs) - 1) + 1)
+            out.append((xx, 10 ** PchipInterpolator(xs, ys)(xx)))
+        i = j + 1
+    return out
+
+
+def plot_lines(table, png: str, top: int = 5, min_reach: float = 0.5, smooth: bool = False,
+               title: str = '', note: str = '') -> str:
     """Per sensor, its top methods on the x axis, the truth error on the y axis,
     one line per job through its errors with those methods (colour: the scene's
     distortion level, grey when not known); the median over the jobs bold."""
@@ -251,9 +279,15 @@ def plot_lines(table, png: str, top: int = 5, min_reach: float = 0.5) -> str:
     sensors = [s for s in sensors
                if table[table['sensor'] == s].groupby('detector')['truth_rmse_m'].median().min() <= 10000.0]
     labels = [lab for _, _, lab in LEVELS]
-    fig, axes = plt.subplots(1, len(sensors), figsize=(5.2 * len(sensors), 6.4), squeeze=False)
+    rows = top > 5                                   # many methods: one sensor per row
+    if rows:
+        fig, axes = plt.subplots(len(sensors), 1, figsize=(13, 4.6 * len(sensors) + 1.6), squeeze=False)
+        axes = axes[:, 0]
+    else:
+        fig, axes = plt.subplots(1, len(sensors), figsize=(5.2 * len(sensors), 6.4), squeeze=False)
+        axes = axes[0]
     fig.patch.set_facecolor(SURFACE)
-    for ax, s in zip(axes[0], sensors):
+    for ax, s in zip(axes, sensors):
         t = table[table['sensor'] == s]
         dets, med = top_detectors(t, top, min_reach)
         piv = t[t['detector'].isin(dets)].pivot_table(index='job', columns='detector', values='truth_rmse_m',
@@ -265,25 +299,34 @@ def plot_lines(table, png: str, top: int = 5, min_reach: float = 0.5) -> str:
             lv = lvl.get(job, '')
             col = LEVEL_COLORS[labels.index(lv)] if lv in labels else UNKNOWN
             y = row.to_numpy(float)
-            ax.plot(x, y, color=col, lw=1.3, alpha=0.9, marker='o', markersize=4.5, markeredgecolor=SURFACE,
-                    markeredgewidth=0.8, zorder=2)
+            if smooth:
+                for xx, yy in _smooth(x, y):
+                    ax.plot(xx, yy, color=col, lw=1.3, alpha=0.9, zorder=2)
+                ax.plot(x, y, ls='', color=col, marker='o', markersize=4.5, markeredgecolor=SURFACE,
+                        markeredgewidth=0.8, zorder=3)
+            else:
+                ax.plot(x, y, color=col, lw=1.3, alpha=0.9, marker='o', markersize=4.5, markeredgecolor=SURFACE,
+                        markeredgewidth=0.8, zorder=2)
             last = np.where(np.isfinite(y))[0]
             if len(last) and np.nanmax(y) >= 3 * float(np.nanmedian(piv.to_numpy())):   # label the far-off jobs
                 k = last[-1]
                 tags.append([x[k], y[k], str(job) if len(str(job)) <= 10 else '…' + str(job)[-8:]])
-        tags.sort(key=lambda r: r[1])                       # spread the labels: at least 13 % apart (log axis)
+        tags.sort(key=lambda r: r[1])                       # spread the labels: at least 22 % apart (log axis)
         for i in range(1, len(tags)):
-            if tags[i][0] == tags[i - 1][0] and tags[i][1] < tags[i - 1][1] * 1.13:
-                tags[i][1] = tags[i - 1][1] * 1.13
+            if tags[i][0] == tags[i - 1][0] and tags[i][1] < tags[i - 1][1] * 1.22:
+                tags[i][1] = tags[i - 1][1] * 1.22
         for tx, ty, lab in tags:
             ax.text(tx + 0.1, ty, lab, fontsize=7, color=MUTED, va='center')
-        ax.plot(x, [med[d] / 1000.0 for d in dets], color=INK, lw=2.6, marker='o', markersize=7,
-                markeredgecolor=SURFACE, markeredgewidth=1.5, zorder=4)
+        my = np.array([med[d] / 1000.0 for d in dets])
+        for xx, yy in (_smooth(x, my) if smooth else [(x, my)]):
+            ax.plot(xx, yy, color=INK, lw=2.6, zorder=4)
+        ax.plot(x, my, ls='', color=INK, marker='o', markersize=7, markeredgecolor=SURFACE, markeredgewidth=1.5,
+                zorder=5)
         ax.set_yscale('log')
         ax.yaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _p: f'{v:g}'))
         ax.set_xticks(x)
-        ax.set_xticklabels([f'{d}\nmedian {med[d]:.0f} m' for d in dets], rotation=25, ha='right', fontsize=9,
-                           color=INK)
+        ax.set_xticklabels([f'{d}\nmedian {med[d]:.0f} m' for d in dets], rotation=0 if rows else 25,
+                           ha='center' if rows else 'right', fontsize=8.5 if rows else 9, color=INK)
         ax.set_xlim(-0.3, len(dets) - 0.2)
         ax.grid(axis='y', color='#e7e6e2', lw=0.8, zorder=0)
         ax.tick_params(length=0, colors=MUTED)
@@ -292,19 +335,23 @@ def plot_lines(table, png: str, top: int = 5, min_reach: float = 0.5) -> str:
         ax.spines['bottom'].set_color('#cfcdc6')
         ax.set_title(f'{s}: top {len(dets)}, {len(piv)} jobs', loc='left', fontsize=12, fontweight='bold',
                      color=INK)
-    axes[0][0].set_ylabel('error against truth (km, log)', fontsize=9.5, color=MUTED)
+    for ax in (axes if rows else axes[:1]):
+        ax.set_ylabel('error against truth (km, log)', fontsize=9.5, color=MUTED)
     handles = [Line2D([], [], color=c, lw=1.6, marker='o', markersize=5, label=lab.replace('\n', ' '))
                for c, lab in zip(LEVEL_COLORS, labels)]
     handles += [Line2D([], [], color=UNKNOWN, lw=1.6, marker='o', markersize=5, label='distortion not known'),
                 Line2D([], [], color=INK, lw=2.6, marker='o', markersize=7, label='median over the jobs')]
-    fig.legend(handles=handles, loc='upper left', bbox_to_anchor=(0.005, 0.93), ncol=6, frameon=False,
+    top_y = 1 - 0.75 / fig.get_figheight()
+    fig.legend(handles=handles, loc='upper left', bbox_to_anchor=(0.005, top_y), ncol=6, frameon=False,
                fontsize=8.5, title='one line per job, by scene distortion (spread of the truth errors)',
                title_fontsize=8.5, alignment='left')
-    fig.text(0.005, 0.995, 'Top 5 methods per sensor: error against truth, job by job', ha='left', va='top',
+    fig.text(0.005, 1 - 0.12 / fig.get_figheight(),
+             title or f'Top {top} methods per sensor: error against truth, job by job', ha='left', va='top',
              fontsize=14, fontweight='bold', color=INK)
-    fig.text(0.995, 0.005, 'Top 5 by median error among methods reaching at least half of the truth points. '
-             'Far-off jobs labelled with their number.', ha='right', va='bottom', fontsize=8, color=MUTED)
-    fig.tight_layout(rect=(0, 0.03, 1, 0.84), w_pad=2.0)
+    fig.text(0.995, 0.005, (note + '   ' if note else '') + f'Top {top} by median error among methods reaching at '
+             'least half of the truth points. Far-off jobs labelled with their number.', ha='right', va='bottom',
+             fontsize=8, color=MUTED)
+    fig.tight_layout(rect=(0, 0.03, 1, 1 - 1.55 / fig.get_figheight()), w_pad=2.0, h_pad=2.5)
     fig.savefig(png, dpi=150, facecolor=SURFACE)
     plt.close(fig)
     return png
@@ -389,10 +436,34 @@ def plot(table, jobs, png: str, min_jobs: int = 2) -> str:
     return png
 
 
+def is_workstation(job: str) -> bool:
+    """A workstation run: not a server job number (a product name, or a long ID)."""
+    b = str(job).split('_')[0]
+    return not b.isdigit() or int(b) >= 100000
+
+
+def recent_jobs(jobs, after_job: int):
+    """(server jobs above after_job, plus the workstation runs that started at
+    or after the first of them; that start time)."""
+    server = jobs[[not is_workstation(j) and int(str(j).split('_')[0]) > after_job for j in jobs['job']]]
+    if server.empty:
+        return [], ''
+    since = str(server['started'].dropna().min()) if 'started' in server else ''
+    ws = jobs[[is_workstation(j) for j in jobs['job']]]
+    if since and 'started' in ws:
+        ws = ws[ws['started'].astype(str) >= since]
+    else:
+        ws = ws.iloc[0:0]
+    return server['job'].tolist() + ws['job'].tolist(), since
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     ap.add_argument('log_dir', nargs='?', default=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'log'))
     ap.add_argument('--out', default='', help='where the plot and tables go (default: the log folder)')
+    ap.add_argument('--after-job', type=int, default=400,
+                    help='also a plot of only the server jobs above this number and the workstation runs that '
+                         'started after the first of them (default 400)')
     a = ap.parse_args(argv)
     out = a.out or a.log_dir
     os.makedirs(out, exist_ok=True)
@@ -405,6 +476,15 @@ def main(argv=None) -> int:
     top_png = plot_top(table, jobs, os.path.join(out, 'TOP_DETECTORS_DEVIATION.png'))
     lines_png = plot_lines(table, os.path.join(out, 'TOP5_BY_JOB.png'))
     print(f"{jobs['job'].nunique()} job(s) with truth -> {top_png}, {lines_png}")
+    sel, since = recent_jobs(jobs, a.after_job)
+    if sel:
+        rt = table[table['job'].isin(sel)]
+        n_ws = sum(1 for j in sel if is_workstation(j))
+        png = plot_lines(rt, os.path.join(out, f'TOP10_BY_JOB_AFTER_{a.after_job}.png'), top=10, smooth=True,
+                         title=f'Top 10 methods per sensor: error against truth, jobs above {a.after_job} '
+                               f'(and workstation runs since {since})',
+                         note=f'{len(sel) - n_ws} server + {n_ws} workstation job(s).')
+        print(f'{len(sel)} job(s) above {a.after_job} / since {since} -> {png}')
     jobs, table = jobs[jobs['level'] != ''], table[table['level'] != '']
     jobs.round(1).to_csv(os.path.join(out, 'DEVIATION_JOBS.csv'), index=False)
     agg = stats(table)
