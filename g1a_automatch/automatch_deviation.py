@@ -107,8 +107,9 @@ def collect(log_dir: str):
             b = bench[job.split('_')[0]]
             info.update({k: v for k, v in b.items() if k != 'sensor'})
             info['sensor'] = info['sensor'] or b['sensor']
-        if 'spread_m' not in info or not info['sensor']:
+        if not info['sensor']:
             continue
+        info.setdefault('spread_m', float('nan'))
         try:
             d = pd.read_csv(f)
         except Exception:
@@ -149,7 +150,79 @@ def stats(table):
 
 
 def level_of(spread: float) -> str:
+    if spread != spread:                       # NaN: not known
+        return ''
     return next(lab for lo, hi, lab in LEVELS if lo <= spread < hi)
+
+
+LEVEL_COLORS = ['#86b6ef', '#3987e5', '#1c5cab', '#0d366b']   # low .. very high (ordinal blue)
+UNKNOWN = '#b4b2ab'
+
+
+def plot_top(table, jobs, png: str, top: int = 10, min_reach: float = 0.5) -> str:
+    """Per sensor, its top detectors over all jobs (by median truth RMSE, among
+    those run in at least half of the sensor's jobs that reach at least half of
+    the truth points): one dot per job (colour:
+    the scene's distortion level, grey when not known), the median as a bar."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import matplotlib.ticker
+    from matplotlib.lines import Line2D
+    sensors = [s for s in ('MV', 'HS', 'HV', 'ML') if s in set(table['sensor'])]
+    sensors = [s for s in sensors
+               if table[table['sensor'] == s].groupby('detector')['truth_rmse_m'].median().min() <= 10000.0]
+    fig, axes = plt.subplots(len(sensors), 1, figsize=(10, 3.4 * len(sensors) + 1.2), squeeze=False)
+    fig.patch.set_facecolor(SURFACE)
+    rng = np.random.default_rng(0)
+    labels = [lab for _, _, lab in LEVELS]
+    for ax, s in zip(axes[:, 0], sensors):
+        t = table[table['sensor'] == s]
+        n_jobs = t['job'].nunique()
+        cnt = t.groupby('detector')['job'].nunique()
+        rch = t.groupby('detector')['reached'].sum() / t.groupby('detector')['total'].sum()
+        ok = [d for d in cnt.index if cnt[d] >= max(2, n_jobs // 2) and rch[d] >= min_reach]
+        med = t[t['detector'].isin(ok)].groupby('detector')['truth_rmse_m'].median().sort_values()
+        dets = med.index[:top].tolist()
+        for i, d in enumerate(dets):
+            u = t[t['detector'] == d]
+            x = i + rng.uniform(-0.22, 0.22, len(u))
+            cols = [LEVEL_COLORS[labels.index(lv)] if lv in labels else UNKNOWN for lv in u['level']]
+            ax.scatter(x, u['truth_rmse_m'] / 1000.0, s=26, c=cols, edgecolors=SURFACE, linewidths=0.8, zorder=3)
+            ax.plot([i - 0.32, i + 0.32], [med[d] / 1000.0] * 2, color=INK, lw=2.2, solid_capstyle='round',
+                    zorder=4)
+            reach = 100.0 * u['reached'].sum() / max(u['total'].sum(), 1)
+            ax.text(i, 0.97, f'{med[d]:.0f} m\n{reach:.0f} %', transform=ax.get_xaxis_transform(), ha='center',
+                    va='top', fontsize=8, color=MUTED)
+        ax.set_yscale('log')
+        ax.set_ylim(0.02, max(200.0, float(t[t['detector'].isin(dets)]['truth_rmse_m'].max()) / 1000.0 * 12.0))
+        ax.set_xticks(range(len(dets)))
+        ax.set_xticklabels(dets, rotation=30, ha='right', fontsize=9, color=INK)
+        ax.set_ylabel('deviation from truth (km)', fontsize=9, color=MUTED)
+        ax.yaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _p: f'{v:g}'))
+        ax.grid(axis='y', color='#e7e6e2', lw=0.8, zorder=0)
+        ax.tick_params(length=0, colors=MUTED)
+        for sp in ('top', 'right', 'left'):
+            ax.spines[sp].set_visible(False)
+        ax.spines['bottom'].set_color('#cfcdc6')
+        ax.set_title(f'{s}: top {len(dets)} of {len(med)} detectors reaching \u2265 {100 * min_reach:.0f} % of the '
+                     f'truth points, {n_jobs} jobs', loc='left', fontsize=12,
+                     fontweight='bold', color=INK, pad=26)
+    handles = [Line2D([], [], marker='o', ls='', color=c, markersize=7, label=lab.replace('\n', ' '))
+               for c, lab in zip(LEVEL_COLORS, labels)]
+    handles += [Line2D([], [], marker='o', ls='', color=UNKNOWN, markersize=7, label='distortion not known'),
+                Line2D([], [], color=INK, lw=2.2, label='median over the jobs')]
+    fig.legend(handles=handles, loc='upper left', bbox_to_anchor=(0.01, 0.985), ncol=6, frameon=False, fontsize=8.5,
+               title='scene distortion (spread of the truth errors)', title_fontsize=8.5, alignment='left')
+    fig.text(0.01, 1.0, 'Top detectors per sensor: deviation from truth over all jobs', ha='left', va='bottom',
+             fontsize=14, fontweight='bold', color=INK)
+    fig.text(0.99, 0.003, 'Each dot one job: truth RMSE of the detector\'s best configuration. Above each: median, '
+             'share of truth points reached.', ha='right', va='bottom', fontsize=8, color=MUTED)
+    fig.tight_layout(rect=(0, 0.02, 1, 0.94), h_pad=2.5)
+    fig.savefig(png, dpi=150, facecolor=SURFACE, bbox_inches='tight')
+    plt.close(fig)
+    return png
 
 
 def plot(table, jobs, png: str, min_jobs: int = 2) -> str:
@@ -244,6 +317,9 @@ def main(argv=None) -> int:
         return 1
     jobs['level'] = jobs['spread_m'].map(level_of)
     table['level'] = table['spread_m'].map(level_of)
+    top_png = plot_top(table, jobs, os.path.join(out, 'TOP_DETECTORS_DEVIATION.png'))
+    print(f"{jobs['job'].nunique()} job(s) with truth -> {top_png}")
+    jobs, table = jobs[jobs['level'] != ''], table[table['level'] != '']
     jobs.round(1).to_csv(os.path.join(out, 'DEVIATION_JOBS.csv'), index=False)
     agg = stats(table)
     agg.to_csv(os.path.join(out, 'DEVIATION_BY_DISTORTION.csv'), index=False)
