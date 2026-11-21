@@ -1578,6 +1578,17 @@ def test_gui_run(tmp):
           'mask threshold goes to the job',
           (order, w.output.text(), json.loads(w.settings.value('run_queue'))[nq]['what'], jq['cloud_min_confidence']),
           (['/q/out_b', '/q/out_a'], '/q/out_b', 'Run', 0.85))
+    w.cache.edit.setText('/fast/cache_a')
+    jc = w.job('fastest', 'fastest')
+    w.cache.edit.setText('')
+    jd = w.job('fastest', 'fastest')
+    import automatch_job as _J
+    nc = _J.normalize(jc)
+    check('run window: the cache folder chosen holds <cache>/<product name>/ (once, also when normalised again); '
+          'empty: <output>/_cache',
+          (nc['temp_dir'].replace('\\', '/'), _J.normalize(nc)['temp_dir'] == nc['temp_dir'],
+           jd['temp_dir'] == os.path.join(w.output.text(), '_cache'), jd.get('temp_per_product', False)),
+          ('/fast/cache_a/q_G1A_MV_a', True, True, False))
     w._wq = w._wq[:nq]
     w._queue_show()
     w.set_fields(f0)

@@ -770,6 +770,7 @@ DEFAULT_JOB: Dict = {
     'reference_scale': 1.0,      # DN scale on the reference (0.003162 for S1 GRD)
     'output_dir': '',
     'temp_dir': '',              # default <output_dir>/_cache
+    'temp_per_product': False,   # True: the cache in <temp_dir>/<product name>/ (input folder + file name)
     'resume': True,              # reuse sweep points finished with identical settings
 
     # algorithms (kornia first; imcui only for algorithms kornia lacks)
@@ -896,6 +897,17 @@ def unknown_key_note(key: str) -> str:
     return f'setting {key!r} is not used by this version (automatch {AUTOMATCH_VERSION}), ignored -- {why}'
 
 
+def product_folder(input_path: str) -> str:
+    """'<input folder>_<input file stem>' (the folder left out when the file
+    name already starts with it): the product's own cache subfolder."""
+    p = str(input_path or '').replace('\\', '/').rstrip('/')
+    if not p:
+        return ''
+    stem = os.path.splitext(os.path.basename(p))[0]
+    folder = os.path.basename(os.path.dirname(p))
+    return stem if not folder or stem.startswith(folder) else f'{folder}_{stem}'
+
+
 def normalize(job: Dict) -> Dict:
     """The job with every default filled in. Settings this version does not
     know are ignored with a warning (once per setting), so a settings file
@@ -909,6 +921,10 @@ def normalize(job: Dict) -> Dict:
     for k in ('_shard', '_queue', '_channel_rasters', '_window_prep', '_reuse', '_server_output_dir', '_gpu_mem'):
         if job.get(k) is not None:
             out[k] = copy.deepcopy(job[k])
+    if out.get('temp_per_product') and out['temp_dir'] and out.get('input_path'):
+        prod = product_folder(out['input_path'])           # once: a saved job already ends in it
+        if prod and os.path.basename(os.path.normpath(out['temp_dir'])) != prod:
+            out['temp_dir'] = os.path.join(out['temp_dir'], prod)
     if not out['temp_dir'] and out['output_dir']:
         out['temp_dir'] = os.path.join(out['output_dir'], '_cache')
     for k in ('window_sizes', 'num_features', 'detectors', 'smnn_thresholds',

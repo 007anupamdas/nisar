@@ -165,6 +165,10 @@ class RunWindow(QtWidgets.QMainWindow):
         self.output = PathRow(True, 'Output folder')
         self.truth = PathRow(False, 'Ground truth (optional)', 'CSV (*.csv);;All files (*)')
         self.weights = PathRow(True, 'Weights folder (optional)')
+        self.cache = PathRow(True, 'Cache folder (optional)')
+        self.cache.setToolTip('Where references, pairs, the cloud mask and detector results are kept and reused '
+                              '(across presets, auto steps and later runs of the same scene). Empty: '
+                              '<output>/_cache. Each product gets <cache>/<product name>/ (input folder + file name)')
         f.addRow('Input image', self.input)
         f.addRow('Reference folder (L8)', self.reference)
         f.addRow('C1 references (India)', self.reference_c1)
@@ -173,6 +177,7 @@ class RunWindow(QtWidgets.QMainWindow):
         f.addRow('Output folder', self.output)
         f.addRow('Ground truth (optional)', self.truth)
         f.addRow('Weights folder (optional)', self.weights)
+        f.addRow('Cache folder (optional)', self.cache)
         self.sensor = QtWidgets.QComboBox()
         self.sensor.addItems(['from the file name'] + list(self.presets))
         self.sensor.setToolTip('The preset used. From the file name: G1A_MV_ / G1A_HV_ / G1A_HS_ / G1A_ML_')
@@ -263,7 +268,7 @@ class RunWindow(QtWidgets.QMainWindow):
                                  'points fill 80 % of the sub-tiles. One cache: each step only adds detectors. Each '
                                  'step into <output>/auto_topN_agreeK; the outcome in AUTO_PRESET.txt')
         self.btn_all.setToolTip('fastest, fast, medium, then slow, into <output>/fastest, /fast, /medium, /slow, '
-                                'sharing one cache (<output>/_cache): references, pairs and the cloud '
+                                'sharing one cache (the cache folder, else <output>/_cache): references, pairs and the cloud '
                                 'mask are made once, and a detector one preset ran is reused by the next')
         self.btn_stop = QtWidgets.QPushButton('Stop')
         self.btn_open = QtWidgets.QPushButton('Open output folder')
@@ -327,7 +332,8 @@ class RunWindow(QtWidgets.QMainWindow):
         self.input.edit.textChanged.connect(self.refresh)
         self.sensor.currentIndexChanged.connect(self.refresh)
         for key, row in (('input', self.input), ('reference', self.reference), ('reference_c1', self.reference_c1),
-                         ('output', self.output), ('truth', self.truth), ('weights', self.weights)):
+                         ('output', self.output), ('truth', self.truth), ('weights', self.weights),
+                         ('cache', self.cache)):
             row.edit.setText(self.settings.value(key, '') or '')
         self.device.setCurrentText(self.settings.value('device', 'all') or 'all')
         self.cloud.setChecked(str(self.settings.value('cloud', 'true')).lower() == 'true')
@@ -383,7 +389,9 @@ class RunWindow(QtWidgets.QMainWindow):
                            mode=mode or self.mode.currentText(), final_points=self.final_points.value(),
                            cell_px=P.parse_levels(self.cell_px.text()),
                            cloud_conf=self.cloud_conf.value() if self.cloud.isChecked() else None,
-                           temp_dir=os.path.join(self.output.text(), '_cache'))
+                           temp_dir=self.cache_dir())
+        if self.cache.text().strip():                 # <cache>/<product name>/
+            job['temp_per_product'] = True
         if '[window' in note:
             self.log.appendPlainText('--- ' + note[note.index('[window') + 1:].rstrip(']'))
         return job
@@ -440,7 +448,8 @@ class RunWindow(QtWidgets.QMainWindow):
         with open(path, 'w', encoding='utf-8') as f:
             json.dump(job, f, indent=2)
         for key, row in (('input', self.input), ('reference', self.reference), ('reference_c1', self.reference_c1),
-                         ('output', self.output), ('truth', self.truth), ('weights', self.weights)):
+                         ('output', self.output), ('truth', self.truth), ('weights', self.weights),
+                         ('cache', self.cache)):
             self.settings.setValue(key, row.text())
         self.settings.setValue('device', self.device.currentText())
         self.settings.setValue('mode', self.mode.currentText())
@@ -626,12 +635,17 @@ class RunWindow(QtWidgets.QMainWindow):
         elif code != 0:
             self.stage.setText(f'ended with code {code} (see the log)')
 
+    def cache_dir(self) -> str:
+        """The cache folder: the one chosen, else <output>/_cache."""
+        return self.cache.text().strip() or os.path.join(self.output.text(), '_cache')
+
     # ── the queue ────────────────────────────────────────────────────────────
     def fields(self) -> dict:
         """The window's settings, to queue and restore."""
         return {'input': self.input.text(), 'reference': self.reference.text(),
                 'reference_c1': self.reference_c1.text(), 'output': self.output.text(), 'truth': self.truth.text(),
-                'weights': self.weights.text(), 'sensor': self.sensor.currentText(), 'mode': self.mode.currentText(),
+                'weights': self.weights.text(), 'cache': self.cache.text(),
+                'sensor': self.sensor.currentText(), 'mode': self.mode.currentText(),
                 'bands': self.bands.text(), 'crispest': self.crispest.isChecked(), 'max_err': self.max_err.value(),
                 'device': self.device.currentText(), 'top_n': self.top_n.value(), 'agree': self.agree.value(),
                 'final_points': self.final_points.value(), 'cell_px': self.cell_px.text(),
@@ -639,7 +653,8 @@ class RunWindow(QtWidgets.QMainWindow):
 
     def set_fields(self, f: dict):
         for key, row in (('input', self.input), ('reference', self.reference), ('reference_c1', self.reference_c1),
-                         ('output', self.output), ('truth', self.truth), ('weights', self.weights)):
+                         ('output', self.output), ('truth', self.truth), ('weights', self.weights),
+                         ('cache', self.cache)):
             row.edit.setText(f.get(key, ''))
         self.sensor.setCurrentText(f.get('sensor', self.sensor.currentText()))
         self.mode.setCurrentText(f.get('mode', self.mode.currentText()))

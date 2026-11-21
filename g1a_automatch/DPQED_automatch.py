@@ -2575,6 +2575,8 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         f.addRow('Output folder', self.out_path)
         self.tmp_path = PathRow('dir')
         self.tmp_path.edit.setPlaceholderText('default: <output>/_cache')
+        self.tmp_path.edit.setToolTip('A cache folder for many products: each gets <cache>/<product name>/ '
+                                      '(input folder + file name). Empty: <output>/_cache')
         f.addRow('Cache folder', self.tmp_path)
         self.gcp_path = PathRow('file', 'CSV (*.csv);;All (*)')
         self.gcp_path.edit.setToolTip('NISAR-style GCPs (columns scan, pix, Map_X, Map_Y, Map_X_ref, Map_Y_ref) '
@@ -3107,6 +3109,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             'reference_scale': self.ref_scale.value(),
             'output_dir': self.out_path.text(),
             'temp_dir': self.tmp_path.text(),
+            'temp_per_product': bool(self.tmp_path.text().strip()),
             'manual_gcp_csv': self.gcp_path.text(),
             'truth_csv': self.truth_path.text().strip(),
             'truth_radius_m': self.truth_radius.value() * 1000.0,
