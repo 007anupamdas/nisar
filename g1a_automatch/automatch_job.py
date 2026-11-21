@@ -1,0 +1,2376 @@
+#!/usr/bin/env python3
+"""
+automatch_job -- run an automatch job from a JSON file (the GUI writes the same
+file and runs this script as a subprocess, so GUI and command line are one path).
+
+    python automatch_job.py template  > job.json     # annotated defaults
+    python automatch_job.py preflight job.json       # validate, no matching
+    python automatch_job.py run       job.json       # match + RIVAL CSVs
+    python automatch_job.py detectors                # what can be selected
+    python automatch_job.py weights   [job.json]     # which weight files are on this machine
+    python automatch_job.py compare   <output_dir> --truth manual.csv   # rank vs ground truth
+    python automatch_job.py pack      job.json --to <dir> --server-dir <dir>  # bundle for the GPU server
+    python automatch_job.py inspect   <input>        # channels, CRS, footprint
+
+Any job key can be overridden on the command line, e.g.
+    python automatch_job.py run job.json --set window_sizes=[1024,2048] --set detectors=["sift"]
+
+Outputs (under output_dir):
+    win<W>_nf<N>/<channel>_to<ref>/...   engine outputs per sweep point
+    rival/RIVAL_*.csv                    one per channel x detector x sweep point,
+                                         loadable in DPQED_rival.py ('Load CSV')
+    RIVAL_BEST_<scene>_<channel>.csv     highest consensus score per channel
+    RUN_MANIFEST.csv                     every run: status, offsets, RMSE, CE90, paths
+    TRUTH_BY_DETECTOR_MATCHER.csv        with truth_csv: detector + matcher ranked vs ground truth
+    TRUTH_RANKING.csv, TRUTH_POINTS.csv  ... every configuration, every truth point
+    automatch.log                        full log
+Progress is printed as lines starting with '@@AUTOMATCH ' followed by JSON.
+"""
+
+import argparse
+import copy
+import difflib
+import hashlib
+import json
+import math
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+import traceback
+from typing import Dict, List, Optional, Tuple
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+
+PROGRESS_PREFIX = '@@AUTOMATCH '
+
+# Printed at the start of every run log and in PACK_REPORT.txt, so a log says
+# which code made it. Not a job key: settings files stay readable by other
+# versions.
+AUTOMATCH_VERSION = '2026.11.06'
+CODE_FILES = ('automatch_engine.py', 'automatch_job.py', 'automatch_imcui.py', 'automatch_refs.py',
+              'automatch_rival.py', 'automatch_truth.py', 'automatch_weights.py', 'automatch_gpuaas.py',
+              'automatch_native.py', 'imw_configs.py', 'automatch_cross.py', 'automatch_bench.py',
+              'automatch_cloud.py', 'automatch_accuracy.py', 'automatch_cloudsweep.py', 'automatch_cloudphys.py',
+              'automatch_tirauxcloud.py', 'automatch_reflect.py', 'automatch_cloudmodels.py', 'automatch_refsubset.py',
+              'automatch_cloudfilter.py', 'automatch_presets.py',
+              'automatch_report.py', 'automatch_target.py', 'automatch_interior.py')
+
+
+def code_fingerprint() -> str:
+    """Short hash of the modules a run uses (line endings ignored): the same
+    on the workstation and the server only when both have the same code."""
+    h = hashlib.sha1()
+    for name in CODE_FILES:
+        try:
+            with open(os.path.join(HERE, name), 'rb') as f:
+                data = f.read().replace(b'\r\n', b'\n')
+        except OSError:
+            data = b'missing'
+        h.update(name.encode() + b'\0' + data + b'\0')
+    return h.hexdigest()[:8]
+
+
+def version_line() -> str:
+    return f'automatch {AUTOMATCH_VERSION}, code {code_fingerprint()} ({HERE})'
+
+
+def use_gpu(device: str) -> str:
+    """Pin this process to one GPU for 'cuda:N': the other GPUs are hidden
+    (CUDA_VISIBLE_DEVICES, numbered as nvidia-smi lists them) before torch
+    loads, so every model, memory check and cache clear lands on GPU N --
+    not only those that take a device, as 'cuda:N' alone would. Returns the
+    device name to use from then on ('cuda'), or the name unchanged when it
+    names no single GPU or torch is already loaded (then 'cuda:N' as is)."""
+    gl = gpus_of(device)                               # 'all' / 'cuda:0,1' in a one-GPU tool: the first of them
+    if gl:
+        device = f'cuda:{gl[0]}'
+    m = re.fullmatch(r'cuda:(\d+)', str(device or '').strip().lower())
+    if not m:
+        return 'auto' if str(device or '').strip().lower() in ('all', 'cuda:all', 'gpus', 'all-gpus') else device
+    if os.environ.get('AUTOMATCH_GPU') == m.group(1):
+        return 'cuda'                                  # pinned already
+    if 'torch' in sys.modules:
+        return device
+    os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'     # the numbering nvidia-smi and the GUI's list use
+    os.environ['CUDA_VISIBLE_DEVICES'] = m.group(1)
+    os.environ['AUTOMATCH_GPU'] = m.group(1)
+    print(f'[Device] GPU {m.group(1)} only (CUDA_VISIBLE_DEVICES={m.group(1)}): every model of this run uses it',
+          flush=True)
+    return 'cuda'
+
+def visible_gpus() -> List[int]:
+    """The GPUs of this machine as nvidia-smi numbers them ([] without any)."""
+    try:
+        r = subprocess.run(['nvidia-smi', '--query-gpu=index', '--format=csv,noheader'], capture_output=True,
+                           text=True, timeout=5, creationflags=0x08000000 if os.name == 'nt' else 0)
+        return [int(x) for x in r.stdout.split() if x.strip().isdigit()] if r.returncode == 0 else []
+    except Exception:
+        return []
+
+
+def gpu_memory_gb() -> Dict[int, float]:
+    """{GPU index: total memory (GB)} as nvidia-smi reports it ({} without)."""
+    try:
+        r = subprocess.run(['nvidia-smi', '--query-gpu=index,memory.total', '--format=csv,noheader,nounits'],
+                           capture_output=True, text=True, timeout=5,
+                           creationflags=0x08000000 if os.name == 'nt' else 0)
+        out = {}
+        for line in r.stdout.splitlines():
+            p = [x.strip() for x in line.split(',')]
+            if len(p) == 2 and p[0].isdigit():
+                out[int(p[0])] = float(p[1]) / 1024.0
+        return out if r.returncode == 0 else {}
+    except Exception:
+        return {}
+
+
+# Peak GPU memory (GB) per detector family at 1024 / 2048 px windows, from jobs
+# 1068 and 1069 (A4000 16 GB / A4500 20 GB; 2048 px often matched in 1024 px
+# tiles). Used to give the heavy ones to the larger GPU; 6 GB when unknown.
+GPU_NEED_GB = {
+    'imw-sp-lg': (14.5, 4.1), 'imw-gim-dkm': (12.9, 7.4), 'imw-rdd-dense': (11.5, 7.9), 'imw-rdd-nn': (8.2, 16.0),
+    'imw-d2net-nn': (7.6, 14.3), 'imw-dkm': (7.4, 7.4), 'imw-topicfm': (7.2, 7.3), 'imw-rord-nn': (6.8, 8.4),
+    'dedode': (6.6, 14.2), 'imw-aspanformer': (6.4, 7.3), 'imw-eloftr': (6.4, 6.0), 'imw-minima-loftr': (6.3, 20.0),
+    'imw-liftfeat-nn': (5.9, 7.5), 'imw-r2d2-nn': (5.5, 5.7), 'loftr': (5.4, 7.7), 'imw-roma': (5.4, 5.5),
+    'imw-gim-roma': (5.4, 5.5), 'imw-xoftr': (5.4, 5.0), 'imw-minima-roma': (5.4, 20.0), 'keynet': (5.3, 14.2),
+    'dog': (5.3, 14.1), 'gftt': (5.2, 9.6), 'hessian': (5.2, 14.2), 'sift': (5.1, 14.3), 'imw-dad-roma': (4.7, 4.8),
+    'imw-aliked-lg': (4.1, 9.4), 'imw-ripe-nn': (3.8, 9.4), 'disk': (3.0, 9.9), 'imw-sfd2-nn': (2.7, 7.5),
+    'imw-xfeat-dense': (2.6, 7.3), 'imw-darkfeat-nn': (2.2, 6.0), 'imw-xfeat-lg': (2.1, 4.3), 'imw-alike-nn': (1.9, 5.3),
+    'imw-sp-nn': (1.4, 3.1), 'imw-lanet-nn': (1.4, 9.4), 'imw-sp-sg': (1.2, 3.1), 'imw-omniglue': (1.0, 1.0)}
+
+
+# Peaks seen on this machine, learned after each detector (the larger of the
+# table's and the learned value counts): ~/.automatch/gpu_peaks.json
+GPU_PEAKS_FILE = os.path.join(os.path.expanduser('~'), '.automatch', 'gpu_peaks.json')
+
+
+def _gpu_family(detector: str) -> str:
+    d = re.sub(r'[-_](kt0p2|fm1|fsp1).*$', '', str(detector))
+    return next((k for k in sorted(GPU_NEED_GB, key=len, reverse=True) if d == k or d.startswith(k + '_')
+                 or d.startswith(k + '-')), d)
+
+
+def _learned_peaks() -> Dict[str, float]:
+    try:
+        with open(GPU_PEAKS_FILE, encoding='utf-8') as f:
+            return {str(k): float(v) for k, v in json.load(f).items()}
+    except (OSError, ValueError, TypeError, AttributeError):
+        return {}
+
+
+def learn_gpu_peak(detector: str, window: int, peak_gb) -> None:
+    """Remember a detector's peak GPU memory at a window size (the largest seen)."""
+    try:
+        peak = float(peak_gb)
+    except (TypeError, ValueError):
+        return
+    if not peak > 0:
+        return
+    key = f'{_gpu_family(detector)}@{1024 if int(window or 1024) <= 1024 else 2048}'
+    peaks = _learned_peaks()
+    if peaks.get(key, 0.0) >= peak:
+        return
+    peaks[key] = round(peak, 2)
+    try:
+        os.makedirs(os.path.dirname(GPU_PEAKS_FILE), exist_ok=True)
+        tmp = f'{GPU_PEAKS_FILE}.{os.getpid()}.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(peaks, f, indent=1, sort_keys=True)
+        os.replace(tmp, GPU_PEAKS_FILE)
+    except OSError:
+        pass
+
+
+def gpu_need_gb(detector: str, window: int) -> float:
+    """Expected peak GPU memory of a detector (or a variant tag) at a window
+    size: the table's, or the largest seen on this machine if higher."""
+    fam = _gpu_family(detector)
+    a, b = GPU_NEED_GB.get(fam, (6.0, 6.0))
+    w = 1024 if int(window or 1024) <= 1024 else 2048
+    return max(a if w == 1024 else b, _learned_peaks().get(f'{fam}@{w}', 0.0))
+
+
+def gpu_share(detectors: List[str], window: int, mem: Dict[int, float]) -> Dict[int, List[str]]:
+    """Each GPU's own share of the detectors: ranked by the memory they need,
+    the least-memory ones to the smallest GPU, the most to the largest
+    (contiguous runs of the ranking, as many detectors each as can be)."""
+    ranked = sorted(detectors, key=lambda d: (gpu_need_gb(d, window), d))
+    gpus = sorted(mem, key=lambda g: (mem[g], g))
+    n, k = len(ranked), max(1, len(gpus))
+    out, start = {}, 0
+    for i, g in enumerate(gpus):
+        stop = start + n // k + (1 if i >= k - n % k else 0)     # the larger GPUs take the odd one over
+        out[g] = ranked[start:stop]
+        start = stop
+    return out
+
+
+def gpu_order(detectors: List[str], window: int, own: int, mem: Dict[int, float]) -> List[str]:
+    """The order a GPU worker goes through the queue: its own share first
+    (gpu_share; the largest GPU its heaviest first, the others their lightest
+    first), and only then the other GPUs' shares, from their ends (what the
+    other GPU would reach last), so a GPU takes over another's work only when
+    its own is done. Too heavy for this GPU: left to the larger (install_queue)."""
+    share = gpu_share(detectors, window, mem)
+    largest = max(mem, key=lambda g: (mem[g], g)) if mem else own
+
+    def run_order(g):
+        return sorted(share.get(g, []), key=lambda d: gpu_need_gb(d, window), reverse=(g == largest))
+    order = run_order(own)
+    for g in sorted((g for g in share if g != own), key=lambda g: abs(mem[g] - mem.get(own, 0.0))):
+        order += list(reversed(run_order(g)))
+    return order
+
+
+def start_parent_watchdog(parent_pid=None, every_s: float = 3.0) -> None:
+    """A GPU worker ends itself when the process that started it is gone
+    (the run was stopped: the GUI ends the parent; on Windows its children
+    would otherwise go on using the GPU)."""
+    import threading
+    try:
+        ppid = int(parent_pid or os.environ.get('AUTOMATCH_PARENT_PID') or 0)
+    except ValueError:
+        ppid = 0
+    if ppid <= 0:
+        return
+
+    def watch():
+        while True:
+            time.sleep(every_s)
+            if not process_alive(ppid):
+                print(f'[Job] the run was stopped (parent {ppid} gone): this worker ends', flush=True)
+                os._exit(3)
+    threading.Thread(target=watch, daemon=True).start()
+
+
+def process_alive(pid: int) -> bool:
+    """Whether a process is still running (on Windows: not merely a handle left open)."""
+    try:
+        if os.name == 'nt':
+            import ctypes
+            k = ctypes.windll.kernel32
+            h = k.OpenProcess(0x1000, False, int(pid))          # PROCESS_QUERY_LIMITED_INFORMATION
+            if not h:
+                return False
+            code = ctypes.c_ulong()
+            ok = k.GetExitCodeProcess(h, ctypes.byref(code))
+            k.CloseHandle(h)
+            return bool(ok) and code.value == 259            # STILL_ACTIVE
+        os.kill(int(pid), 0)
+        try:                                                   # a zombie (ended, not yet reaped) is gone too
+            with open(f'/proc/{int(pid)}/stat') as f:
+                return f.read().split(')')[-1].split()[0] != 'Z'
+        except OSError:
+            return True
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def gpus_of(device: str) -> List[int]:
+    """The GPUs a job spreads its detectors over: 'all' / 'cuda:all' = every
+    GPU of this machine; 'cuda:0,1' / 'cuda:0+cuda:1' = those; else [] (one
+    device, run as before)."""
+    d = str(device or 'auto').strip().lower().replace(' ', '')
+    if d in ('all', 'cuda:all', 'gpus', 'all-gpus'):
+        return visible_gpus()
+    nums = re.findall(r'(?:cuda:|(?<=[,+]))(\d+)', d) if d.startswith('cuda') else (
+        d.split(',') if re.fullmatch(r'\d+(,\d+)+', d) else [])
+    if len(nums) >= 2:
+        return sorted({int(n) for n in nums})
+    return []
+
+
+def shard_detectors(detectors: List[str], n: int) -> List[List[str]]:
+    """The detectors dealt round n GPUs (heavy and light ones spread)."""
+    return [detectors[i::n] for i in range(n)]
+
+
+def fan_out(script: str, argv: List[str], gpus: List[int], extra=None) -> int:
+    """The same command line once per GPU as a worker process (--device
+    cuda:<g> --shard <i>/<n>, plus extra(i, g) arguments), their output
+    relayed with a [GPU g] prefix; the worst exit code."""
+    import threading
+    procs = []
+    for i, g in enumerate(gpus):
+        env = dict(os.environ)
+        env['AUTOMATCH_PARENT_PID'] = str(os.getpid())   # the workers end when the run is stopped
+        for k in ('CUDA_VISIBLE_DEVICES', 'AUTOMATCH_GPU'):
+            env.pop(k, None)
+        cmd = [sys.executable, script] + list(argv) + ['--device', f'cuda:{g}', '--shard', f'{i}/{len(gpus)}']
+        cmd += list(extra(i, g) if extra else [])
+        procs.append((g, subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env,
+                                          bufsize=1, encoding='utf-8', errors='replace')))
+
+    def relay(g, p):
+        for line in p.stdout:
+            line = line.rstrip('\n')
+            if line.startswith(PROGRESS_PREFIX):
+                try:
+                    ev = json.loads(line[len(PROGRESS_PREFIX):])
+                    ev['gpu'] = g
+                    emit(ev)
+                except Exception:
+                    pass
+            else:
+                print(f'[GPU {g}] {line}', flush=True)
+    ts = [threading.Thread(target=relay, args=(g, p), daemon=True) for g, p in procs]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    return max([p.wait() for _, p in procs] or [0])
+
+
+def _read_text(path: str) -> str:
+    try:
+        with open(path, encoding='utf-8') as f:
+            return f.read().strip()
+    except OSError:
+        return ''
+
+
+def parse_shard(text) -> Optional[Tuple[int, int]]:
+    """'i/n' -> (i, n), else None."""
+    m = re.fullmatch(r'\s*(\d+)\s*/\s*(\d+)\s*', str(text or ''))
+    return (int(m.group(1)), int(m.group(2))) if m and int(m.group(2)) > 1 else None
+
+
+def _unit_name(channel: str, tag: str) -> str:
+    """File name of one detector's result at one channel (queue and resume)."""
+    return re.sub(r'[^A-Za-z0-9._+-]+', '_', f'{channel}__{tag}')[:150]
+
+
+def _unit_key(job: Dict, win: int, nf: Optional[int]) -> str:
+    """Resume fingerprint of one detector's result at a sweep point: the
+    sweep point's, without who ran it (the detector list, the GPU, the queue)."""
+    return _sweep_key({k: v for k, v in job.items() if k not in ('detectors', '_shard', '_queue', '_gpu_mem', '_reuse',
+                                                                 '_server_output_dir', '_parent')}, win, nf)
+
+
+def _results_dir(job: Dict, tag: str) -> str:
+    """Where finished detector results are shared between output folders that
+    use the same cache folder (temp_dir): e.g. the fastest, accurate and most
+    accurate presets of one input."""
+    return os.path.join(str(job.get('temp_dir') or os.path.join(job['output_dir'], '_cache')), '_results', tag)
+
+
+def _adopt_result(rec: Dict, other_root: str, root: str) -> Optional[Dict]:
+    """A detector's finished record from another output folder, its match
+    folders copied into this one and its paths rewritten (None when its
+    folders are gone)."""
+    import glob as _glob
+    pol = rec.get('output_dir') or ''
+    tag = rec.get('detector_tag') or ''
+    if not pol or not tag or not os.path.isdir(pol):
+        return None
+    o, r = os.path.normpath(other_root), os.path.normpath(root)
+    rel = os.path.relpath(os.path.normpath(pol), o)
+    if rel.startswith('..'):
+        return None
+    dst_pol = os.path.join(r, rel)
+    found = [p for p in _glob.glob(os.path.join(pol, f'*_{tag}')) if os.path.isdir(p)]
+    if not found:
+        return None
+    for p in found:
+        shutil.copytree(p, os.path.join(dst_pol, os.path.basename(p)), dirs_exist_ok=True)
+
+    def move(v):
+        if isinstance(v, str) and os.path.normpath(v).startswith(o + os.sep):
+            return os.path.join(r, os.path.relpath(os.path.normpath(v), o))
+        return v
+    return {k: move(v) for k, v in rec.items()}
+
+
+def install_queue(E, job: Dict, out_dir: str, tag: str, win: int, nf: Optional[int]) -> None:
+    """A GPU worker's hooks for one sweep point: before each detector (per
+    channel) it claims it in the job's queue folder (a file made exclusively;
+    taken already = another GPU runs it), so a GPU that is free takes the next
+    one, whichever GPU the others are on and however long they take (or how
+    fast they fail, e.g. missing weights). Each result is kept in
+    <sweep>/_units/<channel>__<detector>.json with its fingerprint; with
+    resume, a finished ('ok') one is reused, whichever GPU made it."""
+    claims = os.path.join(job['_queue'], tag)
+    units = os.path.join(out_dir, '_units')
+    os.makedirs(claims, exist_ok=True)
+    os.makedirs(units, exist_ok=True)
+    key, shard = _unit_key(job, win, nf), job.get('_shard')
+    mem = {int(k): float(v) for k, v in (job.get('_gpu_mem') or {}).items()}
+    own = mem.get(int(shard), 0.0) if shard is not None else 0.0
+    bigger = own > 0 and any(v > own + 0.5 for v in mem.values())
+    reuse = job.get('_reuse') or ''             # finish mode: the finished records of an earlier run, any code
+    earlier = _summary_records(out_dir, job) if reuse else {}
+    shared = _results_dir(job, tag)
+    root = str(job['output_dir'])
+
+    def claim(channel, dtag):
+        name = _unit_name(channel, dtag)
+        need = gpu_need_gb(dtag, win)
+        heavy = bigger and need > 0.85 * own
+        if heavy:
+            return False                     # too heavy for this GPU: the larger one takes it (taking it over
+                                             # in tiles failed with CUDA out-of-memory on many models)
+        try:
+            fd = os.open(os.path.join(claims, name), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            return False
+        os.write(fd, str(shard).encode())
+        os.close(fd)
+
+        if job.get('resume'):
+            try:
+                with open(os.path.join(units, name + '.json'), encoding='utf-8') as f:
+                    saved = json.load(f)
+                if saved.get('key') == key and saved['record'].get('status') == 'ok':
+                    return saved['record']
+            except (OSError, ValueError, KeyError, AttributeError, TypeError):
+                pass
+        if job.get('resume'):                # finished in another output folder on the same cache (other preset)
+            try:
+                with open(os.path.join(shared, name + '.json'), encoding='utf-8') as f:
+                    saved = json.load(f)
+                if (saved.get('key') == key and saved['record'].get('status') == 'ok'
+                        and os.path.normpath(saved.get('root') or '') != os.path.normpath(root)):
+                    got = _adopt_result(saved['record'], saved['root'], root)
+                    if got is not None:
+                        print(f"[Job] {dtag}: reused from {saved['root']} (same settings and cache)", flush=True)
+                        return got
+            except (OSError, ValueError, KeyError, AttributeError, TypeError):
+                pass
+        rec = earlier.get((str(channel), str(dtag)))
+        if rec is not None:
+            err = str(rec.get('error') or '')
+            if rec.get('status') == 'ok' or (reuse == 'missing' and 'model not available' not in err):
+                return rec                   # finished, or failed for a reason weights will not change
+        return True
+
+    def done(channel, dtag, rec):
+        err = str(rec.get('error') or '').lower()
+        if bigger and rec.get('status') != 'ok' and ('out of memory' in err or 'cuda error' in err):
+            # too big for this GPU after all: remembered as such, and handed back for the larger one
+            learn_gpu_peak(dtag, win, own)
+            try:
+                os.remove(os.path.join(claims, _unit_name(channel, dtag)))
+            except OSError:
+                pass
+            try:
+                with open(os.path.join(claims, _unit_name(channel, dtag) + '.handback'), 'w', encoding='utf-8') as f:
+                    f.write(f'{dtag}\n{channel}\n')
+            except OSError:
+                pass
+            print(f'[Job] {dtag}: out of GPU memory here ({own:.0f} GB): handed to the larger GPU', flush=True)
+            return
+        if rec.get('status') == 'ok':
+            learn_gpu_peak(dtag, win, max(float(rec.get('gpu_peak_gb') or 0), float(rec.get('gpu_reserved_gb') or 0)))
+        for folder, extra in ((units, {}), (shared, {'root': root})):
+            try:
+                os.makedirs(folder, exist_ok=True)
+                path = os.path.join(folder, _unit_name(channel, dtag) + '.json')
+                tmp = f'{path}.{os.getpid()}.tmp'
+                with open(tmp, 'w', encoding='utf-8') as f:
+                    json.dump({'key': key, 'gpu': shard, 'record': rec, **extra}, f, default=str)
+                os.replace(tmp, path)
+            except OSError:
+                pass
+    E.CLAIM_HOOK, E.UNIT_DONE_HOOK = claim, done
+    E.PAIR_RESULT_KEY = key if job.get('resume') else None
+
+
+def _summary_records(out_dir: str, job: Dict) -> Dict[Tuple[str, str], Dict]:
+    """{(channel, detector tag): record} of a sweep point's earlier run(s):
+    POL_RUN_SUMMARY*.csv (a job's or its GPU workers'), its paths as this
+    machine sees them (the server's output folder mapped onto this one)."""
+    import glob as _glob
+    import pandas as pd
+    srv = str(job.get('_server_output_dir') or '').replace('\\', '/').rstrip('/')
+    loc = str(job.get('output_dir') or '').rstrip('/\\')
+    out: Dict[Tuple[str, str], Dict] = {}
+    for p in sorted(_glob.glob(os.path.join(out_dir, 'POL_RUN_SUMMARY*.csv'))):
+        try:
+            rows = pd.read_csv(p).to_dict('records')
+        except Exception:
+            continue
+        for r in rows:
+            rec = {}
+            for k, v in r.items():
+                if isinstance(v, float) and math.isnan(v):
+                    v = None if k not in ('error',) else ''
+                if isinstance(v, str) and srv and v.replace('\\', '/').startswith(srv + '/'):
+                    v = os.path.join(loc, *[x for x in v.replace('\\', '/')[len(srv) + 1:].split('/') if x])
+                rec[k] = v
+            key = (str(rec.get('nisar_pol')), str(rec.get('detector_tag')))
+            if key not in out or rec.get('status') == 'ok':
+                out[key] = rec
+    return out
+
+
+def finish_spec(job_dir: str, share: Tuple[str, str] = ('', ''), device: str = '', rerun: str = 'missing') -> Dict:
+    """The job of a finished (or crashed) job folder, to run again here with
+    what it has: its settings from job_used.json, every path through the
+    share mapping (a server folder opened from the workstation), its
+    finished detectors reused, the others (rerun 'missing': those whose
+    weights were missing; 'failed': every failed one; 'all': everything)
+    run again, then the truth comparison, the cross-check and the RIVAL
+    files made afresh. The server's job file is kept as job_used_server.json."""
+    import automatch_cross as X
+    X.SHARE = tuple(share) if share else X.SHARE
+    with open(os.path.join(job_dir, 'job_used.json'), encoding='utf-8') as f:
+        job = json.load(f)
+    kept = os.path.join(job_dir, 'job_used_server.json')
+    if not os.path.exists(kept):
+        shutil.copyfile(os.path.join(job_dir, 'job_used.json'), kept)
+    server_out = job.get('output_dir') or ''
+
+    def here(p):
+        if not isinstance(p, str) or not p:
+            return p
+        for loc in (p, X.local_path(p, job_dir, server_out), X._by_share(p)):
+            if loc and os.path.exists(loc):
+                return loc
+        return X._by_share(p)
+    for k in ('input_path', 'reference_dir', 'truth_csv', 'weights_cache_dir', 'manual_gcp_csv', 'cloud_mask_from',
+              'cloud_spectf_vnir', 'cloud_spectf_weights', 'cloud_tiraux_checkpoint', 'cloud_model_dir'):
+        if job.get(k):
+            job[k] = here(job[k])
+    job['cloud_vis_clear'] = [here(p) for p in (job.get('cloud_vis_clear') or [])]
+    job.update(output_dir=job_dir, temp_dir=os.path.join(job_dir, '_cache'), resume=True,
+               _reuse={'missing': 'missing', 'failed': 'failed', 'all': ''}.get(rerun, 'missing'),
+               _server_output_dir=server_out)
+    if device:
+        job['device'] = device
+    return job
+
+
+def run_sharded(job: Dict, gpus: List[int], out_root: str) -> List[Dict]:
+    """One worker process per GPU, the device pinned (cloud mask, auto bands
+    and preflight already done here), all of them on one queue of the
+    detectors (install_queue): each GPU takes the next detector as soon as it
+    is free. Their output is relayed with a [GPU n] prefix. Returns the merged
+    manifest rows of the workers (RUN_MANIFEST_gpu<n>.csv each)."""
+    dets = list(job['detectors'])
+    mem = gpu_memory_gb()
+    if mem:
+        print('[Job] GPU memory: ' + ', '.join(f'GPU {g}: {mem.get(g, 0):.0f} GB' for g in gpus)
+              + ' -- the least-memory detectors to the smaller GPU, the most to the larger; a GPU takes over '
+                'the other\'s only when its own are done', flush=True)
+        for g, share in gpu_share(dets, max(job.get('window_sizes') or [1024]), {g: mem[g] for g in gpus if g in mem}).items():
+            print(f'[Job] GPU {g} ({mem[g]:.0f} GB) first: {", ".join(share)}', flush=True)
+    queue = os.path.join(out_root, '_queue', f'{time.strftime("%Y%m%d_%H%M%S")}_{os.getpid()}')
+    os.makedirs(queue, exist_ok=True)
+    print(f'[Job] {len(dets)} detector(s) on one queue for GPUs {", ".join(map(str, gpus))}: each GPU takes '
+          f'the next as soon as it is free', flush=True)
+    procs, paths = [], []
+    for g in gpus:
+        sub = {k: v for k, v in job.items() if not k.startswith('_') or k in (
+            '_channel_rasters', '_reuse', '_server_output_dir')}
+        sub['_gpu_mem'] = {str(k): v for k, v in mem.items() if k in gpus}
+        sub.update(device=f'cuda:{g}', cloud_device=f'cuda:{g}' if job.get('cloud_device') else '',
+                   detectors=dets, _shard=g, _queue=queue, _channel_rasters=job.get('_channel_rasters') or {},
+                   _window_prep=job.get('_window_prep') or 'none')
+        jp = os.path.join(out_root, f'job_gpu{g}.json')
+        with open(jp, 'w', encoding='utf-8') as f:
+            json.dump(sub, f, indent=2)
+        env = dict(os.environ)
+        env['AUTOMATCH_PARENT_PID'] = str(os.getpid())   # the workers end when the run is stopped
+        for k in ('CUDA_VISIBLE_DEVICES', 'AUTOMATCH_GPU'):
+            env.pop(k, None)
+        p = subprocess.Popen([sys.executable, os.path.abspath(__file__), 'run', jp], stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT, text=True, env=env, bufsize=1, encoding='utf-8',
+                             errors='replace')
+        procs.append((g, p))
+        paths.append(os.path.join(out_root, f'RUN_MANIFEST_gpu{g}.csv'))
+    import threading
+
+    def relay(g, p):
+        for line in p.stdout:
+            line = line.rstrip('\n')
+            if line.startswith(PROGRESS_PREFIX):          # events pass through, tagged with the GPU
+                try:
+                    ev = json.loads(line[len(PROGRESS_PREFIX):])
+                    if ev.get('event') in ('done', 'job', 'failed'):
+                        continue
+                    ev['gpu'] = g
+                    emit(ev)
+                except Exception:
+                    pass
+            else:
+                print(f'[GPU {g}] {line}', flush=True)
+    threads = [threading.Thread(target=relay, args=(g, p), daemon=True) for g, p in procs]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    # handed back: detectors that ran out of memory on a smaller GPU, run now on the largest, in this job
+    back = []
+    for dp, _, fs in os.walk(queue):
+        for f in fs:
+            if f.endswith('.handback'):
+                tag = _read_text(os.path.join(dp, f)).splitlines()[0] if _read_text(os.path.join(dp, f)) else ''
+                base = max((d for d in dets if tag == d or tag.startswith(d + '_') or tag.startswith(d + '-')),
+                           key=len, default='')
+                if base and base not in back:
+                    back.append(base)
+    big = max(gpus, key=lambda g: (mem.get(g, 0.0), g)) if mem else gpus[-1]
+    rows_back: List[Dict] = []
+    if back:
+        print(f'[Job] out of memory on the smaller GPU: {", ".join(back)} -- running on GPU {big} now', flush=True)
+        jp = os.path.join(out_root, f'job_gpu{big}.json')
+        with open(jp, encoding='utf-8') as f:
+            sub = json.load(f)
+        sub.update(detectors=back, _gpu_mem={})                 # one GPU: it takes whatever is left
+        jp2 = os.path.join(out_root, f'job_gpu{big}_handback.json')
+        with open(jp2, 'w', encoding='utf-8') as f:
+            json.dump(sub, f, indent=2)
+        mp_big = os.path.join(out_root, f'RUN_MANIFEST_gpu{big}.csv')
+        first = mp_big + '.first'
+        if os.path.exists(mp_big):
+            os.replace(mp_big, first)
+        env = dict(os.environ)
+        env['AUTOMATCH_PARENT_PID'] = str(os.getpid())
+        for k in ('CUDA_VISIBLE_DEVICES', 'AUTOMATCH_GPU'):
+            env.pop(k, None)
+        p2 = subprocess.Popen([sys.executable, os.path.abspath(__file__), 'run', jp2], stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, text=True, env=env, bufsize=1, encoding='utf-8',
+                              errors='replace')
+        relay(big, p2)
+        p2.wait()
+        import pandas as pd
+        try:
+            rows_back = pd.read_csv(mp_big).to_dict('records') if os.path.exists(mp_big) else []
+        except pd.errors.EmptyDataError:
+            rows_back = []
+        if os.path.exists(first):
+            os.replace(first, mp_big)
+    rows = []
+    claimed = [_read_text(os.path.join(dp, f)) for dp, _, fs in os.walk(queue) for f in fs
+               if not f.endswith('.handback')]
+    ran = {g: claimed.count(str(g)) for g, _ in procs}
+    shutil.rmtree(queue, ignore_errors=True)
+    try:
+        os.rmdir(os.path.dirname(queue))
+    except OSError:
+        pass
+    print('[Job] detectors run per GPU: ' + ', '.join(f'GPU {g}: {n}' for g, n in ran.items()), flush=True)
+    for (g, p), mp in zip(procs, paths):
+        rc = p.wait()
+        if rc != 0:
+            print(f'[Job] GPU {g} worker ended with code {rc}', flush=True)
+        if os.path.exists(mp):
+            import pandas as pd
+            try:
+                rows += pd.read_csv(mp).to_dict('records')
+            except pd.errors.EmptyDataError:     # the other GPUs took every detector first
+                pass
+        else:
+            rows.append({'sweep': '', 'detector': f'(GPU {g} worker)', 'status': 'failed',
+                         'error': f'no manifest from the GPU {g} worker (exit code {rc})'})
+    if rows_back:                              # the second try replaces the out-of-memory failures
+        redone = {(str(r.get('sweep')), str(r.get('channel')), str(r.get('detector'))) for r in rows_back}
+        rows = [r for r in rows if (str(r.get('sweep')), str(r.get('channel')), str(r.get('detector'))) not in redone]
+        rows += rows_back
+    return rows
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Job specification
+# ─────────────────────────────────────────────────────────────────────────────
+DEFAULT_JOB: Dict = {
+    # inputs / outputs
+    'input_path': '',            # G1A raster (GeoTIFF/VRT/JP2...) or NISAR .h5 / scene dir
+    'channels': [],              # [] = all; raster: "band1".., NISAR: "HH"..
+    'auto_bands': 0,             # rasters with channels []: match only the N bands with the best
+                                 # crispness: fine detail above noise (hyperspectral); 0 = off
+    'auto_bands_range': [],
+    # Clouds: OmniCloudMask (thick / thin cloud, shadow) masked out before matching
+    'stretch_percentiles': [1, 99],   # contrast stretch of each window: low / high percentile (e.g. [1, 90])
+    'stretch_mode': 'percentile',     # percentile | clahe: local contrast too (dark ground beside bright cloud)
+    'window_prep': 'auto',            # auto (ML: gradient; others none) | none | gradient | invert: both windows
+                                      # of a pair after the stretch; gradient = polarity-free edge strength,
+                                      # for thermal vs optical (land / water swap sign day and night)
+    'cloud_mask': 'none',        # none | on (or 'omnicloudmask', as before): mask clouds, by cloud_method
+    'cloud_method_MV': 'auto',   # per sensor, with cloud_method auto: auto (= VNIR tests) | omnicloudmask | csmask
+    'cloud_method_HV': 'auto',   # auto (= VNIR tests) | omnicloudmask | csmask
+    'cloud_method_HS': 'auto',   # auto (= SWIR tests) | spectf
+    'cloud_method_ML': 'auto',   # auto (= infrared tests) | tirauxcloud
+    'cloud_destripe': 'rows',    # banding (full-width lines) removed before the reflective tests / models: rows | cols | both | off
+    'cloud_destripe_window': 31,  # running median over this many rows (clouds taller than ~half of it stay)
+    'cloud_method': 'auto',      # auto: ML infrared, HS SWIR, MV / HV VNIR tests | omnicloudmask | ir | swir | vnir
+    'radiance_scale': 0.001,      # radiance = pixel value x this (G1A: scaled radiance, scaling factor 0.001)
+    'radiance_unit': 'W/cm2/sr/um',  # of the scaled radiance (G1A, all sensors); auto: what gives Earth temperatures
+    'cloud_vis_bright_sd': 3.0,  # MV / HV: thick cloud brighter than the clear ground by this many spreads
+    'cloud_vis_white': 0.25,     # MV / HV: cloud is white: spectral spread over blue..NIR below this
+    'cloud_vis_clear_factor': 1.3,  # MV / HV with cloud_vis_clear: brighter than the clear sky x this
+    'cloud_vis_clear': [],       # MV / HV: earlier scenes of the same ground (clear sky: each pixel's darkest)
+    'cloud_from_method': 'auto',  # how the cloud_mask_from image is masked: auto (VNIR tests) | omnicloudmask
+    # cloud_method tirauxcloud (ML, experimental; automatch_tirauxcloud): its released checkpoints
+    'cloud_tiraux_checkpoint': '',  # a model_hash_<...>.pth from its model_files.tar.gz
+    'cloud_tiraux_arch': 'SegFormer',  # SegFormer | Unet (the checkpoint's)
+    'cloud_tiraux_mode': 'ols',   # ols: its 'VIIRS' (DMSP-OLS) models, BT input, 200 m | landsat: radiance, 100 m
+    'cloud_tiraux_classes': 2,    # 2 (clear / cloud) or 3 (clear / thin / cloud), as the checkpoint
+    'cloud_tiraux_px_m': 0.0,     # its pixel size; 0: 200 m ols, 100 m landsat
+    'cloud_tiraux_norm': [0.0, 72.0],  # landsat input: W/m2/sr/um mapped to 0-1 (unpublished: a guess)
+    'cloud_tiraux_threshold': 0.5,  # cloud where its probability is at least this
+    # learned masks on TOA reflectance (automatch_reflect, automatch_cloudmodels): csmask (MV / HV), spectf (HV + HS)
+    'cloud_spectf_weights': '',   # SpecTf's current.pt (109 KB)
+    'cloud_spectf_vnir': '',      # HS: the HV image of the same pass (default: cloud_mask_from)
+    'cloud_spectf_threshold': 0.51,  # cloud where its probability is at least this (its own value)
+    'cloud_spectf_max_bands': 300,  # thin longer spectra evenly to this many bands
+    'cloud_sun_zenith_deg': 0.0,  # reflectance: the sun zenith (deg) when the metadata has none; 0 = metadata
+    'cloud_acq_time_utc': '',     # reflectance: acquisition time (UTC) when the metadata has none; '' = metadata
+    'cloud_ir_dt_k': 8.0,        # ML: cloud is this much colder than clear sky at 10.8 um (thick: twice that)
+    'cloud_ir_split_scale': 1.0,  # ML: x the split-window (10.8 - 12 um) thresholds; higher, less thin cirrus
+    'cloud_ir_cold_k': 240.0,    # ML: colder than this at 10.8 um is thick cloud whatever
+    'cloud_ir_clear': [],        # ML: earlier thermal scenes of the same ground (clear sky: each pixel's warmest)
+    'cloud_swir_k': 4.0,         # HS: cirrus where L1380 / L1250 is this many robust sd above clear
+    'cloud_swir_bright_sd': 3.0,  # HS: thick cloud brighter than the clear ground at 1250 nm by this many spreads
+    'cloud_band_choice': 'spec', # spec: red / green / nir by the band specs; quality: the 3 crispest bands
+    'cloud_bands': [],           # three bands named explicitly (wins over cloud_band_choice)
+    'cloud_mask_classes': [1],   # masked: 1 thick cloud, 2 thin cloud, 3 shadow
+    'cloud_refine': True,        # keep only the model's clouds that are bright blobs (below)
+    'cloud_bright_pct': 90.0,    # bright: above this percentile of the clear ground, both visible bands
+    'cloud_min_blob_km2': 0.0,   # 0: every cloud pixel counts (clouds come in every size); > 0: drop smaller patches
+    'cloud_shadow_near_km': 10.0,  # a shadow lies within this of a cloud blob
+    'cloud_min_confidence': 0.7, # a pixel is cloud / shadow only when the model is this sure
+    'cloud_dilate_px': 2,        # grow the mask by this much (cloud edges)
+    'cloud_mask_from': '',       # HS / ML: the VNIR product of the same pass; its mask added where it covers
+    'cloud_from_margin_px': 10,  # extra growth for the mask laid on (their geolocation differs by km)
+    'cloud_model_dir': '',       # OmniCloudMask weights; '' = <weights folder>/omnicloudmask
+    'cloud_device': '',          # '' = GPU when there is one      # [first, last] band searched by auto_bands, e.g. [1, 70]; [] = all
+    'cloud_test_confidences': [],  # mode "cloud" only: thresholds to compare; [] = 0.5, cloud_min_confidence, 0.85
+    # mode "cloudsweep" only (automatch_cloudsweep): every combination; ranges lo-hi:step or lists
+    'cloud_sweep_conf': '0.6-0.99:0.1',
+    'cloud_sweep_bright': '60-90:5',
+    'cloud_sweep_blob_km2': [0.0, 0.25, 1.0],
+    'cloud_sweep_shadow_km': [5.0, 10.0, 20.0],
+    'cloud_sweep_crisp': 6,       # every 3 of the N crispest bands (0: none); the spec bands always
+    'cloud_sweep_reference': [],  # reference cloud masks, one per image (raster or .geojson / .shp outlines)
+    'cloud_sweep_images': [],     # more images than input_path, e.g. other MV scenes
+    'cloud_sweep_pngs': 'grid',   # one PNG per combination: grid (model alone + each brightness), all, none
+    'cloud_sweep_ir_dt': '4-12:2',       # ML images: infrared tests, colder than clear by (K)
+    'cloud_sweep_ir_split': [0.75, 1.0, 1.5],  # ML: split-window threshold scales
+    'cloud_sweep_swir_k': '2-6:1',       # HS images: cirrus ratio robust sd
+    'cloud_sweep_swir_bright': '2-5:1',  # HS: thick cloud, spreads above the clear ground at 1250 nm
+    'cloud_sweep_vis_bright': '2-5:1',   # MV / HV: thick cloud, spreads above the clear ground
+    'cloud_sweep_vis_white': [0.15, 0.25, 0.35],  # MV / HV: whiteness limits
+    'cloud_sweep_method': 'auto',        # auto | compare (MV / HV: VNIR tests + OmniCloudMask; ML: + TIRAuxCloud)
+    'cloud_sweep_tiraux_threshold': '0.3-0.7:0.2',  # ML with cloud_tiraux_checkpoint: its probability thresholds
+    'cloud_sweep_csmask': False,         # compare: MV / HV also by ukis-csmask
+    'cloud_sweep_spectf_threshold': '0.3-0.7:0.1',  # HS with cloud_spectf_weights: SpecTf thresholds
+    'cloud_sweep_spectf_vnir': [],       # the HV image of the same pass for each sweep image ('' where none)
+    'reference_dir': '',         # L8_ref / C1 / any RIVAL-readable collection
+    'reference_label': '',       # tag in file names; default from folder name
+    'reference_mode': 'auto',    # auto | index-shp | sidecar | degree-tile
+    'reference_band': 1,         # band used from multi-band references
+    'reference_band_map': {},    # per channel, e.g. {"band1": 4}
+    'reference_fill_values': [0, 3],
+    'reference_scale': 1.0,      # DN scale on the reference (0.003162 for S1 GRD)
+    'output_dir': '',
+    'temp_dir': '',              # default <output_dir>/_cache
+    'temp_per_product': False,   # True: the cache in <temp_dir>/<product name>/ (input folder + file name)
+    'resume': True,              # reuse sweep points finished with identical settings
+
+    # algorithms (kornia first; imcui only for algorithms kornia lacks)
+    'detectors': ['sift', 'disk'],   # or "all" / "all-kornia" / "all-imcui" (what this machine offers)
+    'matchers': {},              # per detector, e.g. {"disk": ["lgm"]}; {} = each detector's defaults;
+                                 # "all" = every matcher each detector offers
+    # Per-detector parameters, each a list of values to try, e.g.
+    #   {"sift": {"rootsift": [true, false]},
+    #    "dedode": {"detector_weights": ["L-C4-v2"], "descriptor_weights": ["B-upright", "G-upright"]},
+    #    "disk": {"checkpoint": ["depth", "epipolar"], "lgm.filter_threshold": [0.1, 0.2]}}
+    # Detector parameters: every combination runs as its own named variant and
+    # competes for RIVAL_BEST. 'lgm.*' / 'ada.*' matcher parameters: every
+    # combination is an extra matching pass. `detectors` lists what is settable.
+    'detector_params': {},
+    'smnn_thresholds': [0.9, 0.95],
+    'weights_cache_dir': '',     # offline imcui weights (see prefetch_imw_weights.py)
+
+    # sweep
+    'window_sizes': [1024],
+    'num_features': [None],      # None = from keypoint_density and window size
+    'keypoint_density': 9000,    # keypoints per megapixel of window
+    'max_num_features': 32000,   # cap per window; raise it to keep the density at large windows
+                                 # (e.g. 90000 for 3072 px on a 40 GB GPU)
+    'gpu_window_px': 0,          # largest window a detector matches at once; larger windows are
+                                 # matched in tiles, pooled. 0 = each detector finds it on this GPU
+    'target_resolution': None,   # None = input's native resolution (metres)
+
+    # large offsets (coarse-to-fine)
+    'max_expected_error_m': 50000,
+    'max_error_from_truth': True,
+    'channels_from_truth': True,    # a truth file named <stem>_band28.csv: match band28 (and each band with a
+                                    # sibling <stem>_band<n>.csv); else the selected channels   # with a truth file: max_expected_error_m = its largest error x 1.33 (min 5 km)
+    'coarse_method': 'auto',     # auto | matcher | phasecorr | manual | none
+    'coarse_resolution_m': 60,
+    'initial_offset_m': None,    # [dE, dN] metres, input minus reference
+    'search_margin_m': 1500,
+    'coarse_local': True,        # per-cell coarse offsets (internal distortion)
+    'coarse_cell_km': 0,         # cell size; 0 = one window wide
+    'coarse_shared': True,       # one coarse offset per channel for every detector, measured by a panel
+    'coarse_detectors': [],      # that panel; [] = up to 3 of the job's detectors (TopicFM, MINIMA-RoMa, LoFTR, ...)
+
+    # RANSAC (thresholds in pixels of the working resolution unless *_m given)
+    'ransac_methods': ['magsac'],
+    'ransac_thresholds_px': [1.0, 2.0],
+    'ransac_thresholds_m': [],
+    'ransac_confidences': [0.99],
+    # Sub-cells: match whole windows (context), then keep in each sub-cell the
+    # matches that fit there best; written beside the plain result as RANSAC
+    # variant <method>-sc<px>, so both are ranked in the same run
+    'subcell_px': [],            # sub-cell sides, e.g. [256, 512] inside 2048 px windows; [] = off
+    'subcell_keep': 10,          # matches kept per sub-cell: the least distorted
+
+    # chip consensus (tolerance in pixels unless *_m given)
+    'consensus_tolerance_px': 3.0,
+    'consensus_tolerance_m': None,
+    'consensus_mode_bin_px': 0.5,
+    'min_inliers_per_chip': 6,
+    'min_surviving_chips': 1,
+    'consensus_model': 'surface',   # surface | constant | none (see README)
+    'consensus_surface': 'auto',    # auto | affine | bilinear | quadratic | biquadratic
+    'manual_gcp_csv': '',
+
+    # ground truth (evaluation only: it does not steer matching or consensus)
+    'truth_csv': '',             # RIVAL CSV of manually measured points (In/Ref lon/lat)
+    'truth_radius_m': 5000,      # tool points this close to a truth point estimate its error
+    # Cross-check: keep the matches that several of the best configurations agree on
+    'cross_top_n': 5,            # configurations compared, one per detector (0 = off)
+    'cross_min_agree': 0,        # how many must agree in a cell; 0 = more than half
+    'cross_cell_km': 25.0,       # cell size of the comparison
+    'cross_keep_per_cell': 3,    # of those agreeing in a cell, the least distorted kept
+    'cross_max_points': 500,     # RIVAL_DENSE_<channel>.csv: this many agreed points over what has matches (0: off)
+    'cross_cell_px': [64, 128],  # agreement levels, RIVAL_CONSISTENT / RIVAL_FINAL_<channel>_<L>px.csv: cells of L working px (8 x 8 in a 512 px
+                                 # window) where the top detectors must agree; the best keypoint of each is kept,
+                                 # and RIVAL_FINAL / RIVAL_BEST_FINAL pick only among these (0: off)
+    'final_points': 24,          # RIVAL_FINAL_<channel>.csv: one best point per sub-tile of a grid of this many
+                                 # over the scene; a tile on water / cloud / featureless ground fails (FINAL_TILES_*)
+    'interior_filter': True,     # leave out matches inside featureless areas (water bodies, uniform blobs);
+                                 # their edges kept (automatch_interior)
+    'interior_edge_px': 4.0,     # ... farther than this from any textured pixel (input pixels)
+
+    # RIVAL export
+    'rival_max_points_per_chip': 200,   # 0 = all inliers
+
+    # misc
+    'device': 'auto',            # auto | cuda | cuda:0 | cpu | all (every GPU: detectors spread over them) | cuda:0,1
+    'use_amp': True,
+    'min_valid_fraction': 0.3,
+    'min_area_km2': 50.0,
+    'min_gpu_free_gb': 1.5,
+    'save_match_images': False,
+    'nisar_band': 'auto',
+    'nisar_frequency': 'A',
+    'debug': False,
+}
+
+JOB_HELP = {
+    'input_path': 'Image to assess: G1A raster (any rasterio format) or NISAR .h5 / scene folder',
+    'channels': 'Channels to process ([] = all): band1.. for rasters, HH/HV.. for NISAR',
+    'auto_bands': 'Pick the N bands with the most fine detail above noise when channels is [] (hyperspectral); 0 = off',
+    'auto_bands_range': '[first, last] band auto_bands searches, e.g. [1, 70]; [] = all bands',
+    'reference_dir': 'Reference collection (L8_ref, C1, ...) - discovered like DPQED_rival.py',
+    'max_expected_error_m': 'Worst-case geolocation error; search buffer for references and coarse alignment',
+    'max_error_from_truth': 'With a truth file, take the worst-case error from it (largest error + a third)',
+    'coarse_method': 'auto = matcher at coarse resolution, phase correlation if weak',
+    'coarse_shared': 'One coarse offset per channel, measured by a few detectors and given to every detector',
+    'coarse_detectors': 'Detectors that measure the shared coarse offset ([] = automatic)',
+    'initial_offset_m': '[dE, dN] metres (input minus reference) if known, e.g. from RIVAL',
+    'truth_csv': 'Manually measured points (RIVAL CSV): every detector + matcher is ranked against them',
+}
+
+
+_WARNED_KEYS = set()
+
+
+def unknown_keys(job: Dict) -> List[str]:
+    """Settings this version does not have ('_' keys are internal notes)."""
+    return sorted(k for k in job if k not in DEFAULT_JOB and not str(k).startswith('_'))
+
+
+def unknown_key_note(key: str) -> str:
+    near = difflib.get_close_matches(key, list(DEFAULT_JOB), n=1, cutoff=0.75)
+    why = (f'did you mean {near[0]!r}?' if near else
+           'written by a newer version? copy the current g1a_automatch folder here')
+    return f'setting {key!r} is not used by this version (automatch {AUTOMATCH_VERSION}), ignored -- {why}'
+
+
+def product_folder(input_path: str) -> str:
+    """'<input folder>_<input file stem>' (the folder left out when the file
+    name already starts with it): the product's own cache subfolder."""
+    p = str(input_path or '').replace('\\', '/').rstrip('/')
+    if not p:
+        return ''
+    stem = os.path.splitext(os.path.basename(p))[0]
+    folder = os.path.basename(os.path.dirname(p))
+    return stem if not folder or stem.startswith(folder) else f'{folder}_{stem}'
+
+
+def normalize(job: Dict) -> Dict:
+    """The job with every default filled in. Settings this version does not
+    know are ignored with a warning (once per setting), so a settings file
+    from another version still runs; '_' keys are dropped silently."""
+    out = copy.deepcopy(DEFAULT_JOB)
+    for k in unknown_keys(job):
+        if k not in _WARNED_KEYS:
+            _WARNED_KEYS.add(k)
+            print(f'[Job] WARNING: {unknown_key_note(k)}', flush=True)
+    out.update(copy.deepcopy({k: v for k, v in job.items() if k in DEFAULT_JOB}))
+    for k in ('_shard', '_queue', '_channel_rasters', '_window_prep', '_reuse', '_server_output_dir', '_gpu_mem'):
+        if job.get(k) is not None:
+            out[k] = copy.deepcopy(job[k])
+    if out.get('temp_per_product') and out['temp_dir'] and out.get('input_path'):
+        prod = product_folder(out['input_path'])           # once: a saved job already ends in it
+        if prod and os.path.basename(os.path.normpath(out['temp_dir'])) != prod:
+            out['temp_dir'] = os.path.join(out['temp_dir'], prod)
+    if not out['temp_dir'] and out['output_dir']:
+        out['temp_dir'] = os.path.join(out['output_dir'], '_cache')
+    for k in ('window_sizes', 'num_features', 'detectors', 'smnn_thresholds',
+              'ransac_methods', 'ransac_thresholds_px', 'ransac_thresholds_m', 'ransac_confidences'):
+        if not isinstance(out[k], list):
+            out[k] = [out[k]]
+    out['num_features'] = [None if v in (None, '', 'auto', 0) else int(v) for v in out['num_features']] or [None]
+    sc = out['subcell_px'] if isinstance(out['subcell_px'], (list, tuple)) else [out['subcell_px']]
+    out['subcell_px'] = sorted({int(v) for v in sc if v not in (None, '') and int(v) > 0})
+    dp = out.get('detector_params') or {}
+    if not isinstance(dp, dict) or not all(isinstance(v, dict) for v in dp.values()):
+        raise ValueError('detector_params must map detector -> {parameter: [values]}')
+    out['detector_params'] = {d: {k: (list(v) if isinstance(v, (list, tuple)) else [v])
+                                  for k, v in p.items()} for d, p in dp.items()}
+    if out['initial_offset_m'] in ([], '', None):
+        out['initial_offset_m'] = None
+    return out
+
+
+def load_job(path: str, overrides: Optional[List[str]] = None) -> Dict:
+    with open(path, 'r', encoding='utf-8') as f:
+        job = json.load(f)
+    for ov in overrides or []:
+        if '=' not in ov:
+            raise ValueError(f'--set expects key=value, got {ov!r}')
+        k, v = ov.split('=', 1)
+        if k.strip() not in DEFAULT_JOB:     # typed just now, for this version: a typo
+            raise ValueError(f'--set {k.strip()}: {unknown_key_note(k.strip())}')
+        try:
+            job[k.strip()] = json.loads(v)
+        except ValueError:
+            job[k.strip()] = v
+    return normalize(job)
+
+
+def emit(event: Dict):
+    if os.environ.get('AUTOMATCH_EVENTS', '1') == '0':   # e.g. batch services: log only
+        return
+    try:
+        print(PROGRESS_PREFIX + json.dumps(event, default=str), flush=True)
+    except Exception:
+        pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Detector catalog
+# ─────────────────────────────────────────────────────────────────────────────
+def detector_catalog(weights_cache: str = '') -> Dict:
+    """All selectable detectors (kornia + imcui-only), and why imcui ones were
+    skipped. Registers imcui detectors as a side effect."""
+    import automatch_engine as E
+    import automatch_imcui as IM
+    imw = IM.register_imcui_detectors(weights_cache or None)
+    return {'detectors': E.available_detectors(), 'imcui': imw,
+            'kornia_unavailable': E.kornia_unavailable()}
+
+
+def format_catalog(cat: Dict) -> str:
+    """The catalogue as text: one line per selectable detector (default and
+    optional matchers, settings), then every imcui row not offered and why."""
+    lines = []
+    for det in cat['detectors']:
+        defaults = det.get('default_matchers', det['matchers'])
+        extra = [m for m in det['matchers'] if m not in defaults]
+        ms = ', '.join(defaults) + (f" (+ {', '.join(extra)} when selected)" if extra else '')
+        ps = ', '.join(p['name'] for p in det.get('params', [])
+                       if p.get('scope', 'detector') == 'detector' and '.' not in p['name']) or '-'
+        if det['source'] != 'kornia' and det.get('params'):
+            ps = ', '.join(p['name'] for p in det['params'])   # imcui: thresholds + model keys
+        lines.append(f"{det['name']:<22} {det['source']:<7} matchers: {ms:<52} settings: {ps}")
+    for name, why in (cat.get('kornia_unavailable') or {}).items():
+        lines.append(f'{name:<22} kornia  not available here: {why}')
+    if cat['imcui'].get('error'):
+        lines.append(f"(imcui: {cat['imcui']['error']})")
+    for tag, why in cat['imcui'].get('skipped', []):
+        lines.append(f'{"imw-" + tag:<22} not offered: {why}')
+    return '\n'.join(lines)
+
+
+# 'all' tokens for job['detectors']: everything selectable ON THIS MACHINE
+# (the imcui part depends on the installed imcui), or one source of it.
+ALL_DETECTORS = {'all': None, 'all-kornia': 'kornia', 'all-imcui': 'imcui'}
+
+
+def _is_all(v) -> bool:
+    return isinstance(v, str) and v.strip().lower() == 'all'
+
+
+def expand_selection(job: Dict) -> Dict:
+    """Replace 'all' / 'all-kornia' / 'all-imcui' in detectors and "all" as
+    matchers (for every detector, or as one detector's value) by explicit
+    lists from this machine's catalogue. A job without them is returned as is."""
+    dets = list(job.get('detectors') or [])
+    m = job.get('matchers')
+    want_d = any(isinstance(d, str) and d.strip().lower() in ALL_DETECTORS for d in dets)
+    want_m = _is_all(m) or (isinstance(m, dict) and any(_is_all(v) for v in m.values()))
+    if not (want_d or want_m):
+        return job
+    import automatch_engine as E
+    cat = detector_catalog(job.get('weights_cache_dir', ''))
+    info = {d['name']: d for d in cat['detectors']}
+    names: List[str] = []
+    for d in dets:
+        key = d.strip().lower() if isinstance(d, str) else d
+        if key in ALL_DETECTORS:
+            names += [n for n, x in info.items() if ALL_DETECTORS[key] in (None, x['source'])]
+        else:
+            names.append(d)
+    names = list(dict.fromkeys(names))
+    out = dict(job, detectors=names)
+    if want_m:
+        per = {}
+        for d in names:
+            offered = info.get(E.resolve_detector_name(d)[0], {}).get('matchers')
+            given = m if _is_all(m) else (m or {}).get(d)
+            if _is_all(given) and offered:
+                per[d] = list(offered)
+            elif isinstance(given, list):
+                per[d] = given
+        out['matchers'] = per
+    print(f"[Job] selection expanded on this machine: {len(names)} detector(s): {', '.join(names)}")
+    return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Preflight
+# ─────────────────────────────────────────────────────────────────────────────
+GCP_COLUMNS = {'scan', 'pix', 'Map_X', 'Map_Y', 'Map_X_ref', 'Map_Y_ref'}
+
+
+def _check_gcp_file(path: str) -> List[str]:
+    """Errors for a manual GCP CSV the consensus cannot use."""
+    import csv as _csv
+    try:
+        with open(path, newline='', encoding='utf-8-sig') as f:
+            cols = {c.strip() for c in next(_csv.reader(f), [])}
+    except Exception as e:
+        return [f'manual_gcp_csv unreadable: {type(e).__name__}: {e}']
+    missing = GCP_COLUMNS - cols
+    if not missing:
+        return []
+    if {'In_Lon', 'In_Lat', 'Ref_Lon', 'Ref_Lat'} <= cols:
+        return ['manual_gcp_csv is a RIVAL CSV. Manual GCP CSV takes NISAR-style GCPs (columns scan, pix, '
+                'Map_X, Map_Y, Map_X_ref, Map_Y_ref) that steer the chip consensus. To rank detectors and '
+                'matchers against manually measured RIVAL points, give the file as Ground truth CSV '
+                '(truth_csv) and leave Manual GCP CSV empty.']
+    return [f'manual_gcp_csv lacks the columns {sorted(missing)} (needs {sorted(GCP_COLUMNS)})']
+
+
+WINDOW_KM = 92.0     # 2048 px at 45 m (G1A MX-VNIR): the window size the ranking runs were made with
+
+
+def _scale_warnings(job: Dict, scene, res: float, E) -> List[str]:
+    """Window sizes that do not suit this image's pixel size. A window is
+    best judged on the ground: 2048 px is 92 km at 45 m (MX-VNIR) but 369 km
+    at 180 m (HS) and 645 km at 315 m, where a scene gives one chip per
+    reference (run 300, jobs 312-317)."""
+    out = []
+    if scene.kind != 'raster' or not scene.native_res:
+        return out
+    with E.rt.open(scene.raster_path) as src:
+        w_km = src.width * abs(src.transform.a) / 1000.0
+        h_km = src.height * abs(src.transform.e) / 1000.0
+    # a window larger than the image's long side is the whole scene: one chip
+    # per reference. One larger than a narrow strip's width only (a 39 km wide
+    # HS strip) still tiles along it
+    long_px = max(w_km, h_km) * 1000.0 / res
+    suggest = max(256, int(long_px / 3) // 64 * 64)
+    ground = max(256, int(round(WINDOW_KM * 1000.0 / res / 64.0)) * 64)
+    for w in sorted(set(int(v) for v in job['window_sizes'])):
+        if w > long_px:
+            out.append(f'{w} px windows are {w * res / 1000:.0f} km across at {res:g} m, larger than the image '
+                       f'({w_km:.0f} x {h_km:.0f} km): each reference gives at most one chip and one model '
+                       f'covers the whole scene. Use about a third of its length, here {suggest} px')
+        elif w * res / 1000.0 > 2 * WINDOW_KM:
+            out.append(f'{w} px windows are {w * res / 1000:.0f} km across at {res:g} m: few chips per scene. '
+                       f'About {WINDOW_KM:.0f} km, here {ground} px, gives as many chips as 2048 px windows on '
+                       f'45 m images')
+    return out
+
+
+def max_error_from_truth(job: Dict) -> Tuple[Dict, str]:
+    """(the job with max_expected_error_m taken from its truth file, a note)
+    when max_error_from_truth is on and a truth file is readable: the largest
+    total error of its points (sqrt(dE^2 + dN^2)) plus a third, at least 5 km,
+    rounded up to the km. Otherwise the job unchanged and ''."""
+    if not job.get('max_error_from_truth', True) or not job.get('truth_csv') or not os.path.exists(job['truth_csv']):
+        return job, ''
+    try:
+        import automatch_truth as T
+        from pyproj import Geod
+        t = T.load_truth(job['truth_csv'])
+        _, _, dist = Geod(ellps='WGS84').inv(t['in_lon'].to_numpy(), t['in_lat'].to_numpy(),
+                                             t['ref_lon'].to_numpy(), t['ref_lat'].to_numpy())
+        worst = float(max(abs(d) for d in dist))
+    except Exception as e:
+        return job, f'max_expected_error_m kept ({type(e).__name__} reading the truth: {e})'
+    new = max(5000.0, math.ceil(worst * 4.0 / 3.0 / 1000.0 - 0.1) * 1000.0)     # 20.03 km -> 20, not 21
+    note = (f'max_expected_error_m {new / 1000:.0f} km from the truth file (largest error {worst / 1000:.1f} km '
+            f'+ a third; was {float(job.get("max_expected_error_m") or 0) / 1000:.0f} km)')
+    return dict(job, max_expected_error_m=new), note
+
+
+TRUTH_BAND = re.compile(r'^(.*?)([_\-. ])(?:band_?|b)(\d+)$', re.I)
+
+
+def truth_bands(truth_csv: str) -> List[str]:
+    """The bands a truth file names: its own suffix (pts_band28.csv, pts_B28.csv
+    -> band28) and those of its siblings <stem>_band<n>.csv beside it, in band
+    order; [] when its name carries no band."""
+    import glob as _g
+    if not truth_csv:
+        return []
+    folder, name = os.path.split(truth_csv)
+    stem, ext = os.path.splitext(name)
+    m = TRUTH_BAND.match(stem)
+    if not m:
+        return []
+    base = m.group(1)
+    bands = {int(m.group(3))}
+    for p in _g.glob(os.path.join(folder, _g.escape(base) + '*' + ext)):
+        mm = TRUTH_BAND.match(os.path.splitext(os.path.basename(p))[0])
+        if mm and mm.group(1) == base:
+            bands.add(int(mm.group(3)))
+    return [f'band{n}' for n in sorted(bands)]
+
+
+def truth_files_beside(truth_csv: str) -> List[str]:
+    """The truth file and its per-band siblings (<stem>_band<n>.csv)."""
+    import glob as _g
+    if not truth_csv:
+        return []
+    folder, name = os.path.split(truth_csv)
+    stem, ext = os.path.splitext(name)
+    m = TRUTH_BAND.match(stem)
+    if not m:
+        return [truth_csv]
+    out = [truth_csv]
+    for p in sorted(_g.glob(os.path.join(folder, _g.escape(m.group(1)) + '*' + ext))):
+        mm = TRUTH_BAND.match(os.path.splitext(os.path.basename(p))[0])
+        if mm and mm.group(1) == m.group(1) and os.path.abspath(p) != os.path.abspath(truth_csv):
+            out.append(p)
+    return out
+
+
+def channels_from_truth(job: Dict) -> Tuple[Dict, str]:
+    """(the job matching the bands its truth file names, a note) when
+    channels_from_truth is on and the truth file's name carries a band;
+    otherwise the job unchanged (its selected channels) and ''."""
+    if not job.get('channels_from_truth', True):
+        return job, ''
+    bands = truth_bands(job.get('truth_csv') or '')
+    if not bands:
+        return job, ''
+    if list(job.get('channels') or []) == bands:
+        return job, ''
+    was = ', '.join(job.get('channels') or []) or 'none (auto)'
+    return dict(job, channels=bands, auto_bands=0), (f'channels {", ".join(bands)} from the truth file name(s) '
+                                                     f'(selected: {was})')
+
+
+def preflight(job: Dict, check_weights: bool = True) -> Dict:
+    """Validate a job without matching. {'errors', 'warnings', 'info'}.
+    check_weights: also look for every model weight file the job will load
+    (missing ones are warnings: they download on first use when online)."""
+    errors, warnings, info = [], [], {}
+    warnings += [unknown_key_note(k) for k in
+                 dict.fromkeys(list(job.get('_ignored_keys') or []) + unknown_keys(job))]
+    job = normalize(job)
+    job, note = max_error_from_truth(job)
+    if note:
+        info['max_expected_error_m'] = job['max_expected_error_m']
+        warnings.append(note)
+    job, note = channels_from_truth(job)
+    if note:
+        info['channels'] = job['channels']
+        warnings.append(note)
+
+    if not job['input_path'] or not os.path.exists(job['input_path']):
+        errors.append(f"input_path not found: {job['input_path']!r}")
+    if not job['reference_dir'] or not os.path.isdir(job['reference_dir']):
+        errors.append(f"reference_dir not found: {job['reference_dir']!r}")
+    if not job['output_dir']:
+        errors.append('output_dir is empty')
+    else:
+        try:
+            os.makedirs(job['output_dir'], exist_ok=True)
+            probe = os.path.join(job['output_dir'], '.write_test')
+            open(probe, 'w').close()
+            os.remove(probe)
+        except OSError as e:
+            errors.append(f'output_dir not writable: {e}')
+    if job['manual_gcp_csv'] and not os.path.exists(job['manual_gcp_csv']):
+        errors.append(f"manual_gcp_csv not found: {job['manual_gcp_csv']}")
+    elif job['manual_gcp_csv']:
+        errors += _check_gcp_file(job['manual_gcp_csv'])
+        if job['truth_csv'] and os.path.exists(job['truth_csv']) and \
+                os.path.samefile(job['manual_gcp_csv'], job['truth_csv']):
+            warnings.append('the same file is both Manual GCP CSV (it steers the chip consensus) and Ground '
+                            'truth CSV (it scores the result): the ranking would favour configurations picked '
+                            'to agree with it. Leave Manual GCP CSV empty when choosing a detector + matcher.')
+    if job['truth_csv']:
+        try:
+            import automatch_truth as T
+            info['truth_points'] = len(T.load_truth(job['truth_csv']))
+        except Exception as e:
+            errors.append(f"truth_csv: {type(e).__name__}: {e}")
+    if job['consensus_model'] not in ('surface', 'constant', 'none'):
+        errors.append(f"consensus_model must be surface, constant or none (got {job['consensus_model']!r})")
+    if job['consensus_surface'] not in ('auto', 'affine', 'bilinear', 'quadratic', 'biquadratic'):
+        errors.append(f"consensus_surface must be auto, affine, bilinear, quadratic or biquadratic "
+                      f"(got {job['consensus_surface']!r})")
+    if job['coarse_method'] == 'manual' and job['initial_offset_m'] is None:
+        errors.append("coarse_method 'manual' needs initial_offset_m [dE, dN]")
+    if any(w < 256 for w in job['window_sizes']):
+        errors.append('window_sizes must be >= 256 px')
+    if errors:
+        return {'errors': errors, 'warnings': warnings, 'info': info}
+
+    import automatch_engine as E
+    import automatch_refs as refs
+
+    # input
+    try:
+        cfg = E.PipelineConfig(nisar_band=job['nisar_band'], nisar_frequency=job['nisar_frequency'])
+        scene = E.InputScene(job['input_path'], cfg)
+        info['input'] = scene.describe()
+        if cloud_on(job) and scene.kind == 'raster':
+            import automatch_bench as B
+            import automatch_cloud as C
+            try:
+                sensor = B.sensor_of(scene.name, scene.native_res)
+                method = C.method_for(job, sensor, scene.raster_path)
+                if C.needs_model(job, sensor, scene.raster_path):
+                    errors += C.check(job)
+                try:
+                    import automatch_cloudphys as P
+                    P.unit_name(job.get('radiance_unit') or 'W/cm2/sr/um')
+                except ValueError as e:
+                    errors.append(f'radiance_unit: {e}')
+                if job.get('cloud_mask_from') and not os.path.exists(job['cloud_mask_from']):
+                    errors.append(f"cloud_mask_from not found: {job['cloud_mask_from']}")
+                if method in ('csmask', 'spectf'):
+                    import automatch_cloudmodels as M
+                    import automatch_reflect as R
+                    po = C.phys_options(job, method)
+                    errors += M.csmask_check(po) if method == 'csmask' else M.spectf_check(po)
+                    if method == 'spectf' and sensor == 'HS' and not po.get('vnir'):
+                        errors.append('cloud_method spectf on HS needs the HV image of the same pass '
+                                      '(cloud_spectf_vnir or cloud_mask_from): on SWIR alone it gives nonsense')
+                    si = R.sun_info(scene.raster_path, job)
+                    if si['zenith_deg'] is None and si['time'] is None:
+                        errors.append('reflectance: no sun angle or acquisition time in the metadata; set '
+                                      'cloud_sun_zenith_deg or cloud_acq_time_utc (keys seen: '
+                                      + ('; '.join(si['seen'][:6]) or 'none') + ')')
+                    else:
+                        info['reflectance'] = {'sun_zenith_from': si['zenith_from'], 'time_from': si['time_from']}
+                if method == 'tiraux':
+                    import automatch_tirauxcloud as T
+                    errors += T.check(T.options(job))
+                    warnings.append('cloud_method tirauxcloud is experimental: one thermal channel, a model '
+                                    'trained on other sensors; compare it with the infrared tests (cloud sweep)')
+                if method in C.PHYS_NAMES:
+                    info['cloud_mask'] = {'sensor': sensor, 'method': C.PHYS_NAMES[method],
+                                          'how': C._phys_text(method, C.phys_options(job, method)),
+                                          'from': job.get('cloud_mask_from') or ''}
+                    ck = C.CLEAR_KEY.get(method)
+                    for p in (job.get(ck) or []) if ck else []:
+                        if p and not os.path.exists(p):
+                            errors.append(f'{ck}: not found: {p}')
+                    if method == 'vnir':
+                        import automatch_cloudphys as P
+                        try:
+                            P.vnir_bands(C.band_wavelengths(scene.raster_path, sensor) or [])
+                        except ValueError as e:
+                            errors.append(f'cloud_method vnir: {e}')
+                    if method == 'swir':
+                        import automatch_cloudphys as P
+                        wl = C.band_wavelengths(scene.raster_path, sensor) or \
+                            C.band_wavelengths(scene.raster_path, 'HS') or []
+                        got = P.nearest_bands(wl, [1250.0, 1380.0], 40.0)
+                        if len(got) < 2:
+                            errors.append('cloud_method swir: no bands near 1250 and 1380 nm in this image')
+                elif job.get('cloud_mask_from'):
+                    if not os.path.exists(job['cloud_mask_from']):
+                        errors.append(f"cloud_mask_from not found: {job['cloud_mask_from']}")
+                    info['cloud_mask'] = {'sensor': sensor, 'from': job['cloud_mask_from']}
+                else:
+                    bands, how, wl = C.choose_bands(scene.raster_path, sensor, job.get('cloud_bands') or None,
+                                                    job.get('cloud_band_choice') or 'spec')
+                    if 'not trained' in how:
+                        warnings.append(f'cloud_mask: {how}; on Sentinel-2 SWIR-only bands the model found almost '
+                                        f'no cloud (IoU 0.00-0.04): prefer cloud_mask_from')
+                    info['cloud_mask'] = {'sensor': sensor, 'bands': bands, 'how': how, 'wavelengths_nm': wl}
+                if method == 'ocm' and (scene.native_res or 0) > 50:
+                    warnings.append(f'cloud_mask: OmniCloudMask is validated at 10-50 m; this image is '
+                                    f'{scene.native_res:g} m (run as it is, not upsampled)')
+            except Exception as e:
+                errors.append(f'cloud_mask: {type(e).__name__}: {e}')
+        if scene.kind == 'raster':
+            warnings += ml_band_notes(job, scene)
+            if job.get('truth_csv'):
+                import automatch_truth as T
+                files = T.truth_files_for(job['truth_csv'], job.get('channels') or [])
+                own = {ch: p for ch, p in files.items() if os.path.abspath(p) != os.path.abspath(job['truth_csv'])}
+                if own:
+                    info['truth_by_channel'] = own
+                    warnings.append('ground truth per band: ' + ', '.join(
+                        f'{ch} -> {os.path.basename(p)}' for ch, p in own.items())
+                        + '; the other bands use ' + os.path.basename(job['truth_csv']))
+            picked, note = resolve_auto_bands(job, scene, E)
+            if note:
+                warnings.append(note)
+            if picked:
+                info['auto_bands'] = picked
+        bad = [c for c in job['channels'] if c not in scene.channels]
+        if bad:
+            errors.append(f'channels {bad} not in input; available {scene.channels}')
+        res = job['target_resolution'] or scene.native_res
+        if res is None and scene.kind == 'raster':
+            warnings.append('input is in lon/lat; set target_resolution (metres) explicitly')
+        info['working_resolution_m'] = res
+        if res:
+            warnings += _scale_warnings(job, scene, float(res), E)
+    except Exception as e:
+        errors.append(f'input unreadable: {type(e).__name__}: {e}')
+        scene = None
+
+    # references
+    try:
+        mode = None if job['reference_mode'] in ('', 'auto', None) else job['reference_mode']
+        cat = refs.scan_reference_folder(job['reference_dir'], mode)
+        info['references'] = {'mode': cat['mode'], 'n_rasters': cat['n_rasters'],
+                              'n_footprints': len(cat['footprints']),
+                              'errors': cat['errors'][:10]}
+        if not cat['footprints']:
+            errors.append('no reference footprints could be read')
+        elif scene is not None:
+            from shapely.geometry import Polygon
+            try:
+                foot, src, _ = scene_footprint(job, scene, E, info.get('auto_bands'))
+                grow_deg = job['max_expected_error_m'] / 111000.0
+                grown = foot.buffer(grow_deg)
+                hits = [os.path.basename(p) for p, r in cat['footprints'].items()
+                        if len(r['ring']) >= 3 and grown.intersects(Polygon(r['ring']))]
+                info['footprint_source'] = src
+                info['footprint_bounds'] = [round(v, 4) for v in foot.bounds]
+                info['candidate_references'] = hits[:50]
+                if not hits:
+                    errors.append('no reference footprint lies within max_expected_error_m of the input')
+            except Exception as e:
+                warnings.append(f'footprint check skipped: {type(e).__name__}: {e}')
+    except Exception as e:
+        errors.append(f'reference folder: {type(e).__name__}: {e}')
+
+    # detectors
+    try:
+        job = expand_selection(job)
+        cat = detector_catalog(job['weights_cache_dir'])
+        names = {d['name'] for d in cat['detectors']}
+        wanted = list(dict.fromkeys(job['detectors']))
+        unknown = [d for d in wanted if E.resolve_detector_name(d)[0] not in names]
+        if job['coarse_shared'] and job['coarse_method'] in ('auto', 'matcher'):
+            pcfg = E.PipelineConfig(coarse_detectors=list(job['coarse_detectors']) or None)
+            info['coarse_panel'] = E.coarse_panel(wanted, pcfg)
+            for d in job['coarse_detectors']:
+                if E.resolve_detector_name(d)[0] not in names:
+                    errors.append(f'coarse_detectors: {d!r} is not available here')
+        if unknown:
+            skipped = dict(cat['imcui'].get('skipped') or [])
+            lacking = E.kornia_unavailable()
+            for d in unknown:
+                tag = d[len('imw-'):] if d.startswith('imw-') else d
+                why = (lacking.get(E.resolve_detector_name(d)[0]) or skipped.get(tag)
+                       or cat['imcui'].get('error') or 'not available')
+                errors.append(f'detector {d!r}: {why}')
+        supported = {x['name']: x['matchers'] for x in cat['detectors']}
+        defaults = {x['name']: x.get('default_matchers', x['matchers']) for x in cat['detectors']}
+        for det, ms in (job['matchers'] or {}).items():
+            sup = supported.get(E.resolve_detector_name(det)[0])
+            if sup is None:
+                errors.append(f'matchers given for unknown detector {det!r}')
+            elif set(ms) - set(sup):
+                errors.append(f'{det}: unsupported matcher(s) {sorted(set(ms) - set(sup))}; supported {sup}')
+        # parameters: validate, and count what the job will actually run
+        runs, total = [], 0
+        n_channels = len(job['channels']) or len((info.get('input') or {}).get('channels') or [1])
+        n_sweep = len(job['window_sizes']) * len(job['num_features'])
+        for d in wanted:
+            base = E.resolve_detector_name(d)[0]
+            if base not in supported:
+                continue
+            try:
+                ms = (job['matchers'] or {}).get(d) or (job['matchers'] or {}).get(base) or defaults[base]
+                nv, npass = E.count_runs(d, job['detector_params'].get(d), ms, len(job['smnn_thresholds']))
+                runs.append({'detector': d, 'variants': nv, 'passes': npass})
+                total += npass
+            except ValueError as e:
+                errors.append(str(e))
+        for d in job['detector_params']:
+            if d not in wanted:
+                warnings.append(f'parameters given for {d!r}, which is not selected (ignored)')
+        info['detectors'] = wanted
+        cfgk = E.PipelineConfig(keypoint_density=job['keypoint_density'],
+                                max_num_features=int(job['max_num_features']))
+        info['keypoints_per_window'] = {
+            int(w): (int(nf) if nf else cfgk.compute_num_features(int(w)))
+            for w in job['window_sizes'] for nf in job['num_features']}
+        for w, n in info['keypoints_per_window'].items():
+            want = int(job['keypoint_density'] * w * w / 1e6)
+            if n < want:
+                warnings.append(f'{w} px windows get {n} keypoints, the cap (max_num_features); '
+                                f'{want} would keep the density of {job["keypoint_density"]} per megapixel')
+        info['runs'] = runs
+        info['matching_passes'] = total * n_channels * n_sweep
+        info['ransac_sets_per_pass'] = (len(job['ransac_methods']) * len(job['ransac_confidences'])
+                                        * len(job['ransac_thresholds_m'] or job['ransac_thresholds_px']))
+    except Exception as e:
+        errors.append(f'detector catalog: {type(e).__name__}: {e}')
+
+    # model weights
+    if check_weights and not errors:
+        try:
+            import automatch_weights as W
+            wrep = W.check(job=job, quiet=True)
+            info['weights'] = wrep['summary']
+            for m in wrep['missing']:
+                warnings.append(f"weights: {m['file']} ({', '.join(m['detectors'])}) is not on this machine "
+                                f"-- it is downloaded on first use if this machine is online; offline, that "
+                                f"detector is skipped. Source: {m['source']}. See 'Check weights'.")
+            for d in wrep['detectors']:
+                for v in d['variants']:
+                    if v['status'] in ('error', 'partial'):
+                        warnings.append(f"weights: {v['variant']}: {v['status']} ({v['error']})")
+        except Exception as e:
+            warnings.append(f'weights check skipped: {type(e).__name__}: {e}')
+
+    # device
+    try:
+        import torch
+        if torch.cuda.is_available():
+            p = torch.cuda.get_device_properties(0)
+            info['gpu'] = f'{p.name} ({p.total_memory / 1024 ** 3:.1f} GB)'
+            if p.total_memory / 1024 ** 3 < 20 and max(job['window_sizes']) > 2048:
+                warnings.append('window sizes > 2048 px may not fit a GPU under 20 GB')
+        else:
+            info['gpu'] = 'none (CPU)'
+            if job['device'].startswith('cuda') and not os.environ.get('AUTOMATCH_CPU_OK'):
+                errors.append('device=cuda requested but CUDA is not available')
+    except Exception:
+        pass
+    return {'errors': errors, 'warnings': warnings, 'info': info}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Run
+# ─────────────────────────────────────────────────────────────────────────────
+def _config_for(job: Dict, win: int, nf: Optional[int], res: float, out_dir: str):
+    import automatch_engine as E
+    thr_m = job['ransac_thresholds_m'] or [round(t * res, 3) for t in job['ransac_thresholds_px']]
+    tol = job['consensus_tolerance_m'] or job['consensus_tolerance_px'] * res
+    cfg = E.PipelineConfig(
+        window_size=win, window_size_small=max(256, win // 2), loftr_max_window=win,
+        gpu_window_px=int(job['gpu_window_px'] or 0),
+        keypoint_density=job['keypoint_density'], max_num_features=int(job['max_num_features']),
+        target_resolution=job['target_resolution'],
+        use_disk_cache=True, check_existing_pairs=True, cleanup_after_pair=False,
+        use_amp=job['use_amp'], debug_mode=job['debug'],
+        smnn_thresholds=job['smnn_thresholds'], ransac_methods=job['ransac_methods'],
+        ransac_thresholds=thr_m, ransac_confidences=job['ransac_confidences'],
+        subcell_sizes=[(int(px), float(px) * res) for px in job['subcell_px'] if 0 < int(px) < win],
+        subcell_keep=int(job['subcell_keep'] or 10),
+        reference_dir=job['reference_dir'], reference_label=job['reference_label'],
+        reference_mode=None if job['reference_mode'] in ('', 'auto') else job['reference_mode'],
+        reference_band=int(job['reference_band']), reference_band_map=job['reference_band_map'] or None,
+        reference_fill_values=tuple(job['reference_fill_values'] or ()),
+        s1_calibration_factor=float(job['reference_scale']),
+        output_base_dir=out_dir, temp_dir=job['temp_dir'], min_area=job['min_area_km2'],
+        min_valid_fraction=job['min_valid_fraction'],
+        consensus_tolerance_m=tol, consensus_mode_bin_m=max(0.1, job['consensus_mode_bin_px'] * res),
+        min_inliers_per_chip=job['min_inliers_per_chip'],
+        min_surviving_chips=job['min_surviving_chips'], manual_gcp_csv=job['manual_gcp_csv'],
+        pols=job['channels'] or None, detector_matchers=job['matchers'] or None,
+        detector_params=job['detector_params'] or None,
+        max_expected_error_m=job['max_expected_error_m'], coarse_method=job['coarse_method'],
+        coarse_resolution_m=job['coarse_resolution_m'],
+        initial_offset_m=tuple(job['initial_offset_m']) if job['initial_offset_m'] else None,
+        search_margin_m=job['search_margin_m'], min_gpu_free_gb=job['min_gpu_free_gb'],
+        coarse_local=bool(job['coarse_local']),
+        coarse_cell_m=(float(job['coarse_cell_km']) * 1000.0) if job['coarse_cell_km'] else None,
+        coarse_shared=bool(job['coarse_shared']),
+        stretch_percentiles=tuple(float(v) for v in (job.get('stretch_percentiles') or [1, 99])[:2]),
+        stretch_mode=str(job.get('stretch_mode') or 'percentile'),
+        window_prep=str(job.get('_window_prep') or 'none'),
+        channel_rasters=job.get('_channel_rasters') or None,
+        coarse_detectors=list(job['coarse_detectors']) or None,
+        consensus_model=job['consensus_model'], consensus_surface_degree=job['consensus_surface'],
+        save_match_images=job['save_match_images'], weights_cache_dir=job['weights_cache_dir'],
+        nisar_band=job['nisar_band'], nisar_frequency=job['nisar_frequency'],
+    )
+    cfg.num_features = nf if nf else cfg.compute_num_features(win)
+    return cfg
+
+
+# Job keys that cannot change what the matcher computes for a sweep point.
+_RESULT_NEUTRAL_KEYS = {'output_dir', 'temp_dir', 'resume', 'debug', 'rival_max_points_per_chip',
+                        'device', 'cloud_device',        # the same results on either GPU: resume across them
+                        'save_match_images', 'weights_cache_dir', 'truth_csv', 'truth_radius_m',
+                        'cross_top_n', 'cross_min_agree', 'cross_cell_km', 'cross_keep_per_cell',
+                        'cross_max_points', 'final_points', 'interior_filter', 'interior_edge_px', 'cross_cell_px'}
+# (the interior filter only leaves matches out when they are read: a finished
+# sweep point is reused and its matches read again through the filter)
+
+
+def _key_blob(job: Dict, win: int, nf: Optional[int]) -> Dict:
+    """What the resume fingerprint of one sweep point is made of."""
+    blob = {k: v for k, v in job.items() if k not in _RESULT_NEUTRAL_KEYS}
+    blob.update({'_window': win, '_num_features': nf, '_v': 1})
+    try:
+        st = os.stat(job['input_path'])
+        blob['_input'] = [st.st_size, int(st.st_mtime)]
+    except OSError:
+        pass
+    return json.loads(json.dumps(blob, sort_keys=True, default=str))
+
+
+def _sweep_key(job: Dict, win: int, nf: Optional[int]) -> str:
+    """Fingerprint of everything that shapes one sweep point's results, so
+    'resume' only reuses results produced with the same settings and input."""
+    return hashlib.sha1(json.dumps(_key_blob(job, win, nf), sort_keys=True).encode()).hexdigest()[:16]
+
+
+def _key_diff(path: str, now: Dict) -> str:
+    """Which settings differ from the finished run's (SWEEP_KEY*.json), for the log."""
+    try:
+        with open(path, encoding='utf-8') as f:
+            was = json.load(f)
+    except (OSError, ValueError):
+        return 'no record of the earlier settings (run before this version)'
+    keys = sorted(k for k in set(was) | set(now) if was.get(k) != now.get(k))
+    out = []
+    for k in keys[:6]:
+        a, b = json.dumps(was.get(k), default=str), json.dumps(now.get(k), default=str)
+        out.append(f'{k}: {a[:40]} -> {b[:40]}')
+    return '; '.join(out) + (f' and {len(keys) - 6} more' if len(keys) > 6 else '')
+
+
+def _best_score(record: Dict) -> Optional[float]:
+    p = record.get('best_final_summary_csv')
+    if not p or not isinstance(p, str) or not os.path.exists(p):
+        return None
+    import pandas as pd
+    try:
+        return float(pd.read_csv(p)['score'].iloc[0])
+    except Exception:
+        return None
+
+
+def _matcher_label(method, param) -> str:
+    """Same label as the file names / PASS_TIMING / truth ranking."""
+    import pandas as pd
+    if str(method) == 'smnn' and param is not None and not pd.isna(param):
+        return f'smnn{float(param):g}'
+    return str(method)
+
+
+def _performance_table(out_root: str, manifest: List[Dict]) -> Optional[str]:
+    """PERFORMANCE.csv: per channel x sweep x detector x matcher -- speed
+    (seconds per window, detection included), what its best RANSAC setting
+    kept in the chip consensus, and its agreement with the ground truth when
+    there is one. Sorted by truth RMSE, else by chips kept."""
+    import glob as _glob
+    import pandas as pd
+    import automatch_truth as T
+    def read(path):         # an empty or cut-off file is skipped, not fatal (job 313)
+        try:
+            return pd.read_csv(path)
+        except Exception:
+            return pd.DataFrame()
+    truth = {}
+    tr = os.path.join(out_root, 'TRUTH_RANKING.csv')
+    if os.path.exists(tr):
+        t = read(tr)
+        if not t.empty:     # each detector + matcher at its best-ranked RANSAC setting
+            t = t.sort_values('rank') if 'rank' in t.columns else t.sort_values('truth_rmse_m', na_position='last')
+            for key, g in t.groupby(['channel', 'sweep', 'detector', 'matcher'], sort=False):
+                truth[tuple(str(k) for k in key)] = g.iloc[0]
+    rows = []
+    for row in manifest:
+        fd = row.get('final_dir')
+        if not isinstance(fd, str) or not os.path.isdir(fd):
+            continue
+        tp = os.path.join(fd, 'PASS_TIMING.csv')
+        timing = read(tp).to_dict('records') if os.path.exists(tp) else []
+        best = {}
+        for sp in _glob.glob(os.path.join(fd, 'CONSENSUS_SCORES*.csv')):
+            sc = read(sp)
+            for r in sc.to_dict('records'):
+                lab = _matcher_label(r.get('match_method'), r.get('match_parameter'))
+                cur = best.get(lab)
+                if cur is None or (r['surviving_chips'], r['agg_inliers']) > (cur['surviving_chips'],
+                                                                               cur['agg_inliers']):
+                    best[lab] = r
+        par = {}
+        if isinstance(row.get('filtered_dir'), str) and os.path.isdir(row['filtered_dir']):
+            try:
+                import automatch_rival as _R
+                par = _R.parallel_share(row['filtered_dir'])
+            except Exception as e:
+                print(f"[Job] parallel share not measured for {row.get('detector')}: {type(e).__name__}: {e}")
+        for t in timing:
+            lab = t['matcher']
+            b = best.get(lab) or {}
+            pv = par.get(lab) or {}
+            k = (str(row.get('channel')), str(row.get('sweep')), str(row.get('detector')), lab)
+            tru = truth.get(k)
+            rows.append({
+                'channel': row.get('channel'), 'sweep': row.get('sweep'), 'detector': row.get('detector'),
+                'matcher': lab, 'sec_per_window': t.get('sec_per_window'), 'pass_seconds': t.get('seconds'),
+                'windows': t.get('windows'),
+                'chips_kept': b.get('surviving_chips'), 'inliers': b.get('agg_inliers'),
+                'surface_rmse_m': b.get('surface_rmse_m'),
+                'parallel_share': pv.get('parallel_share'), 'windows_parallel': pv.get('windows_parallel'),
+                'best_ransac': (T.ransac_label(b.get('ransac_method'), b['ransac_threshold'])
+                                if b.get('ransac_threshold') is not None else None),
+                'truth_rank': None if tru is None else tru.get('rank'),
+                'truth_rmse_m': None if tru is None else tru.get('truth_rmse_m'),
+                'truth_reached': None if tru is None else tru.get('truth_reached'),
+                'truth_total': None if tru is None else tru.get('truth_total'),
+                'truth_ransac': None if tru is None else tru.get('ransac'),
+                'detector_seconds': row.get('detector_seconds'), 'gpu_peak_gb': row.get('gpu_peak_gb'),
+                'gpu_window_px': row.get('gpu_window_px')})
+    if not rows:
+        return None
+    df = pd.DataFrame(rows)
+    if df['truth_rank'].notna().any():     # the order of TRUTH_RANKING.csv
+        df = df.sort_values(['truth_rank', 'sec_per_window'], na_position='last')
+    else:
+        df = df.sort_values(['chips_kept', 'sec_per_window'], ascending=[False, True], na_position='last')
+    path = os.path.join(out_root, 'PERFORMANCE.csv')
+    df.to_csv(path, index=False)
+    print('[Job] detector + matcher performance (PERFORMANCE.csv):')
+    print(f"  {'channel':<8} {'detector':<26} {'matcher':<12} {'s/window':>9} {'chips':>6} {'inliers':>8} "
+          f"{'truth RMSE m':>13} {'reached':>8} {'GPU GB':>7}")
+    for r in df.head(40).itertuples():
+        f = (lambda v, w, p=1: f'{v:{w}.{p}f}' if v is not None and not pd.isna(v) else f"{'-':>{w}}")
+        reached = ('-' if r.truth_reached is None or pd.isna(r.truth_reached)
+                   else f'{int(r.truth_reached)}/{int(r.truth_total)}')
+        print(f"  {str(r.channel):<8} {str(r.detector):<26} {str(r.matcher):<12} {f(r.sec_per_window, 9, 2)} "
+              f"{f(r.chips_kept, 6, 0)} {f(r.inliers, 8, 0)} {f(r.truth_rmse_m, 13)} {reached:>8} "
+              f"{f(r.gpu_peak_gb, 7, 1)}")
+    return path
+
+
+def run_cross(job: Dict, out_root: str, working_crs: str) -> Dict:
+    """RIVAL_CROSS_<channel>.csv: the matches the job's top cross_top_n
+    configurations agree on (automatch_cross). {} when off or failed."""
+    if int(job.get('cross_top_n') or 0) < 2:
+        return {}
+    import automatch_cross as X
+    try:
+        res = X.run(out_root, int(job['cross_top_n']), int(job.get('cross_min_agree') or 0),
+                    float(job.get('cross_cell_km') or 25.0), truth_csv=job.get('truth_csv') or '',
+                    working_crs=working_crs, keep=int(job.get('cross_keep_per_cell') or 3),
+                    max_points=int(500 if job.get('cross_max_points') is None else job['cross_max_points']),
+                    final_points=int(job.get('final_points') or 0))
+        if res:      # the batch cross-check reads this back instead of computing it again
+            X._remember(out_root, 'matches', {'top_n': int(job['cross_top_n']),
+                                              'min_agree': int(job.get('cross_min_agree') or 0),
+                                              'keep': int(job.get('cross_keep_per_cell') or 3),
+                                              'cell_km': float(job.get('cross_cell_km') or 25.0),
+                                              'tolerance_m': None, 'truth_csv': ''})
+        return res
+    except Exception as e:
+        print(f'[Cross] not written: {type(e).__name__}: {e}')
+        traceback.print_exc()
+        return {}
+
+
+def refresh_after_compare(output_dir: str, res: Dict) -> List[str]:
+    """After a finished run is ranked again (compare, e.g. a run made by an
+    older version): PERFORMANCE.csv and RIVAL_BEST_* follow the new ranking,
+    as a run writes them. Returns the files rewritten."""
+    import glob as _glob
+    import pandas as pd
+    written = []
+    man = os.path.join(output_dir, 'RUN_MANIFEST.csv')
+    if os.path.exists(man):
+        try:
+            p = _performance_table(output_dir, pd.read_csv(man).to_dict('records'))
+            if p:
+                written.append(p)
+        except Exception as e:
+            print(f'[Job] performance table not rewritten: {type(e).__name__}: {e}')
+    for ch, b in (res.get('best') or {}).items():
+        for dst in _glob.glob(os.path.join(output_dir, f'RIVAL_BEST_*_{ch}.csv')):
+            if '_FINAL_' in os.path.basename(dst):
+                continue
+            shutil.copyfile(b['csv'], dst)
+            written.append(dst)
+            print(f"[Job] {os.path.basename(dst)} is now {b['detector']} + {b['matcher']} {b['ransac']} "
+                  f"(truth RMSE {b['truth_rmse_m']:.1f} m)")
+    jp = os.path.join(output_dir, 'job_used.json')
+    if os.path.exists(jp):                  # the cross-check follows the new ranking too
+        with open(jp, encoding='utf-8') as f:
+            job = normalize(json.load(f))
+        if res.get('truth_csv'):
+            job['truth_csv'] = res['truth_csv']
+        for ch, r in run_cross(job, output_dir, res.get('crs') or '').items():
+            if r.get('csv'):
+                written.append(r['csv'])
+    try:
+        import automatch_cross as X
+        written += X.best_finals(output_dir, res.get('crs') or None)
+    except Exception as e:
+        print(f'[Job] RIVAL_BEST_FINAL not written: {type(e).__name__}: {e}')
+    return written
+
+
+def _compare_with_truth(job: Dict, out_root: str, working_crs: str, manifest: List[Dict]) -> Dict:
+    """Rank every detector + matcher configuration against the ground truth;
+    add each run's own truth metrics to its manifest row."""
+    import automatch_truth as T
+    runs = [{'filtered_dir': r['filtered_dir'], 'final_dir': r['final_dir'], 'sweep': r['sweep']}
+            for r in manifest if isinstance(r.get('filtered_dir'), str) and isinstance(r.get('final_dir'), str)
+            and os.path.isdir(r['filtered_dir']) and os.path.isdir(r['final_dir'])]
+    try:
+        res = T.compare(out_root, job['truth_csv'], float(job['truth_radius_m']), 'consensus', working_crs,
+                        runs=runs)
+    except Exception as e:
+        print(f'[Truth] comparison failed: {type(e).__name__}: {e}')
+        traceback.print_exc()
+        return {}
+    for row in manifest:
+        if isinstance(row.get('detail_csv'), str) and os.path.exists(row['detail_csv']):   # NaN: a failed detector
+            try:
+                tr = (res.get('truth_by_channel') or {}).get(str(row.get('channel')), res['truth'])
+                m = T.score_detail_csv(row['detail_csv'], tr, float(job['truth_radius_m']))
+                row.update({'truth_rmse_m': m.get('truth_rmse_m'), 'truth_reached': m.get('truth_reached'),
+                            'truth_mean_dE_m': m.get('truth_mean_dE_m'),
+                            'truth_mean_dN_m': m.get('truth_mean_dN_m')})
+                emit({'event': 'truth_result', 'sweep': row['sweep'], 'channel': row['channel'],
+                      'detector': row['detector'], 'truth_rmse_m': m.get('truth_rmse_m'),
+                      'truth_reached': m.get('truth_reached')})
+            except Exception as e:
+                print(f"[Truth] {row.get('detector')}: {type(e).__name__}: {e}")
+    files = {k: os.path.join(out_root, f'{k}.csv')
+             for k in ('TRUTH_BY_DETECTOR_MATCHER', 'TRUTH_RANKING', 'TRUTH_POINTS')}
+    by = res['by_detector_matcher']
+    emit({'event': 'truth', 'files': files, 'n_truth': len(res['truth']),
+          'top': json.loads(by.head(30).to_json(orient='records')) if not by.empty else []})
+    files['best'] = res.get('best') or {}
+    return files
+
+
+def scene_footprint(job: Dict, scene, E, picked: Optional[List[str]] = None):
+    """(lon/lat footprint, its source, channel used). For a raster the valid
+    data of a band, tried in order: the job's channels, the auto_bands
+    picks, then every other band, so a corrupt band 1 (no valid pixels)
+    is passed over."""
+    if scene.kind != 'raster':
+        foot, src = E.NISARH5Reader.footprint_lonlat(scene.info)
+        return foot, src, None
+    first = list(job['channels'] or picked or [])
+    tried = []
+    for ch in first + [c for c in scene.channels if c not in first]:
+        try:
+            path, band = scene.channel_raster(ch, '')
+            foot, src = scene.footprint_lonlat(path, band)
+            if foot is not None and not foot.is_empty and foot.area > 0:
+                if tried:
+                    print(f'[Job] footprint from {ch}: {", ".join(tried[:5])} had no usable data', flush=True)
+                return foot, src, ch
+            tried.append(f'{ch} (empty)')
+        except Exception as e:
+            tried.append(f'{ch} ({type(e).__name__})')
+        if len(tried) >= 20:
+            break
+    raise RuntimeError(f'no band gives a footprint: {", ".join(tried[:10])}')
+
+
+def resolve_auto_bands(job: Dict, scene, E, out_dir: str = '') -> Tuple[List[str], str]:
+    """(bands picked by crispness, note for the log) for a raster job
+    with auto_bands set and no channels; the scores go to BAND_QUALITY.csv
+    in out_dir. A raster with many bands and neither set gets a note."""
+    n = int(job.get('auto_bands') or 0)
+    many = len(scene.channels) > 20
+    if n <= 0:
+        if many and not job['channels']:
+            return [], (f'{len(scene.channels)} bands and channels [] : every band will be matched; '
+                        f'set auto_bands (e.g. 1-3) to match only the cleanest')
+        return [], ''
+    if job['channels']:
+        return [], f'auto_bands {n} ignored: channels {job["channels"]} are set'
+    rng = list(job.get('auto_bands_range') or [])
+    bands = None
+    if rng:
+        if len(rng) != 2 or int(rng[0]) < 1 or int(rng[1]) < int(rng[0]):
+            return [], f'auto_bands_range {rng} is not [first, last]; every band will be matched'
+        bands = list(range(int(rng[0]), min(int(rng[1]), len(scene.channels)) + 1))
+        if not bands:
+            return [], f'auto_bands_range {rng} is beyond the {len(scene.channels)} bands; every band will be matched'
+    rows = E.band_quality(scene.raster_path, bands)
+    picked = E.pick_bands(rows, n)
+    print(E.format_band_quality(rows, picked), flush=True)
+    if out_dir:
+        import pandas as pd
+        pd.DataFrame(rows).to_csv(os.path.join(out_dir, 'BAND_QUALITY.csv'), index=False)
+    if not picked:
+        return [], 'auto_bands: no band has more signal than noise; every band will be matched'
+    return picked, ''
+
+
+ML_ABSORPTION_BANDS = {1: '7.35 um (water vapour)', 6: '13.25 um (CO2)'}   # MX-LWIR bands that do not see the ground
+
+
+def window_prep_for(job: Dict, scene) -> str:
+    """The window_prep a job runs with: as set, or for 'auto' 'gradient' on
+    a thermal (ML) input and 'none' otherwise."""
+    w = str(job.get('window_prep') or 'auto').strip().lower()
+    if w != 'auto':
+        return w if w in ('none', 'gradient', 'invert') else 'none'
+    import automatch_bench as B
+    return 'gradient' if B.sensor_of(scene.name, scene.native_res) == 'ML' else 'none'
+
+
+def ml_band_notes(job: Dict, scene) -> List[str]:
+    """Warnings for an ML job matching a band that does not see the ground."""
+    import automatch_bench as B
+    if B.sensor_of(scene.name, scene.native_res) != 'ML':
+        return []
+    out = []
+    for ch in (job.get('channels') or []):
+        m = re.search(r'(\d+)$', str(ch))
+        if m and int(m.group(1)) in ML_ABSORPTION_BANDS:
+            out.append(f'{ch} is the {ML_ABSORPTION_BANDS[int(m.group(1))]} band: it sees the atmosphere, not the '
+                       f'ground, so it cannot be matched to an optical reference; use band4 (10.8 um), then band5 '
+                       f'(12.0) or band2 (8.5)')
+    return out
+
+
+def cloud_on(job: Dict) -> bool:
+    """Whether the job masks clouds (cloud_mask other than none / off / '')."""
+    return str(job.get('cloud_mask') or 'none').strip().lower() not in ('none', 'off', 'no', 'false', '0', '')
+
+
+def prepare_cloud_mask(job: Dict, scene, out_root: str) -> Dict[str, List]:
+    """The cloud mask of the input (automatch_cloud: OmniCloudMask, or the
+    infrared / SWIR tests for ML / HS): {channel: [cloud-masked copy, 1]} for
+    the channels the job matches. Stops the job when it cannot be done
+    (rather than matching clouds without saying so)."""
+    import automatch_bench as B
+    import automatch_cloud as C
+    if scene.kind != 'raster':
+        print('[Cloud] cloud masking is for raster inputs; NISAR channels are matched as they are')
+        return {}
+    sensor = B.sensor_of(scene.name, scene.native_res)
+    if C.needs_model(job, sensor, scene.raster_path):
+        probs = C.check(job)
+        if probs:
+            raise RuntimeError('; '.join(probs))
+    chans = list(job['channels'] or scene.channels)
+    cache = os.path.join(scene.cache_dir(job['temp_dir']), 'cloud')
+    rasters, _ = C.prepare(job, scene, chans, cache, out_root, sensor)
+    return rasters
+
+
+def extract_bands(job: Dict, scene) -> Dict[str, List]:
+    """{channel: [single-band GeoTIFF, 1]} for the matched bands of a big
+    pixel-interleaved cube (more than 16 bands): a pixel-interleaved file
+    stores all bands of a pixel together, so every window the pairs read
+    went through all its bands (a 256-band HS cube: 256 x the data, over the
+    network share). Written once into the cache, in one pass, and reused
+    while the input is unchanged; the cloud step reads from them too."""
+    import automatch_cloud as C
+    import rasterio as rio
+    chans = [c for c in (job.get('channels') or []) if re.fullmatch(r'band\d+', str(c))]
+    if not chans or len(chans) > 8:
+        return {}
+    try:
+        with rio.open(scene.raster_path) as src:
+            il = str(src.profile.get('interleave') or '').lower()
+            if src.count <= 16 or il != 'pixel':
+                return {}
+            folder = os.path.join(scene.cache_dir(job['temp_dir']), 'bands')
+            mt = os.path.getmtime(scene.raster_path)
+            out, need = {}, []
+            for c in chans:
+                p = os.path.join(folder, f'{c}.tif')
+                if os.path.exists(p) and os.path.getmtime(p) >= mt:
+                    out[c] = [p, 1]
+                else:
+                    need.append(c)
+            if need:
+                t0 = time.time()
+                print(f'[Input] {src.count}-band pixel-interleaved cube: extracting {", ".join(need)} once into '
+                      f'{folder} (every later read is then local and single-band) ...', flush=True)
+                arrs = C.read_bands(src, [int(c[4:]) for c in need], None)
+                prof = src.profile.copy()
+                prof.update(count=1, interleave='band', tiled=True, blockxsize=512, blockysize=512, compress=None,
+                            driver='GTiff', BIGTIFF='IF_SAFER')
+                prof.pop('photometric', None)
+                os.makedirs(folder, exist_ok=True)
+                for c, a in zip(need, arrs):
+                    p = os.path.join(folder, f'{c}.tif')
+                    with rio.open(p + '.part', 'w', **prof) as dst:
+                        dst.write(a, 1)
+                    os.replace(p + '.part', p)
+                    out[c] = [p, 1]
+                print(f'[Input] extracted in {time.time() - t0:.0f} s', flush=True)
+    except Exception as e:
+        print(f'[Input] band extraction skipped ({type(e).__name__}: {e}); reading the cube directly', flush=True)
+        return {}
+    for c, (p, _) in out.items():
+        C.BAND_SOURCES[(os.path.abspath(scene.raster_path), int(c[4:]))] = (p, 1)
+    return out
+
+
+def set_interior_filter(job: Dict, scene, out_root: str) -> None:
+    """Leave out, wherever matches are read (exports, truth, cross-check),
+    those inside featureless areas of the input band (automatch_interior):
+    the mask is made once per job (INTERIOR_MASK_<band>.tif), the GPU
+    workers read it."""
+    import automatch_cloudfilter as CF
+    import automatch_interior as IM
+    import automatch_rival as R
+    band = (list(job.get('channels') or []) or list(scene.channels) or ['band1'])[0]
+    path = os.path.join(out_root, f'INTERIOR_MASK_{band}.tif')
+    try:
+        src = getattr(scene, 'raster_path', None) or job['input_path']
+        over = (job.get('_channel_rasters') or {}).get(band)
+        if over:                               # the extracted (or cloud-masked) single band
+            src, band = str(over[0]), f'band{int(over[1])}'
+        if not (os.path.exists(path) and os.path.getmtime(path) >= os.path.getmtime(src)) or job.get('_shard') is None:
+            o = IM.options(job)
+            o['edge_px'] = float(job.get('interior_edge_px') or o['edge_px'])
+            info = IM.interior_mask(src, IM.band_number(band), path, o['edge_px'], o['win_px'], o['k_noise'],
+                                    o['max_side'])
+            print(f"[Job] featureless interiors: {info['interior_pct']} % of {band} (farther than {o['edge_px']:g} px "
+                  f"from texture); matches there are left out -> {path}", flush=True)
+        R.POINT_MASK = CF.point_sampler(path, [1], 0, scene.working_crs)
+    except Exception as e:
+        print(f'[Job] interior filter not set ({type(e).__name__}: {e}); every match kept', flush=True)
+
+
+def run_job(job: Dict) -> Dict:
+    job = expand_selection(normalize(job))
+    if job.get('_shard') is not None:
+        start_parent_watchdog()                # a stopped run ends this worker too
+    gpus = [] if job.get('_shard') is not None else gpus_of(job['device'])
+    if gpus and len(job['detectors']) < 2:
+        gpus = []
+    if gpus:                                   # the parent: preflight, cloud mask, then one worker per GPU
+        job = dict(job, device=f'cuda:{gpus[0]}')
+        print(f'[Device] GPUs {", ".join(map(str, gpus))}: the preparation (cloud mask, bands, featureless areas) '
+              f'here on GPU {gpus[0]}, then one matching worker per GPU', flush=True)
+    device = use_gpu(job['device'])            # before anything loads torch
+    if job.get('cloud_device'):
+        job['cloud_device'] = use_gpu(job['cloud_device'])
+    job, note = max_error_from_truth(job)
+    if note:
+        print(f'[Job] {note}', flush=True)
+    job, note = channels_from_truth(job)
+    if note:
+        print(f'[Job] {note}', flush=True)
+    pf = preflight(job, check_weights=False)   # warmup stops a detector whose weights are missing
+    for w in pf['warnings']:
+        print(f'[Preflight] WARNING: {w}')
+    if pf['errors']:
+        for e in pf['errors']:
+            print(f'[Preflight] ERROR: {e}')
+        emit({'event': 'failed', 'errors': pf['errors']})
+        raise SystemExit(2)
+
+    import pandas as pd
+    import automatch_engine as E
+    import automatch_rival as R
+
+    out_root = job['output_dir']
+    E.setup_logging(out_root, 'automatch.log')
+    print(f'[Job] {version_line()}')
+    with open(os.path.join(out_root, 'job_used.json'), 'w', encoding='utf-8') as f:
+        json.dump(job, f, indent=2)
+    E.set_device(device)
+    E.PROGRESS_HOOK = emit
+
+    scene = E.InputScene(job['input_path'], E.PipelineConfig(nisar_band=job['nisar_band'],
+                                                             nisar_frequency=job['nisar_frequency']))
+    if scene.kind == 'raster':
+        picked, note = resolve_auto_bands(job, scene, E, out_root)
+        if note:
+            print(f'[Job] NOTE: {note}')
+        if picked:
+            job = dict(job, channels=picked)
+            print(f'[Job] auto_bands {job["auto_bands"]}: matching {picked}')
+            with open(os.path.join(out_root, 'job_used.json'), 'w', encoding='utf-8') as f:
+                json.dump(job, f, indent=2)
+    if scene.kind == 'raster' and job.get('_shard') is None:
+        ext = extract_bands(job, scene)         # a big pixel-interleaved cube: its matched bands once, locally
+        if ext:
+            job = dict(job, _channel_rasters={**ext, **(job.get('_channel_rasters') or {})})
+            scene.channel_override = dict(job['_channel_rasters'])
+    if cloud_on(job):
+        job = dict(job, _channel_rasters=prepare_cloud_mask(job, scene, out_root))
+    job = dict(job, _window_prep=window_prep_for(job, scene))
+    if job.get('interior_filter') and scene.kind == 'raster':
+        set_interior_filter(job, scene, out_root)
+    if job['_window_prep'] != 'none':
+        print(f"[Job] window preparation: {job['_window_prep']} (both windows of a pair, after the stretch)")
+    res = job['target_resolution'] or scene.native_res or 10.0
+    detectors = job['detectors']
+    sweep = [(w, nf) for w in job['window_sizes'] for nf in job['num_features']]
+    emit({'event': 'job', 'scene': scene.name, 'channels': job['channels'] or scene.channels,
+          'detectors': detectors, 'sweep': sweep, 'resolution_m': res, 'gpus': gpus})
+    shard = job.get('_shard')
+    t_job = time.time()
+    if gpus:
+        print(f'[Job] {len(detectors)} detectors over GPUs {gpus}: one worker per GPU, the same job folder, '
+              f'one queue', flush=True)
+        manifest = run_sharded(job, gpus, out_root)
+        return _finish_job(job, out_root, scene, manifest, t_job)
+    print(f'[Job] {scene.name}: {len(sweep)} sweep point(s), working resolution {res} m, '
+          f'RANSAC thresholds {job["ransac_thresholds_m"] or [t * res for t in job["ransac_thresholds_px"]]} m')
+
+    manifest = []
+    rival_dir = os.path.join(out_root, 'rival')
+    suffix = f'_gpu{shard}' if shard is not None else ''
+    own_queue = ''
+    if not job.get('_queue') and (job.get('resume') or job.get('_reuse')):   # one GPU: resume per detector too
+        own_queue = os.path.join(out_root, '_queue', f'{time.strftime("%Y%m%d_%H%M%S")}_{os.getpid()}')
+        os.makedirs(own_queue, exist_ok=True)
+        job = dict(job, _queue=own_queue)
+    for k, (win, nf) in enumerate(sweep):
+        tag = f'win{win}_nf{nf or "auto"}'
+        out_dir = os.path.join(out_root, tag)
+        emit({'event': 'sweep', 'done': k, 'total': len(sweep), 'point': tag})
+        summary_csv = os.path.join(out_dir, f'POL_RUN_SUMMARY{suffix}.csv')
+        key_path = os.path.join(out_dir, f'SWEEP_KEY{suffix}.txt')
+        key = _sweep_key(job, win, nf)
+        prev = None
+        if os.path.exists(key_path):
+            with open(key_path) as fh:
+                prev = fh.read().strip()
+        t0 = time.time()
+        queued = bool(job.get('_queue'))           # a GPU worker on the shared queue: resume per detector
+        if not queued and job['resume'] and os.path.exists(summary_csv) and prev == key:
+            print(f'[Job] {tag}: reusing finished results ({summary_csv})')
+            records = pd.read_csv(summary_csv).to_dict('records')
+        else:
+            if not queued and job['resume'] and os.path.exists(summary_csv):
+                why = _key_diff(os.path.join(out_dir, f'SWEEP_KEY{suffix}.json'), _key_blob(job, win, nf))
+                print(f'[Job] {tag}: settings or input changed since the finished run -- running again'
+                      + (f' ({why})' if why else ''))
+            if os.path.exists(key_path):
+                os.remove(key_path)
+            cfg = _config_for(job, win, nf, res, out_dir)
+            print(f'[Job] >>> {tag}: window {win} px, {cfg.num_features} keypoints per window '
+              f'({cfg.num_features / (win * win / 1e6):.0f} per megapixel)')
+            try:
+                cfg.summary_name = f'POL_RUN_SUMMARY{suffix}.csv'
+                run_dets = detectors
+                if queued:
+                    install_queue(E, job, out_dir, tag, win, nf)
+                    mem = {int(k): float(v) for k, v in (job.get('_gpu_mem') or {}).items()}
+                    if mem and job.get('_shard') is not None:
+                        run_dets = gpu_order(list(detectors), win, int(job['_shard']), mem)
+                records = E.AutoMatchPipeline(cfg).run(job['input_path'], run_dets)
+                with open(key_path, 'w') as fh:
+                    fh.write(key)
+                with open(os.path.join(out_dir, f'SWEEP_KEY{suffix}.json'), 'w', encoding='utf-8') as fh:
+                    json.dump(_key_blob(job, win, nf), fh, indent=1, sort_keys=True, default=str)
+            except Exception as e:
+                print(f'[Job] {tag} FAILED: {type(e).__name__}: {e}')
+                traceback.print_exc()
+                records = [{'status': 'failed', 'error': f'{type(e).__name__}: {e}'}]
+            finally:
+                E.CLAIM_HOOK = E.UNIT_DONE_HOOK = None
+                E.PAIR_RESULT_KEY = None
+            E.safe_cuda_empty_cache()
+        for rec in records:
+            row = {'sweep': tag, 'window_size': win, 'num_features': nf or 'auto',
+                   'channel': rec.get('nisar_pol'), 'reference': rec.get('s1_ref_tag'),
+                   'detector': rec.get('detector_tag'), 'status': rec.get('status'),
+                   'error': rec.get('error') if isinstance(rec.get('error'), str) else '',
+                   'coarse_offsets': rec.get('coarse_offsets'), 'consensus_score': _best_score(rec),
+                   'minutes': round((time.time() - t0) / 60.0, 2), 'working_crs': scene.working_crs,
+                   'detector_seconds': rec.get('seconds'), 'gpu_peak_gb': rec.get('gpu_peak_gb'),
+                   'gpu_window_px': rec.get('gpu_window_px'),
+                   'filtered_dir': rec.get('filtered_dir'), 'final_dir': rec.get('final_dir')}
+            try:
+                exp = R.export_run(rec, scene.working_crs, rival_dir, f'{scene.name}_{tag}',
+                                   job['rival_max_points_per_chip'])
+            except Exception as e:
+                exp = None
+                row['error'] = (row['error'] + f' | export: {type(e).__name__}: {e}').strip(' |')
+            if exp:
+                row.update({'rival_csv': exp['rival_csv'], 'detail_csv': exp['detail_csv'],
+                            'validated_by_consensus': exp['validated'], 'n_points': exp['n'],
+                            'n_inliers_all': exp['n_inliers_all'], 'n_chips': exp.get('n_chips'),
+                            **(exp.get('distortion') or {}),
+                            'mean_dx_m': exp.get('mean_dx'), 'mean_dy_m': exp.get('mean_dy'),
+                            'rmse_x_m': exp['rmse_x'], 'rmse_y_m': exp['rmse_y'], 'ce90_m': exp['ce90'],
+                            'matcher_config': exp['matcher_config']})
+                emit({'event': 'result', **{k2: row.get(k2) for k2 in (
+                    'sweep', 'channel', 'detector', 'status', 'n_points', 'n_chips', 'mean_dx_m',
+                    'mean_dy_m', 'dE_min_m', 'dE_max_m', 'dN_min_m', 'dN_max_m', 'affine_rot_deg',
+                    'affine_resid_rmse_m', 'rmse_x_m', 'rmse_y_m', 'ce90_m', 'rival_csv')}})
+            else:
+                emit({'event': 'result', 'sweep': tag, 'channel': row['channel'],
+                      'detector': row['detector'], 'status': row['status'], 'error': row['error']})
+            manifest.append(row)
+
+    if own_queue:
+        shutil.rmtree(own_queue, ignore_errors=True)
+        try:
+            os.rmdir(os.path.dirname(own_queue))
+        except OSError:
+            pass
+    if shard is not None:                      # a worker: its manifest only; the parent finishes the job
+        man_path = os.path.join(out_root, f'RUN_MANIFEST_gpu{shard}.csv')
+        pd.DataFrame(manifest).to_csv(man_path, index=False)
+        emit({'event': 'done', 'manifest': man_path, 'minutes': round((time.time() - t_job) / 60.0, 2)})
+        print(f'[Job] GPU {shard} share done in {(time.time() - t_job) / 60.0:.1f} min')
+        return {'manifest': man_path, 'best': {}}
+    return _finish_job(job, out_root, scene, manifest, t_job)
+
+
+def _finish_job(job: Dict, out_root: str, scene, manifest: List[Dict], t_job: float) -> Dict:
+    """The shared end of a job: truth, RUN_MANIFEST.csv, the performance
+    table, the best per channel, the cross-check."""
+    import pandas as pd
+    truth_files = {}
+    if job['truth_csv']:
+        truth_files = _compare_with_truth(job, out_root, scene.working_crs, manifest)
+    man = pd.DataFrame(manifest)
+    man_path = os.path.join(out_root, 'RUN_MANIFEST.csv')
+    man.to_csv(man_path, index=False)
+    if 'gpu_window_px' in man.columns:      # what fitted the GPU, detector by detector
+        gw = pd.to_numeric(man['gpu_window_px'], errors='coerce')
+        tiled = man[gw < pd.to_numeric(man['window_size'], errors='coerce')]
+        if len(tiled):
+            print('[Job] matched in tiles to fit the GPU: ' + ', '.join(
+                f'{r.detector} {int(r.window_size)} px in {int(r.gpu_window_px)} px tiles'
+                for r in tiled.drop_duplicates(['detector', 'window_size']).itertuples()))
+    try:
+        _performance_table(out_root, manifest)
+    except Exception as e:
+        print(f'[Job] performance table not written: {type(e).__name__}: {e}')
+
+    best_files = {}
+    truth_best = (truth_files or {}).get('best') or {}
+    if not man.empty and 'rival_csv' in man.columns:
+        ok = man[man['rival_csv'].notna()].copy()
+        if not ok.empty:
+            ok['_rank'] = ok['consensus_score'].fillna(-1.0)
+            ok['_v'] = ok.get('validated_by_consensus', True).fillna(False).astype(bool)
+            for ch, g in ok.groupby('channel'):
+                best = g.sort_values(['_v', '_rank', 'n_points'], ascending=False).iloc[0]
+                # with ground truth, the consensus pick is only kept for reference:
+                # many consistent but wrong matches can win it
+                name = 'RIVAL_CONSENSUS_BEST' if str(ch) in truth_best else 'RIVAL_BEST'
+                dst = os.path.join(out_root, f'{name}_{scene.name}_{ch}.csv')
+                shutil.copyfile(best['rival_csv'], dst)
+                if name == 'RIVAL_BEST':
+                    best_files[ch] = dst
+                print(f'[Job] {"best" if name == "RIVAL_BEST" else "consensus pick"} for {ch}: '
+                      f'{best["detector"]} {best["sweep"]} (mean dE {best["mean_dx_m"]:.1f} m, '
+                      f'dN {best["mean_dy_m"]:.1f} m, CE90 {best["ce90_m"]:.1f} m) -> {dst}')
+    for ch, b in truth_best.items():
+        dst = os.path.join(out_root, f'RIVAL_BEST_{scene.name}_{ch}.csv')
+        shutil.copyfile(b['csv'], dst)
+        best_files[ch] = dst
+        print(f"[Job] best for {ch} by ground truth: {b['detector']} + {b['matcher']} {b['ransac']} "
+              f"{b['sweep']} (truth RMSE {b['truth_rmse_m']:.1f} m) -> {dst}")
+    cross = run_cross(job, out_root, scene.working_crs)
+    try:                                       # the best single configuration, thinned the same way
+        import automatch_cross as X
+        X.best_finals(out_root, scene.working_crs, int(job.get('final_points') or 0))
+    except Exception as e:
+        print(f'[Job] RIVAL_BEST_FINAL not written: {type(e).__name__}: {e}')
+    try:                                       # shapefile, look vectors and RIVAL's statistics of the final points
+        import automatch_report as RP
+        RP.report(out_root)
+    except Exception as e:
+        print(f'[Job] REPORT not written: {type(e).__name__}: {e}')
+    emit({'event': 'done', 'manifest': man_path, 'best': best_files, 'truth': truth_files, 'cross': cross,
+          'minutes': round((time.time() - t_job) / 60.0, 2)})
+    print(f'[Job] done in {(time.time() - t_job) / 60.0:.1f} min; manifest {man_path}')
+    return {'manifest': man_path, 'best': best_files}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CLI
+# ─────────────────────────────────────────────────────────────────────────────
+def main(argv: Optional[List[str]] = None) -> int:
+    ap = argparse.ArgumentParser(description='G1A / NISAR automatic geolocation matching')
+    sub = ap.add_subparsers(dest='cmd', required=True)
+    sub.add_parser('template', help='print a job file with the defaults')
+    for name in ('preflight', 'run'):
+        p = sub.add_parser(name)
+        p.add_argument('job')
+        p.add_argument('--set', action='append', default=[], metavar='KEY=JSON')
+    d = sub.add_parser('detectors', help='list selectable detectors')
+    d.add_argument('--weights-cache', default='')
+    i = sub.add_parser('inspect', help='describe an input image')
+    i.add_argument('input')
+    bq = sub.add_parser('bands', help='score every band of a raster by crispness: fine detail above noise (BAND_QUALITY.csv)')
+    bq.add_argument('input')
+    bq.add_argument('--top', type=int, default=3, help='bands to pick (default 3)')
+    bq.add_argument('--csv', default='', help='write every band\'s scores here')
+    bq.add_argument('--range', type=int, nargs=2, metavar=('FIRST', 'LAST'), help='bands to search, e.g. 1 70')
+    w = sub.add_parser('weights', help='check which model weight files are on this machine '
+                                       '(options: python automatch_weights.py -h)')
+    w.add_argument('rest', nargs=argparse.REMAINDER)
+    c = sub.add_parser('compare', help='rank the detector + matcher configurations of an output folder '
+                                       'against ground truth (options: python automatch_truth.py -h)')
+    c.add_argument('rest', nargs=argparse.REMAINDER)
+    sub.add_parser('cross', help='keep the matches the top configurations agree on '
+                                 '(options: python automatch_cross.py -h)').add_argument('rest', nargs=argparse.REMAINDER)
+    sub.add_parser('bench', help='how each detector does on which kind of image, from finished jobs '
+                                 '(options: python automatch_bench.py -h)').add_argument('rest', nargs=argparse.REMAINDER)
+    sub.add_parser('cloud', help='test the cloud mask of one image at several confidence thresholds, without '
+                                 'a matching run (options: python automatch_cloud.py -h)'
+                   ).add_argument('rest', nargs=argparse.REMAINDER)
+    sub.add_parser('cloudsweep', help='cloud mask benchmark: every combination of thresholds, band sets and '
+                                      'bright-blob settings (options: python automatch_cloudsweep.py -h)'
+                   ).add_argument('rest', nargs=argparse.REMAINDER)
+    flt = sub.add_parser('filter', help='finished jobs (also server ones, through the share mapping): leave out '
+                                        'the matches on cloud and inside featureless areas, score again into '
+                                        'FILTERED/ (options: python automatch_cloudfilter.py -h)')
+    flt.add_argument('rest', nargs=argparse.REMAINDER)
+    tg = sub.add_parser('target', help='targeting accuracy of a product against its intended track (BAND_META + '
+                                       'range file; options: python automatch_target.py -h)')
+    tg.add_argument('rest', nargs=argparse.REMAINDER)
+    rp = sub.add_parser('report', help='shapefile, look-vector plot and RIVAL statistics of a finished job\'s '
+                                       'final points (REPORT/)')
+    rp.add_argument('job_dir')
+    rp.add_argument('--all', action='store_true', help='every RIVAL_*.csv, not only the FINAL ones')
+    fin = sub.add_parser('finish', help='a finished or crashed job folder (also a server one, through the share '
+                                        'mapping): rerun the detectors it skipped, reuse the rest, and redo the '
+                                        'truth comparison, the cross-check and the RIVAL files')
+    fin.add_argument('job_dir')
+    fin.add_argument('--share-local', default='', help="where the server's share is mounted here, e.g. V:\\")
+    fin.add_argument('--share-server', default='', help='the same share on the server, e.g. /maintenance/')
+    fin.add_argument('--device', default='', help="auto | cuda:N | all | cpu (default: the job's)")
+    fin.add_argument('--rerun', choices=('missing', 'failed', 'all'), default='missing',
+                     help='missing: the detectors whose weights were missing (default); failed: every failed '
+                          'one; all: every detector')
+    sub.add_parser('cloudfilter', help='reject the match points of finished jobs that fall on cloud and score '
+                                       'them again (options: python automatch_cloudfilter.py -h)'
+                   ).add_argument('rest', nargs=argparse.REMAINDER)
+    sub.add_parser('refsubset', help='copy the reference tiles inside a region (G1A: India and neighbours) to a '
+                                     'local folder (options: python automatch_refsubset.py -h)'
+                   ).add_argument('rest', nargs=argparse.REMAINDER)
+    k = sub.add_parser('pack', help='copy a scene, the references it needs and server settings for the '
+                                    'GPU server (options: python automatch_pack.py -h)')
+    k.add_argument('rest', nargs=argparse.REMAINDER)
+    if argv is None:
+        argv = sys.argv[1:]
+    if argv and argv[0] == 'compare':
+        import automatch_truth as T
+        return T.main(list(argv[1:]))
+    if argv and argv[0] == 'cross':
+        import automatch_cross as X
+        return X.main(list(argv[1:]))
+    if argv and argv[0] == 'bench':
+        import automatch_bench as B
+        return B.main(list(argv[1:]))
+    if argv and argv[0] == 'cloud':
+        import automatch_cloud as C
+        return C.main(list(argv[1:]))
+    if argv and argv[0] == 'cloudsweep':
+        import automatch_cloudsweep as CS
+        return CS.main(list(argv[1:]))
+    if argv and argv[0] == 'filter':
+        import automatch_cloudfilter as CF
+        return CF.main(list(argv[1:]), kinds=('cloud', 'interior'))
+    if argv and argv[0] == 'target':
+        import automatch_target as TG
+        return TG.main(list(argv[1:]))
+    if argv and argv[0] == 'report':
+        import automatch_report as RP
+        a = ap.parse_args(argv)
+        return 0 if RP.report(a.job_dir, a.all) else 1
+    if argv and argv[0] == 'finish':
+        a = ap.parse_args(argv)
+        job = finish_spec(a.job_dir, (a.share_local, a.share_server), a.device, a.rerun)
+        print(f'[Job] finishing {a.job_dir}: rerun {a.rerun}, the rest reused', flush=True)
+        run_job(job)
+        return 0
+    if argv and argv[0] == 'cloudfilter':
+        import automatch_cloudfilter as CF
+        return CF.main(list(argv[1:]))
+    if argv and argv[0] == 'refsubset':
+        import automatch_refsubset as RS
+        return RS.main(list(argv[1:]))
+    if argv and argv[0] == 'pack':
+        import automatch_pack as P
+        return P.main(list(argv[1:]))
+    if argv and argv[0] == 'weights':
+        # a job file as first argument, everything else as automatch_weights takes it
+        import automatch_weights as W
+        rest = list(argv[1:])
+        if rest and not rest[0].startswith('-'):
+            rest = ['--job'] + rest
+        return W.main(rest)
+    a = ap.parse_args(argv)
+
+    if a.cmd == 'template':
+        print(json.dumps(DEFAULT_JOB, indent=2))
+        return 0
+    if a.cmd == 'detectors':
+        cat = detector_catalog(a.weights_cache)
+        print(format_catalog(cat))
+        emit({'event': 'detectors', **cat})
+        return 0
+    if a.cmd == 'inspect':
+        import automatch_engine as E
+        sc = E.InputScene(a.input, E.PipelineConfig())
+        desc = sc.describe()
+        print(json.dumps(desc, indent=2, default=str))
+        emit({'event': 'inspect', **desc})
+        return 0
+    if a.cmd == 'bands':
+        import automatch_engine as E
+        rows = E.band_quality(a.input, list(range(a.range[0], a.range[1] + 1)) if a.range else None)
+        picked = E.pick_bands(rows, a.top)
+        print(E.format_band_quality(rows, picked))
+        if a.csv:
+            import pandas as pd
+            pd.DataFrame(rows).to_csv(a.csv, index=False)
+        emit({'event': 'bands', 'picked': picked, 'rows': rows})
+        return 0
+    job = load_job(a.job, a.set)
+    if a.cmd == 'preflight':
+        use_gpu(job.get('device') or 'auto')
+        res = preflight(job)
+        print(json.dumps(res, indent=2, default=str))
+        emit({'event': 'preflight', **res})
+        return 1 if res['errors'] else 0
+    try:
+        run_job(job)
+        return 0
+    except SystemExit as e:
+        return int(e.code or 1)
+
+
+if __name__ == '__main__':
+    sys.exit(main())

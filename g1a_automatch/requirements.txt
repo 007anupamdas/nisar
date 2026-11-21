@@ -1,0 +1,17 @@
+# torch: install the CUDA build for your driver first (see README)
+# numpy stays on 1.x so imcui (numpy~=1.24, i.e. 1.24 to 1.26) can share the
+# environment; Python 3.11 or 3.12 (imcui 0.2.1 needs < 3.13, kornia 0.9 >= 3.11;
+# on 3.12 numpy is 1.26).
+numpy>=1.24,<2
+# 4.12+ requires numpy>=2. If imcui is installed it brings opencv-python;
+# then drop this line (both OpenCV packages in one env break `import cv2`).
+opencv-python-headless>=4.10,<4.12
+kornia>=0.8.3
+rasterio
+rioxarray
+xarray
+h5py
+shapely>=2.0
+pyproj
+pandas
+PyQt5
