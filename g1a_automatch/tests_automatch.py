@@ -1426,7 +1426,7 @@ def test_presets(tmp):
     check('presets: an HS job: its detectors and window, truth decides range and band, all GPUs, cross-check 3 of 5',
           (n['detectors'][:2], n['window_sizes'], n['max_error_from_truth'], n['channels_from_truth'], n['device'],
            n['cross_top_n'], n['cross_min_agree'], 'note' in job, bool(note), 'top_n' in job),
-          (['disk', 'imw-topicfm'], [512], True, True, 'all', 10, 3, False, True, False))
+          (['disk', 'dedode'], [512], True, True, 'all', 10, 3, False, True, False))
     j3, _ = P.job_for('HS', '/d/G1A_HS_x.tif', '/ref', '/out', '/t/pts_band28.csv', presets=pre, top_n=3, agree=2)
     jf, _ = P.job_for('MV', '/d/G1A_MV_x.tif', '/ref', '/out', '/t/pts_band4.csv', presets=pre, mode='fastest')
     ja, _ = P.job_for('MV', '/d/G1A_MV_x.tif', '/ref', '/out', '/t/pts_band4.csv', presets=pre, mode='fast')
@@ -1455,7 +1455,7 @@ def test_presets(tmp):
     nb = J.normalize(jb)
     check('presets: each detector runs only its best method for the sensor (matcher and variant), not every matcher',
           (nb['matchers'].get('disk'), nb['detector_params'].get('disk'), set(nb['matchers']) <= set(nb['detectors'])),
-          (['ada'], {'checkpoint': ['epipolar']}, True))
+          (['smnn'], {'checkpoint': ['epipolar']}, True))
     import automatch_cross as _Cx
     _cf = [dict(channel='band3', sweep='w', detector=d, matcher='m', ransac='r') for d in
            ('disk_depth', 'disk_epipolar', 'sift')]

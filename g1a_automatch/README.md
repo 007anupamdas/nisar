@@ -107,8 +107,8 @@ the window for every setting, sweeps and the benchmark.
 
 Four tiers per sensor (**Preset**), all prefixes of one list ranked by fast
 *and* accurate: the mean of two per-job percentiles, accuracy (truth RMSE ×
-(truth points / reached)²) and speed (s per window), over MV 8, HS 14, HV 10
-truth jobs up to 1080; a method less accurate than 55 % of the others goes to
+(truth points / reached)²) and speed (s per window), over MV 23, HS 19, HV 12
+truth jobs up to 1104; a method less accurate than 55 % of the others goes to
 the end however fast. ML uses the HS list, C3 the MV list. *fastest* — top 5,
 3 agreeing; *fast* — top 10, 3 agreeing; *medium* — top 20, 4 agreeing;
 *slow* — all 30, 4 agreeing. The same RANSAC and sub-cells, so a tier reuses
@@ -117,9 +117,9 @@ what the tiers below it ran. The earlier names still work: *accurate* = fast,
 
 | Tier | MV | HS | HV |
 |---|---|---|---|
-| top 5 | disk, dog, imw-sfd2-nn, imw-darkfeat-nn, imw-xoftr | disk, imw-topicfm, dedode, imw-xoftr, imw-eloftr | disk, dog, sift, imw-darkfeat-nn, imw-lanet-nn |
-| 6-10 | sift, keynet, imw-liftfeat-nn, imw-xfeat-lg, imw-eloftr | imw-minima-loftr, dog, imw-sfd2-nn, imw-lanet-nn, imw-darkfeat-nn | gftt, dedode, keynet, loftr, imw-sfd2-nn |
-| 11-20 | imw-topicfm, imw-minima-loftr, gftt, imw-minima-roma, imw-rdd-nn, imw-aliked-lg, imw-d2net-nn, hessian, imw-gim-roma, dedode | imw-liftfeat-nn, imw-d2net-nn, loftr, imw-ripe-nn, imw-aspanformer, imw-minima-roma, imw-rdd-nn, imw-gim-roma, imw-roma, loftr-windoor | imw-eloftr, imw-minima-loftr, hessian, imw-ripe-nn, imw-topicfm, imw-xfeat-lg, imw-d2net-nn, imw-minima-roma, imw-aspanformer, imw-rdd-nn |
+| top 5 | disk, dog, imw-sfd2-nn, sift, imw-xfeat-dense | disk, dedode, dog, imw-minima-loftr, sift | disk, dog, imw-darkfeat-nn, sift, imw-lanet-nn |
+| 6-10 | imw-xoftr, imw-darkfeat-nn, imw-liftfeat-nn, imw-eloftr, imw-topicfm | imw-xoftr, imw-darkfeat-nn, imw-topicfm, imw-eloftr, imw-sfd2-nn | gftt, dedode, imw-sfd2-nn, keynet, imw-xoftr |
+| 11-20 | imw-minima-loftr, imw-minima-roma, imw-xfeat-lg, imw-d2net-nn, keynet, imw-aliked-lg, imw-rdd-nn, imw-dkm, imw-gim-roma, imw-roma | imw-lanet-nn, imw-liftfeat-nn, imw-d2net-nn, imw-minima-roma, keynet, imw-gim-roma, imw-ripe-nn, loftr, imw-rord-nn, imw-aspanformer | imw-eloftr, hessian, imw-minima-loftr, loftr, imw-ripe-nn, imw-minima-roma, imw-xfeat-lg, imw-rdd-nn, imw-d2net-nn, imw-aliked-lg |
 
 **One method per detector**: a preset runs each detector with only its best
 matcher and variant for the sensor (`BEST_METHOD` in `automatch_presets.py`,

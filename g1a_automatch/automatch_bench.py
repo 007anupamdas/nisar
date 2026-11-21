@@ -169,7 +169,7 @@ def scene_id(input_path: str) -> str:
     jobs 297-334 all read a file called cog.tif, which alone is no scene."""
     p = str(input_path or '').replace('\\', '/')
     stem = os.path.splitext(os.path.basename(p))[0]
-    if re.search(r'G1A_[A-Z]{2}_', stem):
+    if re.search(r'G1A_?(MV|HV|HS|ML)(?=[_0-9A-Z])', stem):
         return stem
     parts = [x for x in p.split('/') if x]
     if len(parts) >= 3 and parts[-2].lower() == 'input':
@@ -179,7 +179,7 @@ def scene_id(input_path: str) -> str:
 
 def sensor_of(scene: str, pixel_m: Optional[float]) -> str:
     """MV / HS / HV / ML from the G1A name, else from the pixel size."""
-    m = re.search(r'G1A_([A-Z]{2})_', scene or '')
+    m = re.search(r'G1A_?(MV|HV|HS|ML)(?=[_0-9A-Z])', scene or '')
     if m:
         return m.group(1)
     if pixel_m:
