@@ -2,11 +2,12 @@
 How far each detector is from the truth, by distortion level, from the
 uploaded logs (log/automatch_<job>*.log and log/TRUTH_RANKING_<job>.csv).
 
-Distortion of a scene: the spread of its truth (manual) points' errors around
-their mean offset, sqrt(var dE + var dN), from the report line
-'[Report] manual points: n, mean dE .. dN .., RMSE E .. N ..'. A scene that is
-only shifted has spread 0; the more the error changes across the scene, the
-larger it is. Jobs without that line (older code) are left out.
+Distortion of a scene: how much its truth (manual) points' errors spread
+around their mean offset. Newer jobs: sqrt(var dE + var dN) from the report
+line '[Report] manual points: n, mean dE .. dN .., RMSE E .. N ..' of its log;
+older jobs: error_spread_km of BENCH_JOBS.csv (the benchmark's measure, the
+largest distance from the mean offset). A scene that is only shifted has
+spread 0; the more the error changes across the scene, the larger it is.
 
 Per job and detector family (disk_depth / disk_epipolar -> disk, -kt0p2 etc.
 -> its base) the best configuration's truth RMSE; per distortion level the
@@ -28,8 +29,8 @@ from typing import Dict
 
 SENSOR_RE = re.compile(r'G1A_?(MV|HV|HS|ML)(?=[_0-9A-Z])')
 MANUAL_RE = re.compile(r'manual points: (\d+), mean dE (-?[\d.]+) m dN (-?[\d.]+) m, RMSE E ([\d.]+) N ([\d.]+) m')
-LEVELS = [(0.0, 300.0, 'low\n< 0.3 km'), (300.0, 1500.0, 'medium\n0.3–1.5 km'),
-          (1500.0, 5000.0, 'high\n1.5–5 km'), (5000.0, float('inf'), 'very high\n> 5 km')]
+LEVELS = [(0.0, 500.0, 'low\n< 0.5 km'), (500.0, 2000.0, 'medium\n0.5–2 km'),
+          (2000.0, 8000.0, 'high\n2–8 km'), (8000.0, float('inf'), 'very high\n> 8 km')]
 # the sequential blue ramp (light = small error, dark = large)
 RAMP = ['#cde2fb', '#b7d3f6', '#9ec5f4', '#86b6ef', '#6da7ec', '#5598e7', '#3987e5', '#2a78d6', '#256abf',
         '#1c5cab', '#184f95', '#104281', '#0d366b']
@@ -56,14 +57,56 @@ def job_distortion(log_dir: str, job: str) -> Dict:
     return r
 
 
+def bench_spread(log_dir: str) -> Dict[str, Dict]:
+    """Older jobs: the truth error spread the benchmark measured (BENCH_JOBS.csv,
+    error_spread_km: the largest distance of a truth point's error from the
+    scene's mean offset), by job number."""
+    import pandas as pd
+    out = {}
+    for f in glob.glob(os.path.join(log_dir, 'BENCH_JOBS*.csv')):
+        try:
+            b = pd.read_csv(f)
+        except Exception:
+            continue
+        for r in b.to_dict('records'):
+            if pd.notna(r.get('error_spread_km')):
+                out[re.sub(r'^output', '', str(r['job']))] = {
+                    'spread_m': float(r['error_spread_km']) * 1000.0,
+                    'sensor': str(r['sensor']) if pd.notna(r.get('sensor')) else '',
+                    'offset_m': math.hypot(float(r.get('error_dE_km') or 0), float(r.get('error_dN_km') or 0)) * 1000,
+                    'n_truth': r.get('truth_points'), 'spread_from': 'BENCH_JOBS (largest)'}
+    return out
+
+
+TRUTH_FILES = {'347': 'gt_347.csv'}       # truth files uploaded beside the logs, by job
+
+
+def truth_file_spread(path: str) -> Dict:
+    """Spread of a truth file's own errors (DX_Err, DY_Err): rms around the mean."""
+    import pandas as pd
+    t = pd.read_csv(path, encoding='utf-8-sig')
+    dx, dy = t['DX_Err'].astype(float), t['DY_Err'].astype(float)
+    return {'spread_m': math.sqrt(dx.var(ddof=0) + dy.var(ddof=0)), 'offset_m': math.hypot(dx.mean(), dy.mean()),
+            'n_truth': len(t), 'spread_from': f'truth file {os.path.basename(path)} (rms)'}
+
+
 def collect(log_dir: str):
     import pandas as pd
     jobs, rows = [], []
+    bench = bench_spread(log_dir)
     for f in sorted(glob.glob(os.path.join(log_dir, 'TRUTH_RANKING_*.csv'))):
         job = os.path.basename(f)[len('TRUTH_RANKING_'):-4]
         if job.split('_')[0] in NO_TRUTH_JOBS:
             continue
         info = job_distortion(log_dir, job)
+        if 'spread_m' in info:
+            info['spread_from'] = 'log: manual points (rms)'
+        elif job.split('_')[0] in TRUTH_FILES and os.path.exists(os.path.join(log_dir, TRUTH_FILES[job.split('_')[0]])):
+            info.update(truth_file_spread(os.path.join(log_dir, TRUTH_FILES[job.split('_')[0]])))
+        elif job.split('_')[0] in bench:
+            b = bench[job.split('_')[0]]
+            info.update({k: v for k, v in b.items() if k != 'sensor'})
+            info['sensor'] = info['sensor'] or b['sensor']
         if 'spread_m' not in info or not info['sensor']:
             continue
         try:
@@ -145,7 +188,7 @@ def plot(table, jobs, png: str, min_jobs: int = 2) -> str:
     bounds = np.geomspace(30.0, 100000.0, len(RAMP) + 1)
     cmap, norm = ListedColormap(RAMP), BoundaryNorm(bounds, len(RAMP))
     heights = [max(len(p[1]), 3) for p in panels]
-    head_in = 1.3
+    head_in = 1.5
     fig_h = head_in + 0.26 * sum(heights) + 0.9 * len(panels)
     fig, axes = plt.subplots(len(panels), 1, figsize=(9.5, fig_h), gridspec_kw={'height_ratios': heights},
                              squeeze=False)
@@ -180,7 +223,7 @@ def plot(table, jobs, png: str, min_jobs: int = 2) -> str:
              'Cell: median truth RMSE of the detector\'s best configuration over all jobs at that level (n jobs '
              'in brackets); last column all levels together.\nRows: best first; % of the truth points it '
              'reached over all its jobs.\nDistortion: spread of the truth points\' errors around their '
-             'mean offset (0 = the scene is only shifted). Grey: not run at that level.',
+             'mean offset (0 = only shifted):\nnewer jobs from their logs, older ones from BENCH_JOBS.csv. Grey: not run at that level.',
              fontsize=8.5, color=MUTED, va='top')
     fig.tight_layout(rect=(0, 0, 1, 1 - head_in / fig_h), h_pad=2.0)
     fig.savefig(png, dpi=150, facecolor=SURFACE)

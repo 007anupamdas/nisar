@@ -1,51 +1,81 @@
-job,sensor,n_truth,offset_m,spread_m,level
-1070,MV,9,10862.4,3737.0,"high
-1.5–5 km"
-1079,MV,16,532.4,2064.2,"high
-1.5–5 km"
-1080,MV,16,11104.0,2537.2,"high
-1.5–5 km"
-1081,ML,3,165012.8,2550.3,"high
-1.5–5 km"
-1082,MV,18,201.0,759.0,"medium
-0.3–1.5 km"
-1083,ML,2,104235.5,3420.1,"high
-1.5–5 km"
-1084,HS,15,118278.0,30547.4,"very high
-> 5 km"
-1085,MV,8,2859.0,1379.9,"medium
-0.3–1.5 km"
-1086,MV,16,7111.4,3938.4,"high
-1.5–5 km"
-1087,MV,11,7604.6,3447.0,"high
-1.5–5 km"
-1088,MV,7,9843.9,291.2,"low
-< 0.3 km"
-1089,MV,6,8052.4,200.1,"low
-< 0.3 km"
-1090,MV,11,7967.4,1803.4,"high
-1.5–5 km"
-1091,HV,8,996.6,860.2,"medium
-0.3–1.5 km"
-1092,MV,13,32.2,78.6,"low
-< 0.3 km"
-1093,HV,10,32.9,248.9,"low
-< 0.3 km"
-1094,HS,7,134827.6,64428.3,"very high
-> 5 km"
-1095,HS,10,145553.1,59441.8,"very high
-> 5 km"
-1097,HS,15,1539.3,3477.9,"high
-1.5–5 km"
-1098,MV,15,531.9,1068.2,"medium
-0.3–1.5 km"
-1099,MV,17,11.4,75.9,"low
-< 0.3 km"
-1100,MV,13,23663.9,12614.5,"very high
-> 5 km"
-1101,MV,8,11074.7,451.1,"medium
-0.3–1.5 km"
-1104,MV,2,8815.1,282.6,"low
-< 0.3 km"
-G1AMV026111204EL000004,MV,14,19785.0,1312.1,"medium
-0.3–1.5 km"
+job,sensor,n_truth,offset_m,spread_m,spread_from,level
+1070,MV,9.0,10862.4,3737.0,log: manual points (rms),"high
+2–8 km"
+1079,MV,16.0,532.4,2064.2,log: manual points (rms),"high
+2–8 km"
+1080,MV,16.0,11104.0,2537.2,log: manual points (rms),"high
+2–8 km"
+1081,ML,3.0,165012.8,2550.3,log: manual points (rms),"high
+2–8 km"
+1082,MV,18.0,201.0,759.0,log: manual points (rms),"medium
+0.5–2 km"
+1083,ML,2.0,104235.5,3420.1,log: manual points (rms),"high
+2–8 km"
+1084,HS,15.0,118278.0,30547.4,log: manual points (rms),"very high
+> 8 km"
+1085,MV,8.0,2859.0,1379.9,log: manual points (rms),"medium
+0.5–2 km"
+1086,MV,16.0,7111.4,3938.4,log: manual points (rms),"high
+2–8 km"
+1087,MV,11.0,7604.6,3447.0,log: manual points (rms),"high
+2–8 km"
+1088,MV,7.0,9843.9,291.2,log: manual points (rms),"low
+< 0.5 km"
+1089,MV,6.0,8052.4,200.1,log: manual points (rms),"low
+< 0.5 km"
+1090,MV,11.0,7967.4,1803.4,log: manual points (rms),"medium
+0.5–2 km"
+1091,HV,8.0,996.6,860.2,log: manual points (rms),"medium
+0.5–2 km"
+1092,MV,13.0,32.2,78.6,log: manual points (rms),"low
+< 0.5 km"
+1093,HV,10.0,32.9,248.9,log: manual points (rms),"low
+< 0.5 km"
+1094,HS,7.0,134827.6,64428.3,log: manual points (rms),"very high
+> 8 km"
+1095,HS,10.0,145553.1,59441.8,log: manual points (rms),"very high
+> 8 km"
+1097,HS,15.0,1539.3,3477.9,log: manual points (rms),"high
+2–8 km"
+1098,MV,15.0,531.9,1068.2,log: manual points (rms),"medium
+0.5–2 km"
+1099,MV,17.0,11.4,75.9,log: manual points (rms),"low
+< 0.5 km"
+1100,MV,13.0,23663.9,12614.5,log: manual points (rms),"very high
+> 8 km"
+1101,MV,8.0,11074.7,451.1,log: manual points (rms),"low
+< 0.5 km"
+1104,MV,2.0,8815.1,282.6,log: manual points (rms),"low
+< 0.5 km"
+335_aa,HV,8.0,18051.3,470.0,BENCH_JOBS (largest),"low
+< 0.5 km"
+336,HS,6.0,10841.8,570.0,BENCH_JOBS (largest),"medium
+0.5–2 km"
+339,MV,7.0,6435.9,7610.0,BENCH_JOBS (largest),"high
+2–8 km"
+344,MV,14.0,53942.4,12230.0,BENCH_JOBS (largest),"very high
+> 8 km"
+347,HV,7.0,26326.8,148149.3,truth file gt_347.csv (rms),"very high
+> 8 km"
+348,HV,9.0,76326.4,2940.0,BENCH_JOBS (largest),"high
+2–8 km"
+353,HS,9.0,73492.3,4280.0,BENCH_JOBS (largest),"high
+2–8 km"
+354,HS,12.0,77271.9,10790.0,BENCH_JOBS (largest),"very high
+> 8 km"
+357,HS,8.0,15047.3,820.0,BENCH_JOBS (largest),"medium
+0.5–2 km"
+358,HS,7.0,8200.2,780.0,BENCH_JOBS (largest),"medium
+0.5–2 km"
+359,HV,6.0,66417.8,17090.0,BENCH_JOBS (largest),"very high
+> 8 km"
+360,HS,5.0,20562.9,590.0,BENCH_JOBS (largest),"medium
+0.5–2 km"
+361,HS,5.0,50986.6,6750.0,BENCH_JOBS (largest),"high
+2–8 km"
+364,HV,12.0,53035.3,3790.0,BENCH_JOBS (largest),"high
+2–8 km"
+366,HV,5.0,156543.4,33950.0,BENCH_JOBS (largest),"very high
+> 8 km"
+G1AMV026111204EL000004,MV,14.0,19785.0,1312.1,log: manual points (rms),"medium
+0.5–2 km"
