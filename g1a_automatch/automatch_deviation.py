@@ -130,7 +130,8 @@ def collect(log_dir: str):
         for r in best.itertuples():
             rows.append({'job': job, 'sensor': info['sensor'], 'spread_m': info['spread_m'], 'detector': r.family,
                          'variant': r.detector, 'matcher': r.matcher, 'truth_rmse_m': float(r.truth_rmse_m),
-                         'reached': int(r.truth_reached), 'total': int(r.truth_total)})
+                         'reached': int(r.truth_reached), 'total': int(r.truth_total),
+                         's_per_window': float(getattr(r, 'sec_per_window', float('nan')))})
     return pd.DataFrame(jobs), pd.DataFrame(rows)
 
 
@@ -265,7 +266,7 @@ def _smooth(x, y, n: int = 24):
 
 
 def plot_lines(table, png: str, top: int = 5, min_reach: float = 0.5, smooth: bool = False,
-               title: str = '', note: str = '') -> str:
+               title: str = '', note: str = '', fastest: int = 0) -> str:
     """Per sensor, its top methods on the x axis, the truth error on the y axis,
     one line per job through its errors with those methods (colour: the scene's
     distortion level, grey when not known); the median over the jobs bold."""
@@ -325,7 +326,21 @@ def plot_lines(table, png: str, top: int = 5, min_reach: float = 0.5, smooth: bo
         ax.set_yscale('log')
         ax.yaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _p: f'{v:g}'))
         ax.set_xticks(x)
-        ax.set_xticklabels([f'{d}\nmedian {med[d]:.0f} m' for d in dets], rotation=0 if rows else 25,
+        spw = t.groupby('detector')['s_per_window'].median() if 's_per_window' in t else None
+        fast = []
+        if fastest and spw is not None:          # the quickest of these methods: a shaded band each
+            sp = spw.reindex(dets).dropna().sort_values()
+            fast = sp.index[:fastest].tolist()
+            for k, d in enumerate(fast):
+                i = dets.index(d)
+                ax.axvspan(i - 0.42, i + 0.42, color='#fff1cc', zorder=0, lw=0)
+                ax.text(i, 1.0, f'fastest {k + 1}', transform=ax.get_xaxis_transform(), ha='center', va='bottom',
+                        fontsize=8.5, fontweight='bold', color='#8a5a00')
+
+        def lab(d):
+            sec = f'\n{spw[d]:.2f} s/window' if spw is not None and d in spw and spw[d] == spw[d] else ''
+            return f'{d}\nmedian {med[d]:.0f} m' + sec
+        ax.set_xticklabels([lab(d) for d in dets], rotation=0 if rows else 25,
                            ha='center' if rows else 'right', fontsize=8.5 if rows else 9, color=INK)
         ax.set_xlim(-0.3, len(dets) - 0.2)
         ax.grid(axis='y', color='#e7e6e2', lw=0.8, zorder=0)
@@ -334,7 +349,7 @@ def plot_lines(table, png: str, top: int = 5, min_reach: float = 0.5, smooth: bo
             ax.spines[sp].set_visible(False)
         ax.spines['bottom'].set_color('#cfcdc6')
         ax.set_title(f'{s}: top {len(dets)}, {len(piv)} jobs', loc='left', fontsize=12, fontweight='bold',
-                     color=INK)
+                     color=INK, pad=20 if fast else 6)
     for ax in (axes if rows else axes[:1]):
         ax.set_ylabel('error against truth (km, log)', fontsize=9.5, color=MUTED)
     handles = [Line2D([], [], color=c, lw=1.6, marker='o', markersize=5, label=lab.replace('\n', ' '))
@@ -481,9 +496,11 @@ def main(argv=None) -> int:
         rt = table[table['job'].isin(sel)]
         n_ws = sum(1 for j in sel if is_workstation(j))
         png = plot_lines(rt, os.path.join(out, f'TOP10_BY_JOB_AFTER_{a.after_job}.png'), top=10, smooth=True,
+                         fastest=3,
                          title=f'Top 10 methods per sensor: error against truth, jobs above {a.after_job} '
                                f'(and workstation runs since {since})',
-                         note=f'{len(sel) - n_ws} server + {n_ws} workstation job(s).')
+                         note=f'{len(sel) - n_ws} server + {n_ws} workstation job(s). Shaded: the 3 fastest '
+                              f'of the 10 (median seconds per window over these jobs).')
         print(f'{len(sel)} job(s) above {a.after_job} / since {since} -> {png}')
     jobs, table = jobs[jobs['level'] != ''], table[table['level'] != '']
     jobs.round(1).to_csv(os.path.join(out, 'DEVIATION_JOBS.csv'), index=False)
