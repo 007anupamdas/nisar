@@ -372,6 +372,92 @@ def plot_lines(table, png: str, top: int = 5, min_reach: float = 0.5, smooth: bo
     return png
 
 
+# speed classes (median seconds per window): upper limits, then (label, colour)
+SPEED_CLASSES = ([0.5, 2.0, float('inf')],
+                 [('fast < 0.5 s', '#1baf7a'), ('medium 0.5–2 s', '#2a78d6'), ('slow > 2 s', '#eb6834')])
+
+
+def speed_color(spw) -> str:
+    if spw != spw:                              # NaN: speed not known
+        return UNKNOWN
+    return next(c for lim, (_l, c) in zip(*SPEED_CLASSES) if spw < lim)
+
+
+def plot_closest(table, png: str, title: str = '', note: str = '', min_reach: float = 0.5, show: int = 15) -> str:
+    """Per sensor, how often each method was the closest to truth in a job (the
+    lowest truth RMSE among the methods reaching at least min_reach of that
+    job's truth points), and how often it was among the 3 closest: horizontal
+    bars, the most often closest first."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import matplotlib.ticker
+    import numpy as np
+    import pandas as pd
+    t = table[table['reached'] >= min_reach * table['total']].copy()
+    t['rank'] = t.groupby('job')['truth_rmse_m'].rank(method='min')
+    sensors = [s for s in ('MV', 'HS', 'HV', 'ML') if s in set(t['sensor'])]
+    sensors = [s for s in sensors if t[t['sensor'] == s]['truth_rmse_m'].min() <= 10000.0]
+    panels = []
+    for s in sensors:
+        u = t[t['sensor'] == s]
+        n_jobs = u['job'].nunique()
+        win = u[u['rank'] == 1].groupby('detector')['job'].nunique()
+        top3 = u[u['rank'] <= 3].groupby('detector')['job'].nunique()
+        ran = u.groupby('detector')['job'].nunique()
+        spw = u.groupby('detector')['s_per_window'].median()
+        best_rmse = u[u['rank'] == 1].groupby('detector')['truth_rmse_m'].median()
+        d = pd.DataFrame({'win': win, 'top3': top3, 'ran': ran, 'spw': spw, 'rmse': best_rmse}).fillna(
+            {'win': 0, 'top3': 0})
+        d = d[d['top3'] > 0].sort_values(['win', 'top3'], ascending=False).head(show)
+        panels.append((s, n_jobs, d))
+    heights = [max(len(p[2]), 3) for p in panels]
+    fig_h = 1.6 + 0.32 * sum(heights) + 0.9 * len(panels)
+    fig, axes = plt.subplots(len(panels), 1, figsize=(10, fig_h), gridspec_kw={'height_ratios': heights},
+                             squeeze=False)
+    fig.patch.set_facecolor(SURFACE)
+    from matplotlib.patches import Patch
+    for ax, (s, n_jobs, d) in zip(axes[:, 0], panels):
+        y = np.arange(len(d))
+        cols = [speed_color(v) for v in d['spw']]
+        ax.barh(y, d['top3'], height=0.62, color=cols, alpha=0.32, zorder=2)        # among the 3 closest
+        ax.barh(y, d['win'], height=0.62, color=cols, zorder=3)                     # the closest
+        for i, (det, r) in enumerate(d.iterrows()):
+            txt = f"closest in {int(r['win'])}, top 3 in {int(r['top3'])} of {int(r['ran'])} jobs"
+            if r['win'] > 0 and r['rmse'] == r['rmse']:
+                txt += f"  ·  {r['rmse']:.0f} m when closest"
+            if r['spw'] == r['spw']:
+                txt += f"  ·  {r['spw']:.2f} s/window"
+            ax.text(r['top3'] + 0.15, i, txt, va='center', fontsize=8, color=MUTED)
+        ax.set_yticks(y)
+        ax.set_yticklabels(d.index, fontsize=9.5, color=INK)
+        ax.invert_yaxis()
+        ax.set_xlim(0, max(float(d['top3'].max()), 1.0) * 2.4)
+        ax.xaxis.set_major_locator(matplotlib.ticker.MaxNLocator(integer=True))
+        ax.grid(axis='x', color='#e7e6e2', lw=0.8, zorder=0)
+        ax.tick_params(length=0, colors=MUTED)
+        for sp in ('top', 'right', 'bottom'):
+            ax.spines[sp].set_visible(False)
+        ax.spines['left'].set_color('#cfcdc6')
+        ax.set_xlabel('jobs', fontsize=9, color=MUTED)
+        ax.set_title(f'{s}: {n_jobs} jobs', loc='left', fontsize=12, fontweight='bold', color=INK)
+    h = [Patch(color=c, label=lab) for lab, c in SPEED_CLASSES[1]]
+    h += [Patch(color='#8a8a85', label='solid: the closest'), Patch(color='#8a8a85', alpha=0.32,
+                                                                   label='light: among the 3 closest')]
+    fig.legend(handles=h, loc='upper left', bbox_to_anchor=(0.01, 1 - 0.75 / fig_h), ncol=5, frameon=False,
+               fontsize=9, title='colour: speed (median seconds per window)', title_fontsize=8.5,
+               alignment='left')
+    fig.text(0.01, 1 - 0.15 / fig_h, title or 'Which method is closest to truth, sensor by sensor', ha='left',
+             va='top', fontsize=14, fontweight='bold', color=INK)
+    fig.text(0.99, 0.004, (note + '   ' if note else '') + f'Per job, among the methods reaching at least '
+             f'{100 * min_reach:.0f} % of its truth points; ranked by how often closest, then how often in the 3 '
+             'closest.', ha='right', va='bottom', fontsize=8, color=MUTED)
+    fig.tight_layout(rect=(0, 0.02, 1, 1 - 1.45 / fig_h), h_pad=2.0)
+    fig.savefig(png, dpi=150, facecolor=SURFACE)
+    plt.close(fig)
+    return png
+
+
 def plot(table, jobs, png: str, min_jobs: int = 2) -> str:
     import matplotlib
     matplotlib.use('Agg')
@@ -501,7 +587,10 @@ def main(argv=None) -> int:
                                f'(and workstation runs since {since})',
                          note=f'{len(sel) - n_ws} server + {n_ws} workstation job(s). Shaded: the 3 fastest '
                               f'of the 10 (median seconds per window over these jobs).')
-        print(f'{len(sel)} job(s) above {a.after_job} / since {since} -> {png}')
+        cpng = plot_closest(rt, os.path.join(out, f'CLOSEST_TO_TRUTH_AFTER_{a.after_job}.png'),
+                            title=f'Which method is closest to truth, sensor by sensor (jobs above {a.after_job})',
+                            note=f'{len(sel) - n_ws} server + {n_ws} workstation job(s).')
+        print(f'{len(sel)} job(s) above {a.after_job} / since {since} -> {png}, {cpng}')
     jobs, table = jobs[jobs['level'] != ''], table[table['level'] != '']
     jobs.round(1).to_csv(os.path.join(out, 'DEVIATION_JOBS.csv'), index=False)
     agg = stats(table)
