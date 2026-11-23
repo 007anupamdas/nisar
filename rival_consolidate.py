@@ -413,12 +413,36 @@ def parse_meta_xml(path):
     return out
 
 
-def _ids_for(name, meta_xml):
+def index_tifs(folders):
+    """{lower-case tif stem: product folder name} of every .tif under the
+    product folders. A RIVAL run on Load Input TIF names its export after the
+    tif (<folder>/<name>.tif -> <name>_rival_band4.csv), so the export's name
+    finds its product folder through this."""
+    idx = {}
+    for f in folders or []:
+        for root, _dirs, files in os.walk(f):
+            rel = os.path.relpath(root, f)
+            if rel == ".":
+                continue
+            top = rel.split(os.sep)[0]
+            for n in files:
+                if n.lower().endswith((".tif", ".tiff")):
+                    idx.setdefault(os.path.splitext(n)[0].lower(), top)
+    return idx
+
+
+def _ids_for(name, meta_xml, tif_index=None):
     """(ids, kind) for a file or folder name, or (None, None)."""
     ids = product_id_of(name if name.lower().endswith(".csv") else name + ".csv")
     if ids:
         return ids, "regular"
     stem = results_stem(name)
+    folder = (tif_index or {}).get(stem.lower())
+    if folder:                               # named after a tif in a product folder
+        ids = product_id_of(folder + ".csv")
+        # a product folder not named 26<reqid>...: still its own product,
+        # its BAND_META.txt in it
+        return (ids or (folder, "", "")), "regular"
     if meta_xml and stem.lower() in meta_xml:
         return (stem, "", ""), "special"
     if SCENE_NAME_RE.match(stem):            # a special product without its meta
@@ -426,7 +450,7 @@ def _ids_for(name, meta_xml):
     return None, None
 
 
-def find_results(folder, meta_xml=None, source="manual"):
+def find_results(folder, meta_xml=None, source="manual", tif_index=None):
     """Every results CSV under folder (recursively), keyed by
     (source, product id, band, result set).
 
@@ -447,12 +471,12 @@ def find_results(folder, meta_xml=None, source="manual"):
             low = f.lower()
             if not low.endswith(".csv") or SKIP_TOKEN in low or low.endswith("_detail.csv"):
                 continue
-            ids, kind = _ids_for(f, meta_xml)
+            ids, kind = _ids_for(f, meta_xml, tif_index)
             if not ids:
                 rel = os.path.relpath(root, folder)
                 parts = [] if rel == "." else rel.split(os.sep)
                 for part in reversed(parts):
-                    ids, kind = _ids_for(part, meta_xml)
+                    ids, kind = _ids_for(part, meta_xml, tif_index)
                     if ids:
                         break
             if not ids:
@@ -461,6 +485,7 @@ def find_results(folder, meta_xml=None, source="manual"):
             stem = os.path.splitext(f)[0]
             rset = ""
             if (not product_id_of(f) and not results_stem(f).lower() in (meta_xml or {})
+                    and results_stem(f).lower() not in (tif_index or {})
                     and not SCENE_NAME_RE.match(results_stem(f))):
                 rset = re.sub(r"_band[\d-]+", "", stem, flags=re.IGNORECASE)
             key = (source, ids[0], band_of(f), rset)
@@ -594,10 +619,11 @@ def _band_meta_path(folders, pid):
 def _consolidate(sources, folders, xml_index, out_csv, log=print,
                  date_from=None, date_to=None, by_date=False):
     """Build the table. Returns the number of products written."""
+    tif_index = index_tifs(folders)
     found, dupes = {}, []
     for src_name, folder in sources.items():
         if folder and os.path.isdir(folder):
-            f_, d_ = find_results(folder, xml_index, src_name)
+            f_, d_ = find_results(folder, xml_index, src_name, tif_index)
             found.update(f_)
             dupes += d_
     results_folder = ", ".join(f"{k}: {v}" for k, v in sources.items() if v)

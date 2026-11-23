@@ -315,6 +315,26 @@ check("band ranges in the spellings truth files use",
                               "26946848021 band 2-5.csv", "266697511_rival.csv")],
       ["2-5", "2-5", "2-5", "2-5", "2-5", ""])
 
+# a truth exported from Load Input TIF: named after the tif, not the folder
+pd12 = tempfile.mkdtemp(); os.makedirs(os.path.join(pd12, "266697541", "sub"))
+open(os.path.join(pd12, "266697541", "BAND_META.txt"), "w").write("Sensor = LISS3\n")
+open(os.path.join(pd12, "266697541", "sub", "scene_ITD_A_1.tif"), "w").close()
+man12 = tempfile.mkdtemp()
+write(os.path.join(man12, "scene_ITD_A_1_rival_band2.csv"), new)
+C.consolidate(man12, [pd12], os.path.join(man12, "o.csv"), lambda *a: None)
+r12 = list(csv.DictReader(open(os.path.join(man12, "o.csv"), encoding="utf-8-sig")))
+check("a truth named after its tif finds its product folder",
+      [(r["product_id"], r["band"], r["sensor"]) for r in r12],
+      [("266697541", "band2", "LISS3")])
+
+os.makedirs(os.path.join(pd12, "TRUTH_A"))
+open(os.path.join(pd12, "TRUTH_A", "BAND_META.txt"), "w").write("Sensor = LISS4\n")
+open(os.path.join(pd12, "TRUTH_A", "img7.tif"), "w").close()
+write(os.path.join(man12, "img7_rival.csv"), new)
+C.consolidate(man12, [pd12], os.path.join(man12, "o.csv"), lambda *a: None)
+r13 = {r["product_id"]: r for r in csv.DictReader(open(os.path.join(man12, "o.csv"), encoding="utf-8-sig"))}
+check("... also when the product folder has another name", r13["TRUTH_A"]["sensor"], "LISS4")
+
 if failures:
     print(f"{len(failures)} FAILURE(S)")
     for x in failures:
