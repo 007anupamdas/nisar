@@ -432,7 +432,21 @@ def index_tifs(folders):
             for n in files:
                 if n.lower().endswith((".tif", ".tiff")):
                     idx.setdefault(os.path.splitext(n)[0].lower(), top)
+                    # the BAND_META.txt nearest the tif: its own subfolder
+                    # first, then upward to the product folder
+                    d = root
+                    while True:
+                        m = os.path.join(d, BAND_META_NAME)
+                        if os.path.isfile(m):
+                            TIF_META.setdefault(os.path.splitext(n)[0].lower(), m)
+                            break
+                        if os.path.normpath(d) == os.path.normpath(f):
+                            break
+                        d = os.path.dirname(d)
     return idx
+
+
+TIF_META = {}      # tif stem -> nearest BAND_META.txt (filled by index_tifs)
 
 
 def _ids_for(name, meta_xml, tif_index=None):
@@ -623,6 +637,7 @@ def _band_meta_path(folders, pid):
 def _consolidate(sources, folders, xml_index, out_csv, log=print,
                  date_from=None, date_to=None, by_date=False):
     """Build the table. Returns the number of products written."""
+    TIF_META.clear()
     tif_index = index_tifs(folders)
     found, dupes = {}, []
     for src_name, folder in sources.items():
@@ -644,7 +659,8 @@ def _consolidate(sources, folders, xml_index, out_csv, log=print,
             errs, lonlats, frame = pick_errors(csv.DictReader(f))
         st = error_summary(errs)
         meta_path = (xml_index.get(pid.lower(), "") if kind == "special"
-                     else _band_meta_path(folders, pid))
+                     else TIF_META.get(results_stem(path).lower())
+                     or _band_meta_path(folders, pid))
         anc = {"sensor": None, "date": None, "session_id": None, "strip_id": None,
                "centre_lat": None, "centre_lon": None, "sources": {}}
         if kind == "special" and not meta_path and ancillary_from_name(pid):

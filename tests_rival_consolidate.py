@@ -343,6 +343,19 @@ open(os.path.join(deep, "deep_scene.tif"), "w").close()
 check("tif deep in subfolders maps to its product id folder",
       C.index_tifs([pd14])["deep_scene"], "266697551")
 
+pd15 = tempfile.mkdtemp()
+for sub, sens in (("s1", "LISS3"), ("s2", "AWiFS")):
+    os.makedirs(os.path.join(pd15, "266697561", sub))
+    open(os.path.join(pd15, "266697561", sub, "BAND_META.txt"), "w").write(f"Sensor = {sens}\n")
+    open(os.path.join(pd15, "266697561", sub, f"img_{sub}.tif"), "w").close()
+man15 = tempfile.mkdtemp()
+write(os.path.join(man15, "img_s2_rival_band3.csv"), new)
+C.consolidate(man15, [pd15], os.path.join(man15, "o.csv"), lambda *a: None)
+r15 = next(csv.DictReader(open(os.path.join(man15, "o.csv"), encoding="utf-8-sig")))
+check("truth named after a tif in one of several subfolders: that subfolder's meta",
+      (r15["product_id"], r15["sensor"], r15["band_meta"].endswith(os.path.join("s2", "BAND_META.txt"))),
+      ("266697561", "AWiFS", True))
+
 if failures:
     print(f"{len(failures)} FAILURE(S)")
     for x in failures:
