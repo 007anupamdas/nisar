@@ -544,7 +544,7 @@ def summarise_by_date(rows):
         key = (d.isoformat() if d else "unknown", r.get("source") or "")
         g = groups.setdefault(key, {"errs": [], "products": []})
         g["errs"] += r.get("_errs") or []
-        g["products"].append(r["product_id"] + (f" b{r['band']}" if r.get("band") else ""))
+        g["products"].append(r["product_id"] + (f" {r['band']}" if r.get("band") else ""))
     out = []
     for (date, source), g in sorted(groups.items()):
         st = error_summary(g["errs"])
@@ -635,7 +635,8 @@ def _consolidate(sources, folders, xml_index, out_csv, log=print,
             meta_path = ""
         row = {
             "product_id": pid, "request_id": req, "product_no": prodno,
-            "band": band, "product_kind": kind,
+            # 'band5-3', not '5-3': Excel reads a bare 5-3 as the date 5-Mar
+            "band": f"band{band}" if band else "", "product_kind": kind,
             "source": source, "result_set": rset,
             "date": (anc["date"] or date_from_path(path) or date_from_path(meta_path)
                      or date_from_product_folder(folders, pid)),

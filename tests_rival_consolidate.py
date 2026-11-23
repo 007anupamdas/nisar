@@ -147,7 +147,7 @@ n2 = C.consolidate(res2, prod, out2, lambda *a: None)
 rows2 = list(csv.DictReader(open(out2, encoding="utf-8-sig")))
 check("two bands of one product are two rows, not a duplicate",
       (n2, [(r["product_id"], r["band"]) for r in rows2]),
-      (2, [("266697511", "1"), ("266697511", "6")]))
+      (2, [("266697511", "band1"), ("266697511", "band6")]))
 
 # ── special products: several tifs per folder, <tif stem>_META.xml beside each
 SP = "G1AHS026111104EX000006_S062321_E063509_11112026DIP_DQ_ort"
@@ -185,7 +185,7 @@ n3 = C.consolidate(res3, prod3, out3, lambda *a: None)
 rows3 = {r["product_id"]: r for r in csv.DictReader(open(out3, encoding="utf-8-sig"))}
 check("regular and special products in one table; stats and unknown CSVs skipped",
       (n3, sorted((k, r["product_kind"], r["band"]) for k, r in rows3.items())),
-      (2, sorted([("266697511", "regular", "2"), (SP, "special", "6")])))
+      (2, sorted([("266697511", "regular", "band2"), (SP, "special", "band6")])))
 r = rows3[SP]
 check("special row carries the XML fields and path",
       (r["sensor"], r["date"], r["session_id"], r["strip_id"], r["n_points"],
@@ -235,10 +235,10 @@ n6 = C.consolidate({"manual": man6, "auto": auto6}, [pa, pb, pc], out6, lambda *
 r6 = sorted((r["source"], r["product_id"], r["band"], r["result_set"], r["sensor"])
             for r in csv.DictReader(open(out6, encoding="utf-8-sig")))
 check("manual and auto in one table; auto product from its job folder; sets kept apart",
-      (n6, r6), (4, sorted([("manual", "266697511", "2", "", "LISS4"),
-                            ("auto", "266697511", "2", "RIVAL_FINAL", "LISS4"),
-                            ("auto", "266697511", "2", "RIVAL_BEST_FINAL", "LISS4"),
-                            ("auto", SP, "6", "RIVAL_FINAL", "HS")])))
+      (n6, r6), (4, sorted([("manual", "266697511", "band2", "", "LISS4"),
+                            ("auto", "266697511", "band2", "RIVAL_FINAL", "LISS4"),
+                            ("auto", "266697511", "band2", "RIVAL_BEST_FINAL", "LISS4"),
+                            ("auto", SP, "band6", "RIVAL_FINAL", "HS")])))
 
 # ── date-wise ──────────────────────────────────────────────────────────────
 check("dates in the metadata's forms", [str(C.parse_date(t)) for t in
@@ -299,7 +299,15 @@ r10 = next(csv.DictReader(open(os.path.join(man10, "o.csv"), encoding="utf-8-sig
 check("a meta-less special truth is consolidated from its name",
       (r10["product_kind"], r10["product_id"], r10["band"], r10["sensor"],
        r10["session_id"], r10["strip_id"], r10["date"], r10["n_points"], r10["prod_code"]),
-      ("special", nm[:-6], "4", "MV", "26112006", "1", "20-11-2026", "2", "ort"))
+      ("special", nm[:-6], "band4", "MV", "26112006", "1", "20-11-2026", "2", "ort"))
+
+man11 = tempfile.mkdtemp()
+write(os.path.join(man11, "26946848021_rival_band5-3.csv"), new)
+C.consolidate(man11, [tempfile.mkdtemp()], os.path.join(man11, "o.csv"), lambda *a: None)
+r11 = next(csv.DictReader(open(os.path.join(man11, "o.csv"), encoding="utf-8-sig")))
+check("a numeric truth's composite band is 'band5-3' (Excel would read 5-3 as 5-Mar); "
+      "no name-based sensor / date for it", (r11["band"], r11["sensor"], r11["date"]),
+      ("band5-3", "", ""))
 
 if failures:
     print(f"{len(failures)} FAILURE(S)")
