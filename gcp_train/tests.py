@@ -250,6 +250,62 @@ def consistent_checks(tmp, rng, ref):
           (0, True, True, 'test'))
 
 
+def gui_checks(tmp, ref):
+    """The gcp_train window: each step a settings file run with gpuaas.py, or written for the server."""
+    try:
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+        import gcp_train_gui as GUI
+    except Exception as e:
+        print(f'SKIP  gui: {type(e).__name__}: {e}')
+        return
+    import pandas as pd
+    app = GUI.QtWidgets.QApplication.instance() or GUI.QtWidgets.QApplication([])
+    st = GUI.QtCore.QSettings(os.path.join(tmp, 'gui.ini'), GUI.QtCore.QSettings.IniFormat)
+    w = GUI.TrainWindow(st)
+    w.work.setText(os.path.join(tmp, 'gui_work'))
+    w.outputs.add(os.path.join(tmp, 'automatch_ws'))
+    w.inputs.add(os.path.join(tmp, 'inputs'))
+    w.truth.setText(os.path.join(tmp, 'truth'))
+    w.band_mod.setText('band1=nir')
+    w.crop.setValue(96)
+    w.per_scene.setValue(3)
+
+    def run(step):
+        w.run_here(step)
+        if w.proc is not None:
+            w.proc.waitForFinished(300000)
+        app.processEvents()
+    run('consistent')
+    rows = w.scene_table.rowCount()
+    split = w.scene_table.item(0, [w.scene_table.horizontalHeaderItem(k).text()
+                                   for k in range(w.scene_table.columnCount())].index('split')).text() if rows else ''
+    run('pairs')
+    fit = os.path.join(tmp, 'gui_work', 'pairs', 'pairs', 'scenes_fit.csv')
+    check('gui: the scene list and the pairs built from the window (gpuaas.py steps), shown in its tables',
+          (rows, split, os.path.exists(fit), w.fit_table.rowCount() >= 1,
+           os.path.exists(os.path.join(tmp, 'gui_work', 'settings', 'pairs.json'))),
+          (1, 'test', True, True, True))
+    w.map_local.setText(tmp)
+    w.map_server.setText('/srv/gcp')
+    w.save_for_server('smoke')
+    sj = json.load(open(os.path.join(tmp, 'gui_work', 'server', 'smoke.json')))
+    clip = GUI.QtWidgets.QApplication.clipboard().text()
+    check('gui: settings for the server with server paths, and the GPUaaS command',
+          (sj['index'].startswith('/srv/gcp/gui_work/pairs/pairs/'), sj['smoke'], sj['config'],
+           clip.startswith('python gcp_train/gpuaas.py "." /srv/gcp/gui_work/smoke_')),
+          (True, True, 'disk', True))
+    w.write_automatch()
+    am = json.load(open(os.path.join(tmp, 'gui_work', 'automatch_lightglue.json')))
+    name = next(iter(am['lightglue_weights']))
+    check('gui: the automatch settings run the official and the fine-tuned LightGlue side by side',
+          (am['detector_params']['disk']['lgm.weights'], am['lightglue_weights'][name]['modality'],
+           am['lightglue_weights'][name]['weights'].startswith('/srv/gcp/')),
+          (['official', name], ['nir', 'visible'], True))
+    why = w.check_step('eval')
+    check('gui: a step that cannot run yet says why (no fine-tuned model to compare)', 'train it' in why, True)
+    w.close()
+
+
 def main():
     import cv2
     import pandas as pd
@@ -265,6 +321,7 @@ def main():
     try:
         ref = make_reference(os.path.join(tmp, 'ref.tif'), rng)
         consistent_checks(tmp, rng, ref)
+        gui_checks(tmp, ref)
         inp = make_input_image(os.path.join(tmp, 'C3_scene1.img.tif'), ref)
         g1 = write_gt(os.path.join(tmp, 'C3_scene1.txt'), inp, rng, outlier=6)
         pts = G.load_points(g1, quiet=True)

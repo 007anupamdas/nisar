@@ -60,6 +60,32 @@ file cannot hold an empty cell) are recovered from their X/Y when the file's
 other points give that mapping, else left out with a note. Rows more than
 500 km apart are dropped as broken (`gt.py`).
 
+## The window: `python gcp_train_gui.py`
+
+The G1A route (automatch's consistent points) step by step, one tab each:
+
+1. **Scenes:** your automatch output folders (any layout, several places),
+   the input image folders (searched by file name), the truth folder (scenes
+   with truth only test) and what each band is → the scene list, shown as a
+   table (split, points, truth file).
+2. **Pairs:** crop size, crops per scene and the rules a crop's labels must
+   meet → the pairs, with a table per scene (pairs, label fit, why crops were
+   refused).
+3. **Train:** DISK or ALIKED + LightGlue, name, epochs, sensors. Run the smoke
+   test first, then the training.
+4. **Check:** the official and the fine-tuned weights on the test pairs, and
+   the settings that run both side by side in automatch on the scenes with
+   truth (the test that decides).
+
+Each step is a settings file for `gpuaas.py`:
+- **Run here** runs it on this machine.
+- **Save for the server…** writes it with server paths (the path mapping at
+  the top, e.g. `V:\` = `/maintenance/`) and copies the GPUaaS command to the
+  clipboard. Run it as usual.
+
+Everything goes under the work folder: `scenes/`, `pairs/`, `train_<name>/`,
+`eval/`, `settings/` and `server/`. The folders and choices are remembered.
+
 ## 1. Scenes: `scenes.csv`
 
 One row per scene:
