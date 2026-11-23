@@ -366,8 +366,11 @@ def _det_entry(table, dtag: str):
 def _unit_base_key(job: Dict, win: int, nf: Optional[int]) -> str:
     """The resume fingerprint without the per-detector tables (matchers,
     detector_params): those are compared per detector, so a detector's result
-    is reused whichever other detectors the run (preset tier, auto step) has."""
-    return _unit_key({k: v for k, v in job.items() if k not in ('matchers', 'detector_params')}, win, nf)
+    is reused whichever other detectors the run (preset tier, auto step) has;
+    nor the lists of window sizes and keypoint counts (the sweep point's own
+    window and count are in it), so a keypoint test reuses the usual one."""
+    return _unit_key({k: v for k, v in job.items()
+                      if k not in ('matchers', 'detector_params', 'num_features', 'window_sizes')}, win, nf)
 
 
 def unit_matches(saved: Dict, key: str, base_key: str, want_m, want_p) -> bool:
@@ -2260,6 +2263,12 @@ def _finish_job(job: Dict, out_root: str, scene, manifest: List[Dict], t_job: fl
         RP.report(out_root)
     except Exception as e:
         print(f'[Job] REPORT not written: {type(e).__name__}: {e}')
+    if job['truth_csv'] and len(job.get('num_features') or []) > 1:    # a keypoint test: the counts compared
+        try:
+            import automatch_truthcheck as TC
+            TC.keypoint_plot(out_root)
+        except Exception as e:
+            print(f'[Job] KEYPOINT_TEST.png not drawn: {type(e).__name__}: {e}')
     emit({'event': 'done', 'manifest': man_path, 'best': best_files, 'truth': truth_files, 'cross': cross,
           'minutes': round((time.time() - t_job) / 60.0, 2)})
     print(f'[Job] done in {(time.time() - t_job) / 60.0:.1f} min; manifest {man_path}')

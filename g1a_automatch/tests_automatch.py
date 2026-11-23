@@ -1499,8 +1499,27 @@ def test_presets(tmp):
            J.unit_matches(dict(saved, matchers=['smnn', 'lgm', 'ada']), k10, b10, ['lgm'],
                           {'checkpoint': ['epipolar']}),
            J.unit_matches(old, J._unit_key(dict(base, temp_per_product=True), 512, None), '', None, None),
-           J._det_entry({'disk': ['ada'], 'dog': ['lgm']}, 'disk_epipolar')),
-          (True, False, False, True, True, ['ada']))
+           J._det_entry({'disk': ['ada'], 'dog': ['lgm']}, 'disk_epipolar'),
+           J._unit_base_key(dict(t5, num_features=[None, 5243]), 512, None) == J._unit_base_key(t5, 512, None),
+           J._unit_base_key(t5, 512, 5243) == J._unit_base_key(t5, 512, None)),
+          (True, False, False, True, True, ['ada'], True, False))
+    jk, nk = P.job_for('MV', '/d/G1A_MV_x.tif', '/ref', '/out', '', ['band3'], 20.0, presets=pre, mode='fast',
+                       keypoint_test=5000)
+    import automatch_truthcheck as _TC
+    kd = os.path.join(tmp, 'kp_test')
+    os.makedirs(kd, exist_ok=True)
+    _pd.DataFrame([dict(rank=i + 1, sweep=sw, detector=d, matcher='m', truth_rmse_m=r, truth_reached=9,
+                        truth_total=10, sec_per_window=sp)
+                   for i, (sw, d, r, sp) in enumerate([('win1024_nfauto', 'disk', 100, 0.4),
+                                                       ('win1024_nf5243', 'disk', 110, 0.25),
+                                                       ('win1024_nfauto', 'sift', 150, 0.3),
+                                                       ('win1024_nf5243', 'sift', 180, 0.2)])]).to_csv(
+        os.path.join(kd, 'TRUTH_RANKING.csv'), index=False)
+    png = _TC.keypoint_plot(kd)
+    check('keypoint test: one window at the usual density and 5000 per megapixel, each its own sweep point; the '
+          'two compared per detector (KEYPOINT_TEST.png)',
+          (jk['window_sizes'], jk['num_features'], 'keypoint test' in nk, os.path.basename(png)),
+          ([1024], [None, 5243], True, 'KEYPOINT_TEST.png'))
     import automatch_cross as _C
     pn = os.path.join(tmp, 'pn_job')
     os.makedirs(pn, exist_ok=True)

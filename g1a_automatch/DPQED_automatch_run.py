@@ -194,6 +194,11 @@ class RunWindow(QtWidgets.QMainWindow):
         self.bands.setMaximumWidth(160)
         self.bands.setToolTip('The band(s) to match: yours to name. Empty is accepted only with crispest ticked, '
                               'or with a truth file whose name ends in the band (pts_band28.csv)')
+        self.kp_test = QtWidgets.QCheckBox('keypoint test (also 5000 / MP)')
+        self.kp_test.setToolTip('Run each detector twice in the same job: at the usual keypoint density and at '
+                                '5000 per megapixel (one window size), each in its own sweep folder '
+                                '(win<W>_nfauto, win<W>_nf<N>). With a truth file, KEYPOINT_TEST.png in the output '
+                                'folder compares their truth error and time per window')
         self.crispest = QtWidgets.QCheckBox('crispest')
         self.crispest.setToolTip('Instead of naming a band: let the job pick the band with the most fine detail '
                                  '(hyperspectral cubes). Off by default')
@@ -250,6 +255,7 @@ class RunWindow(QtWidgets.QMainWindow):
                 h.addWidget(self.crispest)
         h.addWidget(self.cloud)
         h.addWidget(self.cloud_conf)
+        h.addWidget(self.kp_test)
         h.addStretch(1)
         v.addLayout(h)
         self.summary = QtWidgets.QLabel()
@@ -397,6 +403,7 @@ class RunWindow(QtWidgets.QMainWindow):
                            mode=mode or self.mode.currentText(), final_points=self.final_points.value(),
                            cell_px=P.parse_levels(self.cell_px.text()),
                            cloud_conf=self.cloud_conf.value() if self.cloud.isChecked() else None,
+                           keypoint_test=5000 if self.kp_test.isChecked() else 0,
                            temp_dir=self.cache_dir())
         if self.cache.text().strip():                 # <cache>/<product name>/
             job['temp_per_product'] = True
@@ -687,7 +694,8 @@ class RunWindow(QtWidgets.QMainWindow):
                 'bands': self.bands.text(), 'crispest': self.crispest.isChecked(), 'max_err': self.max_err.value(),
                 'device': self.device.currentText(), 'top_n': self.top_n.value(), 'agree': self.agree.value(),
                 'final_points': self.final_points.value(), 'cell_px': self.cell_px.text(),
-                'cloud': self.cloud.isChecked(), 'cloud_conf': self.cloud_conf.value()}
+                'cloud': self.cloud.isChecked(), 'cloud_conf': self.cloud_conf.value(),
+                'kp_test': self.kp_test.isChecked()}
 
     def set_fields(self, f: dict):
         for key, row in (('input', self.input), ('reference', self.reference), ('reference_c1', self.reference_c1),
@@ -706,6 +714,7 @@ class RunWindow(QtWidgets.QMainWindow):
         self.cell_px.setText(f.get('cell_px', self.cell_px.text()))
         self.cloud.setChecked(bool(f.get('cloud', True)))
         self.cloud_conf.setValue(float(f.get('cloud_conf', 0.7)))
+        self.kp_test.setChecked(bool(f.get('kp_test', False)))
 
     def _queue_show(self):
         self.queue_list.clear()

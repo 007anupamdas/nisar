@@ -332,7 +332,8 @@ def job_for(sensor: str, input_path: str, reference_dir: str, output_dir: str, t
             cloud: Optional[bool] = None, weights_dir: str = '', presets: Optional[Dict] = None,
             crispest: int = 0, top_n: Optional[int] = None, agree: Optional[int] = None,
             mode: str = 'fast', final_points: Optional[int] = None, temp_dir: str = '',
-            cell_px: Optional[int] = None, cloud_conf: Optional[float] = None) -> Tuple[Dict, str]:
+            cell_px: Optional[int] = None, cloud_conf: Optional[float] = None,
+            keypoint_test: float = 0) -> Tuple[Dict, str]:
     """(job, note): the sensor's preset with this run's paths and the few
     things chosen in the window (search range without truth, device, clouds
     on / off) and the band(s): the user's; else, when asked, the crispest N;
@@ -380,6 +381,12 @@ def job_for(sensor: str, input_path: str, reference_dir: str, output_dir: str, t
         job['device'] = device
     if cloud is not None:
         job['cloud_mask'] = 'on' if cloud else 'none'
+    if keypoint_test:                        # each detector also at keypoint_test keypoints per megapixel
+        w = int((job.get('window_sizes') or [1024])[0])
+        job['window_sizes'] = [w]            # one window: a keypoint count is for one window size
+        job['num_features'] = [None, int(round(float(keypoint_test) * w * w / 1e6))]
+        note = (note + ' ' if note else '') + (f'[keypoint test: {w} px windows at the usual density and at '
+                                               f'{keypoint_test:g} per megapixel ({job["num_features"][1]} per window)]')
     if cloud_conf:                           # a pixel is cloud only when the mask is this sure
         job['cloud_min_confidence'] = round(float(cloud_conf), 2)
     if weights_dir:

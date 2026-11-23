@@ -138,6 +138,14 @@ truth file also sets the job (window size from its largest error, the search
 range, the band). Command line: `python automatch_job.py truthcheck <run |
 folder of runs> --truth pts.csv`.
 
+**Keypoint test.** Do fewer keypoints lose accuracy? Tick *keypoint test*
+in the run window (or put `auto, 5243` in *Keypoints* in the full window, for
+1024 px windows): each detector runs at the usual density and at 5000 per
+megapixel in the same job (`win1024_nfauto`, `win1024_nf5243`). With a truth
+file, `KEYPOINT_TEST.png` shows per detector the truth RMSE, the truth points
+reached and the seconds per window at both, and the median change. The usual
+results already in the output folder are reused.
+
 **Queue** (run window): *Add to queue* keeps the window's settings as they
 are (input, output, band, preset, cloud threshold, ...) with what to do (Run,
 Run auto, Run all 4 tiers); *Run the queue* runs them one after another, Stop

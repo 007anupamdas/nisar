@@ -82,6 +82,10 @@ def check_run(run: str, truth_csv: str, radius_m: float = 5000.0) -> List[Dict]:
         except Exception as e:
             print(f'[TruthCheck] {name}: {os.path.basename(f)} not scored ({type(e).__name__}: {e})')
     try:
+        keypoint_plot(run)
+    except Exception as e:
+        print(f'[TruthCheck] {name}: keypoint test plot not drawn ({type(e).__name__}: {e})')
+    try:
         import automatch_report as RP
         RP.report(run, quiet=True, truth_csv=truth_csv)
     except Exception as e:
@@ -92,6 +96,74 @@ def check_run(run: str, truth_csv: str, radius_m: float = 5000.0) -> List[Dict]:
               + (f"truth RMSE {rm:.0f} m at {r.get('truth_reached')}/{r.get('truth_total')}"
                  if rm == rm and rm is not None else 'no truth point reached'), flush=True)
     return rows
+
+
+def keypoint_plot(run: str) -> str:
+    """A keypoint test (one run with two keypoint counts, win<W>_nfauto and
+    win<W>_nf<N>): per detector, its best configuration's truth RMSE, truth
+    points reached and seconds per window at each count; KEYPOINT_TEST.png."""
+    import re
+    import pandas as pd
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    rk = os.path.join(run, 'TRUTH_RANKING.csv')
+    if not os.path.exists(rk):
+        return ''
+    t = pd.read_csv(rk)
+    sweeps = sorted(t['sweep'].astype(str).unique(), key=lambda v: (0 if v.endswith('nfauto') else 1, v))
+    if len(sweeps) < 2:
+        return ''
+    t = t.sort_values('rank').groupby(['sweep', 'detector']).first().reset_index()
+    perf = os.path.join(run, 'PERFORMANCE.csv')
+    if os.path.exists(perf):
+        p = pd.read_csv(perf).groupby(['sweep', 'detector'])['sec_per_window'].median().rename('spw_perf')
+        t = t.merge(p.reset_index(), on=['sweep', 'detector'], how='left')
+        t['sec_per_window'] = t['spw_perf'].fillna(t.get('sec_per_window'))
+    a, b = sweeps[0], sweeps[1]
+    w = t.pivot_table(index='detector', columns='sweep', values=['truth_rmse_m', 'truth_reached', 'sec_per_window'])
+    w = w.dropna(subset=[('truth_rmse_m', a), ('truth_rmse_m', b)])
+    if w.empty:
+        return ''
+    w = w.sort_values(('truth_rmse_m', a))
+    nb = re.search(r'nf(\d+)', b)
+    lab_a, lab_b = 'usual density', (f'{nb.group(1)} keypoints per window' if nb else b)
+    ca, cb = '#2a78d6', '#eb6834'
+    fig, axes = plt.subplots(1, 3, figsize=(13, 1.6 + 0.36 * len(w)), sharey=True,
+                             gridspec_kw={'width_ratios': [1.4, 1, 1]})
+    y = range(len(w))
+    for ax, col, title, log in ((axes[0], 'truth_rmse_m', 'truth RMSE (m, log)', True),
+                                (axes[1], 'truth_reached', 'truth points reached', False),
+                                (axes[2], 'sec_per_window', 'seconds per window', False)):
+        va, vb = w[(col, a)].to_numpy(float), w[(col, b)].to_numpy(float)
+        for i in y:
+            ax.plot([va[i], vb[i]], [i, i], color='#cfcdc6', lw=2, zorder=1)
+        ax.scatter(va, list(y), s=46, color=ca, zorder=3, label=lab_a, edgecolors='white', linewidths=0.8)
+        ax.scatter(vb, list(y), s=46, color=cb, zorder=3, label=lab_b, edgecolors='white', linewidths=0.8)
+        if log:
+            ax.set_xscale('log')
+            for i in y:
+                r = vb[i] / va[i] if va[i] else float('nan')
+                ax.text(max(va[i], vb[i]) * 1.12, i, f'{r:.2f}x', va='center', fontsize=8, color='#6b6b66')
+        ax.set_title(title, fontsize=10, loc='left', color='#1f1f1d')
+        ax.grid(axis='x', color='#e7e6e2', lw=0.8, zorder=0)
+        for sp in ('top', 'right'):
+            ax.spines[sp].set_visible(False)
+    axes[0].set_yticks(list(y))
+    axes[0].set_yticklabels(w.index, fontsize=9)
+    axes[0].invert_yaxis()
+    axes[0].legend(loc='lower right', fontsize=8.5, frameon=False)
+    med = (w[('truth_rmse_m', b)] / w[('truth_rmse_m', a)]).median()
+    spd = (w[('sec_per_window', b)] / w[('sec_per_window', a)]).median()
+    fig.suptitle(f'Keypoint test: {lab_b} against the usual density -- median error x{med:.2f}, time per window '
+                 f'x{spd:.2f}', x=0.01, ha='left', fontsize=12, fontweight='bold')
+    fig.tight_layout()
+    png = os.path.join(run, 'KEYPOINT_TEST.png')
+    fig.savefig(png, dpi=150)
+    plt.close(fig)
+    print(f'[KeypointTest] {len(w)} detector(s): truth error x{med:.2f}, time per window x{spd:.2f} -> {png}',
+          flush=True)
+    return png
 
 
 def plot(df, png: str) -> str:
