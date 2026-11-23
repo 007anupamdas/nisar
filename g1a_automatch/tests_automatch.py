@@ -1668,6 +1668,17 @@ def test_gui_run(tmp):
           (nc['temp_dir'].replace('\\', '/'), _J.normalize(nc)['temp_dir'] == nc['temp_dir'],
            jd['temp_dir'] == os.path.join(w.output.text(), '_cache'), jd.get('temp_per_product', False)),
           ('/fast/cache_a/q_G1A_MV_a', True, True, False))
+    w.queue_edit(nq + 1)                             # edit /q/out_a in place: band 3 -> 5, auto -> Run
+    w.bands.setText('5')
+    w.queue_what.setCurrentText('Run all 4 tiers')
+    w.queue_save()
+    w.queue_list.setCurrentRow(nq)
+    w.queue_down()
+    edited = (w._wq[nq]['fields']['output'], w._wq[nq]['fields']['bands'], w._wq[nq]['what'],
+              w._wq[nq + 1]['fields']['output'], len(w._wq) - nq, w.btn_q_save.isVisibleTo(w))
+    check('run window: a queued run edited in place (its settings and what to do saved back in its place), '
+          'moved down',
+          edited, ('/q/out_a', '5', 'Run all 4 tiers', '/q/out_b', 2, False))
     w._wq = w._wq[:nq]
     w._queue_show()
     w.set_fields(f0)

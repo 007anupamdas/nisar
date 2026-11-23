@@ -305,13 +305,19 @@ class RunWindow(QtWidgets.QMainWindow):
         self.btn_q_add.setToolTip('Queue a run of the settings as they are now; then change them for the next one')
         self.btn_q_remove = QtWidgets.QPushButton('Remove')
         self.btn_q_up = QtWidgets.QPushButton('Up')
-        self.btn_q_load = QtWidgets.QPushButton('Load')
-        self.btn_q_load.setToolTip('Put the selected run\'s settings back in the window (to check or change; '
-                                   'add it again and remove the old one)')
+        self.btn_q_down = QtWidgets.QPushButton('Down')
+        self.btn_q_load = QtWidgets.QPushButton('Edit')
+        self.btn_q_load.setToolTip('Put the selected run\'s settings in the window to change them (also: double-click '
+                                   'it), then Save to queue: it keeps its place in the queue')
+        self.btn_q_save = QtWidgets.QPushButton('Save to queue')
+        self.btn_q_save.setToolTip('Put the run being edited back in its place with the settings as they are now')
+        self.btn_q_cancel = QtWidgets.QPushButton('Cancel edit')
+        for b in (self.btn_q_save, self.btn_q_cancel):
+            b.setVisible(False)
         self.btn_q_run = QtWidgets.QPushButton('Run the queue')
         self.btn_q_run.setToolTip('Start the queued runs one after another (Stop pauses the queue)')
-        for wq in (QtWidgets.QLabel('Queue:'), self.queue_what, self.btn_q_add, self.btn_q_up, self.btn_q_remove,
-                   self.btn_q_load, self.btn_q_run):
+        for wq in (QtWidgets.QLabel('Queue:'), self.queue_what, self.btn_q_add, self.btn_q_up, self.btn_q_down,
+                   self.btn_q_remove, self.btn_q_load, self.btn_q_save, self.btn_q_cancel, self.btn_q_run):
             hq.addWidget(wq)
         hq.addStretch(1)
         v.addLayout(hq)
@@ -319,7 +325,12 @@ class RunWindow(QtWidgets.QMainWindow):
         self.btn_q_add.clicked.connect(self.queue_add)
         self.btn_q_remove.clicked.connect(self.queue_remove)
         self.btn_q_up.clicked.connect(self.queue_up)
-        self.btn_q_load.clicked.connect(lambda: self.queue_load(self.queue_list.currentRow()))
+        self.btn_q_down.clicked.connect(self.queue_down)
+        self.btn_q_load.clicked.connect(lambda: self.queue_edit(self.queue_list.currentRow()))
+        self.queue_list.itemDoubleClicked.connect(lambda *_: self.queue_edit(self.queue_list.currentRow()))
+        self.btn_q_save.clicked.connect(self.queue_save)
+        self.btn_q_cancel.clicked.connect(self.queue_cancel_edit)
+        self._q_edit = None                    # the queued entry being edited
         self.btn_q_run.clicked.connect(self.queue_start)
         self._wq, self._q_running = [], False
         self.bar = QtWidgets.QProgressBar()
@@ -726,19 +737,66 @@ class RunWindow(QtWidgets.QMainWindow):
                                     f"  {f.get('mode', '')}  -> {f.get('output', '')}")
         self.settings.setValue('run_queue', json.dumps(self._wq))
 
-    def queue_add(self):
+    def _queue_entry(self, skip=None):
+        """The window's settings as a queue entry, or None (a message said why)."""
         f = self.fields()
         if not (f['input'] and f['output']):
             QtWidgets.QMessageBox.warning(self, 'Queue', 'set the input image and the output folder first')
-            return
-        same = [e for e in self._wq if os.path.normcase(os.path.normpath(e['fields']['output'])) ==
+            return None
+        same = [e for e in self._wq if e is not skip and os.path.normcase(os.path.normpath(e['fields']['output'])) ==
                 os.path.normcase(os.path.normpath(f['output']))]
         if same:
             QtWidgets.QMessageBox.warning(self, 'Queue', f"{f['output']} is already the output of a queued run: "
                                                          'choose another output folder')
+            return None
+        return {'what': self.queue_what.currentText(), 'fields': f}
+
+    def queue_add(self):
+        e = self._queue_entry()
+        if e is not None:
+            self._wq.append(e)
+            self._queue_show()
+
+    def queue_edit(self, i: int):
+        """The selected run's settings into the window, to change and save back in its place."""
+        if not 0 <= i < len(self._wq):
             return
-        self._wq.append({'what': self.queue_what.currentText(), 'fields': f})
+        self._q_edit = self._wq[i]
+        self.set_fields(self._q_edit['fields'])
+        self.queue_what.setCurrentText(self._q_edit['what'])
+        for b in (self.btn_q_save, self.btn_q_cancel):
+            b.setVisible(True)
+        self.log.appendPlainText(f'--- queue: editing run {i + 1} ({os.path.basename(self._q_edit["fields"].get("input", ""))}); '
+                                 f'change the settings, then Save to queue')
+
+    def queue_save(self):
+        if self._q_edit is None:
+            return
+        if not any(e is self._q_edit for e in self._wq):
+            QtWidgets.QMessageBox.information(self, 'Queue', 'That run has already started (or was removed): '
+                                                             'Add to queue to queue it again.')
+            self.queue_cancel_edit()
+            return
+        e = self._queue_entry(skip=self._q_edit)
+        if e is None:
+            return
+        i = next(k for k, x in enumerate(self._wq) if x is self._q_edit)
+        self._wq[i] = e
         self._queue_show()
+        self.queue_list.setCurrentRow(i)
+        self.queue_cancel_edit()
+
+    def queue_cancel_edit(self):
+        self._q_edit = None
+        for b in (self.btn_q_save, self.btn_q_cancel):
+            b.setVisible(False)
+
+    def queue_down(self):
+        i = self.queue_list.currentRow()
+        if 0 <= i < len(self._wq) - 1:
+            self._wq[i + 1], self._wq[i] = self._wq[i], self._wq[i + 1]
+            self._queue_show()
+            self.queue_list.setCurrentRow(i + 1)
 
     def queue_remove(self):
         i = self.queue_list.currentRow()
@@ -754,6 +812,7 @@ class RunWindow(QtWidgets.QMainWindow):
             self.queue_list.setCurrentRow(i - 1)
 
     def queue_load(self, i: int):
+        """The selected run's settings into the window (see queue_edit to change it in place)."""
         if 0 <= i < len(self._wq):
             self.set_fields(self._wq[i]['fields'])
 
@@ -770,6 +829,8 @@ class RunWindow(QtWidgets.QMainWindow):
             self.log.appendPlainText('--- queue: all runs done')
             return
         e = self._wq.pop(0)
+        if e is self._q_edit:                 # it starts now: the edit ends (with the settings saved)
+            self.queue_cancel_edit()
         self._queue_show()
         self.set_fields(e['fields'])
         self.log.appendPlainText(f"--- queue: {e['what']} of {e['fields'].get('input')} "
