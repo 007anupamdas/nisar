@@ -413,40 +413,49 @@ def parse_meta_xml(path):
     return out
 
 
+def _nearest_meta(d, root):
+    """BAND_META.txt in d or the nearest folder above it, up to root; or ''."""
+    while True:
+        m = os.path.join(d, BAND_META_NAME)
+        if os.path.isfile(m):
+            return m
+        if os.path.normpath(d) == os.path.normpath(root) or os.path.dirname(d) == d:
+            return ""
+        d = os.path.dirname(d)
+
+
 def index_tifs(folders):
-    """{lower-case tif stem: product folder name} of every .tif under the
-    product folders. A RIVAL run on Load Input TIF names its export after the
-    tif (<folder>/<name>.tif -> <name>_rival_band4.csv), so the export's name
-    finds its product folder through this."""
+    """{lower-case name: product id} for every folder and every .tif under the
+    product folders (TIF_META gets each name's BAND_META.txt).
+
+    A truth is named either after a folder -- the input folder's subfolder of
+    that name -- or after a tif -- in a flat input folder of tifs, or in one
+    of its subfolders. Folder names are taken first. The product id is the
+    nearest folder above with a 26<reqid>... name, else the name itself; the
+    meta is the BAND_META.txt nearest it."""
     idx = {}
     for f in folders or []:
-        for root, _dirs, files in os.walk(f):
-            rel = os.path.relpath(root, f)
-            if rel == ".":
-                continue
-            parts = rel.split(os.sep)
-            # the nearest folder above the tif named as a product id; else the
-            # top folder (a product folder holds several subfolders)
-            top = next((q for q in reversed(parts) if product_id_of(q + ".csv")),
-                       parts[0])
+        for root, dirs, files in os.walk(f):
+            parts = [] if os.path.normpath(root) == os.path.normpath(f) else \
+                os.path.relpath(root, f).split(os.sep)
+            above = next((q for q in reversed(parts) if product_id_of(q + ".csv")), None)
+            if parts:                                  # this folder, by its name
+                name = parts[-1]
+                key = name.lower()
+                if key not in idx:
+                    idx[key] = above or name
+                    TIF_META.setdefault(key, _nearest_meta(root, f))
             for n in files:
                 if n.lower().endswith((".tif", ".tiff")):
-                    idx.setdefault(os.path.splitext(n)[0].lower(), top)
-                    # the BAND_META.txt nearest the tif: its own subfolder
-                    # first, then upward to the product folder
-                    d = root
-                    while True:
-                        m = os.path.join(d, BAND_META_NAME)
-                        if os.path.isfile(m):
-                            TIF_META.setdefault(os.path.splitext(n)[0].lower(), m)
-                            break
-                        if os.path.normpath(d) == os.path.normpath(f):
-                            break
-                        d = os.path.dirname(d)
+                    stem = os.path.splitext(n)[0]
+                    key = stem.lower()
+                    if key not in idx:
+                        idx[key] = above or stem
+                        TIF_META.setdefault(key, _nearest_meta(root, f))
     return idx
 
 
-TIF_META = {}      # tif stem -> nearest BAND_META.txt (filled by index_tifs)
+TIF_META = {}      # name -> nearest BAND_META.txt (filled by index_tifs)
 
 
 def _ids_for(name, meta_xml, tif_index=None):
@@ -455,12 +464,10 @@ def _ids_for(name, meta_xml, tif_index=None):
     if ids:
         return ids, "regular"
     stem = results_stem(name)
-    folder = (tif_index or {}).get(stem.lower())
-    if folder:                               # named after a tif in a product folder
-        ids = product_id_of(folder + ".csv")
-        # a product folder not named 26<reqid>...: still its own product,
-        # its BAND_META.txt in it
-        return (ids or (folder, "", "")), "regular"
+    pid = (tif_index or {}).get(stem.lower())
+    if pid:                       # named after a folder or a tif in the input folders
+        ids = product_id_of(pid + ".csv")
+        return (ids or (pid, "", "")), "regular"
     if meta_xml and stem.lower() in meta_xml:
         return (stem, "", ""), "special"
     if SCENE_NAME_RE.match(stem):            # a special product without its meta
@@ -663,8 +670,10 @@ def _consolidate(sources, folders, xml_index, out_csv, log=print,
                      or _band_meta_path(folders, pid))
         anc = {"sensor": None, "date": None, "session_id": None, "strip_id": None,
                "centre_lat": None, "centre_lon": None, "sources": {}}
-        if kind == "special" and not meta_path and ancillary_from_name(pid):
-            anc = ancillary_from_name(pid)
+        by_name = ancillary_from_name(pid) or ancillary_from_name(results_stem(path))
+        if by_name and not (meta_path and os.path.isfile(meta_path)):
+            # a tif with no meta beside it: what its name says
+            anc = by_name
             log(f"[META] {pid} (special): no meta file; sensor, session, strip "
                 f"and date read from its name")
         elif kind == "special" and meta_path:

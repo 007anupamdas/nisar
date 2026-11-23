@@ -333,7 +333,8 @@ open(os.path.join(pd12, "TRUTH_A", "img7.tif"), "w").close()
 write(os.path.join(man12, "img7_rival.csv"), new)
 C.consolidate(man12, [pd12], os.path.join(man12, "o.csv"), lambda *a: None)
 r13 = {r["product_id"]: r for r in csv.DictReader(open(os.path.join(man12, "o.csv"), encoding="utf-8-sig"))}
-check("... also when the product folder has another name", r13["TRUTH_A"]["sensor"], "LISS4")
+check("... also when the folders are not named by product id (the tif names it)",
+      r13["img7"]["sensor"], "LISS4")
 
 pd14 = tempfile.mkdtemp()
 deep = os.path.join(pd14, "batch_nov", "266697551", "A", "B")
@@ -355,6 +356,43 @@ r15 = next(csv.DictReader(open(os.path.join(man15, "o.csv"), encoding="utf-8-sig
 check("truth named after a tif in one of several subfolders: that subfolder's meta",
       (r15["product_id"], r15["sensor"], r15["band_meta"].endswith(os.path.join("s2", "BAND_META.txt"))),
       ("266697561", "AWiFS", True))
+
+# the three layouts, one input folder each
+pf = tempfile.mkdtemp()
+os.makedirs(os.path.join(pf, "SCENE_FOLDER_X"))                     # named after a folder
+open(os.path.join(pf, "SCENE_FOLDER_X", "BAND_META.txt"), "w").write("Sensor = HS\n")
+open(os.path.join(pf, "SCENE_FOLDER_X", "a.tif"), "w").close()
+pflat = tempfile.mkdtemp()                                           # flat: tifs only
+open(os.path.join(pflat, "flat_scene_1.tif"), "w").close()
+open(os.path.join(pflat, "BAND_META.txt"), "w").write("Sensor = MX\n")
+psub = tempfile.mkdtemp()                                            # tif in a subfolder
+os.makedirs(os.path.join(psub, "q", "r"))
+open(os.path.join(psub, "q", "r", "sub_scene_9.tif"), "w").close()
+open(os.path.join(psub, "q", "BAND_META.txt"), "w").write("Sensor = LISS4\n")
+m16 = tempfile.mkdtemp()
+for n in ("SCENE_FOLDER_X_rival_band2.csv", "flat_scene_1_rival_band1.csv",
+          "sub_scene_9_rival_band4.csv"):
+    write(os.path.join(m16, n), new)
+C.consolidate(m16, [pf, pflat, psub], os.path.join(m16, "o.csv"), lambda *a: None)
+r16 = {r["product_id"]: r for r in csv.DictReader(open(os.path.join(m16, "o.csv"), encoding="utf-8-sig"))}
+check("truths named after a folder, a flat folder's tif and a subfolder's tif all found",
+      sorted((k, v["band"], v["sensor"]) for k, v in r16.items()),
+      [("SCENE_FOLDER_X", "band2", "HS"), ("flat_scene_1", "band1", "MX"),
+       ("sub_scene_9", "band4", "LISS4")])
+
+pnm = tempfile.mkdtemp()                       # a tif with no meta anywhere
+nm2 = "G1AMV026112006EF000003_S073122_E073804_21112026DIP_DQ_ort"
+open(os.path.join(pnm, nm2 + ".tif"), "w").close()
+open(os.path.join(pnm, "plain_scene.tif"), "w").close()
+m17 = tempfile.mkdtemp()
+write(os.path.join(m17, nm2 + "_rival_band2.csv"), new)
+write(os.path.join(m17, "plain_scene_rival.csv"), new)
+C.consolidate(m17, [pnm], os.path.join(m17, "o.csv"), lambda *a: None)
+r17 = {r["product_id"]: r for r in csv.DictReader(open(os.path.join(m17, "o.csv"), encoding="utf-8-sig"))}
+check("tifs without meta are still consolidated; a G1A name fills in the details",
+      (sorted(r17), r17[nm2]["sensor"], r17[nm2]["strip_id"], r17[nm2]["date"],
+       r17["plain_scene"]["sensor"], r17["plain_scene"]["n_points"]),
+      (sorted([nm2, "plain_scene"]), "MV", "3", "21-11-2026", "", "2"))
 
 if failures:
     print(f"{len(failures)} FAILURE(S)")
