@@ -191,7 +191,7 @@ check("special row carries the XML fields and path",
       (r["sensor"], r["date"], r["session_id"], r["strip_id"], r["n_points"],
        r["band_meta"].endswith(SP + "_META.xml")),
       ("HS", "11-11-2026", "026111104", "000006", "2", True))
-check("a special product has no ProdCode", r["prod_code"], "")
+check("a special product's ProdCode is the end of its name", r["prod_code"], "ort")
 check("regular row unchanged", (rows3["266697511"]["sensor"],
       rows3["266697511"]["product_kind"]), ("LISS4", "regular"))
 # a lone XML in its folder also keys the folder: export named after the folder
@@ -285,6 +285,21 @@ C.consolidate(man9, [pd9], os.path.join(man9, "o.csv"), lambda *a: None)
 r9 = next(csv.DictReader(open(os.path.join(man9, "o.csv"), encoding="utf-8-sig")))
 check("only a product folder id: dated from the files in that product folder",
       (r9["date"], r9["date_source"]), ("12-10-2026", "product folder files"))
+
+# ── a special product's truth with no meta: everything from its name ──────
+nm = "G1AMV026112006EF000001_S073122_E073804_20112026DIP_DQ_ort_band4"
+a10 = C.ancillary_from_name(nm)
+check("name -> sensor, session, strip, DOP",
+      (a10["sensor"], a10["session_id"], a10["strip_id"], a10["date"]),
+      ("MV", "26112006", "1", "20-11-2026"))
+man10 = tempfile.mkdtemp()
+write(os.path.join(man10, nm + ".csv"), new)
+C.consolidate(man10, [tempfile.mkdtemp()], os.path.join(man10, "o.csv"), lambda *a: None)
+r10 = next(csv.DictReader(open(os.path.join(man10, "o.csv"), encoding="utf-8-sig")))
+check("a meta-less special truth is consolidated from its name",
+      (r10["product_kind"], r10["product_id"], r10["band"], r10["sensor"],
+       r10["session_id"], r10["strip_id"], r10["date"], r10["n_points"], r10["prod_code"]),
+      ("special", nm[:-6], "4", "MV", "26112006", "1", "20-11-2026", "2", "ort"))
 
 if failures:
     print(f"{len(failures)} FAILURE(S)")

@@ -324,7 +324,33 @@ def error_summary(errors):
 def results_stem(filename):
     """The scene name a RIVAL export is named after: X_rival_band6.csv -> X."""
     stem = os.path.splitext(os.path.basename(filename))[0]
-    return re.split(r"_rival", stem, maxsplit=1, flags=re.IGNORECASE)[0]
+    stem = re.split(r"_rival", stem, maxsplit=1, flags=re.IGNORECASE)[0]
+    return re.sub(r"_band[\d-]+$", "", stem, flags=re.IGNORECASE)
+
+
+SCENE_NAME_RE = re.compile(
+    r"^([A-Z]\w{2})([A-Z]{2})(\d{9})([A-Z]{2})(\d{6})_S\d+_E\d+_(\d{8})")
+
+
+def ancillary_from_name(name):
+    """Sensor, session, strip and date read from a special product's name, for
+    a truth with no metadata beside it:
+    G1AMV026112006EF000001_S073122_E073804_20112026DIP_DQ_ort_band4 ->
+    sensor MV, session 26112006, strip 1, date 20-11-2026. None if the name
+    does not follow that pattern."""
+    m = SCENE_NAME_RE.match(os.path.basename(name or ""))
+    if not m:
+        return None
+    sat, sensor, session, _mode, strip, dmy = m.groups()
+    d = parse_date(dmy)
+    stem = results_stem(name)
+    code = stem.rsplit("_", 1)[-1] if "_" in stem else ""
+    return {"sensor": sensor, "session_id": str(int(session)), "strip_id": str(int(strip)),
+            "prod_code": code if code and not code.isdigit() else None,
+            "date": d.strftime("%d-%m-%Y") if d else None, "satellite": sat,
+            "centre_lat": None, "centre_lon": None,
+            "sources": {"sensor": "name", "session_id": "name", "strip_id": "name",
+                        "date": "name", "prod_code": "name"}}
 
 
 def index_meta_xml(products_folder):
@@ -386,10 +412,11 @@ def _ids_for(name, meta_xml):
     ids = product_id_of(name if name.lower().endswith(".csv") else name + ".csv")
     if ids:
         return ids, "regular"
-    if meta_xml:
-        stem = results_stem(name)
-        if stem.lower() in meta_xml:
-            return (stem, "", ""), "special"
+    stem = results_stem(name)
+    if meta_xml and stem.lower() in meta_xml:
+        return (stem, "", ""), "special"
+    if SCENE_NAME_RE.match(stem):            # a special product without its meta
+        return (stem, "", ""), "special"
     return None, None
 
 
@@ -427,7 +454,8 @@ def find_results(folder, meta_xml=None, source="manual"):
             path = os.path.join(root, f)
             stem = os.path.splitext(f)[0]
             rset = ""
-            if not product_id_of(f) and not results_stem(f).lower() in (meta_xml or {}):
+            if (not product_id_of(f) and not results_stem(f).lower() in (meta_xml or {})
+                    and not SCENE_NAME_RE.match(results_stem(f))):
                 rset = re.sub(r"_band[\d-]+", "", stem, flags=re.IGNORECASE)
             key = (source, ids[0], band_of(f), rset)
             if key in found:
@@ -583,7 +611,11 @@ def _consolidate(sources, folders, xml_index, out_csv, log=print,
                      else _band_meta_path(folders, pid))
         anc = {"sensor": None, "date": None, "session_id": None, "strip_id": None,
                "centre_lat": None, "centre_lon": None, "sources": {}}
-        if kind == "special" and meta_path:
+        if kind == "special" and not meta_path and ancillary_from_name(pid):
+            anc = ancillary_from_name(pid)
+            log(f"[META] {pid} (special): no meta file; sensor, session, strip "
+                f"and date read from its name")
+        elif kind == "special" and meta_path:
             try:
                 anc = parse_meta_xml(meta_path)
                 used = ", ".join(f"{k}<-{v}" for k, v in anc["sources"].items() if v)
@@ -613,7 +645,10 @@ def _consolidate(sources, folders, xml_index, out_csv, log=print,
                             if date_from_product_folder(folders, pid) else ""),
             "session_id": anc["session_id"],
             "strip_id": anc["strip_id"], "sensor": anc["sensor"],
-            "prod_code": anc.get("prod_code"),
+            # a special product's code is the last part of its name (..._DQ_ort)
+            "prod_code": anc.get("prod_code") or (
+                (ancillary_from_name(pid) or {}).get("prod_code") if kind == "special"
+                else None),
             "centre_lat": _fmt(anc["centre_lat"], 6),
             "centre_lon": _fmt(anc["centre_lon"], 6),
             "n_points": st["n"], "results_csv": path, "band_meta": meta_path,
