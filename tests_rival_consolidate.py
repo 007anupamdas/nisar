@@ -309,6 +309,12 @@ check("a numeric truth's composite band is 'band5-3' (Excel would read 5-3 as 5-
       "no name-based sensor / date for it", (r11["band"], r11["sensor"], r11["date"]),
       ("band5-3", "", ""))
 
+check("band ranges in the spellings truth files use",
+      [C.band_of(n) for n in ("26946848021_band2-5.csv", "26946848021_band_2-5.csv",
+                              "26946848021_b2-5.csv", "26946848021_2-5.csv",
+                              "26946848021 band 2-5.csv", "266697511_rival.csv")],
+      ["2-5", "2-5", "2-5", "2-5", "2-5", ""])
+
 if failures:
     print(f"{len(failures)} FAILURE(S)")
     for x in failures:

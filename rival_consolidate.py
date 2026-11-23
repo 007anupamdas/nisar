@@ -107,13 +107,19 @@ def product_id_of(filename):
     return m.group(1), m.group(2), m.group(3)
 
 
-BAND_RE = re.compile(r"_band(\d+(?:-\d+)*)(?=[._]|$)", re.IGNORECASE)
+BAND_RE = re.compile(r"(?:_|\s|^)(?:band|b)[ _-]?(\d+(?:-\d+)*)(?=[._\s]|$)", re.IGNORECASE)
+BARE_BAND_RE = re.compile(r"_(\d{1,3}(?:-\d{1,3})+)$")   # 26946848021_2-5: bands 2 to 5
 
 
 def band_of(filename):
-    """'6' for X_rival_band6.csv (RIVAL tags exports with the band marked on),
-    '6-4-3' for a composite, '' for an untagged file."""
-    m = BAND_RE.search(os.path.basename(filename))
+    """The band(s) a results CSV is for, as written in its name: '6' for
+    X_rival_band6.csv, '2-5' for X_band2-5 / X_band_2-5 / X_b2-5 / X_2-5
+    (bands 2 to 5, or a composite), '' for an untagged file."""
+    stem = os.path.splitext(os.path.basename(filename))[0]
+    m = BAND_RE.search(stem)
+    if m:
+        return m.group(1)
+    m = BARE_BAND_RE.search(stem)
     return m.group(1) if m else ""
 
 
