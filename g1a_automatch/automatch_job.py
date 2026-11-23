@@ -155,16 +155,35 @@ def _gpu_family(detector: str) -> str:
                  or d.startswith(k + '-')), d)
 
 
-def _learned_peaks() -> Dict[str, float]:
+def _peaks_file() -> Dict[str, List[float]]:
+    """{family@window: the last peaks seen} (version 2: allocated memory only).
+    The earlier file (one number each, the largest of allocated and reserved
+    ever seen) is not read: PyTorch's cache made it far too high (MINIMA-RoMa
+    allocates ~5.4 GB at 1024 px but showed ~20 GB reserved), and one outlier
+    kept a detector off a smaller GPU for good."""
     try:
         with open(GPU_PEAKS_FILE, encoding='utf-8') as f:
-            return {str(k): float(v) for k, v in json.load(f).items()}
+            d = json.load(f)
+        if isinstance(d, dict) and d.get('v') == 2:
+            return {str(k): [float(x) for x in v] for k, v in (d.get('peaks') or {}).items()}
     except (OSError, ValueError, TypeError, AttributeError):
-        return {}
+        pass
+    return {}
+
+
+def _learned_peaks() -> Dict[str, float]:
+    """{family@window: the median of its last peaks}."""
+    out = {}
+    for k, v in _peaks_file().items():
+        if v:
+            v = sorted(v)
+            out[k] = v[len(v) // 2]
+    return out
 
 
 def learn_gpu_peak(detector: str, window: int, peak_gb) -> None:
-    """Remember a detector's peak GPU memory at a window size (the largest seen)."""
+    """Remember a detector's peak GPU memory (allocated) at a window size: the
+    last five, their median used."""
     try:
         peak = float(peak_gb)
     except (TypeError, ValueError):
@@ -172,15 +191,13 @@ def learn_gpu_peak(detector: str, window: int, peak_gb) -> None:
     if not peak > 0:
         return
     key = f'{_gpu_family(detector)}@{1024 if int(window or 1024) <= 1024 else 2048}'
-    peaks = _learned_peaks()
-    if peaks.get(key, 0.0) >= peak:
-        return
-    peaks[key] = round(peak, 2)
+    peaks = _peaks_file()
+    peaks[key] = (peaks.get(key, []) + [round(peak, 2)])[-5:]
     try:
         os.makedirs(os.path.dirname(GPU_PEAKS_FILE), exist_ok=True)
         tmp = f'{GPU_PEAKS_FILE}.{os.getpid()}.tmp'
         with open(tmp, 'w', encoding='utf-8') as f:
-            json.dump(peaks, f, indent=1, sort_keys=True)
+            json.dump({'v': 2, 'peaks': peaks}, f, indent=1, sort_keys=True)
         os.replace(tmp, GPU_PEAKS_FILE)
     except OSError:
         pass
@@ -454,11 +471,17 @@ def install_queue(E, job: Dict, out_dir: str, tag: str, win: int, nf: Optional[i
     def wants(dtag):
         return _det_entry(job.get('matchers'), dtag), _det_entry(job.get('detector_params'), dtag)
 
+    left_to_larger = set()
+
     def claim(channel, dtag):
         name = _unit_name(channel, dtag)
         need = gpu_need_gb(dtag, win)
         heavy = bigger and need > 0.85 * own
         if heavy:
+            if dtag not in left_to_larger:   # say why this GPU leaves it (once)
+                left_to_larger.add(dtag)
+                print(f'[Job] {dtag}: left to the larger GPU (needs about {need:.1f} GB here at {win} px, more '
+                      f'than 85 % of this GPU\'s {own:.0f} GB)', flush=True)
             return False                     # too heavy for this GPU: the larger one takes it (taking it over
                                              # in tiles failed with CUDA out-of-memory on many models)
         try:
@@ -515,7 +538,7 @@ def install_queue(E, job: Dict, out_dir: str, tag: str, win: int, nf: Optional[i
             print(f'[Job] {dtag}: out of GPU memory here ({own:.0f} GB): handed to the larger GPU', flush=True)
             return
         if rec.get('status') == 'ok':
-            learn_gpu_peak(dtag, win, max(float(rec.get('gpu_peak_gb') or 0), float(rec.get('gpu_reserved_gb') or 0)))
+            learn_gpu_peak(dtag, win, float(rec.get('gpu_peak_gb') or 0))      # allocated: the cache is not need
         for folder, extra in ((units, {}), (shared, {'root': root})):
             try:
                 os.makedirs(folder, exist_ok=True)

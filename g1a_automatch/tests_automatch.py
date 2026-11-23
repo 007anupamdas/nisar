@@ -963,13 +963,18 @@ def test_interior_and_final(tmp):
         taken_over = e0.CLAIM_HOOK('b1', 'imw-rdd-nn-kt0p2')     # also too heavy: never taken over
         kept_big = e0.CLAIM_HOOK('b1', 'imw-minima-loftr')       # 20 GB at 2048: never on the 16 GB GPU
         J.learn_gpu_peak('imw-xfeat-lg', 1024, 15.2)
-        J.learn_gpu_peak('imw-xfeat-lg', 1024, 3.0)               # a lower peak does not lower it
+        one = J.gpu_need_gb('imw-xfeat-lg', 1024)
+        J.learn_gpu_peak('imw-xfeat-lg', 1024, 3.0)
+        J.learn_gpu_peak('imw-xfeat-lg', 1024, 3.3)               # one outlier no longer blocks for good
         learned = J.gpu_need_gb('imw-xfeat-lg', 1024)
+        with open(J.GPU_PEAKS_FILE, 'w') as f:                     # the earlier file: largest of allocated and
+            json.dump({'imw-minima-roma@1024': 19.8}, f)          # reserved ever seen -- not read any more
+        old_ignored = J.gpu_need_gb('imw-minima-roma', 1024)
     finally:
         J.GPU_PEAKS_FILE = old_file
-    check('gpu: a detector too heavy for the smaller GPU is left to the larger while it is its own; a peak seen '
-          'here is learned',
-          (refused, learned), (False, 15.2))
+    check('gpu: a detector too heavy for the smaller GPU is left to the larger while it is its own; peaks seen '
+          'here are learned (the median of the last ones); the earlier file of largest reserved peaks is not read',
+          (refused, one, learned, old_ignored), (False, 15.2, 3.3, 5.4))
     J.install_queue(e0, dict(heavy, _queue=os.path.join(tmp, 'gq2', 'q3'), _shard=0, _gpu_mem={'0': 16.0, '1': 20.0}),
                     os.path.join(tmp, 'gq2', 'w3'), 'w3', 1024, None)
     old_file = J.GPU_PEAKS_FILE
@@ -1520,6 +1525,20 @@ def test_presets(tmp):
           'two compared per detector (KEYPOINT_TEST.png)',
           (jk['window_sizes'], jk['num_features'], 'keypoint test' in nk, os.path.basename(png)),
           ([1024], [None, 5243], True, 'KEYPOINT_TEST.png'))
+    pf = os.path.join(tmp, 'old_presets.json')
+    with open(pf, 'w') as _f:
+        json.dump({'MV': {'detectors': ['imw-minima-loftr', 'imw-minima-roma', 'disk'], 'fast_detectors': ['x'],
+                          'agree': 2}}, _f)
+    lo = P.load(pf)
+    note_old = P.LOAD_NOTE
+    with open(pf, 'w') as _f:
+        json.dump({'_version': P.PRESETS_VERSION, 'MV': {'detectors': ['disk', 'sift']}}, _f)
+    lc = P.load(pf)
+    check('presets file from an earlier ranking: its settings kept, its detector lists replaced by the current '
+          'ones (and said so); a current file\'s lists are used',
+          (lo['MV']['detectors'][:3] == P.SENSORS['MV']['detectors'][:3], lo['MV']['agree'], 'fast_detectors' in lo['MV'],
+           'MV' in note_old, lc['MV']['detectors'], P.LOAD_NOTE),
+          (True, 2, False, True, ['disk', 'sift'], ''))
     import automatch_cross as _C
     pn = os.path.join(tmp, 'pn_job')
     os.makedirs(pn, exist_ok=True)

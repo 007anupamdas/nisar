@@ -335,6 +335,8 @@ class RunWindow(QtWidgets.QMainWindow):
         self.log.setReadOnly(True)
         self.log.setMaximumBlockCount(20000)
         v.addWidget(self.log, 1)
+        if P.LOAD_NOTE:
+            self.log.appendPlainText('--- presets: ' + P.LOAD_NOTE)
         self.btn_check.clicked.connect(lambda: self.start('preflight'))
         self.btn_run.clicked.connect(lambda: self.start('run'))
         self.btn_all.clicked.connect(self.run_all)
@@ -782,9 +784,10 @@ class RunWindow(QtWidgets.QMainWindow):
             QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(self.output.text()))
 
     def presets_file(self):
-        if not os.path.exists(P.PRESETS_FILE):
+        if not os.path.exists(P.PRESETS_FILE) or P.LOAD_NOTE:     # new, or from an earlier ranking: rewritten
             with open(P.PRESETS_FILE, 'w', encoding='utf-8') as f:
-                json.dump(P.load(''), f, indent=2)
+                json.dump({'_version': P.PRESETS_VERSION, **self.presets}, f, indent=2)
+            P.LOAD_NOTE = ''
         QtWidgets.QMessageBox.information(
             self, 'Presets', f'The presets are in\n{P.PRESETS_FILE}\n\nEdit it (per sensor: detectors, window_sizes, '
                              f'channels, ...) and open this window again. Delete it to go back to the built-in ones.')

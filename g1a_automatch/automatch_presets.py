@@ -188,16 +188,38 @@ BEST_METHOD: Dict[str, Dict] = {
 }
 
 
+# The ranking the built-in lists come from; a presets file written for an
+# earlier one keeps its own settings but not its detector lists.
+PRESETS_VERSION = '2026-11-23'
+RANKED_KEYS = ('detectors',)
+GONE_KEYS = ('fast_detectors', 'slow_detectors')       # no longer used
+LOAD_NOTE = ''
+
+
 def load(path: Optional[str] = None) -> Dict[str, Dict]:
-    """{sensor: preset} = COMMON + SENSORS + the presets file (per sensor, key by key)."""
+    """{sensor: preset} = COMMON + SENSORS + the presets file (per sensor, key
+    by key). A file from an earlier ranking (no or another _version) keeps its
+    settings, but the detector lists are the current ones (LOAD_NOTE says so)."""
+    global LOAD_NOTE
+    LOAD_NOTE = ''
     out = {s: {**copy.deepcopy(COMMON), **copy.deepcopy(v)} for s, v in SENSORS.items()}
     path = PRESETS_FILE if path is None else path
     if path and os.path.exists(path):
         with open(path, encoding='utf-8') as f:
             user = json.load(f)
+        current = isinstance(user, dict) and user.get('_version') == PRESETS_VERSION
+        dropped = []
         for s, v in (user or {}).items():
             if isinstance(v, dict):
+                v = {k: x for k, x in v.items() if k not in GONE_KEYS}
+                if not current and s in SENSORS:          # a sensor of the file's own keeps its list
+                    dropped += [s for k in RANKED_KEYS if k in v and v[k] != out.get(s, {}).get(k)]
+                    v = {k: x for k, x in v.items() if k not in RANKED_KEYS}
                 out[s] = {**out.get(s, copy.deepcopy(COMMON)), **v}
+        if dropped:
+            LOAD_NOTE = (f'{os.path.basename(path)} is from an earlier ranking: its detector lists for '
+                         f'{", ".join(sorted(set(dropped)))} are replaced by the current ones ({PRESETS_VERSION}); '
+                         f'its other settings are kept. Write it again (Presets file…) to edit the current lists.')
     return out
 
 
