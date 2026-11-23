@@ -424,7 +424,11 @@ def index_tifs(folders):
             rel = os.path.relpath(root, f)
             if rel == ".":
                 continue
-            top = rel.split(os.sep)[0]
+            parts = rel.split(os.sep)
+            # the nearest folder above the tif named as a product id; else the
+            # top folder (a product folder holds several subfolders)
+            top = next((q for q in reversed(parts) if product_id_of(q + ".csv")),
+                       parts[0])
             for n in files:
                 if n.lower().endswith((".tif", ".tiff")):
                     idx.setdefault(os.path.splitext(n)[0].lower(), top)

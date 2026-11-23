@@ -335,6 +335,14 @@ C.consolidate(man12, [pd12], os.path.join(man12, "o.csv"), lambda *a: None)
 r13 = {r["product_id"]: r for r in csv.DictReader(open(os.path.join(man12, "o.csv"), encoding="utf-8-sig"))}
 check("... also when the product folder has another name", r13["TRUTH_A"]["sensor"], "LISS4")
 
+pd14 = tempfile.mkdtemp()
+deep = os.path.join(pd14, "batch_nov", "266697551", "A", "B")
+os.makedirs(deep)
+open(os.path.join(pd14, "batch_nov", "266697551", "BAND_META.txt"), "w").write("Sensor = MX\n")
+open(os.path.join(deep, "deep_scene.tif"), "w").close()
+check("tif deep in subfolders maps to its product id folder",
+      C.index_tifs([pd14])["deep_scene"], "266697551")
+
 if failures:
     print(f"{len(failures)} FAILURE(S)")
     for x in failures:
