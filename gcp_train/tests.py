@@ -52,13 +52,16 @@ def make_reference(path, rng, size=1600, px=30.0, x0=495000.0, y1=1705000.0):
     return path
 
 
-def true_map(c, r, quad=False):
+def true_map(c, r, quad=False, wave=0.0):
     """Input pixel -> true ground (E, N): a misplaced, slightly rotated and scaled image."""
     E = 498000.0 + 60.3 * c + 1.2 * r
     N = 1702000.0 - 0.9 * c - 59.8 * r
     if quad:                                     # error growing across the scene (job 347)
         E = E + 0.004 * c * c
         N = N - 0.003 * c * r
+    if wave:                                     # distortion changing across the scene: wave px, 400 px long
+        E = E + wave * 60.0 * np.sin(2 * np.pi * np.asarray(c, float) / 400.0)
+        N = N + wave * 60.0 * np.cos(2 * np.pi * np.asarray(r, float) / 400.0)
     return E, N
 
 
@@ -73,14 +76,14 @@ def _bilinear(img, x, y):
     return np.where(ok, v, 0)
 
 
-def make_input_image(path, ref_path, size=600, quad=False, claimed=(500000.0, 1700000.0, 60.0)):
+def make_input_image(path, ref_path, size=600, quad=False, claimed=(500000.0, 1700000.0, 60.0), wave=0.0):
     import rasterio as rio
     from rasterio.transform import from_origin
     with rio.open(ref_path) as r:
         ref = r.read(1).astype(np.float32)
         inv = ~r.transform
     cc, rr = np.meshgrid(np.arange(size, dtype=float), np.arange(size, dtype=float))
-    E, N = true_map(cc, rr, quad)
+    E, N = true_map(cc, rr, quad, wave)
     x, y = inv * (E, N)
     a = _bilinear(ref, np.asarray(x) - 0.5, np.asarray(y) - 0.5)
     a = np.clip(a, 0, 65000).astype(np.uint16)
@@ -90,7 +93,7 @@ def make_input_image(path, ref_path, size=600, quad=False, claimed=(500000.0, 17
     return path
 
 
-def write_gt(path, input_path, rng, n=12, quad=False, noise_px=0.0, outlier=None, broken_rows=True):
+def write_gt(path, input_path, rng, n=12, quad=False, noise_px=0.0, outlier=None, broken_rows=True, wave=0.0):
     import rasterio as rio
     from pyproj import Transformer
     to_ll = Transformer.from_crs(CRS, 'EPSG:4326', always_xy=True)
@@ -98,7 +101,7 @@ def write_gt(path, input_path, rng, n=12, quad=False, noise_px=0.0, outlier=None
         c = rng.uniform(40, s.width - 40, n)
         r = rng.uniform(40, s.height - 40, n)
         ix, iy = s.transform * (c + 0.5, r + 0.5)
-    E, N = true_map(c, r, quad)
+    E, N = true_map(c, r, quad, wave)
     E = E + rng.normal(0, noise_px * 60.0, n)
     N = N + rng.normal(0, noise_px * 60.0, n)
     if outlier is not None:
@@ -119,6 +122,109 @@ def write_gt(path, input_path, rng, n=12, quad=False, noise_px=0.0, outlier=None
     return path
 
 
+def write_consistent(path, input_path, rng, n=1500, wave=0.0, noise_px=0.3, outliers=0.06,
+                     families=('disk_depth', 'imw-minima-roma', 'dog_hardnet'), weak=0.1):
+    """automatch's RIVAL_CONSISTENT_<band>_64px_detail.csv: points across the scene with
+    their detector and how many agreed (a share 'weak' agreed by only 2; outliers 5 px off)."""
+    import rasterio as rio
+    import pandas as pd
+    from pyproj import Transformer
+    to_ll = Transformer.from_crs(CRS, 'EPSG:4326', always_xy=True)
+    with rio.open(input_path) as s:
+        c = rng.uniform(5, s.width - 5, n)
+        r = rng.uniform(5, s.height - 5, n)
+        ix, iy = s.transform * (c + 0.5, r + 0.5)
+    E, N = true_map(c, r, False, wave)
+    E = E + rng.normal(0, noise_px * 60.0, n)
+    N = N + rng.normal(0, noise_px * 60.0, n)
+    bad = rng.random(n) < outliers
+    E[bad] += 5 * 60.0
+    ilo, ila = to_ll.transform(np.asarray(ix), np.asarray(iy))
+    rlo, rla = to_ll.transform(E, N)
+    pd.DataFrame({'In_X': ix, 'In_Y': iy, 'Ref_X': E, 'Ref_Y': N, 'DX_Err': np.asarray(ix) - E,
+                  'DY_Err': np.asarray(iy) - N, 'Row': range(1, n + 1), 'In_Lon': ilo, 'In_Lat': ila,
+                  'Ref_Lon': rlo, 'Ref_Lat': rla, 'channel': 'band1', 'detector': rng.choice(list(families), n),
+                  'n_agree': np.where(rng.random(n) < weak, 2, rng.integers(3, 6, n)),
+                  'agree_spread_m': rng.uniform(5, 40, n)}).to_csv(path, index=False, encoding='utf-8-sig')
+    return path
+
+
+def consistent_checks(tmp, rng, ref):
+    """Labels from automatch's consistent points: one homography per crop."""
+    import pandas as pd
+    import gt as G
+    import fit as F
+    import pairs as P
+    import consistent as CP
+    # a scene whose distortion changes across it (3 px waves): one scene-wide fit cannot label it
+    inw = make_input_image(os.path.join(tmp, 'G1A_MV_wave.tif'), ref, wave=3.0)
+    gw = write_gt(os.path.join(tmp, 'G1A_MV_wave_truth.txt'), inw, rng, n=14, wave=3.0, broken_rows=False)
+    rw = F.fit_scene(G.load_points(gw, quiet=True), inw)
+    check('consistent: a scene with local distortion fails the scene-wide fit of its manual points',
+          (rw['ok'], 'leave-one-out' in rw['why']), (False, True))
+    jobs = os.path.join(tmp, 'automatch_out')
+    rows_in = []
+    imgs = {'output2001': inw, 'output2005': inw,                                          # one product twice
+            'output2002': make_input_image(os.path.join(tmp, 'G1A_MV_one.tif'), ref, wave=3.0),
+            'output2003': make_input_image(os.path.join(tmp, 'G1A_MV_few.tif'), ref, wave=3.0)}
+    for name, kw in (('output2001', {}), ('output2005', {'n': 400}),                    # fewer points: not kept
+                     ('output2002', {'families': ('disk_depth',)}),                     # one family only
+                     ('output2003', {'n': 60})):                                         # too sparse
+        d = os.path.join(jobs, name)
+        os.makedirs(d, exist_ok=True)
+        img = imgs[name]
+        write_consistent(os.path.join(d, 'RIVAL_CONSISTENT_band1_64px_detail.csv'), img, rng, wave=3.0, **kw)
+        pd.DataFrame([{'channel': 'band1', 'reliable': True}]).to_csv(os.path.join(d, 'CROSS_SUMMARY.csv'),
+                                                                      index=False)
+        json.dump({'input_path': img, 'reference_dir': ref, 'reference_band': 1, 'channels': ['band1'],
+                   'truth_csv': gw if name == 'output2003' else ''}, open(os.path.join(d, 'job_used.json'), 'w'))
+        rows_in.append(d)
+    d4 = os.path.join(jobs, 'output2004')                    # cross-check not reliable: left out
+    os.makedirs(d4, exist_ok=True)
+    write_consistent(os.path.join(d4, 'RIVAL_CONSISTENT_band1_64px_detail.csv'), inw, rng, wave=3.0)
+    pd.DataFrame([{'channel': 'band1', 'reliable': False}]).to_csv(os.path.join(d4, 'CROSS_SUMMARY.csv'), index=False)
+    json.dump({'input_path': inw, 'reference_dir': ref, 'channels': ['band1']},
+              open(os.path.join(d4, 'job_used.json'), 'w'))
+    mp = os.path.join(tmp, 'scenes_consistent.csv')
+    code = CP.main([jobs, '--out', mp])
+    man = pd.read_csv(mp)
+    pts = CP.load_consistent(os.path.join(jobs, 'output2001', 'RIVAL_CONSISTENT_band1_64px_detail.csv'))
+    check('consistent: the manifest from automatch job folders (unreliable cross-check left out; a job with a '
+          'truth file only tests); points agreed by fewer than 3 detectors left out',
+          (code, sorted(man['job']), man.set_index('job').loc['output2003', 'split'], set(man['labels']),
+           bool((pts['n_agree'] >= 3).all()), 1200 < len(pts) < 1450),
+          (0, ['output2001', 'output2002', 'output2003'], 'test', {'consistent'}, True, True))
+    check('consistent: one product from several job folders (auto steps, tiers) is one scene, from the job with '
+          'the most consistent points', (len(man), int((man['scene_id'] == 'G1A_MV_wave_band1').sum())), (3, 1))
+    out = os.path.join(tmp, 'pairs_consistent')
+    P.build(mp, out, crop=96, per_scene=8, seed=5, res_m=60.0)
+    fitted = pd.read_csv(os.path.join(out, 'scenes_fit.csv')).set_index('scene_id')
+    idx = pd.read_csv(os.path.join(out, 'pairs.csv'))
+    good = idx[idx['scene_id'] == 'G1A_MV_wave_band1']
+    # the labels against the true mapping: every crop pixel's reference position
+    worst = 0.0
+    g = np.linspace(0, 95, 7)
+    uu, vv = np.meshgrid(g, g)
+    for r in good.to_dict('records'):
+        H = np.array([float(v) for v in r['H'].split()]).reshape(3, 3)
+        p = np.column_stack([uu.ravel(), vv.ravel(), np.ones(uu.size)]) @ H.T
+        p = p[:, :2] / p[:, 2:3]
+        E, N = true_map(r['col0'] + uu.ravel(), r['row0'] + vv.ravel(), False, 3.0)
+        xt = (E - r['ref_x0']) / r['px_m'] - 0.5
+        yt = (r['ref_y1'] - N) / r['px_m'] - 0.5
+        worst = max(worst, float(np.hypot(p[:, 0] - xt, p[:, 1] - yt).max()))
+    check('consistent: the distorted scene gives pairs whose labels match the true mapping within 1.5 px '
+          '(one homography per crop, outliers dropped)',
+          (len(good), worst < 1.5, set(good['labels']), bool((good['label_rms_px'] <= 1.5).all())),
+          (8, True, {'consistent'}, True))
+    one, few = fitted.loc['G1A_MV_one_band1'], fitted.loc['G1A_MV_few_band1']
+    check('consistent: crops refused when the points come from one detector family, or are too few; the '
+          'scene with a truth file is in test',
+          (int(one['pairs']), 'too few detector families' in str(one['crops_refused']),
+           'too few points' in str(few['crops_refused']) or 'consistent point' in str(few['why']), few['split']),
+          (0, True, True, 'test'))
+
+
 def main():
     import cv2
     import pandas as pd
@@ -133,6 +239,7 @@ def main():
     rng = np.random.default_rng(7)
     try:
         ref = make_reference(os.path.join(tmp, 'ref.tif'), rng)
+        consistent_checks(tmp, rng, ref)
         inp = make_input_image(os.path.join(tmp, 'C3_scene1.img.tif'), ref)
         g1 = write_gt(os.path.join(tmp, 'C3_scene1.txt'), inp, rng, outlier=6)
         pts = G.load_points(g1, quiet=True)

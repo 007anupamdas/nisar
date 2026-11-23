@@ -10,6 +10,10 @@ The JSON files merge in order; "mode" picks the step:
           pixel sizes come from each scene's images (pairs.py); "res_m": 45
           fixes them, "res_m": [45, 315] limits them
           -> <output>/pairs/ (pairs.csv, scenes_fit.csv, splits.csv, images)
+  consistent {"mode": "consistent", "jobs": ["/maintenance/.../output"], "level": 64}
+          the scenes from automatch job folders' consistent points (consistent.py)
+          -> <output>/scenes_consistent.csv; then "pairs" with that manifest
+          ("labels": "consistent" for its rows; "local": {"max_rms_px": 1.5, ...})
   train   {"mode": "train", "index": "/maintenance/.../pairs/pairs.csv",
            "config": "aliked" | "disk" | "/path/to/config.yaml",
            "experiment": "aliked_lg_all", "epochs": 20, "batch_size": 16,
@@ -121,8 +125,19 @@ def main(argv: List[str] = None) -> int:
                     min_valid=float(job.get('min_valid', 0.6)), max_cloud=float(job.get('max_cloud', 0.5)),
                     max_loo_px=float(job.get('max_loo_px', 1.5)), val=float(job.get('val', 0.1)),
                     test=float(job.get('test', 0.2)), seed=int(job.get('seed', 0)),
-                    res_m=job.get('res_m', job.get('work_res_m')), max_scale=float(job.get('max_scale', 16)))
+                    res_m=job.get('res_m', job.get('work_res_m')), max_scale=float(job.get('max_scale', 16)),
+                    labels=str(job.get('labels') or ''), local=dict(job.get('local') or {}))
         return 0 if r['pairs'] else 1
+    if mode == 'consistent':
+        import consistent as CP
+        jobs = job.get('jobs') or []
+        a = [str(j) for j in (jobs if isinstance(jobs, list) else [jobs])]
+        a += ['--out', os.path.join(out_dir, 'scenes_consistent.csv')]
+        if job.get('level'):
+            a += ['--level', str(int(job['level']))]
+        if job.get('include_unreliable'):
+            a.append('--include-unreliable')
+        return CP.main(a)
     if mode == 'train':
         return run_train(job, out_dir)
     if mode == 'export':
@@ -140,7 +155,7 @@ def main(argv: List[str] = None) -> int:
         if job.get('condition') is False:
             a += ['--set', 'model.matcher.name=matchers.lightglue']
         return V.main(a)
-    print(f'[gcp_train] unknown mode {mode!r}: pairs, train, export or eval')
+    print(f'[gcp_train] unknown mode {mode!r}: consistent, pairs, train, export or eval')
     return 2
 
 

@@ -113,6 +113,47 @@ They share its split.
 crops of one scene look alike. To measure generalisation, also hold out
 whole sensors or months by setting `split` in the manifest.
 
+## 2b. Pairs from automatch's consistent points (G1A)
+
+A G1A scene's manual points do not fit one smooth field closely enough (7–85 px
+on MV), so `pairs.py` cannot label its crops from them. automatch's consistent
+points can: thousands per scene, each agreed by several unrelated detectors.
+Each crop gets its own homography from the points in and around it, so
+distortion that changes across the scene does not matter
+(`SCOPE_CONSISTENT_POINTS.md` has the reasoning).
+
+    python consistent.py /maintenance/.../output --out scenes_g1a.csv [--map /maintenance/=V:/]
+    python pairs.py --manifest scenes_g1a.csv --out pairs_g1a/ --crop 512 --per-scene 60
+
+- **The manifest** (`consistent.py`) is built from automatch job folders.
+  - **Which file:** the finest level's `RIVAL_CONSISTENT_<band>_<L>px_detail.csv`,
+    with the input, band and references from `job_used.json`.
+  - **Left out:** a band whose cross-check was not reliable
+    (`--include-unreliable` keeps it), and points fewer than 3 detectors
+    agreed on.
+  - **One scene per product and band:** several job folders of one product
+    (auto steps, tiers) count once, from the folder with the most points.
+  - **Truth stays out of training:** a scene with a truth file goes to
+    **test**.
+  - **Older jobs** get consistent points without matching again:
+    `python automatch_cross.py <jobs> --batch --jobs 1061-1104 --recompute`.
+- **A crop is labelled** (`labels=consistent`, `fit.LocalPoints`) only when
+  all of these hold:
+  - **Points:** at least 20 points in it, plus a 10 % margin.
+  - **Fit:** a RANSAC homography with at most 10 % outliers and a residual of
+    at most 1.5 px.
+  - **Families:** the points come from at least 2 detector families.
+  - **Coverage:** they cover at least half the crop.
+  - **Changing a rule:** `--local-min-points`, `--local-max-rms-px`, … .
+- **What gets written:** `scenes_fit.csv` says per scene how many crops each
+  rule refused, and the median label fit. `pairs.csv` adds `label_rms_px`,
+  `label_points`, `label_families` and the reference grid origin
+  (`ref_x0`, `ref_y1`).
+- **Training and export** are as below (DISK + LightGlue first). The fine-tuned
+  weights then run in automatch as an extra LightGlue pass beside the official
+  ones (automatch README, *Fine-tuned LightGlue*). That comparison on the
+  held-out truth scenes decides whether they are better.
+
 ## 3. Fine-tune (Glue Factory)
 
 On the server, once:

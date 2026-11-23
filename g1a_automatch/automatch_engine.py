@@ -2936,16 +2936,20 @@ class BaseMatcher(ABC):
         raise ValueError(f'Unknown matcher: {name}')
 
     def _lightglue(self, feature_name: str, params: Optional[Dict] = None):
-        """The LightGlue matcher for these features and parameters (built once)."""
+        """The LightGlue matcher for these features and parameters (built once);
+        params 'weights': 'official' or a name of the job's lightglue_weights."""
         key = (feature_name, tuple(sorted((params or {}).items())))
         model = self._lgm_models.get(key)
         if model is None:
+            kp = {k: v for k, v in (params or {}).items() if k != 'weights'}
+            wname = str((params or {}).get('weights') or 'official')
             print(f'{self.get_detector_name()}: Initializing LightGlue {dict(params or {}) or "(defaults)"}...')
             restore_lightglue_defaults()
             model = self._load_model(
                 f'LightGlue ({feature_name})',
-                lambda: KF.LightGlueMatcher(feature_name=feature_name,
-                                            params=dict(params or {})).eval().to(self.device))
+                lambda: KF.LightGlueMatcher(feature_name=feature_name, params=kp).eval().to(self.device))
+            if wname != 'official':
+                load_lightglue_weights(model, wname, feature_name, self.device)
             self._lgm_models[key] = model
         return model
 
@@ -2956,6 +2960,9 @@ class BaseMatcher(ABC):
         # reads as a single descriptor and silently returns no matches
         d1 = descs1.squeeze(0) if descs1.dim() == 3 else descs1
         d2 = descs2.squeeze(0) if descs2.dim() == 3 else descs2
+        cond = getattr(model, '_gcp_condition', None)
+        if cond is not None:                 # fine-tuned weights told what each view is: FiLM on the descriptors
+            d1, d2 = cond(d1, 0), cond(d2, 1)
         with th.no_grad():
             return model(
                 d1,
@@ -5297,6 +5304,10 @@ LGM_PARAMS = [
               label='LightGlue depth confidence', help='early-stop confidence; -1 disables early stopping'),
     ParamSpec('lgm.width_confidence', 'float', 0.99, token='lw', scope='lgm',
               label='LightGlue width confidence', help='point-pruning confidence; -1 disables pruning'),
+    ParamSpec('lgm.weights', 'str', 'official', token='lwt', scope='lgm',
+              label='LightGlue weights', help="'official', or the name of fine-tuned weights given in the job's "
+                                              "lightglue_weights (gcp_train's export): several names run as "
+                                              "passes side by side"),
 ]
 ADA_PARAMS = [
     ParamSpec('ada.search_expansion', 'int', _PC.adalam_search_expansion, token='as', scope='ada',
@@ -5505,6 +5516,68 @@ def detector_param_specs(name: str) -> List[ParamSpec]:
     if base in DETECTOR_PARAMS:
         return DETECTOR_PARAMS[base]
     return list(EXTERNAL_DETECTORS.get(base, {}).get('params', []))
+
+
+# Fine-tuned LightGlue weights (gcp_train's export), by name:
+# {name: {'feature': 'disk', 'weights': '<x>_lightglue.pth', 'condition': '<x>_lightglue_condition.pth' (optional;
+#  found beside the weights when not given), 'modality': ['visible', 'visible'] (input, reference),
+#  'px_m': the pair's pixel size (default: the working resolution)}}; set by the job.
+LIGHTGLUE_WEIGHTS: Dict[str, Dict] = {}
+
+
+class _GcpCondition:
+    """gcp_train's FiLM (condition.py) applied outside it: d' = d * (1 + g) + b,
+    (g, b) = modality.weight[m] + MLP(log2(px_m / 30) / 4), per view."""
+
+    def __init__(self, state: Dict, modalities: List[str], views: List[str], px_m: float, device):
+        W = state['modality.weight'].float().to(device)
+        r = th.tensor([[math.log2(max(float(px_m), 0.01) / 30.0) / 4.0]], device=device)
+        h = th.nn.functional.silu(r @ state['resolution.0.weight'].float().to(device).T
+                                  + state['resolution.0.bias'].float().to(device))
+        res = h @ state['resolution.2.weight'].float().to(device).T + state['resolution.2.bias'].float().to(device)
+        self.gb = []
+        for v in views:
+            m = modalities.index(v) if v in modalities else 0
+            g, b = (W[m:m + 1] + res).chunk(2, dim=-1)
+            self.gb.append((g[0], b[0]))
+
+    def __call__(self, d, view: int):
+        g, b = self.gb[view]
+        return d * (1.0 + g.to(d.dtype)) + b.to(d.dtype)
+
+
+def load_lightglue_weights(model, name: str, feature_name: str, device) -> None:
+    """Put a fine-tuned LightGlue (LIGHTGLUE_WEIGHTS[name]) into kornia's matcher;
+    its conditioning, when there is one, is kept on the model for match_lgm."""
+    spec = LIGHTGLUE_WEIGHTS.get(name)
+    if not spec:
+        raise ValueError(f"LightGlue weights {name!r} are not in the job's lightglue_weights")
+    if spec.get('feature') and str(spec['feature']) != str(feature_name):
+        raise ValueError(f"LightGlue weights {name!r} were trained for {spec['feature']} features, not {feature_name}")
+    path = spec['weights']
+    sd = th.load(path, map_location='cpu', weights_only=True)
+    lg = getattr(model, 'matcher', model)
+    missing, unexpected = lg.load_state_dict(sd, strict=False)
+    if len(missing) > len(sd) // 2 or (unexpected and len(unexpected) > len(sd) // 2):
+        raise ValueError(f'{os.path.basename(path)}: not LightGlue weights for kornia '
+                         f'({len(missing)} missing, {len(unexpected)} unexpected tensors)')
+    lg.to(device)
+    stem = os.path.splitext(path)[0]
+    cpath = spec.get('condition') or (stem + '_condition.pth' if os.path.exists(stem + '_condition.pth') else '')
+    if cpath:
+        meta = {}
+        try:
+            with open(stem + '.json', encoding='utf-8') as f:
+                meta = json.load(f)
+        except (OSError, ValueError):
+            pass
+        mods = ((meta.get('condition') or {}).get('modalities')
+                or ['visible', 'nir', 'swir', 'mwir', 'lwir', 'sar'])
+        model._gcp_condition = _GcpCondition(th.load(cpath, map_location='cpu', weights_only=True), mods,
+                                             list(spec.get('modality') or ['visible', 'visible']),
+                                             float(spec.get('px_m') or 30.0), device)
+    print(f'[LightGlue] {feature_name}: fine-tuned weights {name!r} ({os.path.basename(path)}'
+          + (f', conditioning {os.path.basename(cpath)}' if cpath else '') + ')', flush=True)
 
 
 def param_token_value(v) -> str:

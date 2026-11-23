@@ -890,6 +890,9 @@ DEFAULT_JOB: Dict = {
     # competes for RIVAL_BEST. 'lgm.*' / 'ada.*' matcher parameters: every
     # combination is an extra matching pass. `detectors` lists what is settable.
     'detector_params': {},
+    'lightglue_weights': {},     # fine-tuned LightGlue (gcp_train export), by name: {"g1a_mv": {"feature": "disk",
+                                 # "weights": ".../g1a_mv_lightglue.pth", "modality": ["nir", "visible"]}}; a pass
+                                 # uses it with detector_params {"disk": {"lgm.weights": ["official", "g1a_mv"]}}
     'smnn_thresholds': [0.9, 0.95],
     'weights_cache_dir': '',     # offline imcui weights (see prefetch_imw_weights.py)
 
@@ -1532,6 +1535,16 @@ def preflight(job: Dict, check_weights: bool = True) -> Dict:
         for d in job['detector_params']:
             if d not in wanted:
                 warnings.append(f'parameters given for {d!r}, which is not selected (ignored)')
+        lw = job.get('lightglue_weights') or {}
+        for d, prm in (job['detector_params'] or {}).items():
+            for name in (prm or {}).get('lgm.weights') or []:
+                if str(name) == 'official':
+                    continue
+                spec = lw.get(str(name))
+                if not isinstance(spec, dict) or not spec.get('weights'):
+                    errors.append(f"{d}: LightGlue weights {name!r} are not in lightglue_weights")
+                elif not os.path.exists(str(spec['weights'])):
+                    errors.append(f"{d}: LightGlue weights {name!r}: {spec['weights']} not found")
         info['detectors'] = wanted
         cfgk = E.PipelineConfig(keypoint_density=job['keypoint_density'],
                                 max_num_features=int(job['max_num_features']))
@@ -2141,6 +2154,8 @@ def run_job(job: Dict) -> Dict:
     if job['_window_prep'] != 'none':
         print(f"[Job] window preparation: {job['_window_prep']} (both windows of a pair, after the stretch)")
     res = job['target_resolution'] or scene.native_res or 10.0
+    E.LIGHTGLUE_WEIGHTS = {str(k): dict(v, px_m=v.get('px_m') or res)              # fine-tuned LightGlue, if any
+                           for k, v in (job.get('lightglue_weights') or {}).items() if isinstance(v, dict)}
     detectors = job['detectors']
     sweep = [(w, nf) for w in job['window_sizes'] for nf in job['num_features']]
     emit({'event': 'job', 'scene': scene.name, 'channels': job['channels'] or scene.channels,

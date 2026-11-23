@@ -1,6 +1,8 @@
 # Scope: training pairs from automatch's consistent points
 
-Status: proposal, not built yet.
+Status: built. `consistent.py`, `pairs.py --labels consistent` and `fit.LocalPoints`; automatch's
+`lightglue_weights` / `lgm.weights`; the checks are in `tests.py` and `tests_automatch.py`. Not run on
+real jobs yet.
 
 ## Why
 

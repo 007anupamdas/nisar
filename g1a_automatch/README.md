@@ -146,6 +146,21 @@ file, `KEYPOINT_TEST.png` shows per detector the truth RMSE, the truth points
 reached and the seconds per window at both, and the median change. The usual
 results already in the output folder are reused.
 
+**Fine-tuned LightGlue** (from gcp_train, trained on consistent points): name
+the exported weights in the job and run them as a LightGlue pass beside the
+official ones, then compare the two in TRUTH_RANKING:
+
+    "lightglue_weights": {"g1a_mv": {"feature": "disk", "weights": "/maintenance/.../g1a_mv_lightglue.pth",
+                                     "modality": ["nir", "visible"]}},
+    "detector_params": {"disk": {"lgm.weights": ["official", "g1a_mv"]}},
+    "matchers": {"disk": ["lgm"]}
+
+The conditioning (`g1a_mv_lightglue_condition.pth`) is found beside the
+weights and applied to the descriptors of each view (input, reference); the
+pixel size is the working resolution unless `px_m` is given. Weights trained
+for other features are refused, and a missing file stops the job in preflight.
+Nothing from gcp_train is imported: only its files are read.
+
 **Queue** (run window): *Add to queue* keeps the window's settings as they
 are (input, output, band, preset, cloud threshold, ...) with what to do (Run,
 Run auto, Run all 4 tiers); *Run the queue* runs them one after another, Stop

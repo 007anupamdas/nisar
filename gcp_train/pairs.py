@@ -61,6 +61,7 @@ if HERE not in sys.path:
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
+import consistent as CP  # noqa: E402
 import fit as F  # noqa: E402
 import geo  # noqa: E402
 import gt as G  # noqa: E402
@@ -112,9 +113,15 @@ def crop_homography(model: F.SceneModel, src, col0: float, row0: float, size: in
     return H, float(np.hypot(*(p - dstp).T).max())
 
 
+# per-crop labels (labels=consistent): what a crop's points must satisfy (fit.LocalPoints.fit)
+LOCAL = {'min_points': 20, 'max_rms_px': 1.5, 'max_outliers': 0.1, 'min_cover': 0.5, 'min_families': 2,
+         'margin': 0.1, 'min_agree': 3}
+
+
 def build_scene(rec: Dict, out_dir: str, crop: int, per_scene: int, shift_frac: float, min_valid: float,
                 max_cloud: float, max_loo_px: float, ref_cache: Dict, rng: np.random.Generator,
-                res_m=None, max_scale: float = 16.0, prefix: Optional[str] = None) -> (Dict, List[Dict]):
+                res_m=None, max_scale: float = 16.0, prefix: Optional[str] = None,
+                local: Optional[Dict] = None) -> (Dict, List[Dict]):
     import cv2
     import rasterio as rio
     sid = str(rec['scene_id'])
@@ -123,8 +130,17 @@ def build_scene(rec: Dict, out_dir: str, crop: int, per_scene: int, shift_frac: 
         m_in = M.resolve(rec.get('modality'), rec.get('wavelength_nm'), rec.get('sensor', ''))
         m_ref = M.resolve(rec.get('reference_modality'), rec.get('reference_wavelength_nm'))
         info.update(modality=m_in, reference_modality=m_ref)
-        pts = G.load_points(rec['gt_path'], quiet=True)
-        res = F.fit_scene(pts, rec['input_path'], max_loo_px=max_loo_px)
+        lp = None
+        if str(rec.get('labels') or '').strip().lower() == 'consistent':     # one homography per crop
+            loc = dict(LOCAL, **(local or {}))
+            pts = CP.load_consistent(rec['gt_path'], int(loc['min_agree']))
+            lp = F.LocalPoints(pts, rec['input_path'])
+            res = {'ok': lp.n >= loc['min_points'], 'type': 'local', 'n_points': int(len(pts)), 'n_used': lp.n,
+                   'loo_rmse_px': None, 'dropped': [], 'model': None, 'bounds_px': getattr(lp, 'bounds_px', None),
+                   'why': '' if lp.n >= loc['min_points'] else f'{lp.n} consistent point(s) inside the image'}
+        else:
+            pts = G.load_points(rec['gt_path'], quiet=True)
+            res = F.fit_scene(pts, rec['input_path'], max_loo_px=max_loo_px)
     except Exception as e:
         info['why'] = f'{type(e).__name__}: {e}'
         return info, []
@@ -156,7 +172,8 @@ def build_scene(rec: Dict, out_dir: str, crop: int, per_scene: int, shift_frac: 
     with rio.open(rec['input_path']) as src:
         ac0, ac1 = max(0.0, c0 - gw), min(float(src.width), c1 + gw)     # where crops may lie
         ar0, ar1 = max(0.0, r0 - gh), min(float(src.height), r1 + gh)
-        in_px = model.pixel_m((ac0 + ac1) / 2.0, (ar0 + ar1) / 2.0)      # true ground pixel, from the fit
+        in_px = (lp.px if lp is not None                                  # true ground pixel: from the fit,
+                 else model.pixel_m((ac0 + ac1) / 2.0, (ar0 + ar1) / 2.0))  # or the image's own (local labels)
         ref_px = max(geo.pixel_m(p) for p in refs)
         floor = max(in_px, ref_px)                                       # finer than this, one side is blur
         cap = in_px * min(ac1 - ac0, ar1 - ar0) / crop                   # coarser, a crop leaves the area
@@ -172,6 +189,8 @@ def build_scene(rec: Dict, out_dir: str, crop: int, per_scene: int, shift_frac: 
         info['res_m'] = f'{lo:.4g}' if fixed else f'{lo:.4g}-{hi:.4g}'
         os.makedirs(os.path.join(out_dir, sid), exist_ok=True)
         tries = 0
+        refused: Dict[str, int] = {}
+        rms_ok: List[float] = []
         while len(rows) < per_scene and tries < per_scene * 8:
             tries += 1
             px = lo if fixed else float(np.exp(rng.uniform(np.log(lo), np.log(hi))))
@@ -182,6 +201,15 @@ def build_scene(rec: Dict, out_dir: str, crop: int, per_scene: int, shift_frac: 
             if hi_c < lo_c or hi_r < lo_r:
                 continue
             col0, row0 = int(rng.integers(lo_c, hi_c + 1)), int(rng.integers(lo_r, hi_r + 1))
+            st = {}
+            if lp is not None:                   # this crop's own homography, or no pair here
+                model, st = lp.fit(col0, row0, span, **{k: loc[k] for k in ('margin', 'min_points', 'max_rms_px',
+                                                                           'max_outliers', 'min_cover',
+                                                                           'min_families')})
+                if model is None:
+                    refused[st['why']] = refused.get(st['why'], 0) + 1
+                    continue
+                rms_ok.append(st['rms_px'])
             a0, v0 = geo.read_scaled(src, ib, col0, row0, crop, factor)
             if v0.mean() < min_valid:
                 continue
@@ -213,19 +241,27 @@ def build_scene(rec: Dict, out_dir: str, crop: int, per_scene: int, shift_frac: 
                          'H': ' '.join(f'{v:.10g}' for v in H.ravel()), 'px_m': round(px, 3),
                          'modality0': m_in, 'modality1': m_ref, 'col0': col0, 'row0': row0,
                          'shift_x_px': round(sx / px, 1), 'shift_y_px': round(-sy / px, 1), 'cloud': round(cloud, 3),
-                         'h_residual_px': round(err, 3)})
+                         'h_residual_px': round(err, 3), 'ref_x0': round(x0, 3), 'ref_y1': round(y1, 3),
+                         'labels': 'consistent' if lp is not None else 'truth',
+                         'label_rms_px': st.get('rms_px', ''), 'label_points': st.get('points', ''),
+                         'label_families': st.get('families', '')})
     if cmask is not None:
         cmask.close()
     info['used'] = bool(rows)
     info['pairs'] = len(rows)
+    if lp is not None:
+        info['crops_refused'] = '; '.join(f'{k}: {v}' for k, v in sorted(refused.items(), key=lambda kv: -kv[1]))
+        info['label_rms_px_median'] = round(float(np.median(rms_ok)), 3) if rms_ok else None
     if not rows:
-        info['why'] = 'no crop with enough valid data in input and reference'
+        info['why'] = ('no crop met the label rules (crops_refused says why)' if lp is not None and refused
+                       else 'no crop with enough valid data in input and reference')
     return info, rows
 
 
 def build(manifest: str, out_dir: str, crop: int = 512, per_scene: int = 40, shift_frac: float = 0.25,
           min_valid: float = 0.6, max_cloud: float = 0.5, max_loo_px: float = 1.5, val: float = 0.1,
-          test: float = 0.2, seed: int = 0, res_m=None, max_scale: float = 16.0) -> Dict:
+          test: float = 0.2, seed: int = 0, res_m=None, max_scale: float = 16.0, labels: str = '',
+          local: Optional[Dict] = None) -> Dict:
     man = pd.read_csv(manifest)
     os.makedirs(out_dir, exist_ok=True)
     cache_p = os.path.join(out_dir, 'reference_footprints.json')
@@ -238,8 +274,13 @@ def build(manifest: str, out_dir: str, crop: int = 512, per_scene: int = 40, shi
     scene_split: Dict[str, str] = {}
     seen: Dict[str, int] = {}
     for rec in man.to_dict('records'):
+        rec = {k: ('' if isinstance(v, float) and v != v else v) for k, v in rec.items()}    # empty cells: ''
+        if labels and not str(rec.get('labels') or '').strip():
+            rec['labels'] = labels
         sid = str(rec['scene_id'])
         split = str(rec.get('split') or '').strip().lower()
+        if str(rec.get('truth_csv') or '').strip() and str(rec.get('labels') or '').strip().lower() == 'consistent':
+            split = 'test'                       # a scene with a truth file judges, it never trains
         if split not in ('train', 'val', 'test'):
             split = assign_split(sid, val, test)
         if scene_split.setdefault(sid, split) != split:
@@ -249,17 +290,23 @@ def build(manifest: str, out_dir: str, crop: int = 512, per_scene: int = 40, shi
         seen[sid + tag] = seen.get(sid + tag, 0) + 1
         prefix = tag + (f'_{seen[sid + tag]}' if seen[sid + tag] > 1 else '')
         info, r = build_scene(rec, out_dir, crop, per_scene, shift_frac, min_valid, max_cloud, max_loo_px,
-                              ref_cache, rng, res_m, max_scale, prefix)
+                              ref_cache, rng, res_m, max_scale, prefix, local)
         info['split'] = split
         for x in r:
             x['split'] = split
         infos.append(info)
         rows += r
         print(f"[Pairs] {sid} ({info.get('sensor', '')}, {split}): "
-              + (f"{info.get('pairs', 0)} pair(s) at {info.get('res_m')} m, {info.get('modality')} -> "
-                 f"{info.get('reference_modality')}; {info.get('type')} fit, leave-one-out "
-                 f"{info.get('loo_rmse_px')} px on {info.get('n_used')} point(s)" if info['used']
-                 else f"not used: {info.get('why')}"), flush=True)
+              + ((f"{info.get('pairs', 0)} pair(s) at {info.get('res_m')} m, {info.get('modality')} -> "
+                  f"{info.get('reference_modality')}; "
+                  + (f"local labels from {info.get('n_used')} consistent point(s), median fit "
+                     f"{info.get('label_rms_px_median')} px; crops refused: {info.get('crops_refused') or 'none'}"
+                     if info.get('type') == 'local' else
+                     f"{info.get('type')} fit, leave-one-out {info.get('loo_rmse_px')} px on "
+                     f"{info.get('n_used')} point(s)")) if info['used']
+                 else f"not used: {info.get('why')}"
+                 + (f" (crops refused: {info.get('crops_refused')})" if info.get('crops_refused') else '')),
+              flush=True)
     json.dump(ref_cache, open(cache_p, 'w'))
     pd.DataFrame(infos).to_csv(os.path.join(out_dir, 'scenes_fit.csv'), index=False)
     pd.DataFrame([{'scene_id': i['scene_id'], 'sensor': i.get('sensor', ''), 'split': i['split']} for i in infos]
@@ -287,9 +334,16 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help='pixel size limits in m: 45 (fixed) or 45-315 (a range); empty: from each scene\'s images')
     ap.add_argument('--max-scale', type=float, default=16.0,
                     help='without --res: pixel sizes up to this many times the coarser image\'s')
+    ap.add_argument('--labels', choices=('truth', 'consistent'), default='',
+                    help='where the labels come from for manifest rows that do not say (column labels): the '
+                         'manual points (one fit per scene) or automatch\'s consistent points (one per crop)')
+    for k, v in LOCAL.items():
+        ap.add_argument(f'--local-{k.replace("_", "-")}', type=type(v), default=v,
+                        help=f'consistent labels: {k} per crop (default {v})')
     a = ap.parse_args(argv)
+    local = {k: getattr(a, f'local_{k}') for k in LOCAL}
     r = build(a.manifest, a.out, a.crop, a.per_scene, a.shift, a.min_valid, a.max_cloud, a.max_loo_px, a.val, a.test,
-              a.seed, a.res or None, a.max_scale)
+              a.seed, a.res or None, a.max_scale, a.labels, local)
     return 0 if r['pairs'] else 1
 
 

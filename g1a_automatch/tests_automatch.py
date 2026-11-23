@@ -1219,6 +1219,48 @@ def test_nisar_h5(tmp):
     check('NISAR: footprint from boundingPolygon (no .met)', src, 'h5-boundingPolygon')
 
 
+def lightglue_weights_check():
+    """gcp_train's exported LightGlue (and its conditioning) loaded into kornia's matcher."""
+    import tempfile
+    import torch as _th
+    import kornia.feature as KF
+    import automatch_engine as E
+    try:
+        m0 = KF.LightGlueMatcher(feature_name='sift').eval()
+    except Exception as e:                       # no cached weights offline
+        print(f'SKIP  LightGlue weights: {type(e).__name__}: {e}')
+        return
+    d = tempfile.mkdtemp()
+    sd = {k: v.clone() for k, v in m0.matcher.state_dict().items()}
+    k0 = next(k for k in sd if k.endswith('weight') and sd[k].dim() == 2)
+    sd[k0] = sd[k0] + 0.5                                     # 'fine-tuned'
+    wpath = os.path.join(d, 'g1a_mv_lightglue.pth')
+    _th.save(sd, wpath)
+    dim = 128
+    mods = ['visible', 'nir', 'swir', 'mwir', 'lwir', 'sar']
+    cond = {'modality.weight': _th.zeros(len(mods), 2 * dim), 'resolution.0.weight': _th.zeros(32, 1),
+            'resolution.0.bias': _th.zeros(32), 'resolution.2.weight': _th.zeros(2 * dim, 32),
+            'resolution.2.bias': _th.zeros(2 * dim)}
+    cond['modality.weight'][mods.index('nir'), :dim] = 0.5    # nir view: g = 0.5 -> descriptors x 1.5
+    _th.save(cond, os.path.join(d, 'g1a_mv_lightglue_condition.pth'))
+    json.dump({'condition': {'modalities': mods}}, open(os.path.join(d, 'g1a_mv_lightglue.json'), 'w'))
+    E.LIGHTGLUE_WEIGHTS = {'g1a_mv': {'feature': 'sift', 'weights': wpath, 'modality': ['nir', 'visible'],
+                                      'px_m': 10.0}}
+    m1 = KF.LightGlueMatcher(feature_name='sift').eval()
+    E.load_lightglue_weights(m1, 'g1a_mv', 'sift', 'cpu')
+    desc = _th.ones(4, dim)
+    try:
+        E.load_lightglue_weights(KF.LightGlueMatcher(feature_name='sift').eval(), 'g1a_mv', 'disk', 'cpu')
+        wrong = False
+    except ValueError:
+        wrong = True
+    E.LIGHTGLUE_WEIGHTS = {}
+    check('LightGlue weights: the fine-tuned matcher replaces the official one, its conditioning is applied per '
+          'view (input nir, reference visible), weights for other features refused',
+          (bool(_th.allclose(m1.matcher.state_dict()[k0], sd[k0])), float(m1._gcp_condition(desc, 0)[0, 0]),
+           float(m1._gcp_condition(desc, 1)[0, 0]), wrong), (True, 1.5, 1.0, True))
+
+
 def test_detector_params():
     import automatch_engine as E
     cfg = E.PipelineConfig(smnn_thresholds=[0.9, 0.95])
@@ -1243,6 +1285,11 @@ def test_detector_params():
     runs = [(n, m._matcher_param_str(n, p)) for n, p in m.matcher_runs()]
     check('params: matcher values add passes, not variants', runs,
           [('smnn', '0.9'), ('smnn', '0.95'), ('lgm', ''), ('lgm', 'lf0p2'), ('ada', ''), ('ada', 'as2')])
+    mw = E.build_detector('disk', cfg, {'lgm.weights': ['official', 'g1a_mv']})
+    check('params: fine-tuned LightGlue weights run as a pass beside the official ones',
+          [(n, mw._matcher_param_str(n, p)) for n, p in mw.matcher_runs() if n == 'lgm'],
+          [('lgm', ''), ('lgm', 'lwtg1amv')])
+    lightglue_weights_check()
     check('params: run count (variants, passes in total)',
           E.count_runs('disk', {'checkpoint': ['depth', 'epipolar'], 'lgm.filter_threshold': [0.1, 0.2]},
                        ['smnn', 'lgm'], 2), (2, 8))
