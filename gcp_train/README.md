@@ -122,9 +122,18 @@ Each crop gets its own homography from the points in and around it, so
 distortion that changes across the scene does not matter
 (`SCOPE_CONSISTENT_POINTS.md` has the reasoning).
 
-    python consistent.py /maintenance/.../output --out scenes_g1a.csv [--map /maintenance/=V:/]
+    python consistent.py <output folder> [<another output folder> ...] --out scenes_g1a.csv \
+        --inputs <input folder 1> --inputs <input folder 2> --inputs <input folder 3> \
+        --truth-folder <truth folder> --band-modality band4=nir [--map /maintenance/=V:/]
     python pairs.py --manifest scenes_g1a.csv --out pairs_g1a/ --crop 512 --per-scene 60
 
+- **Where things are.** Job outputs may be in several places (server and
+  workstation runs). A job saved on another machine has an input path that
+  doesn't exist here, so the input is looked up by its file name under the
+  `--inputs` folders. Truth files can sit in one `--truth-folder`, named after
+  the input: its file name or one of its folders (e.g. the request ID). Names
+  like `pts_<name>_band4.csv` match too. A scene with a truth file there goes
+  to test, even if its run had no truth (auto runs).
 - **The manifest** (`consistent.py`) is built from automatch job folders.
   - **Which file:** the finest level's `RIVAL_CONSISTENT_<band>_<L>px_detail.csv`,
     with the input, band and references from `job_used.json`.

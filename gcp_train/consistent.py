@@ -112,15 +112,74 @@ def apply_map(path: str, maps: List[Tuple[str, str]]) -> str:
     return p
 
 
+_IMG_EXT = ('.tif', '.tiff', '.img', '.vrt', '.h5', '.jp2')
+
+
+class InputIndex:
+    """Input images under several folders, by file name: a job's input_path
+    from another machine (server / workstation) found where it is here."""
+
+    def __init__(self, roots: List[str]):
+        self.by_name: Dict[str, str] = {}
+        for root in roots or []:
+            for d, _, files in os.walk(root):
+                for f in files:
+                    if f.lower().endswith(_IMG_EXT):
+                        self.by_name.setdefault(f.lower(), os.path.join(d, f))
+
+    def find(self, path: str) -> str:
+        p = str(path or '')
+        if p and os.path.exists(p):
+            return p
+        return self.by_name.get(os.path.basename(p.replace('\\', '/')).lower(), p)
+
+
+def _truth_key(name: str) -> str:
+    """A truth file's name as the product it is for: 'pts_267403451_band4.csv' -> '267403451'."""
+    s = os.path.splitext(os.path.basename(name))[0].lower()
+    s = re.sub(r'^(pts|gt|truth|gcp|manual)[_-]+', '', s)
+    s = re.sub(r'[_-]+(pts|gt|truth|gcp|manual)$', '', s)
+    s = re.sub(r'[_-]+b(and)?\d+$', '', s)
+    return s
+
+
+class TruthIndex:
+    """Truth files of one folder (and below), found for an input by name: the
+    input's file name, or one of its folders (e.g. the request ID folder)."""
+
+    def __init__(self, folder: str):
+        self.by_key: Dict[str, List[str]] = {}
+        for d, _, files in os.walk(folder or ''):
+            for f in files:
+                if f.lower().endswith(('.csv', '.txt')):
+                    self.by_key.setdefault(_truth_key(f), []).append(os.path.join(d, f))
+
+    def find(self, input_path: str, band: str = '') -> str:
+        p = str(input_path or '').replace('\\', '/')
+        keys = [os.path.splitext(os.path.basename(p))[0].lower()]
+        keys += [x.lower() for x in p.split('/')[-4:-1] if x and x.lower() not in ('input', 'inputs', 'data')][::-1]
+        for k in keys:
+            got = self.by_key.get(_truth_key(k)) or self.by_key.get(k)
+            if got:
+                same_band = [g for g in got if band and re.search(rf'[_-]{band}(\D|$)', os.path.basename(g).lower())]
+                return sorted(same_band or got)[0]
+        return ''
+
+
 def manifest_rows(job: str, level: Optional[int] = None, include_unreliable: bool = False,
                   maps: Optional[List[Tuple[str, str]]] = None,
-                  band_modality: Optional[Dict[str, str]] = None) -> Tuple[List[Dict], List[str]]:
+                  band_modality: Optional[Dict[str, str]] = None, inputs: Optional[InputIndex] = None,
+                  truths: Optional[TruthIndex] = None) -> Tuple[List[Dict], List[str]]:
     """(manifest rows of one job, notes on what was left out)."""
     maps = maps or []
     name = os.path.basename(os.path.normpath(job))
     with open(os.path.join(job, 'job_used.json'), encoding='utf-8') as f:
         j = json.load(f)
     inp = apply_map(j.get('input_path') or '', maps)
+    if inputs is not None:
+        inp = inputs.find(inp)
+    if not os.path.exists(inp):
+        return [], [f'{name}: input {inp} not found here (give the input folders with --inputs)']
     m = SENSOR_RE.search(os.path.basename(inp))
     sensor = f'G1A_{m.group(1)}' if m else ''
     bands = [c for c in (j.get('channels') or []) if str(c).startswith('band')]
@@ -139,14 +198,17 @@ def manifest_rows(job: str, level: Optional[int] = None, include_unreliable: boo
             notes.append(f'{name} {b}: cross-check not reliable (too few cells agree): left out')
             continue
         stem = os.path.splitext(os.path.basename(inp))[0]
+        tcsv = apply_map(j.get('truth_csv') or '', maps)
+        if truths is not None and not (tcsv and os.path.exists(tcsv)):
+            tcsv = truths.find(inp, b) or tcsv      # an auto run without truth: its truth from the truth folder
         rows.append({'scene_id': f'{stem}_{b}', 'sensor': sensor, 'date': '', 'input_path': inp,
                      'input_band': int(re.search(r'(\d+)', b).group(1)), 'labels': 'consistent', 'gt_path': f,
                      'reference': apply_map(j.get('reference_dir') or '', maps),
                      'reference_band': int(j.get('reference_band') or 1),
                      'modality': (band_modality or {}).get(f'{sensor}:{b}', (band_modality or {}).get(b, '')),
                      'cloud_mask': cloud[0] if cloud else '',
-                     'split': 'test' if str(j.get('truth_csv') or '').strip() else '',
-                     'truth_csv': apply_map(j.get('truth_csv') or '', maps), 'job': name})
+                     'split': 'test' if str(tcsv or '').strip() else '',
+                     'truth_csv': tcsv, 'job': name})
     return rows, notes
 
 
@@ -181,7 +243,13 @@ def dedupe(df: pd.DataFrame) -> pd.DataFrame:
 
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description='Manifest of training scenes from automatch consistent points')
-    ap.add_argument('jobs', nargs='+', help='job output folders, or folders of them')
+    ap.add_argument('jobs', nargs='+', help='job output folders, or folders of them (several places allowed)')
+    ap.add_argument('--inputs', action='append', default=[],
+                    help='a folder of input images (repeatable): where a job\'s input is when its saved path is '
+                         'from another machine')
+    ap.add_argument('--truth-folder', default='',
+                    help='the folder of truth files, named after each input (its file name or one of its folders, '
+                         'e.g. the request ID): those scenes only test')
     ap.add_argument('--out', default='scenes_consistent.csv')
     ap.add_argument('--level', type=int, default=None, help='agreement level in px (default: the finest)')
     ap.add_argument('--include-unreliable', action='store_true')
@@ -195,9 +263,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     bm = dict(x.strip().split('=', 1) for x in a.band_modality.split(',') if '=' in x)
     rows, notes = [], []
     folders = job_folders(a.jobs)
+    inputs = InputIndex([apply_map(p, maps) for p in a.inputs]) if a.inputs else None
+    truths = TruthIndex(apply_map(a.truth_folder, maps)) if a.truth_folder else None
+    if inputs is not None:
+        print(f'[Consistent] {len(inputs.by_name)} input image(s) under {len(a.inputs)} folder(s)')
+    if truths is not None:
+        print(f'[Consistent] {sum(len(v) for v in truths.by_key.values())} truth file(s) in {a.truth_folder}')
     for job in folders:
         try:
-            r, n = manifest_rows(job, a.level, a.include_unreliable, maps, bm)
+            r, n = manifest_rows(job, a.level, a.include_unreliable, maps, bm, inputs, truths)
         except (OSError, ValueError) as e:
             r, n = [], [f'{os.path.basename(job)}: {type(e).__name__}: {e}']
         rows += r

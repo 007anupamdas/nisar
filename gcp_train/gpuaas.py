@@ -10,7 +10,9 @@ The JSON files merge in order; "mode" picks the step:
           pixel sizes come from each scene's images (pairs.py); "res_m": 45
           fixes them, "res_m": [45, 315] limits them
           -> <output>/pairs/ (pairs.csv, scenes_fit.csv, splits.csv, images)
-  consistent {"mode": "consistent", "jobs": ["/maintenance/.../output"], "band_modality": {"band4": "nir"}}
+  consistent {"mode": "consistent", "jobs": ["/maintenance/.../output", "/maintenance/.../output2"],
+           "inputs": ["/maintenance/.../input/dqe/g1a", ...], "truth_folder": "/maintenance/.../truth",
+           "band_modality": {"band4": "nir"}}
           the scenes from automatch job folders' consistent points (consistent.py)
           -> <output>/scenes_consistent.csv; then "pairs" with that manifest
           ("labels": "consistent" for its rows; "local": {"max_rms_px": 1.5, ...})
@@ -137,6 +139,10 @@ def main(argv: List[str] = None) -> int:
             a += ['--level', str(int(job['level']))]
         if job.get('include_unreliable'):
             a.append('--include-unreliable')
+        for root in (job.get('inputs') or []):
+            a += ['--inputs', str(root)]
+        if job.get('truth_folder'):
+            a += ['--truth-folder', str(job['truth_folder'])]
         if job.get('band_modality'):             # {"band4": "nir"} or "band4=nir,band3=visible"
             bm = job['band_modality']
             a += ['--band-modality', ','.join(f'{k}={v}' for k, v in bm.items()) if isinstance(bm, dict) else str(bm)]

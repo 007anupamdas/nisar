@@ -196,6 +196,31 @@ def consistent_checks(tmp, rng, ref):
           (0, ['output2001', 'output2002', 'output2003'], 'test', {'consistent'}, True, True))
     check('consistent: one product from several job folders (auto steps, tiers) is one scene, from the job with '
           'the most consistent points', (len(man), int((man['scene_id'] == 'G1A_MV_wave_band1').sum())), (3, 1))
+    # jobs made on another machine (the saved input path does not exist here), truth only in a truth folder
+    jobs2 = os.path.join(tmp, 'automatch_ws')
+    srv = os.path.join(tmp, 'inputs', 'req_555', 'input')
+    os.makedirs(srv)
+    shutil.copyfile(inw, os.path.join(srv, 'G1A_MV_srv.tif'))
+    tfold = os.path.join(tmp, 'truth')
+    os.makedirs(tfold)
+    shutil.copyfile(gw, os.path.join(tfold, 'pts_req_555_band1.csv'))
+    for name, inpath in (('auto_top3_agree2', '/maintenance/x/input/dqe/g1a/req_555/input/G1A_MV_srv.tif'),
+                         ('fastest', '/maintenance/x/input/G1A_MV_gone.tif')):
+        d = os.path.join(jobs2, 'G1A_MV_srv', name)
+        os.makedirs(d)
+        write_consistent(os.path.join(d, 'RIVAL_CONSISTENT_band1_64px_detail.csv'), inw, rng, wave=3.0)
+        json.dump({'input_path': inpath, 'reference_dir': ref, 'channels': ['band1'], 'truth_csv': ''},
+                  open(os.path.join(d, 'job_used.json'), 'w'))
+    mp2 = os.path.join(tmp, 'scenes_ws.csv')
+    CP.main([jobs2, '--inputs', os.path.join(tmp, 'inputs'), '--truth-folder', tfold, '--out', mp2,
+             '--band-modality', 'band1=nir'])
+    m2 = pd.read_csv(mp2)
+    check('consistent: an input saved with another machine\'s path is found under the input folders; its truth '
+          'in the truth folder by the input\'s folder name (request ID), so it only tests; a missing input is '
+          'left out; the band\'s modality set',
+          (len(m2), os.path.exists(m2['input_path'].iloc[0]), m2['split'].iloc[0],
+           os.path.basename(str(m2['truth_csv'].iloc[0])), m2['modality'].iloc[0]),
+          (1, True, 'test', 'pts_req_555_band1.csv', 'nir'))
     out = os.path.join(tmp, 'pairs_consistent')
     P.build(mp, out, crop=96, per_scene=8, seed=5, res_m=60.0)
     fitted = pd.read_csv(os.path.join(out, 'scenes_fit.csv')).set_index('scene_id')
