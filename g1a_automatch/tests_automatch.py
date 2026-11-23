@@ -475,6 +475,23 @@ def test_e2e_truth(tmp):
     by2 = pd.read_csv(by_path)
     check('truth e2e: compare on existing results measures a 400 m disagreement',
           (res.returncode, round(float(by2.iloc[0]['truth_rmse_m']) / 50) * 50), (0, 400))
+    # a finished run compared afterwards with a truth file: nothing matched again, the point sets scored
+    res = subprocess.run([sys.executable, os.path.join(HERE, 'automatch_job.py'), 'truthcheck', out, '--truth',
+                          truth_file('truth_ok2.csv', 4013.0, -2487.0)], capture_output=True, text=True)
+    tc = pd.read_csv(os.path.join(out, 'TRUTH_CHECK.csv')) if os.path.exists(os.path.join(out, 'TRUTH_CHECK.csv')) \
+        else pd.DataFrame(columns=['set', 'truth_rmse_m'])
+    bs = tc[tc['set'].astype(str).str.startswith('best single')]
+    import automatch_truthcheck as TC
+    par = os.path.join(tmp, 'tc_parent')
+    for sub_ in ('auto_top3_agree2', 'auto_top5_agree3'):
+        os.makedirs(os.path.join(par, sub_), exist_ok=True)
+        open(os.path.join(par, sub_, 'job_used.json'), 'w').write('{}')
+    check('truthcheck: a finished run scored against a truth file afterwards (no matching), every point set '
+          'with its truth RMSE, the plot written; a folder of auto steps gives each step',
+          (res.returncode, 'Processing pair' in res.stdout, len(bs) == 1 and float(bs['truth_rmse_m'].iloc[0]) < 15,
+           len(tc) >= 2, os.path.exists(os.path.join(out, 'TRUTH_CHECK.png')),
+           [os.path.basename(r) for r in TC.run_folders(par)]),
+          (0, False, True, True, True, ['auto_top3_agree2', 'auto_top5_agree3']))
     # the GPU service's compare mode re-scores a finished run, nothing matched again
     st = os.path.join(tmp, 'cmp_settings.json')
     md = os.path.join(tmp, 'mode_compare.json')
@@ -1426,7 +1443,7 @@ def test_presets(tmp):
     check('presets: an HS job: its detectors and window, truth decides range and band, all GPUs, cross-check 3 of 5',
           (n['detectors'][:2], n['window_sizes'], n['max_error_from_truth'], n['channels_from_truth'], n['device'],
            n['cross_top_n'], n['cross_min_agree'], 'note' in job, bool(note), 'top_n' in job),
-          (['disk', 'dedode'], [512], True, True, 'all', 10, 3, False, True, False))
+          (['imw-minima-roma', 'imw-minima-loftr'], [512], True, True, 'all', 10, 3, False, True, False))
     j3, _ = P.job_for('HS', '/d/G1A_HS_x.tif', '/ref', '/out', '/t/pts_band28.csv', presets=pre, top_n=3, agree=2)
     jf, _ = P.job_for('MV', '/d/G1A_MV_x.tif', '/ref', '/out', '/t/pts_band4.csv', presets=pre, mode='fastest')
     ja, _ = P.job_for('MV', '/d/G1A_MV_x.tif', '/ref', '/out', '/t/pts_band4.csv', presets=pre, mode='fast')
@@ -1592,7 +1609,7 @@ def test_gui_run(tmp):
     w._wq = w._wq[:nq]
     w._queue_show()
     w.set_fields(f0)
-    check('run window: the fastest tier shows its list; fast sets top 10 / 3', ('fastest' in fast_txt and 'imw-sfd2-nn'
+    check('run window: the fastest tier shows its list; fast sets top 10 / 3', ('fastest' in fast_txt and 'imw-minima-roma'
           in fast_txt, w.top_n.value(), w.agree.value()), (True, 10, 3))
     w.top_n.setValue(2)
     w.agree.setValue(2)

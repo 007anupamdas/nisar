@@ -270,13 +270,20 @@ class RunWindow(QtWidgets.QMainWindow):
         self.btn_all.setToolTip('fastest, fast, medium, then slow, into <output>/fastest, /fast, /medium, /slow, '
                                 'sharing one cache (the cache folder, else <output>/_cache): references, pairs and the cloud '
                                 'mask are made once, and a detector one preset ran is reused by the next')
+        self.btn_truth = QtWidgets.QPushButton('Compare with truth')
+        self.btn_truth.setToolTip('Score the finished run(s) in the output folder (also its auto steps / tiers) '
+                                  'against the truth file, without running them again: TRUTH_RANKING, the final '
+                                  'points\' truth error, REPORT with the manual points; TRUTH_CHECK.png in the '
+                                  'output folder. (Running again with a truth file processes it again: the truth '
+                                  'file also sets the window, the search range and the band.)')
         self.btn_stop = QtWidgets.QPushButton('Stop')
         self.btn_open = QtWidgets.QPushButton('Open output folder')
         self.btn_presets = QtWidgets.QPushButton('Presets file…')
         self.btn_presets.setToolTip('Write automatch_presets.json (the presets, to edit) or show where it is; '
                                     'it is read when this window opens')
         self.btn_stop.setEnabled(False)
-        for b in (self.btn_check, self.btn_run, self.btn_all, self.btn_auto, self.btn_stop, self.btn_open, self.btn_presets):
+        for b in (self.btn_check, self.btn_run, self.btn_all, self.btn_auto, self.btn_truth, self.btn_stop,
+                  self.btn_open, self.btn_presets):
             hb.addWidget(b)
         hb.addStretch(1)
         v.addLayout(hb)
@@ -326,6 +333,7 @@ class RunWindow(QtWidgets.QMainWindow):
         self.btn_run.clicked.connect(lambda: self.start('run'))
         self.btn_all.clicked.connect(self.run_all)
         self.btn_auto.clicked.connect(self.run_auto)
+        self.btn_truth.clicked.connect(self.compare_truth)
         self.btn_stop.clicked.connect(self.stop)
         self.btn_open.clicked.connect(self.open_output)
         self.btn_presets.clicked.connect(self.presets_file)
@@ -471,6 +479,28 @@ class RunWindow(QtWidgets.QMainWindow):
         self.btn_stop.setEnabled(True)
         self.proc.start(sys.executable, ['-u', JOB_SCRIPT, kind, path])
 
+    def compare_truth(self):
+        """The finished run(s) in the output folder against the truth file (automatch_truthcheck)."""
+        if self.proc is not None:
+            return
+        out, truth = self.output.text().strip(), self.truth.text().strip()
+        if not (out and os.path.isdir(out) and truth and os.path.isfile(truth)):
+            QtWidgets.QMessageBox.warning(self, 'Compare with truth', 'Set the output folder of the finished run(s) '
+                                                                      'and the ground truth file.')
+            return
+        self.log.appendPlainText(f'--- compare with truth: {out} against {truth} (nothing is run again)')
+        self._kind, self._buf, self._current = 'truthcheck', '', ('', out)
+        self.bar.setRange(0, 0)
+        self.proc = QtCore.QProcess(self)
+        self.proc.setProcessChannelMode(QtCore.QProcess.ProcessChannelMode.MergedChannels if QT_API != 'PyQt5'
+                                        else QtCore.QProcess.MergedChannels)
+        self.proc.readyReadStandardOutput.connect(self.read)
+        self.proc.finished.connect(self.finished)
+        for b in (self.btn_run, self.btn_all, self.btn_auto, self.btn_check, self.btn_truth):
+            b.setEnabled(False)
+        self.btn_stop.setEnabled(True)
+        self.proc.start(sys.executable, ['-u', JOB_SCRIPT, 'truthcheck', out, '--truth', truth])
+
     def read(self):
         self._buf += bytes(self.proc.readAllStandardOutput()).decode('utf-8', 'replace')
         *lines, self._buf = self._buf.split('\n')
@@ -584,6 +614,14 @@ class RunWindow(QtWidgets.QMainWindow):
         self.btn_run.setEnabled(True)
         self.btn_check.setEnabled(True)
         self.btn_stop.setEnabled(False)
+        self.btn_truth.setEnabled(True)
+        if kind == 'truthcheck':
+            png = os.path.join(getattr(self, '_current', ('', ''))[1] or self.output.text(), 'TRUTH_CHECK.png')
+            self.stage.setText('compared with the truth: TRUTH_CHECK.png and each run\'s TRUTH_RANKING.csv, REPORT/'
+                               if code == 0 else 'compare with truth: not done (see the log)')
+            if code == 0 and os.path.exists(png):
+                QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(png))
+            return
         if kind == 'preflight':
             self.stage.setText('check passed: ready to run' if code == 0 else 'check found problems (see the log)')
             return

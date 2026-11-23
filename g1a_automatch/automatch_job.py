@@ -2273,6 +2273,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     fin.add_argument('--rerun', choices=('missing', 'failed', 'all'), default='missing',
                      help='missing: the detectors whose weights were missing (default); failed: every failed '
                           'one; all: every detector')
+    sub.add_parser('truthcheck', help='compare finished runs (one, or a folder of runs: auto steps, tiers) with a '
+                                      'truth file without running them again (options: python '
+                                      'automatch_truthcheck.py -h)').add_argument('rest', nargs=argparse.REMAINDER)
     sub.add_parser('cloudfilter', help='reject the match points of finished jobs that fall on cloud and score '
                                        'them again (options: python automatch_cloudfilter.py -h)'
                    ).add_argument('rest', nargs=argparse.REMAINDER)
@@ -2284,6 +2287,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     k.add_argument('rest', nargs=argparse.REMAINDER)
     if argv is None:
         argv = sys.argv[1:]
+    if argv and argv[0] == 'truthcheck':
+        import automatch_truthcheck as TC
+        return TC.main(list(argv[1:]))
     if argv and argv[0] == 'compare':
         import automatch_truth as T
         return T.main(list(argv[1:]))

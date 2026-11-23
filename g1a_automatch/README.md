@@ -105,11 +105,11 @@ the window for every setting, sweeps and the benchmark.
 | Band | yours (suggested band3) | yours | yours (near 1250 / 1650 / 2200 nm) | yours (not band1 / band6) |
 | Clouds | OmniCloudMask, bands 5, 4, 6 | VNIR tests | SWIR tests | infrared tests |
 
-Four tiers per sensor (**Preset**), all prefixes of one list ranked by fast
-*and* accurate: the mean of two per-job percentiles, accuracy (truth RMSE ×
-(truth points / reached)²) and speed (s per window), over MV 23, HS 19, HV 12
-truth jobs up to 1104; a method less accurate than 55 % of the others goes to
-the end however fast. ML uses the HS list, C3 the MV list. *fastest* — top 5,
+Four tiers per sensor (**Preset**), all prefixes of one list ranked by
+accuracy only (the mean per-job percentile of truth RMSE × (truth points /
+reached)², over MV 23, HS 19, HV 12 truth jobs up to 1104); methods whose
+median pass takes more than 15 minutes (OmniGlue on MV) are left out. ML uses
+the HS list, C3 the MV list. *fastest* — top 5,
 3 agreeing; *fast* — top 10, 3 agreeing; *medium* — top 20, 4 agreeing;
 *slow* — all 30, 4 agreeing. The same RANSAC and sub-cells, so a tier reuses
 what the tiers below it ran. The earlier names still work: *accurate* = fast,
@@ -117,9 +117,9 @@ what the tiers below it ran. The earlier names still work: *accurate* = fast,
 
 | Tier | MV | HS | HV |
 |---|---|---|---|
-| top 5 | disk, dog, imw-sfd2-nn, sift, imw-xfeat-dense | disk, dedode, dog, imw-minima-loftr, sift | disk, dog, imw-darkfeat-nn, sift, imw-lanet-nn |
-| 6-10 | imw-xoftr, imw-darkfeat-nn, imw-liftfeat-nn, imw-eloftr, imw-topicfm | imw-xoftr, imw-darkfeat-nn, imw-topicfm, imw-eloftr, imw-sfd2-nn | gftt, dedode, imw-sfd2-nn, keynet, imw-xoftr |
-| 11-20 | imw-minima-loftr, imw-minima-roma, imw-xfeat-lg, imw-d2net-nn, keynet, imw-aliked-lg, imw-rdd-nn, imw-dkm, imw-gim-roma, imw-roma | imw-lanet-nn, imw-liftfeat-nn, imw-d2net-nn, imw-minima-roma, keynet, imw-gim-roma, imw-ripe-nn, loftr, imw-rord-nn, imw-aspanformer | imw-eloftr, hessian, imw-minima-loftr, loftr, imw-ripe-nn, imw-minima-roma, imw-xfeat-lg, imw-rdd-nn, imw-d2net-nn, imw-aliked-lg |
+| top 5 | imw-minima-roma, imw-d2net-nn, disk, imw-topicfm, imw-rdd-nn | imw-minima-roma, imw-minima-loftr, imw-topicfm, disk, imw-gim-roma | imw-minima-roma, disk, dog, imw-darkfeat-nn, imw-ripe-nn |
+| 6-10 | imw-sfd2-nn, imw-xoftr, dog, imw-gim-roma, imw-roma | imw-xoftr, dedode, imw-d2net-nn, dog, imw-ripe-nn | imw-rdd-nn, dedode, imw-dkm, imw-sfd2-nn, imw-minima-loftr |
+| 11-20 | imw-dkm, imw-darkfeat-nn, imw-minima-loftr, imw-eloftr, imw-aliked-lg, imw-liftfeat-nn, imw-dad-roma, keynet, imw-aspanformer, sift | imw-sfd2-nn, imw-aspanformer, imw-eloftr, imw-roma, imw-darkfeat-nn, imw-liftfeat-nn, sift, loftr, imw-rord-nn, keynet | imw-gim-roma, keynet, imw-topicfm, imw-aspanformer, sift, gftt, imw-lanet-nn, hessian, imw-eloftr, imw-aliked-lg |
 
 **One method per detector**: a preset runs each detector with only its best
 matcher and variant for the sensor (`BEST_METHOD` in `automatch_presets.py`,
@@ -127,6 +127,16 @@ from the truth jobs), e.g. MV: DISK epipolar + AdaLAM, DoG HardNet8 + AdaLAM,
 KeyNet + LightGlue; before, DISK ran every matcher and could fill the top N on
 its own. The cross-check's top N are also N detector families (DISK depth and
 epipolar count as one).
+
+**Compare with truth** (run window): a run made without a truth file (e.g.
+*Run auto*) is scored afterwards against one, without matching again: every
+detector + matcher (TRUTH_RANKING), each final point set's truth RMSE (final,
+rigid, consistent, best final), REPORT with the manual points, and
+TRUTH_CHECK.png over the runs in the output folder (each auto step or tier).
+Running again *with* the truth file processes the scene again, because the
+truth file also sets the job (window size from its largest error, the search
+range, the band). Command line: `python automatch_job.py truthcheck <run |
+folder of runs> --truth pts.csv`.
 
 **Queue** (run window): *Add to queue* keeps the window's settings as they
 are (input, output, band, preset, cloud threshold, ...) with what to do (Run,
