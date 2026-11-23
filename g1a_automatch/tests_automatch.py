@@ -959,9 +959,10 @@ def test_interior_and_final(tmp):
     old_file = J.GPU_PEAKS_FILE
     J.GPU_PEAKS_FILE = os.path.join(tmp, 'gpu_peaks.json')
     try:
-        refused = e0.CLAIM_HOOK('b1', 'dedode_L-C4_B-C4')        # too heavy for the A4000: left to the A4500
-        taken_over = e0.CLAIM_HOOK('b1', 'imw-rdd-nn-kt0p2')     # also too heavy: never taken over
-        kept_big = e0.CLAIM_HOOK('b1', 'imw-minima-loftr')       # 20 GB at 2048: never on the 16 GB GPU
+        refused = e0.CLAIM_HOOK('b1', 'dedode_L-C4_B-C4')        # heavy by the table: the A4000 still tries it
+        taken_over = e0.CLAIM_HOOK('b1', 'imw-rdd-nn-kt0p2')
+        J.learn_gpu_oom('imw-minima-loftr', 2048, 16.0)           # ran out of memory on a 16 GB GPU before
+        kept_big = e0.CLAIM_HOOK('b1', 'imw-minima-loftr')       # so left to the larger one
         J.learn_gpu_peak('imw-xfeat-lg', 1024, 15.2)
         one = J.gpu_need_gb('imw-xfeat-lg', 1024)
         J.learn_gpu_peak('imw-xfeat-lg', 1024, 3.0)
@@ -972,9 +973,9 @@ def test_interior_and_final(tmp):
         old_ignored = J.gpu_need_gb('imw-minima-roma', 1024)
     finally:
         J.GPU_PEAKS_FILE = old_file
-    check('gpu: a detector too heavy for the smaller GPU is left to the larger while it is its own; peaks seen '
+    check('gpu: the smaller GPU tries a detector heavy by the table (no out-of-memory yet); peaks seen '
           'here are learned (the median of the last ones); the earlier file of largest reserved peaks is not read',
-          (refused, one, learned, old_ignored), (False, 15.2, 3.3, 5.4))
+          (bool(refused), one, learned, old_ignored), (True, 15.2, 3.3, 5.4))
     J.install_queue(e0, dict(heavy, _queue=os.path.join(tmp, 'gq2', 'q3'), _shard=0, _gpu_mem={'0': 16.0, '1': 20.0}),
                     os.path.join(tmp, 'gq2', 'w3'), 'w3', 1024, None)
     old_file = J.GPU_PEAKS_FILE
@@ -984,13 +985,15 @@ def test_interior_and_final(tmp):
         e0.UNIT_DONE_HOOK('b1', 'imw-xfeat-lg', {'status': 'failed', 'error': 'RuntimeError: CUDA out of memory.'})
         qd = os.path.join(tmp, 'gq2', 'q3', 'w3')
         back = (os.path.exists(os.path.join(qd, J._unit_name('b1', 'imw-xfeat-lg') + '.handback')),
-                os.path.exists(os.path.join(qd, J._unit_name('b1', 'imw-xfeat-lg'))), J.gpu_need_gb('imw-xfeat-lg', 1024))
+                os.path.exists(os.path.join(qd, J._unit_name('b1', 'imw-xfeat-lg'))),
+                J.oom_on('imw-xfeat-lg', 1024, 16.0), e0.CLAIM_HOOK('b1', 'imw-xfeat-lg'))
     finally:
         J.GPU_PEAKS_FILE = old_file
     check('gpu: out of memory on the smaller GPU: handed back (marked for the larger, claim freed), remembered as '
-          'needing all of it', back, (True, False, 16.0))
-    check('gpu: a heavy detector is never taken over by the smaller GPU (CUDA out of memory)',
-          (taken_over, kept_big), (False, False))
+          'having failed on this GPU size, so not tried here again', back, (True, False, True, False))
+    check('gpu: the smaller GPU takes over a heavy detector too; one that ran out of memory on a GPU this size '
+          'is left to the larger',
+          (bool(taken_over), kept_big), (True, False))
 
 
 def test_report(tmp):

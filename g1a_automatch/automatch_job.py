@@ -131,7 +131,7 @@ def gpu_memory_gb() -> Dict[int, float]:
 
 # Peak GPU memory (GB) per detector family at 1024 / 2048 px windows, from jobs
 # 1068 and 1069 (A4000 16 GB / A4500 20 GB; 2048 px often matched in 1024 px
-# tiles). Used to give the heavy ones to the larger GPU; 6 GB when unknown.
+# tiles). Used to deal the heavy ones to the larger GPU first; 6 GB when unknown.
 GPU_NEED_GB = {
     'imw-sp-lg': (14.5, 4.1), 'imw-gim-dkm': (12.9, 7.4), 'imw-rdd-dense': (11.5, 7.9), 'imw-rdd-nn': (8.2, 16.0),
     'imw-d2net-nn': (7.6, 14.3), 'imw-dkm': (7.4, 7.4), 'imw-topicfm': (7.2, 7.3), 'imw-rord-nn': (6.8, 8.4),
@@ -171,6 +171,43 @@ def _peaks_file() -> Dict[str, List[float]]:
     return {}
 
 
+def _oom_file() -> Dict[str, float]:
+    """{family@window: the largest GPU (GB) it ran out of memory on here}."""
+    try:
+        with open(GPU_PEAKS_FILE, encoding='utf-8') as f:
+            d = json.load(f)
+        if isinstance(d, dict) and d.get('v') == 2:
+            return {str(k): float(v) for k, v in (d.get('oom') or {}).items()}
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    return {}
+
+
+def _write_peaks(peaks: Dict[str, List[float]], oom: Dict[str, float]) -> None:
+    try:
+        os.makedirs(os.path.dirname(GPU_PEAKS_FILE), exist_ok=True)
+        tmp = f'{GPU_PEAKS_FILE}.{os.getpid()}.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump({'v': 2, 'peaks': peaks, 'oom': oom}, f, indent=1, sort_keys=True)
+        os.replace(tmp, GPU_PEAKS_FILE)
+    except OSError:
+        pass
+
+
+def learn_gpu_oom(detector: str, window: int, gpu_gb: float) -> None:
+    """Remember that a detector ran out of memory on a GPU of this size here."""
+    key = f'{_gpu_family(detector)}@{1024 if int(window or 1024) <= 1024 else 2048}'
+    oom = _oom_file()
+    oom[key] = round(max(float(gpu_gb), oom.get(key, 0.0)), 1)
+    _write_peaks(_peaks_file(), oom)
+
+
+def oom_on(detector: str, window: int, gpu_gb: float) -> bool:
+    """It ran out of memory here on a GPU this size or larger."""
+    key = f'{_gpu_family(detector)}@{1024 if int(window or 1024) <= 1024 else 2048}'
+    return _oom_file().get(key, 0.0) >= float(gpu_gb) - 0.5
+
+
 def _learned_peaks() -> Dict[str, float]:
     """{family@window: the median of its last peaks}."""
     out = {}
@@ -193,14 +230,7 @@ def learn_gpu_peak(detector: str, window: int, peak_gb) -> None:
     key = f'{_gpu_family(detector)}@{1024 if int(window or 1024) <= 1024 else 2048}'
     peaks = _peaks_file()
     peaks[key] = (peaks.get(key, []) + [round(peak, 2)])[-5:]
-    try:
-        os.makedirs(os.path.dirname(GPU_PEAKS_FILE), exist_ok=True)
-        tmp = f'{GPU_PEAKS_FILE}.{os.getpid()}.tmp'
-        with open(tmp, 'w', encoding='utf-8') as f:
-            json.dump({'v': 2, 'peaks': peaks}, f, indent=1, sort_keys=True)
-        os.replace(tmp, GPU_PEAKS_FILE)
-    except OSError:
-        pass
+    _write_peaks(peaks, _oom_file())
 
 
 def gpu_need_gb(detector: str, window: int) -> float:
@@ -232,7 +262,8 @@ def gpu_order(detectors: List[str], window: int, own: int, mem: Dict[int, float]
     (gpu_share; the largest GPU its heaviest first, the others their lightest
     first), and only then the other GPUs' shares, from their ends (what the
     other GPU would reach last), so a GPU takes over another's work only when
-    its own is done. Too heavy for this GPU: left to the larger (install_queue)."""
+    its own is done. One that ran out of memory on a GPU this size: left to the larger
+    (install_queue)."""
     share = gpu_share(detectors, window, mem)
     largest = max(mem, key=lambda g: (mem[g], g)) if mem else own
 
@@ -475,15 +506,14 @@ def install_queue(E, job: Dict, out_dir: str, tag: str, win: int, nf: Optional[i
 
     def claim(channel, dtag):
         name = _unit_name(channel, dtag)
-        need = gpu_need_gb(dtag, win)
-        heavy = bigger and need > 0.85 * own
-        if heavy:
+        # every GPU tries every detector; one goes to the larger GPU only once it has run out of
+        # memory on a GPU this size (here, in this run or an earlier one)
+        if bigger and oom_on(dtag, win, own):
             if dtag not in left_to_larger:   # say why this GPU leaves it (once)
                 left_to_larger.add(dtag)
-                print(f'[Job] {dtag}: left to the larger GPU (needs about {need:.1f} GB here at {win} px, more '
-                      f'than 85 % of this GPU\'s {own:.0f} GB)', flush=True)
-            return False                     # too heavy for this GPU: the larger one takes it (taking it over
-                                             # in tiles failed with CUDA out-of-memory on many models)
+                print(f'[Job] {dtag}: left to the larger GPU (it ran out of memory on this {own:.0f} GB GPU at '
+                      f'{win} px before)', flush=True)
+            return False
         try:
             fd = os.open(os.path.join(claims, name), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except FileExistsError:
@@ -525,7 +555,7 @@ def install_queue(E, job: Dict, out_dir: str, tag: str, win: int, nf: Optional[i
         err = str(rec.get('error') or '').lower()
         if bigger and rec.get('status') != 'ok' and ('out of memory' in err or 'cuda error' in err):
             # too big for this GPU after all: remembered as such, and handed back for the larger one
-            learn_gpu_peak(dtag, win, own)
+            learn_gpu_oom(dtag, win, own)
             try:
                 os.remove(os.path.join(claims, _unit_name(channel, dtag)))
             except OSError:
