@@ -10,7 +10,7 @@ The JSON files merge in order; "mode" picks the step:
           pixel sizes come from each scene's images (pairs.py); "res_m": 45
           fixes them, "res_m": [45, 315] limits them
           -> <output>/pairs/ (pairs.csv, scenes_fit.csv, splits.csv, images)
-  consistent {"mode": "consistent", "jobs": ["/maintenance/.../output"], "level": 64}
+  consistent {"mode": "consistent", "jobs": ["/maintenance/.../output"], "band_modality": {"band4": "nir"}}
           the scenes from automatch job folders' consistent points (consistent.py)
           -> <output>/scenes_consistent.csv; then "pairs" with that manifest
           ("labels": "consistent" for its rows; "local": {"max_rms_px": 1.5, ...})
@@ -137,6 +137,9 @@ def main(argv: List[str] = None) -> int:
             a += ['--level', str(int(job['level']))]
         if job.get('include_unreliable'):
             a.append('--include-unreliable')
+        if job.get('band_modality'):             # {"band4": "nir"} or "band4=nir,band3=visible"
+            bm = job['band_modality']
+            a += ['--band-modality', ','.join(f'{k}={v}' for k, v in bm.items()) if isinstance(bm, dict) else str(bm)]
         return CP.main(a)
     if mode == 'train':
         return run_train(job, out_dir)

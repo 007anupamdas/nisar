@@ -113,7 +113,8 @@ def apply_map(path: str, maps: List[Tuple[str, str]]) -> str:
 
 
 def manifest_rows(job: str, level: Optional[int] = None, include_unreliable: bool = False,
-                  maps: Optional[List[Tuple[str, str]]] = None) -> Tuple[List[Dict], List[str]]:
+                  maps: Optional[List[Tuple[str, str]]] = None,
+                  band_modality: Optional[Dict[str, str]] = None) -> Tuple[List[Dict], List[str]]:
     """(manifest rows of one job, notes on what was left out)."""
     maps = maps or []
     name = os.path.basename(os.path.normpath(job))
@@ -142,6 +143,7 @@ def manifest_rows(job: str, level: Optional[int] = None, include_unreliable: boo
                      'input_band': int(re.search(r'(\d+)', b).group(1)), 'labels': 'consistent', 'gt_path': f,
                      'reference': apply_map(j.get('reference_dir') or '', maps),
                      'reference_band': int(j.get('reference_band') or 1),
+                     'modality': (band_modality or {}).get(f'{sensor}:{b}', (band_modality or {}).get(b, '')),
                      'cloud_mask': cloud[0] if cloud else '',
                      'split': 'test' if str(j.get('truth_csv') or '').strip() else '',
                      'truth_csv': apply_map(j.get('truth_csv') or '', maps), 'job': name})
@@ -183,15 +185,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument('--out', default='scenes_consistent.csv')
     ap.add_argument('--level', type=int, default=None, help='agreement level in px (default: the finest)')
     ap.add_argument('--include-unreliable', action='store_true')
+    ap.add_argument('--band-modality', default='',
+                    help="what each band is, e.g. 'band4=nir,band3=visible' or per sensor 'G1A_MV:band4=nir' "
+                         "(visible, nir, swir, mwir, lwir, sar); empty: visible")
     ap.add_argument('--map', action='append', default=[], metavar='SERVER=LOCAL',
                     help="path prefix as this machine sees it, e.g. /maintenance/=V:/ (repeatable)")
     a = ap.parse_args(argv)
     maps = [tuple(m.split('=', 1)) for m in a.map if '=' in m]
+    bm = dict(x.strip().split('=', 1) for x in a.band_modality.split(',') if '=' in x)
     rows, notes = [], []
     folders = job_folders(a.jobs)
     for job in folders:
         try:
-            r, n = manifest_rows(job, a.level, a.include_unreliable, maps)
+            r, n = manifest_rows(job, a.level, a.include_unreliable, maps, bm)
         except (OSError, ValueError) as e:
             r, n = [], [f'{os.path.basename(job)}: {type(e).__name__}: {e}']
         rows += r
