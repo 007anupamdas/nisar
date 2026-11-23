@@ -1480,6 +1480,27 @@ def test_presets(tmp):
     tops, _ = _Cx.pick_top(_cf, 2, 1.0, 1.0, _rk)
     check('cross-check: the top N are N detector families (disk_depth and disk_epipolar are one)',
           [c['detector'] for c in tops], ['disk_depth', 'sift'])
+    # resume across tiers / auto steps: a detector's result is its own, whatever else the run has
+    base = J.normalize({'input_path': '/d/x.tif', 'reference_dir': '/r', 'output_dir': '/o',
+                        'detectors': ['disk', 'sift'], 'channels': ['band3']})
+    t5 = dict(base, matchers={'disk': ['smnn']}, detector_params={'disk': {'checkpoint': ['epipolar']}})
+    t10 = dict(base, matchers={'disk': ['smnn'], 'sift': ['snn']}, temp_per_product=True,
+               detector_params={'disk': {'checkpoint': ['epipolar']}})
+    saved = {'key': J._unit_key(t5, 512, None), 'base_key': J._unit_base_key(t5, 512, None),
+             'matchers': ['smnn'], 'params': {'checkpoint': ['epipolar']}}
+    k10, b10 = J._unit_key(t10, 512, None), J._unit_base_key(t10, 512, None)
+    old = {'key': J._unit_key(dict(base), 512, None)}                     # saved before per-detector keys
+    check('resume: a detector done in a smaller tier is reused by a larger one (its own matcher and variant); the '
+          'cache-per-product flag does not change results; another variant or a matcher it did not run is not; '
+          'results saved before keep matching on the full key',
+          (J.unit_matches(saved, k10, b10, ['smnn'], {'checkpoint': ['epipolar']}),
+           J.unit_matches(saved, k10, b10, ['smnn'], {'checkpoint': ['depth']}),
+           J.unit_matches(saved, k10, b10, ['lgm'], {'checkpoint': ['epipolar']}),
+           J.unit_matches(dict(saved, matchers=['smnn', 'lgm', 'ada']), k10, b10, ['lgm'],
+                          {'checkpoint': ['epipolar']}),
+           J.unit_matches(old, J._unit_key(dict(base, temp_per_product=True), 512, None), '', None, None),
+           J._det_entry({'disk': ['ada'], 'dog': ['lgm']}, 'disk_epipolar')),
+          (True, False, False, True, True, ['ada']))
     import automatch_cross as _C
     pn = os.path.join(tmp, 'pn_job')
     os.makedirs(pn, exist_ok=True)

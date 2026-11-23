@@ -352,6 +352,41 @@ def _unit_key(job: Dict, win: int, nf: Optional[int]) -> str:
                                                                  '_server_output_dir', '_parent')}, win, nf)
 
 
+def _det_entry(table, dtag: str):
+    """A per-detector setting (matchers / detector_params) for one detector tag:
+    the entry whose name is the tag or its family (disk for disk_epipolar)."""
+    if not isinstance(table, dict):
+        return None
+    for k in sorted(table, key=len, reverse=True):
+        if dtag == k or dtag.startswith(k + '_') or dtag.startswith(k + '-'):
+            return table[k]
+    return None
+
+
+def _unit_base_key(job: Dict, win: int, nf: Optional[int]) -> str:
+    """The resume fingerprint without the per-detector tables (matchers,
+    detector_params): those are compared per detector, so a detector's result
+    is reused whichever other detectors the run (preset tier, auto step) has."""
+    return _unit_key({k: v for k, v in job.items() if k not in ('matchers', 'detector_params')}, win, nf)
+
+
+def unit_matches(saved: Dict, key: str, base_key: str, want_m, want_p) -> bool:
+    """An earlier result of this detector is this one: the same full
+    fingerprint (results saved before per-detector keys), or the same
+    fingerprint without the per-detector tables, the same detector variant,
+    and the matchers wanted among those it ran (None: its defaults)."""
+    if saved.get('key') == key:
+        return True
+    if saved.get('base_key') != base_key or 'matchers' not in saved:
+        return False
+    if json.dumps(saved.get('params'), sort_keys=True) != json.dumps(want_p, sort_keys=True):
+        return False
+    got = saved.get('matchers')
+    if want_m is None or got is None:
+        return want_m == got
+    return set(want_m) <= set(got)
+
+
 def _results_dir(job: Dict, tag: str) -> str:
     """Where finished detector results are shared between output folders that
     use the same cache folder (temp_dir): e.g. the fastest, accurate and most
@@ -405,7 +440,16 @@ def install_queue(E, job: Dict, out_dir: str, tag: str, win: int, nf: Optional[i
     reuse = job.get('_reuse') or ''             # finish mode: the finished records of an earlier run, any code
     earlier = _summary_records(out_dir, job) if reuse else {}
     shared = _results_dir(job, tag)
+    shared_all = [shared]                    # also where results were before the per-product cache folders
+    if job.get('temp_per_product') and job.get('temp_dir'):
+        shared_all.append(os.path.join(os.path.dirname(os.path.normpath(job['temp_dir'])), '_results', tag))
+    shared_all.append(os.path.join(job['output_dir'], '_cache', '_results', tag))
+    shared_all = list(dict.fromkeys(os.path.normpath(p) for p in shared_all))
+    base_key = _unit_base_key(job, win, nf)
     root = str(job['output_dir'])
+
+    def wants(dtag):
+        return _det_entry(job.get('matchers'), dtag), _det_entry(job.get('detector_params'), dtag)
 
     def claim(channel, dtag):
         name = _unit_name(channel, dtag)
@@ -421,26 +465,29 @@ def install_queue(E, job: Dict, out_dir: str, tag: str, win: int, nf: Optional[i
         os.write(fd, str(shard).encode())
         os.close(fd)
 
+        want_m, want_p = wants(dtag)
         if job.get('resume'):
             try:
                 with open(os.path.join(units, name + '.json'), encoding='utf-8') as f:
                     saved = json.load(f)
-                if saved.get('key') == key and saved['record'].get('status') == 'ok':
+                if unit_matches(saved, key, base_key, want_m, want_p) and saved['record'].get('status') == 'ok':
+                    print(f'[Job] {dtag}: already done in this output folder (same settings): reused', flush=True)
                     return saved['record']
             except (OSError, ValueError, KeyError, AttributeError, TypeError):
                 pass
         if job.get('resume'):                # finished in another output folder on the same cache (other preset)
-            try:
-                with open(os.path.join(shared, name + '.json'), encoding='utf-8') as f:
-                    saved = json.load(f)
-                if (saved.get('key') == key and saved['record'].get('status') == 'ok'
-                        and os.path.normpath(saved.get('root') or '') != os.path.normpath(root)):
-                    got = _adopt_result(saved['record'], saved['root'], root)
-                    if got is not None:
-                        print(f"[Job] {dtag}: reused from {saved['root']} (same settings and cache)", flush=True)
-                        return got
-            except (OSError, ValueError, KeyError, AttributeError, TypeError):
-                pass
+            for sh in shared_all:
+                try:
+                    with open(os.path.join(sh, name + '.json'), encoding='utf-8') as f:
+                        saved = json.load(f)
+                    if (unit_matches(saved, key, base_key, want_m, want_p) and saved['record'].get('status') == 'ok'
+                            and os.path.normpath(saved.get('root') or '') != os.path.normpath(root)):
+                        got = _adopt_result(saved['record'], saved['root'], root)
+                        if got is not None:
+                            print(f"[Job] {dtag}: reused from {saved['root']} (same settings)", flush=True)
+                            return got
+                except (OSError, ValueError, KeyError, AttributeError, TypeError):
+                    pass
         rec = earlier.get((str(channel), str(dtag)))
         if rec is not None:
             err = str(rec.get('error') or '')
@@ -471,8 +518,10 @@ def install_queue(E, job: Dict, out_dir: str, tag: str, win: int, nf: Optional[i
                 os.makedirs(folder, exist_ok=True)
                 path = os.path.join(folder, _unit_name(channel, dtag) + '.json')
                 tmp = f'{path}.{os.getpid()}.tmp'
+                wm, wp = wants(dtag)
                 with open(tmp, 'w', encoding='utf-8') as f:
-                    json.dump({'key': key, 'gpu': shard, 'record': rec, **extra}, f, default=str)
+                    json.dump({'key': key, 'base_key': base_key, 'matchers': wm, 'params': wp, 'gpu': shard,
+                               'record': rec, **extra}, f, default=str)
                 os.replace(tmp, path)
             except OSError:
                 pass
@@ -1534,7 +1583,8 @@ _RESULT_NEUTRAL_KEYS = {'output_dir', 'temp_dir', 'resume', 'debug', 'rival_max_
                         'device', 'cloud_device',        # the same results on either GPU: resume across them
                         'save_match_images', 'weights_cache_dir', 'truth_csv', 'truth_radius_m',
                         'cross_top_n', 'cross_min_agree', 'cross_cell_km', 'cross_keep_per_cell',
-                        'cross_max_points', 'final_points', 'interior_filter', 'interior_edge_px', 'cross_cell_px'}
+                        'cross_max_points', 'final_points', 'interior_filter', 'interior_edge_px', 'cross_cell_px',
+                        'temp_per_product'}     # where the cache is, not what is in it
 # (the interior filter only leaves matches out when they are read: a finished
 # sweep point is reused and its matches read again through the filter)
 
