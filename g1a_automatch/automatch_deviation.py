@@ -495,6 +495,12 @@ def plot_time_accuracy(table, png: str, title: str = '', note: str = '', min_rea
             if r['rmse'] < best:
                 front.append(d)
                 best = r['rmse']
+        named = list(dict.fromkeys(front + list(ok.sort_values('rmse').index[:5])))
+        # linear time axis: up to a bit past most methods (and every named one); slower ones at the edge
+        xcap = max(1.3 * float(g['spw'].quantile(0.9)), 1.15 * float(g.loc[named, 'spw'].max()) if named else 0.0)
+        far = g[g['spw'] > xcap]
+        g = g.assign(spw_raw=g['spw'], spw=g['spw'].clip(upper=xcap))
+        ok = g[g['reach'] >= min_reach]
         low = g[g['reach'] < min_reach]
         ax.scatter(low['spw'], low['rmse'], s=34, facecolors='none', edgecolors=UNKNOWN, linewidths=1.2, zorder=2,
                    label=f'reaches < {100 * min_reach:.0f} % of the truth points')
@@ -505,25 +511,33 @@ def plot_time_accuracy(table, png: str, title: str = '', note: str = '', min_rea
         ax.plot(fr['spw'], fr['rmse'], color=INK, lw=1.4, zorder=4)
         ax.scatter(fr['spw'], fr['rmse'], s=64, color='#1c5cab', edgecolors=SURFACE, linewidths=1.0, zorder=5,
                    label='no other both faster and more accurate')
-        named = list(dict.fromkeys(front + list(ok.sort_values('rmse').index[:5])))
         named.sort(key=lambda d: g.loc[d, 'rmse'])
+        ly = None
+        for d, r in far.sort_values('rmse').iterrows():     # slower than the axis: an arrowhead at the edge, named
+            ax.scatter([xcap], [r['rmse']], marker='>', s=46, color='#86b6ef' if r['reach'] >= min_reach else UNKNOWN,
+                       zorder=6)
+            y = r['rmse'] if ly is None else max(r['rmse'], ly * 1.12)     # labels apart on the log axis
+            ly = y
+            ax.annotate(f"{d} {r['spw']:.1f} s", (xcap, y), xytext=(-8, 0), textcoords='offset points',
+                        ha='right', va='center', fontsize=7, color=MUTED, zorder=6)
         lines = []
         for k, d in enumerate(named, 1):
             r = g.loc[d]
             ax.annotate(str(k), (r['spw'], r['rmse']), xytext=(5, 4), textcoords='offset points', fontsize=8,
                         fontweight='bold', color=INK, zorder=6)
-            lines.append(f"{k:>2}  {d:<18.18} {r['rmse']:>6.0f} m {r['spw']:>6.2f} s"
+            lines.append(f"{k:>2}  {d:<18.18} {r['rmse']:>6.0f} m {r['spw_raw']:>6.2f} s"
                          + ('  *' if d in front else ''))
         ax.text(1.02, 1.0, 'numbered (* joined):\n' + '\n'.join(lines), transform=ax.transAxes, ha='left',
                 va='top', fontsize=7.5, family='monospace', color=INK)
-        ax.set_xscale('log')
+        ax.set_xlim(0, xcap * 1.04)
         ax.set_yscale('log')
         lo, hi = float(g['rmse'].min()), float(g['rmse'].max())
         ax.yaxis.set_major_locator(mt.FixedLocator([v for v in nice if lo / 1.5 <= v <= hi * 1.5] or nice))
         ax.yaxis.set_minor_locator(mt.NullLocator())
         ax.yaxis.set_major_formatter(mt.FuncFormatter(lambda v, _p: f'{v:g} m' if v < 1000 else f'{v / 1000:g} km'))
         ax.xaxis.set_major_formatter(mt.FuncFormatter(lambda v, _p: f'{v:g}'))
-        ax.set_xlabel('seconds per window (median over the jobs, log)', fontsize=9, color=MUTED)
+        ax.set_xlabel('seconds per window (median over the jobs)' + (f'; slower than {xcap:.1f} s: at the edge'
+                                                                         if len(far) else ''), fontsize=9, color=MUTED)
         ax.set_ylabel('error against truth (median over the jobs, log)', fontsize=9, color=MUTED)
         ax.grid(color='#e7e6e2', lw=0.8, zorder=0)
         ax.tick_params(colors=MUTED)
