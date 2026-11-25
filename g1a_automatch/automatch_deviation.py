@@ -558,6 +558,66 @@ def plot_time_accuracy(table, png: str, title: str = '', note: str = '', min_rea
     return png
 
 
+def plot_fast_top(table, png: str, max_spw: float = 1.0, top: int = 15, min_reach: float = 0.5,
+                  title: str = '', note: str = '') -> str:
+    """Per sensor, the methods under max_spw seconds per window (median over the
+    jobs), ranked by accuracy (median truth RMSE; those reaching at least
+    min_reach of the truth points): horizontal bars, the time and reach beside."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    t = table.dropna(subset=['s_per_window', 'truth_rmse_m'])
+    sensors = [s for s in ('MV', 'HS', 'HV', 'ML') if s in set(t['sensor'])]
+    sensors = [s for s in sensors if t[t['sensor'] == s].groupby('detector')['truth_rmse_m'].median().min() <= 10000.0]
+    panels = []
+    for s in sensors:
+        u = t[t['sensor'] == s]
+        n_jobs = u['job'].nunique()
+        g = u.groupby('detector').agg(rmse=('truth_rmse_m', 'median'), spw=('s_per_window', 'median'),
+                                      jobs=('job', 'nunique'), reached=('reached', 'sum'), total=('total', 'sum'))
+        g = g[g['jobs'] >= max(2, n_jobs // 3)]
+        g['reach'] = g['reached'] / g['total']
+        n_slow = int((g['spw'] >= max_spw).sum())
+        g = g[(g['spw'] < max_spw) & (g['reach'] >= min_reach)].sort_values('rmse').head(top)
+        panels.append((s, n_jobs, n_slow, g))
+    fig, axes = plt.subplots(len(panels), 1, figsize=(11, 1.4 + sum(0.3 * max(len(p[3]), 3) + 0.8 for p in panels)),
+                             gridspec_kw={'height_ratios': [max(len(p[3]), 3) for p in panels]}, squeeze=False)
+    fig.patch.set_facecolor(SURFACE)
+    for ax, (s, n_jobs, n_slow, g) in zip(axes[:, 0], panels):
+        y = range(len(g))
+        cols = [speed_color(v) for v in g['spw']]
+        ax.barh(list(y), g['rmse'], color=cols, height=0.62, zorder=2)
+        for i, (d, r) in enumerate(g.iterrows()):
+            ax.text(r['rmse'] * 1.01 + 2, i, f"{r['rmse']:.0f} m   {r['spw']:.2f} s/window   "
+                                            f"{100 * r['reach']:.0f} % reached   {int(r['jobs'])} jobs",
+                    va='center', fontsize=8, color=MUTED)
+        ax.set_yticks(list(y))
+        ax.set_yticklabels([f'{k + 1}  {d}' for k, d in enumerate(g.index)], fontsize=9.5, color=INK)
+        ax.invert_yaxis()
+        ax.set_xlim(0, float(g['rmse'].max()) * 1.9 if len(g) else 1)
+        ax.grid(axis='x', color='#e7e6e2', lw=0.8, zorder=0)
+        ax.tick_params(length=0, colors=MUTED)
+        for sp in ('top', 'right', 'bottom'):
+            ax.spines[sp].set_visible(False)
+        ax.set_xlabel('error against truth (median over the jobs, m)', fontsize=9, color=MUTED)
+        ax.set_title(f'{s}: the {len(g)} most accurate under {max_spw:g} s per window, {n_jobs} jobs '
+                     f'({n_slow} slower methods left out)', loc='left', fontsize=12, fontweight='bold', color=INK)
+    from matplotlib.patches import Patch
+    h = [Patch(color=c, label=lab) for lab, c in SPEED_CLASSES[1][:2]]
+    H = fig.get_figheight()
+    fig.legend(handles=h, loc='upper left', bbox_to_anchor=(0.01, 1 - 0.55 / H), ncol=2, frameon=False, fontsize=9,
+               title='colour: time per window', title_fontsize=8.5, alignment='left')
+    fig.text(0.01, 1 - 0.1 / H, title or f'Top methods by accuracy, only those under {max_spw:g} s per window',
+             ha='left', va='top', fontsize=14, fontweight='bold', color=INK)
+    fig.text(0.99, 0.004, (note + '   ' if note else '') + "Each method's best configuration per job; methods "
+             f'reaching at least {100 * min_reach:.0f} % of the truth points.', ha='right', va='bottom', fontsize=8,
+             color=MUTED)
+    fig.tight_layout(rect=(0, 0.02, 1, 1 - 1.25 / H), h_pad=2.0)
+    fig.savefig(png, dpi=150, facecolor=SURFACE)
+    plt.close(fig)
+    return png
+
+
 def plot(table, jobs, png: str, min_jobs: int = 2) -> str:
     import matplotlib
     matplotlib.use('Agg')
@@ -678,6 +738,7 @@ def main(argv=None) -> int:
     lines_png = plot_lines(table, os.path.join(out, 'TOP5_BY_JOB.png'))
     ta_png = plot_time_accuracy(table, os.path.join(out, 'TIME_VS_ACCURACY.png'),
                                 note=f"{jobs['job'].nunique()} job(s) with truth.")
+    plot_fast_top(table, os.path.join(out, 'TOP_UNDER_1S.png'), note=f"{jobs['job'].nunique()} job(s) with truth.")
     print(f"{jobs['job'].nunique()} job(s) with truth -> {top_png}, {lines_png}, {ta_png}")
     sel, since = recent_jobs(jobs, a.after_job)
     if sel:

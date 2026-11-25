@@ -25,8 +25,8 @@ PRESETS_FILE = os.path.join(HERE, 'automatch_presets.json')
 
 # What the presets rest on, shown in the run window. They are provisional:
 # updated here as the logs and rankings of finished jobs come in.
-BASIS = ('as of 2026-11-21: MV 23 truth jobs (up to 1104), HS 19, HV 12; ML uses the HS list (2 ML jobs, too '
-         'few and far off) and C3 the MV list (no benchmark yet)')
+BASIS = ('as of 2026-11-25: MV 38 truth jobs (up to 1121), HS 19, HV 12; only methods under 1 s per window; '
+         'ML uses the HS list and C3 the MV list')
 
 # For every sensor
 COMMON: Dict = {
@@ -50,13 +50,12 @@ COMMON: Dict = {
 # GUI, not sent to the job.
 INFO_KEYS = ('note', 'band_hint', 'top_n', 'agree')   # read by the window
 
-# Four tiers per sensor. Each sensor's detector list is ranked best first by
-# accuracy only: the mean per-job percentile of truth RMSE x (truth points /
-# reached)^2 over all its truth jobs (a detector's best variant per job).
-# Methods whose median pass takes more than 15 minutes (OmniGlue on MV) are
-# left out. A tier runs the first top_n: fastest the top 5, fast the top 10,
-# medium the top 20, slow all 30. Same RANSAC and sub-cells, so a tier reuses
-# the results of the tiers below it.
+# Four tiers per sensor. Each sensor's detector list holds only the methods
+# under 1 s per window (median over its truth jobs), ranked best first by
+# accuracy: the mean per-job percentile of truth RMSE x (truth points /
+# reached)^2 (a detector's best variant per job). A tier runs the first top_n:
+# fastest the top 5, fast the top 10, medium the top 20, slow all of them.
+# Same RANSAC and sub-cells, so a tier reuses the results of the tiers below it.
 MODES = {'fastest': {'top_n': 5, 'agree': 3},
          'fast': {'top_n': 10, 'agree': 3},
          'medium': {'top_n': 20, 'agree': 4},
@@ -126,45 +125,43 @@ def auto_next(share: Optional[float]) -> Tuple[Optional[str], str]:
 
 
 SENSORS: Dict[str, Dict] = {
-    'MV': {'detectors': ['imw-minima-roma', 'imw-d2net-nn', 'disk', 'imw-topicfm', 'imw-rdd-nn', 'imw-sfd2-nn',
-                   'imw-xoftr', 'dog', 'imw-gim-roma', 'imw-roma', 'imw-dkm', 'imw-darkfeat-nn',
-                   'imw-minima-loftr', 'imw-eloftr', 'imw-aliked-lg', 'imw-liftfeat-nn', 'imw-dad-roma', 'keynet',
-                   'imw-aspanformer', 'sift', 'imw-xfeat-lg', 'imw-rord-nn', 'imw-xfeat-dense', 'hessian', 'gftt',
-                   'loftr', 'imw-r2d2-nn', 'dedode', 'imw-lanet-nn', 'imw-sp-lg'],
+    'MV': {'detectors': ['imw-topicfm', 'imw-sfd2-nn', 'imw-xoftr', 'disk', 'imw-dkm', 'imw-eloftr', 'imw-liftfeat-nn',
+                   'imw-minima-loftr', 'imw-aliked-lg', 'dog', 'imw-darkfeat-nn', 'imw-xfeat-lg', 'keynet', 'sift',
+                   'loftr', 'imw-xfeat-dense', 'hessian', 'gftt', 'imw-sp-lg', 'imw-lanet-nn', 'dedode',
+                   'imw-ripe-nn', 'loftr-windoornew', 'imw-sp-nn', 'imw-alike-nn', 'loftr-windoor'],
            'window_sizes': [1024], 'band_hint': 'band3 (650 nm)',
            'cloud_method_MV': 'omnicloudmask', 'cloud_bands': ['band5', 'band4', 'band6'],
            'note': 'MX-VNIR: 1024 px windows (better than 2048 in every MV job); clouds by OmniCloudMask on bands '
                    '5, 4, 6. From jobs 1066-1069: disk, MINIMA-RoMa / -LoFTR and loftr were in the top 10 most '
                    'often; the fast list is the ones at 1-3 min per pass among the top 20.'},
-    'HV': {'detectors': ['imw-minima-roma', 'disk', 'dog', 'imw-darkfeat-nn', 'imw-ripe-nn', 'imw-rdd-nn', 'dedode',
-                   'imw-dkm', 'imw-sfd2-nn', 'imw-minima-loftr', 'imw-gim-roma', 'keynet', 'imw-topicfm',
-                   'imw-aspanformer', 'sift', 'gftt', 'imw-lanet-nn', 'hessian', 'imw-eloftr', 'imw-aliked-lg',
-                   'imw-d2net-nn', 'imw-xfeat-lg', 'loftr', 'imw-xoftr', 'imw-roma', 'imw-rord-nn', 'imw-r2d2-nn',
-                   'imw-liftfeat-nn', 'imw-omniglue', 'imw-alike-nn'],
+    'HV': {'detectors': ['disk', 'dog', 'imw-darkfeat-nn', 'imw-ripe-nn', 'imw-rdd-nn', 'dedode', 'imw-sfd2-nn',
+                   'imw-minima-loftr', 'keynet', 'imw-topicfm', 'imw-aspanformer', 'sift', 'gftt', 'imw-lanet-nn',
+                   'hessian', 'imw-eloftr', 'imw-aliked-lg', 'imw-d2net-nn', 'imw-xfeat-lg', 'loftr', 'imw-xoftr',
+                   'imw-rord-nn', 'imw-r2d2-nn', 'imw-liftfeat-nn', 'imw-alike-nn', 'imw-xfeat-dense',
+                   'loftr-windoor', 'loftr-windoornew', 'imw-sp-lg', 'imw-sp-nn'],
            'window_sizes': [512], 'band_hint': 'the band you benchmarked (e.g. band30)',
            'note': 'HyS-VNIR: 512 px windows; clouds by the VNIR tests.'},
     'HS': {'detectors': ['imw-minima-roma', 'imw-minima-loftr', 'imw-topicfm', 'disk', 'imw-gim-roma', 'imw-xoftr',
                    'dedode', 'imw-d2net-nn', 'dog', 'imw-ripe-nn', 'imw-sfd2-nn', 'imw-aspanformer', 'imw-eloftr',
-                   'imw-roma', 'imw-darkfeat-nn', 'imw-liftfeat-nn', 'sift', 'loftr', 'imw-rord-nn', 'keynet',
-                   'imw-lanet-nn', 'imw-aliked-lg', 'imw-rdd-nn', 'imw-xfeat-dense', 'hessian', 'gftt', 'imw-dkm',
-                   'imw-xfeat-lg', 'imw-r2d2-nn', 'imw-alike-nn'],
+                   'imw-darkfeat-nn', 'imw-liftfeat-nn', 'sift', 'loftr', 'imw-rord-nn', 'keynet', 'imw-lanet-nn',
+                   'imw-aliked-lg', 'imw-rdd-nn', 'imw-xfeat-dense', 'hessian', 'gftt', 'imw-dkm', 'imw-xfeat-lg',
+                   'imw-r2d2-nn', 'imw-alike-nn', 'loftr-windoor'],
            'window_sizes': [512], 'band_hint': 'near 1250, 1650 or 2200 nm (e.g. band28), not 1380 / 1900 nm',
            'note': 'HyS-SWIR: 512 px windows; clouds by the SWIR tests. RoMa / MINIMA-RoMa reached 16 of 16 truth '
                    'points.'},
-    'C3': {'detectors': ['imw-minima-roma', 'imw-d2net-nn', 'disk', 'imw-topicfm', 'imw-rdd-nn', 'imw-sfd2-nn',
-                   'imw-xoftr', 'dog', 'imw-gim-roma', 'imw-roma', 'imw-dkm', 'imw-darkfeat-nn',
-                   'imw-minima-loftr', 'imw-eloftr', 'imw-aliked-lg', 'imw-liftfeat-nn', 'imw-dad-roma', 'keynet',
-                   'imw-aspanformer', 'sift', 'imw-xfeat-lg', 'imw-rord-nn', 'imw-xfeat-dense', 'hessian', 'gftt',
-                   'loftr', 'imw-r2d2-nn', 'dedode', 'imw-lanet-nn', 'imw-sp-lg'],
+    'C3': {'detectors': ['imw-topicfm', 'imw-sfd2-nn', 'imw-xoftr', 'disk', 'imw-dkm', 'imw-eloftr', 'imw-liftfeat-nn',
+                   'imw-minima-loftr', 'imw-aliked-lg', 'dog', 'imw-darkfeat-nn', 'imw-xfeat-lg', 'keynet', 'sift',
+                   'loftr', 'imw-xfeat-dense', 'hessian', 'gftt', 'imw-sp-lg', 'imw-lanet-nn', 'dedode',
+                   'imw-ripe-nn', 'loftr-windoornew', 'imw-sp-nn', 'imw-alike-nn', 'loftr-windoor'],
            'window_sizes': [1024], 'band_hint': 'the MX band you benchmarked (PAN: band1)',
            'cloud_method_MV': 'omnicloudmask',
            'note': 'Cartosat-3 (MX / PAN): no benchmark yet; the detectors that did best on G1A MV as a start. '
                    'References: C1 over India, L8 elsewhere (the run window chooses by the scene centre).'},
     'ML': {'detectors': ['imw-minima-roma', 'imw-minima-loftr', 'imw-topicfm', 'disk', 'imw-gim-roma', 'imw-xoftr',
                    'dedode', 'imw-d2net-nn', 'dog', 'imw-ripe-nn', 'imw-sfd2-nn', 'imw-aspanformer', 'imw-eloftr',
-                   'imw-roma', 'imw-darkfeat-nn', 'imw-liftfeat-nn', 'sift', 'loftr', 'imw-rord-nn', 'keynet',
-                   'imw-lanet-nn', 'imw-aliked-lg', 'imw-rdd-nn', 'imw-xfeat-dense', 'hessian', 'gftt', 'imw-dkm',
-                   'imw-xfeat-lg', 'imw-r2d2-nn', 'imw-alike-nn'],
+                   'imw-darkfeat-nn', 'imw-liftfeat-nn', 'sift', 'loftr', 'imw-rord-nn', 'keynet', 'imw-lanet-nn',
+                   'imw-aliked-lg', 'imw-rdd-nn', 'imw-xfeat-dense', 'hessian', 'gftt', 'imw-dkm', 'imw-xfeat-lg',
+                   'imw-r2d2-nn', 'imw-alike-nn', 'loftr-windoor'],
            'window_sizes': [512], 'band_hint': 'not band1 (7.35 um) or band6 (13.25 um)',
            'note': 'MX-LWIR: no benchmark yet, the HS list as a start; gradient window preparation (thermal against '
                    'optical); clouds by the infrared tests.'},
@@ -175,14 +172,14 @@ SENSORS: Dict[str, Dict] = {
 # the best mean per-job percentile), so a run tries that one method per detector
 # instead of every matcher (disk ran smnn, lgm, ada, mnn, ... before).
 BEST_METHOD: Dict[str, Dict] = {
-    'MV': {'matchers': {'dedode': 'lgm', 'disk': 'smnn', 'dog': 'lgm', 'gftt': 'smnn', 'hessian': 'fginn', 'keynet': 'lgm', 'sift': 'snn'},
-           'detector_params': {'dedode': {'detector_weights': ['L-upright'], 'descriptor_weights': ['B-upright']}, 'disk': {'checkpoint': ['epipolar']}, 'dog': {'descriptor': ['hardnet']}}},
+    'MV': {'matchers': {'dedode': 'lgm', 'disk': 'smnn', 'dog': 'ada', 'gftt': 'smnn', 'hessian': 'ada', 'keynet': 'lgm', 'sift': 'fginn'},
+           'detector_params': {'dedode': {'detector_weights': ['L-upright'], 'descriptor_weights': ['B-upright']}, 'disk': {'checkpoint': ['epipolar']}, 'dog': {'descriptor': ['sosnet']}}},
     'HS': {'matchers': {'dedode': 'lgm', 'disk': 'smnn', 'dog': 'smnn', 'gftt': 'smnn', 'hessian': 'smnn', 'keynet': 'lgm', 'sift': 'fginn'},
            'detector_params': {'dedode': {'detector_weights': ['L-C4-v2'], 'descriptor_weights': ['B-upright']}, 'disk': {'checkpoint': ['epipolar']}, 'dog': {'descriptor': ['hardnet']}}},
     'HV': {'matchers': {'dedode': 'lgm', 'disk': 'ada', 'dog': 'mnn', 'gftt': 'mnn', 'hessian': 'smnn', 'keynet': 'ada', 'sift': 'smnn'},
            'detector_params': {'dedode': {'detector_weights': ['L-C4'], 'descriptor_weights': ['B-upright']}, 'disk': {'checkpoint': ['epipolar']}, 'dog': {'descriptor': ['hardnet8']}}},
-    'C3': {'matchers': {'dedode': 'lgm', 'disk': 'smnn', 'dog': 'lgm', 'gftt': 'smnn', 'hessian': 'fginn', 'keynet': 'lgm', 'sift': 'snn'},
-           'detector_params': {'dedode': {'detector_weights': ['L-upright'], 'descriptor_weights': ['B-upright']}, 'disk': {'checkpoint': ['epipolar']}, 'dog': {'descriptor': ['hardnet']}}},
+    'C3': {'matchers': {'dedode': 'lgm', 'disk': 'smnn', 'dog': 'ada', 'gftt': 'smnn', 'hessian': 'ada', 'keynet': 'lgm', 'sift': 'fginn'},
+           'detector_params': {'dedode': {'detector_weights': ['L-upright'], 'descriptor_weights': ['B-upright']}, 'disk': {'checkpoint': ['epipolar']}, 'dog': {'descriptor': ['sosnet']}}},
     'ML': {'matchers': {'dedode': 'lgm', 'disk': 'smnn', 'dog': 'smnn', 'gftt': 'smnn', 'hessian': 'smnn', 'keynet': 'lgm', 'sift': 'fginn'},
            'detector_params': {'dedode': {'detector_weights': ['L-C4-v2'], 'descriptor_weights': ['B-upright']}, 'disk': {'checkpoint': ['epipolar']}, 'dog': {'descriptor': ['hardnet']}}},
 }
@@ -190,7 +187,7 @@ BEST_METHOD: Dict[str, Dict] = {
 
 # The ranking the built-in lists come from; a presets file written for an
 # earlier one keeps its own settings but not its detector lists.
-PRESETS_VERSION = '2026-11-23'
+PRESETS_VERSION = '2026-11-25'
 RANKED_KEYS = ('detectors',)
 GONE_KEYS = ('fast_detectors', 'slow_detectors')       # no longer used
 LOAD_NOTE = ''

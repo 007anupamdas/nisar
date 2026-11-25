@@ -105,11 +105,11 @@ the window for every setting, sweeps and the benchmark.
 | Band | yours (suggested band3) | yours | yours (near 1250 / 1650 / 2200 nm) | yours (not band1 / band6) |
 | Clouds | OmniCloudMask, bands 5, 4, 6 | VNIR tests | SWIR tests | infrared tests |
 
-Four tiers per sensor (**Preset**), all prefixes of one list ranked by
-accuracy only (the mean per-job percentile of truth RMSE × (truth points /
-reached)², over MV 23, HS 19, HV 12 truth jobs up to 1104); methods whose
-median pass takes more than 15 minutes (OmniGlue on MV) are left out. ML uses
-the HS list, C3 the MV list. *fastest* — top 5,
+Four tiers per sensor (**Preset**), all prefixes of one list per sensor: only
+the methods under 1 s per window (median over the sensor's truth jobs), ranked
+by accuracy (the mean per-job percentile of truth RMSE × (truth points /
+reached)², over MV 38, HS 19, HV 12 truth jobs up to 1121). ML uses the HS
+list, C3 the MV list. *fastest* — top 5,
 3 agreeing; *fast* — top 10, 3 agreeing; *medium* — top 20, 4 agreeing;
 *slow* — all 30, 4 agreeing. The same RANSAC and sub-cells, so a tier reuses
 what the tiers below it ran. The earlier names still work: *accurate* = fast,
@@ -117,9 +117,9 @@ what the tiers below it ran. The earlier names still work: *accurate* = fast,
 
 | Tier | MV | HS | HV |
 |---|---|---|---|
-| top 5 | imw-minima-roma, imw-d2net-nn, disk, imw-topicfm, imw-rdd-nn | imw-minima-roma, imw-minima-loftr, imw-topicfm, disk, imw-gim-roma | imw-minima-roma, disk, dog, imw-darkfeat-nn, imw-ripe-nn |
-| 6-10 | imw-sfd2-nn, imw-xoftr, dog, imw-gim-roma, imw-roma | imw-xoftr, dedode, imw-d2net-nn, dog, imw-ripe-nn | imw-rdd-nn, dedode, imw-dkm, imw-sfd2-nn, imw-minima-loftr |
-| 11-20 | imw-dkm, imw-darkfeat-nn, imw-minima-loftr, imw-eloftr, imw-aliked-lg, imw-liftfeat-nn, imw-dad-roma, keynet, imw-aspanformer, sift | imw-sfd2-nn, imw-aspanformer, imw-eloftr, imw-roma, imw-darkfeat-nn, imw-liftfeat-nn, sift, loftr, imw-rord-nn, keynet | imw-gim-roma, keynet, imw-topicfm, imw-aspanformer, sift, gftt, imw-lanet-nn, hessian, imw-eloftr, imw-aliked-lg |
+| top 5 | imw-topicfm, imw-sfd2-nn, imw-xoftr, disk, imw-dkm | imw-minima-roma, imw-minima-loftr, imw-topicfm, disk, imw-gim-roma | disk, dog, imw-darkfeat-nn, imw-ripe-nn, imw-rdd-nn |
+| 6-10 | imw-eloftr, imw-liftfeat-nn, imw-minima-loftr, imw-aliked-lg, dog | imw-xoftr, dedode, imw-d2net-nn, dog, imw-ripe-nn | dedode, imw-sfd2-nn, imw-minima-loftr, keynet, imw-topicfm |
+| 11-20 | imw-darkfeat-nn, imw-xfeat-lg, keynet, sift, loftr, imw-xfeat-dense, hessian, gftt, imw-sp-lg, imw-lanet-nn | imw-sfd2-nn, imw-aspanformer, imw-eloftr, imw-darkfeat-nn, imw-liftfeat-nn, sift, loftr, imw-rord-nn, keynet, imw-lanet-nn | imw-aspanformer, sift, gftt, imw-lanet-nn, hessian, imw-eloftr, imw-aliked-lg, imw-d2net-nn, imw-xfeat-lg, loftr |
 
 **One method per detector**: a preset runs each detector with only its best
 matcher and variant for the sensor (`BEST_METHOD` in `automatch_presets.py`,

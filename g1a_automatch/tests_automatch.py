@@ -1604,7 +1604,8 @@ def test_presets(tmp):
            jf['ransac_methods'] == js['ransac_methods'], jf['subcell_px'] == js['subcell_px'],
            (jf['cross_min_agree'], ja['cross_min_agree'], jm['cross_min_agree']), jo['detectors'] == jm['detectors'],
            list(P.MODES)),
-          (5, 10, 20, 30, True, True, True, True, (3, 3, 4), True, ['fastest', 'fast', 'medium', 'slow']))
+          (5, 10, 20, min(30, len(P.SENSORS['MV']['detectors'])), True, True, True, True, (3, 3, 4), True,
+           ['fastest', 'fast', 'medium', 'slow']))
     import pandas as _pd
     cs = os.path.join(tmp, 'auto_cs')
     os.makedirs(cs, exist_ok=True)
@@ -1846,7 +1847,7 @@ def test_gui_run(tmp):
     w._wq = w._wq[:nq]
     w._queue_show()
     w.set_fields(f0)
-    check('run window: the fastest tier shows its list; fast sets top 10 / 3', ('fastest' in fast_txt and 'imw-minima-roma'
+    check('run window: the fastest tier shows its list; fast sets top 10 / 3', ('fastest' in fast_txt and 'disk'
           in fast_txt, w.top_n.value(), w.agree.value()), (True, 10, 3))
     w.top_n.setValue(2)
     w.agree.setValue(2)
