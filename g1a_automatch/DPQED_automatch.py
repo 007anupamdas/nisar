@@ -129,9 +129,13 @@ def job_summary(out_dir: str, minutes=None) -> str:
         st = pd.read_csv(os.path.join(out_dir, 'REPORT', 'REPORT_STATS.csv'))
         man = st[st['file'].astype(str).str.startswith('MANUAL')]
         for r in st[st['file'].astype(str).str.startswith('RIVAL_FINAL_')].to_dict('records'):
-            lines.append(f"{r['file']}: mean dE {float(r.get('mean_dx_m') or 0) / 1000:.3f} km, dN "
-                         f"{float(r.get('mean_dy_m') or 0) / 1000:.3f} km, CE90 {float(r.get('ce90_m') or 0) / 1000:.3f} km"
-                         + (f"  (manual CE90 {float(man['ce90_m'].iloc[0]) / 1000:.3f} km)" if len(man) else ''))
+            m = float(r.get('ce90_m') or 0) < 1000.0          # metres when the error is metres
+
+            def ln(v, m=m):
+                return f'{float(v or 0):.0f} m' if m else f'{float(v or 0) / 1000:.3f} km'
+            lines.append(f"{r['file']}: mean dE {ln(r.get('mean_dx_m'))}, dN {ln(r.get('mean_dy_m'))}, "
+                         f"CE90 {ln(r.get('ce90_m'))}"
+                         + (f"  (manual CE90 {ln(man['ce90_m'].iloc[0])})" if len(man) else ''))
     except Exception:
         pass
     auto = os.path.join(os.path.dirname(os.path.normpath(out_dir)), 'AUTO_PRESET.txt')

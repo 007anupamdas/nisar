@@ -235,24 +235,36 @@ def _scene_background(raster: str, crs: str, prod_ext=None) -> Dict:
 BRIGHT = ((0, 200, 255), (0, 220, 120), (255, 230, 0), (255, 140, 0), (255, 40, 40))
 
 
-def _ne(st: Dict, ky: str, kx: str) -> str:
-    return f"{float(st.get(ky) or 0) / 1000.0:.3f} km N / {float(st.get(kx) or 0) / 1000.0:.3f} km E"
+def error_unit(errors_m) -> str:
+    """'m' when the errors are metres (90 % of them under 1 km), else 'km'."""
+    import numpy as np
+    e = np.asarray([v for v in errors_m if v == v], float)
+    return 'm' if len(e) and float(np.percentile(np.abs(e), 90)) < 1000.0 else 'km'
 
 
-def vectors_title(title: str, st: Optional[Dict]) -> str:
-    """'<title>' over 'RMSE n km N / e km E' (DPQED_rival.vectors_title)."""
+def _len(v, unit: str = 'km') -> str:
+    v = float(v or 0)
+    return f'{v:.0f} m' if unit == 'm' else f'{v / 1000.0:.3f} km'
+
+
+def _ne(st: Dict, ky: str, kx: str, unit: str = 'km') -> str:
+    return f"{_len(st.get(ky), unit)} N / {_len(st.get(kx), unit)} E"
+
+
+def vectors_title(title: str, st: Optional[Dict], unit: str = 'km') -> str:
+    """'<title>' over 'RMSE n km N / e km E' (DPQED_rival.vectors_title); in metres when unit is 'm'."""
     if not (st and st.get('n')):
         return title
-    rm = f"RMSE {_ne(st, 'rmse_y_m', 'rmse_x_m')}"
+    rm = f"RMSE {_ne(st, 'rmse_y_m', 'rmse_x_m', unit)}"
     return f'{title}\n{rm}' if title else rm
 
 
-def vectors_footer(st: Optional[Dict]) -> str:
-    """'Mean ...   |   Std ...   |   CE90 c km' (DPQED_rival.vectors_footer)."""
+def vectors_footer(st: Optional[Dict], unit: str = 'km') -> str:
+    """'Mean ...   |   Std ...   |   CE90 c km' (DPQED_rival.vectors_footer); in metres when unit is 'm'."""
     if not (st and st.get('n')):
         return ''
-    return (f"n {st['n']}   |   Mean {_ne(st, 'mean_dy_m', 'mean_dx_m')}   |   Std {_ne(st, 'std_dy_m', 'std_dx_m')}"
-            f"   |   CE90 {float(st.get('ce90_m') or 0) / 1000.0:.3f} km"
+    return (f"n {st['n']}   |   Mean {_ne(st, 'mean_dy_m', 'mean_dx_m', unit)}   |   "
+            f"Std {_ne(st, 'std_dy_m', 'std_dx_m', unit)}   |   CE90 {_len(st.get('ce90_m'), unit)}"
             + ('' if st.get('ce90_circular', True) else ' (axes unequal)'))
 
 
@@ -314,18 +326,20 @@ def plot_vectors(points: List[Dict], png: str, title: str = '', st: Optional[Dic
     dmax = max(float(d.max()) if len(d) else 0.0,
                float(np.hypot(tr['dE'], tr['dN']).max()) if tr is not None and len(tr) else 0.0, 1.0)
     scale = (dmax / 1000.0) / (0.06 * span)           # the longest arrow: 6 % of the scene's long side
+    unit = error_unit(list(d) or (list(np.hypot(tr['dE'], tr['dN'])) if tr is not None else []))
+    uf = 1.0 if unit == 'm' else 1000.0                # errors shown in metres or km (positions stay km)
     if len(x):
         from matplotlib.colors import LinearSegmentedColormap
         bright = LinearSegmentedColormap.from_list('rival_bright', [tuple(c / 255.0 for c in v) for v in BRIGHT])
-        q = ax.quiver(x, y, -dx / 1000.0, -dy / 1000.0, d / 1000.0, angles='xy', scale_units='xy', scale=scale,
+        q = ax.quiver(x, y, -dx / 1000.0, -dy / 1000.0, d / uf, angles='xy', scale_units='xy', scale=scale,
                       units='inches', width=0.035, cmap=bright, zorder=3)
         q.set_clip_on(False)                 # an arrow at the scene's edge may run past the frame
         ax.scatter(x, y, s=14, c='white', edgecolors='0.35', linewidths=0.6, zorder=4)
         cb = fig.colorbar(q, cax=cax, orientation='horizontal' if wide else 'vertical')
         cb.ax.tick_params(labelsize=8)
-        cb.ax.set_title('Error (km)', fontsize=9, loc='left' if wide else 'center')
+        cb.ax.set_title(f'Error ({unit})', fontsize=9, loc='left' if wide else 'center')
         ref = float(10 ** np.floor(np.log10(dmax)))
-        ax.quiverkey(q, key_xy[0], key_xy[1], ref / 1000.0, f'Arrow: {ref / 1000.0:g} km', labelpos='E',
+        ax.quiverkey(q, key_xy[0], key_xy[1], ref / 1000.0, f'Arrow: {ref / uf:g} {unit}', labelpos='E',
                      coordinates='figure', color='k')
     else:
         cax.set_visible(False)
@@ -378,12 +392,12 @@ def plot_vectors(points: List[Dict], png: str, title: str = '', st: Optional[Dic
             pass
     ax.grid(True, alpha=0.25)
     name = os.path.splitext(os.path.basename(png))[0].replace('_vectors', '')
-    ax.set_title(vectors_title(ctx.get('title') or title or name, st), fontsize=14, fontweight='bold', pad=4)
+    ax.set_title(vectors_title(ctx.get('title') or title or name, st, unit), fontsize=14, fontweight='bold', pad=4)
     if st:
-        txt = vectors_footer(st)
+        txt = vectors_footer(st, unit)
         man = ctx.get('manual')
         if man:
-            txt += f"\nmanual points: {vectors_footer(man)}   |   RMSE {_ne(man, 'rmse_y_m', 'rmse_x_m')}"
+            txt += f"\nmanual points: {vectors_footer(man, unit)}   |   RMSE {_ne(man, 'rmse_y_m', 'rmse_x_m', unit)}"
         if not wide:
             txt = txt.replace('   |   ', '\n')
         fig.text(*stat_xy, txt, ha=stat_ha, va=stat_va, fontsize=11)
