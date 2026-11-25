@@ -2366,7 +2366,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
                      ('Stop', self.stop), ('Open output', self.open_output), ('Pack for server…', self.pack_dialog))
         analysis = (('Benchmark & cross-check…', self.bench_dialog), ('Finish a job…', self.finish_dialog),
                     ('Report…', self.report_dialog), ('Filter points…', self.filter_dialog),
-                    ('Targeting…', self.target_dialog),
+                    ('Targeting…', self.target_dialog), ('Train matchers…', self.train_tool),
                     ('Cloud mask test…', self.cloud_dialog), ('Cloud sweep…', self.cloud_sweep_dialog))
         menu = self.menuBar().addMenu('Tools')
         for row_items, title in ((job_tools, ''), (analysis, 'Analysis:')):
@@ -3753,6 +3753,36 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
     def _start_simple(self, args, kind):
         self.log.appendPlainText('--- ' + ' '.join(args))
         self._start(args, kind)
+
+    def train_tool_path(self) -> str:
+        """gcp_train's window (gcp_train_gui.py): the one chosen before, else beside
+        this folder (../gcp_train), else ''."""
+        for p in (self.settings.value('gcp_train_gui', '') or '',
+                  os.path.join(os.path.dirname(HERE), 'gcp_train', 'gcp_train_gui.py'),
+                  os.path.join(HERE, 'gcp_train', 'gcp_train_gui.py')):
+            if p and os.path.isfile(p):
+                return p
+        return ''
+
+    def train_tool(self, *_, start=True):
+        """Open gcp_train's window (fine-tune LightGlue on the consistent points) as
+        its own program: nothing of it is imported here. start=False: the
+        command only (tests)."""
+        path = self.train_tool_path()
+        if not path:
+            path, _ = QtWidgets.QFileDialog.getOpenFileName(
+                self, 'Where is gcp_train_gui.py (the gcp_train folder of the repository)?', '',
+                'gcp_train_gui.py (gcp_train_gui.py)')
+            if not path:
+                return None
+            self.settings.setValue('gcp_train_gui', path)
+        cmd = [sys.executable, path]
+        if start:
+            ok = QtCore.QProcess.startDetached(cmd[0], cmd[1:], os.path.dirname(path))
+            ok = ok[0] if isinstance(ok, tuple) else ok
+            self.lbl_status.setText('gcp_train window opened' if ok else f'could not start {path}')
+            self.log.appendPlainText(f'--- gcp_train: {path}' + ('' if ok else ' (did not start)'))
+        return cmd
 
     def target_dialog(self, *_, run=True):
         """Targeting accuracy of a product (automatch_target); run=False returns the dialog unshown (tests)."""

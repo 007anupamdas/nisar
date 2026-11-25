@@ -2395,6 +2395,10 @@ def test_gui_dialog():
             w._pack_next()                        # queue empty: done
         finally:
             w._start_pack_item = orig_item
+        tcmd = w.train_tool(start=False)
+        check('gui: Train matchers opens gcp_train\'s window as its own program (found beside g1a_automatch)',
+              (bool(tcmd) and tcmd[-1].replace('\\', '/').endswith('gcp_train/gcp_train_gui.py'),
+               any(b.text() == 'Train matchers…' for b in w.findChildren(G.QtWidgets.QPushButton))), (True, True))
         check('gui pack queue: packs queued with their settings, run one after another, the queue kept',
               ([d.replace('\\', '/').rsplit('/', 1)[-1] for d in started], w._pack_queue, w._pack_queue_on,
                json.loads(w.settings.value('pack_queue'))),
