@@ -1808,7 +1808,7 @@ def test_gui_cloud():
         tools = [a.text().replace('&&', '&') for a in w.menuBar().actions()[0].menu().actions()]
         check('gui: the analysis tools in their own row and in the Tools menu; the version in the title',
               (w.btn_cloud_sweep.parentWidget() is not None, tools, G.AUTOMATCH_VERSION in w.windowTitle()),
-              (True, ['Benchmark & cross-check…', 'Finish a job…', 'Report…', 'Filter points…', 'Targeting…', 'Cloud mask test…',
+              (True, ['Benchmark & cross-check…', 'Finish a job…', 'Report…', 'Filter points…', 'Targeting…', 'Train matchers…', 'Cloud mask test…',
                       'Cloud sweep…'], True))
         w.in_path.setText(img)
         w.cloud_conf.setValue(0.8)
