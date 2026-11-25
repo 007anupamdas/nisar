@@ -1675,13 +1675,28 @@ def scene_title(input_path):
     return (f"{got['sat']}: " if got["sat"] else "") + body
 
 
+def error_unit(max_error_m):
+    """('m', 1.0) when every error is under a kilometre, else ('km', 1000.0):
+    a plot of 40 m errors reads in metres, one of 2.7 km errors in km."""
+    try:
+        return ("m", 1.0) if float(max_error_m or 0.0) < 1000.0 else ("km", 1000.0)
+    except (TypeError, ValueError):
+        return ("km", 1000.0)
+
+
+def _fmt_err(v_m, unit):
+    u, k = unit
+    return f"{float(v_m or 0) / k:.{1 if u == 'm' else 3}f} {u}"
+
+
 def vectors_title(title, st):
     """'<scene>' over 'RMSE n km N / e km E | Mean ... | Std ...'."""
     if not (st and st.get("n")):
         return title
+    unit = error_unit(st.get("max_r"))
+
     def ne(ky, kx):
-        return (f"{st.get(ky, 0) / 1000.0:.3f} km N / "
-                f"{st.get(kx, 0) / 1000.0:.3f} km E")
+        return f"{_fmt_err(st.get(ky), unit)} N / {_fmt_err(st.get(kx), unit)} E"
     rm = f"RMSE {ne('rmse_y', 'rmse_x')}"
     return f"{title}\n{rm}" if title else rm      # RMSE on its own line, below
 
@@ -1691,11 +1706,12 @@ def vectors_footer(st):
     if not (st and st.get("n")):
         return ""
 
+    unit = error_unit(st.get("max_r"))
+
     def ne(ky, kx):
-        return (f"{st.get(ky, 0) / 1000.0:.3f} km N / "
-                f"{st.get(kx, 0) / 1000.0:.3f} km E")
+        return f"{_fmt_err(st.get(ky), unit)} N / {_fmt_err(st.get(kx), unit)} E"
     return (f"Mean {ne('mean_y', 'mean_x')}   |   Std {ne('std_y', 'std_x')}"
-            f"   |   CE90 {st.get('ce90', 0) / 1000.0:.3f} km"
+            f"   |   CE90 {_fmt_err(st.get('ce90'), unit)}"
             + ("" if st.get("circular", True) else " (axes unequal)"))
 
 
@@ -1771,16 +1787,17 @@ def plot_look_vectors(rows, png, title="", st=None, extent=None, background=None
         from matplotlib.colors import LinearSegmentedColormap
         bright = LinearSegmentedColormap.from_list(
             "rival_bright", [tuple(c / 255.0 for c in v) for v in VIRIDIS])
-        q = ax.quiver(x, y, -dx / 1000.0, -dy / 1000.0, d / 1000.0, angles="xy",
+        un, uk = error_unit(float(d.max()) if len(d) else 0.0)
+        q = ax.quiver(x, y, -dx / 1000.0, -dy / 1000.0, d / uk, angles="xy",
                       scale_units="xy", scale=scale, units="inches", width=0.035,
                       cmap=bright, zorder=3)
         q.set_clip_on(False)        # an arrow at the scene's edge may run past the frame
         ax.scatter(x, y, s=14, c="white", edgecolors="0.35", linewidths=0.6, zorder=4)
         cb = fig.colorbar(q, cax=cax, orientation="horizontal" if wide else "vertical")
         cb.ax.tick_params(labelsize=8)
-        cb.ax.set_title("Error (km)", fontsize=9, loc="left" if wide else "center")
+        cb.ax.set_title(f"Error ({un})", fontsize=9, loc="left" if wide else "center")
         ref = float(10 ** np.floor(np.log10(dmax)))
-        ax.quiverkey(q, key_xy[0], key_xy[1], ref / 1000.0, f"Arrow: {ref / 1000.0:g} km",
+        ax.quiverkey(q, key_xy[0], key_xy[1], ref / 1000.0, f"Arrow: {ref / uk:g} {un}",
                      labelpos="E", coordinates="figure", color="k")
     else:
         cax.set_visible(False)
@@ -2005,18 +2022,19 @@ def plot_look_vectors_qt(rows, png, title="", st=None, extent=None, background=N
     p.drawRect(QRectF(cx0, cy, cw, 12))
     if dmax - dmin < 1e-6:
         dmin = max(dmax - 1.0, 0.0)
-    for v in _nice_ticks(dmin / 1000.0, dmax / 1000.0, 6):
-        xx = cx0 + (v * 1000 - dmin) / max(dmax - dmin, 1e-9) * cw
+    un, uk = error_unit(max(d) if d else 0.0)
+    for v in _nice_ticks(dmin / uk, dmax / uk, 6):
+        xx = cx0 + (v * uk - dmin) / max(dmax - dmin, 1e-9) * cw
         p.drawLine(QPointF(xx, cy + 12), QPointF(xx, cy + 17))
         p.drawText(QRectF(xx - 50, cy + 17, 100, 22), Qt.AlignHCenter, f"{v:g}")
     p.drawText(QRectF(cx0 - 260, cy - 5, 250, 22), Qt.AlignRight | Qt.AlignVCenter,
-               "Error (km)")
+               f"Error ({un})")
     ref = float(10 ** math.floor(math.log10(dmax)))
     ka = QPointF(left + 0.72 * mw, cy + 6)
     arrow(ka, -ref, 0.0, QColor(0, 0, 0), 3.0)      # points right, ref m long
     p.setPen(QColor(0, 0, 0))
     p.drawText(QRectF(ka.x() + ref * k + 10, cy - 5, 260, 22), Qt.AlignLeft | Qt.AlignVCenter,
-               f"Arrow: {ref / 1000.0:g} km")
+               f"Arrow: {ref / uk:g} {un}")
     # title and statistics
     name = os.path.splitext(os.path.basename(png))[0].replace("_vectors", "")
     tf = QFont("Sans", 20)

@@ -827,6 +827,13 @@ check("a COG names the scene it came from", H["cog_source_of"](_cog), "/srv/P/x.
 check("anything else is its own source", H["cog_source_of"]("/a/b.tif"), "/a/b.tif")
 check("latitude ticks every whole degree", H["degree_ticks"](25.53, 28.35), [26.0, 27.0, 28.0])
 check("latitude ticks on a 1-degree scene still exist", len(H["degree_ticks"](16.2, 16.9)) >= 2, True)
+_st_m = H["error_summary"]([(30.0, -40.0), (10.0, 20.0)])
+check("errors under 1 km: title in metres", H["vectors_title"]("T", _st_m),
+      "T\nRMSE 31.6 m N / 22.4 m E")
+check("errors under 1 km: footer in metres", H["vectors_footer"](_st_m).startswith(
+      "Mean -10.0 m N / 20.0 m E"), True)
+_st_k = H["error_summary"]([(2500.0, 600.0), (2000.0, 500.0)])
+check("errors over 1 km: km", H["vectors_title"]("", _st_k), "RMSE 0.552 km N / 2.264 km E")
 check("no metadata, no title", H["scene_title"](os.path.join(_tf.mkdtemp(), "a.tif")), "")
 try:
     import matplotlib  # noqa: F401
