@@ -1715,6 +1715,31 @@ def test_gui_run(tmp):
           (nc['temp_dir'].replace('\\', '/'), _J.normalize(nc)['temp_dir'] == nc['temp_dir'],
            jd['temp_dir'] == os.path.join(w.output.text(), '_cache'), jd.get('temp_per_product', False)),
           ('/fast/cache_a/q_G1A_MV_a', True, True, False))
+    # a queued run that cannot start (no band named) is skipped and logged, never a box waiting for a click
+    shown = []
+    orig_warn = G.QtWidgets.QMessageBox.warning
+    G.QtWidgets.QMessageBox.warning = staticmethod(lambda *a, **k: shown.append(a[-1]))
+    try:
+        fb = dict(w.fields(), bands='', crispest=False, truth='', output='/q/out_noband')
+        w.set_fields(fb)
+        w.queue_what.setCurrentText('Run')
+        n_before = len(w._wq)
+        w.queue_add()                                # refused when added
+        refused = (len(w._wq) == n_before, bool(shown) and 'band' in shown[-1])
+        saved_q, w._wq = w._wq, [{'what': 'Run', 'fields': fb}, {'what': 'Run auto', 'fields': fb}]
+        shown.clear()
+        w.queue_start()
+        for _ in range(20):
+            app.processEvents()
+        logtxt = w.log.toPlainText()
+        w._wq = saved_q
+        w._queue_show()
+    finally:
+        G.QtWidgets.QMessageBox.warning = orig_warn
+    check('run window queue: a run without a band is refused when added; one already queued is skipped and '
+          'logged (no box waiting for a click) and the queue goes on to the end',
+          (refused, shown, 'queue: not started' in logtxt, 'all runs done; 2 did not start' in logtxt, w._q_running),
+          ((True, True), [], True, True, False))
     w.queue_edit(nq + 1)                             # edit /q/out_a in place: band 3 -> 5, auto -> Run
     w.bands.setText('5')
     w.queue_what.setCurrentText('Run all 4 tiers')

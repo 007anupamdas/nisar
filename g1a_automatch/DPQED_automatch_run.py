@@ -436,7 +436,7 @@ class RunWindow(QtWidgets.QMainWindow):
         try:
             step = self.auto_job(0)
         except ValueError as e:
-            QtWidgets.QMessageBox.warning(self, 'Automatch', str(e))
+            self.warn(str(e))
             return
         self._pending, self._all_done = [], []
         self._auto = 0
@@ -452,7 +452,7 @@ class RunWindow(QtWidgets.QMainWindow):
         try:
             jobs = [(m, self.job(m, m.replace(' ', '_'))) for m in P.MODES]
         except ValueError as e:
-            QtWidgets.QMessageBox.warning(self, 'Automatch', str(e))
+            self.warn(str(e))
             return
         self._pending = jobs[1:]
         self._all_done = []
@@ -468,7 +468,7 @@ class RunWindow(QtWidgets.QMainWindow):
         try:
             mode, job = preset if preset is not None else (self.mode.currentText(), self.job())
         except ValueError as e:
-            QtWidgets.QMessageBox.warning(self, 'Automatch', str(e))
+            self.warn(str(e))
             return
         self._current = (mode, job['output_dir'])
         os.makedirs(job['output_dir'], exist_ok=True)
@@ -737,6 +737,28 @@ class RunWindow(QtWidgets.QMainWindow):
                                     f"  {f.get('mode', '')}  -> {f.get('output', '')}")
         self.settings.setValue('run_queue', json.dumps(self._wq))
 
+    def warn(self, msg: str):
+        """A run that cannot start: while the queue runs, logged (the queue goes on
+        unattended); otherwise a message."""
+        if getattr(self, '_q_running', False):
+            self.log.appendPlainText(f'--- queue: not started: {msg}')
+        else:
+            QtWidgets.QMessageBox.warning(self, 'Automatch', msg)
+
+    def queue_problem(self, what: str) -> str:
+        """Why the window's settings cannot run as queued ('' when they can): the
+        same check a run makes when it starts (band, folders, sensor)."""
+        try:
+            if what == 'Run auto':
+                self.auto_job(0)
+            elif what == 'Run all 4 tiers':
+                self.job('fastest', 'fastest')
+            else:
+                self.job()
+        except ValueError as e:
+            return str(e)
+        return ''
+
     def _queue_entry(self, skip=None):
         """The window's settings as a queue entry, or None (a message said why)."""
         f = self.fields()
@@ -748,6 +770,10 @@ class RunWindow(QtWidgets.QMainWindow):
         if same:
             QtWidgets.QMessageBox.warning(self, 'Queue', f"{f['output']} is already the output of a queued run: "
                                                          'choose another output folder')
+            return None
+        why = self.queue_problem(self.queue_what.currentText())
+        if why:                                  # caught now, not when the queue reaches it unattended
+            QtWidgets.QMessageBox.warning(self, 'Queue', f'This run could not start: {why}')
             return None
         return {'what': self.queue_what.currentText(), 'fields': f}
 
@@ -826,7 +852,11 @@ class RunWindow(QtWidgets.QMainWindow):
             return
         if not self._wq:
             self._q_running = False
-            self.log.appendPlainText('--- queue: all runs done')
+            skipped = getattr(self, '_q_skipped', [])
+            self.log.appendPlainText('--- queue: all runs done'
+                                     + (f'; {len(skipped)} did not start: ' + ', '.join(os.path.basename(x) for x in skipped)
+                                        if skipped else ''))
+            self._q_skipped = []
             return
         e = self._wq.pop(0)
         if e is self._q_edit:                 # it starts now: the edit ends (with the settings saved)
@@ -837,7 +867,8 @@ class RunWindow(QtWidgets.QMainWindow):
                                  f"({len(self._wq)} more queued)")
         {'Run auto': self.run_auto, 'Run all 4 tiers': self.run_all}.get(e['what'], lambda: self.start('run'))()
         if self.proc is None:                 # it did not start (a setting missing): on to the next
-            self.log.appendPlainText('--- queue: that run did not start; next')
+            self.log.appendPlainText('--- queue: that run did not start (see above); next')
+            self._q_skipped = getattr(self, '_q_skipped', []) + [e['fields'].get('input', '')]
             QtCore.QTimer.singleShot(0, self.queue_next)
 
     def open_output(self):
