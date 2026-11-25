@@ -763,46 +763,143 @@ def _consolidate(sources, folders, xml_index, out_csv, log=print,
 
 
 # ── GUI ───────────────────────────────────────────────────────────────────────
+def parse_sources(items):
+    """{name: folder} from 'name=folder' strings (or bare folders, named
+    source1, source2 ...), keeping their order."""
+    out = {}
+    for k, it in enumerate(items or [], start=1):
+        name, sep, path = str(it).partition("=")
+        if not sep:
+            name, path = f"source{k}", name
+        name = name.strip() or f"source{k}"
+        if path.strip():
+            out[name] = path.strip()
+    return out
+
+
 def run_gui():
+    import json
     from PyQt5.QtCore import QSettings
     from PyQt5.QtWidgets import (QApplication, QWidget, QGridLayout, QLabel,
-                                 QLineEdit, QPushButton, QFileDialog,
-                                 QPlainTextEdit, QMessageBox)
+                                 QLineEdit, QPushButton, QFileDialog, QGroupBox,
+                                 QPlainTextEdit, QMessageBox, QCheckBox,
+                                 QHBoxLayout, QVBoxLayout)
 
     own_app = QApplication.instance() is None      # not inside QGIS
     app = QApplication.instance() or QApplication(sys.argv)
     settings = QSettings("NRSC", "RIVAL-consolidate")
     win = QWidget()
     win.setWindowTitle("RIVAL -- consolidate results")
-    grid = QGridLayout(win)
-    fields = {}
+    outer = QVBoxLayout(win)
 
-    def row(r, label, key, pick_file=False):
-        grid.addWidget(QLabel(label), r, 0)
-        edit = QLineEdit(str(settings.value(key, "") or ""))
-        grid.addWidget(edit, r, 1)
-        btn = QPushButton("Browse")
+    def browse_dir(edit, title):
+        p = QFileDialog.getExistingDirectory(win, title, edit.text())
+        if p:
+            edit.setText(p)
 
-        def browse():
-            if pick_file:
-                p, _ = QFileDialog.getSaveFileName(win, label, edit.text(),
-                                                   "CSV (*.csv)")
-            else:
-                p = QFileDialog.getExistingDirectory(win, label, edit.text())
-            if p:
-                edit.setText(p)
-                settings.setValue(key, p)
-        btn.clicked.connect(browse)
-        grid.addWidget(btn, r, 2)
-        fields[key] = edit
+    # ── CSV sources: manual, auto, and any more with + ────────────────────
+    src_box = QGroupBox("Result sources (CSV folders) -- name and folder")
+    src_lay = QVBoxLayout(src_box)
+    src_rows = []
 
-    row(0, "Manual results (RIVAL CSVs):", "results")
-    row(1, "Auto results (matcher job folders, optional):", "auto")
-    row(2, "Product folder 1 (<id>/BAND_META.txt, *_META.xml):", "products")
-    row(3, "Product folder 2 (optional):", "products2")
-    row(4, "Product folder 3 (optional):", "products3")
-    row(5, "Consolidated CSV:", "out", pick_file=True)
-    from PyQt5.QtWidgets import QCheckBox, QHBoxLayout
+    def add_source(name="", path="", removable=True):
+        line = QHBoxLayout()
+        n = QLineEdit(name)
+        n.setPlaceholderText("name (e.g. manual, auto, team-B)")
+        n.setMaximumWidth(160)
+        p = QLineEdit(path)
+        p.setPlaceholderText("folder of RIVAL / matcher CSVs")
+        b = QPushButton("Browse")
+        b.clicked.connect(lambda: browse_dir(p, "Results folder"))
+        line.addWidget(n)
+        line.addWidget(p, 1)
+        line.addWidget(b)
+        rec = {"name": n, "path": p, "layout": line}
+        if removable:
+            x = QPushButton("\u2212")
+            x.setToolTip("Remove this source")
+            x.setMaximumWidth(30)
+
+            def remove():
+                for w in (n, p, b, x):
+                    w.setParent(None)
+                src_rows.remove(rec)
+            x.clicked.connect(remove)
+            line.addWidget(x)
+        src_lay.insertLayout(len(src_rows), line)
+        src_rows.append(rec)
+
+    saved = []
+    try:
+        saved = json.loads(str(settings.value("sources_json", "") or "[]"))
+    except ValueError:
+        saved = []
+    if not saved:
+        saved = [["manual", str(settings.value("results", "") or "")],
+                 ["auto", str(settings.value("auto", "") or "")]]
+    for k, (nm, pth) in enumerate(saved):
+        add_source(nm, pth, removable=k >= 2)
+    plus = QPushButton("+ Add source")
+    plus.clicked.connect(lambda: add_source(f"source{len(src_rows) + 1}", ""))
+    src_lay.addWidget(plus)
+    outer.addWidget(src_box)
+
+    # ── product folders (meta): any number, with + ──────────────────────────
+    prod_box = QGroupBox("Input product folders (<id>/BAND_META.txt, *_META.xml, tifs)")
+    prod_lay = QVBoxLayout(prod_box)
+    prod_rows = []
+
+    def add_product(path="", removable=True):
+        line = QHBoxLayout()
+        p = QLineEdit(path)
+        b = QPushButton("Browse")
+        b.clicked.connect(lambda: browse_dir(p, "Input product folder"))
+        line.addWidget(p, 1)
+        line.addWidget(b)
+        rec = {"path": p}
+        if removable:
+            x = QPushButton("\u2212")
+            x.setMaximumWidth(30)
+
+            def remove():
+                for w in (p, b, x):
+                    w.setParent(None)
+                prod_rows.remove(rec)
+            x.clicked.connect(remove)
+            line.addWidget(x)
+        prod_lay.insertLayout(len(prod_rows), line)
+        prod_rows.append(rec)
+
+    try:
+        saved_p = json.loads(str(settings.value("products_json", "") or "[]"))
+    except ValueError:
+        saved_p = []
+    if not saved_p:
+        saved_p = [str(settings.value(k, "") or "") for k in
+                   ("products", "products2", "products3")]
+        saved_p = [q for q in saved_p if q] or [""]
+    for k, q in enumerate(saved_p):
+        add_product(q, removable=k >= 1)
+    plus_p = QPushButton("+ Add product folder")
+    plus_p.clicked.connect(lambda: add_product(""))
+    prod_lay.addWidget(plus_p)
+    outer.addWidget(prod_box)
+
+    # ── output, dates ───────────────────────────────────────────────────────
+    grid = QGridLayout()
+    grid.addWidget(QLabel("Consolidated CSV:"), 0, 0)
+    out_edit = QLineEdit(str(settings.value("out", "") or ""))
+    grid.addWidget(out_edit, 0, 1)
+    ob = QPushButton("Browse")
+
+    def browse_out():
+        p, _ = QFileDialog.getSaveFileName(win, "Consolidated CSV", out_edit.text(),
+                                           "CSV (*.csv)")
+        if p:
+            out_edit.setText(p)
+    ob.clicked.connect(browse_out)
+    grid.addWidget(ob, 0, 2)
+    outer.addLayout(grid)
     drow = QHBoxLayout()
     drow.addWidget(QLabel("Date of pass from:"))
     d_from = QLineEdit(str(settings.value("date_from", "") or ""))
@@ -815,25 +912,38 @@ def run_gui():
     by_date = QCheckBox("Also summarise date-wise (<out>_by_date.csv)")
     by_date.setChecked(str(settings.value("by_date", "false")).lower() == "true")
     drow.addWidget(by_date)
-    grid.addLayout(drow, 8, 0, 1, 3)
+    outer.addLayout(drow)
+    run = QPushButton("Consolidate")
+    outer.addWidget(run)
     log_box = QPlainTextEdit()
     log_box.setReadOnly(True)
-    grid.addWidget(log_box, 7, 0, 1, 3)
+    outer.addWidget(log_box, 1)
 
     def log(msg):
         log_box.appendPlainText(msg)
         QApplication.processEvents()
 
     def go():
-        keys = ("results", "products", "products2", "products3", "out", "auto")
-        res, p1, p2, p3, out, auto = (fields[k].text().strip() for k in keys)
-        for k in keys:
-            settings.setValue(k, fields[k].text().strip())
-        prods = product_folders([p1, p2, p3])
-        if not ((os.path.isdir(res) or os.path.isdir(auto)) and prods and out):
+        pairs = [[r["name"].text().strip(), r["path"].text().strip()] for r in src_rows]
+        settings.setValue("sources_json", json.dumps(pairs))
+        sources, seen = {}, set()
+        for k, (nm, pth) in enumerate(pairs, start=1):
+            nm = nm or f"source{k}"
+            if nm in seen:
+                QMessageBox.warning(win, "Consolidate", f"Two sources are named '{nm}'.")
+                return
+            seen.add(nm)
+            if pth:
+                sources[nm] = pth
+        plist = [r["path"].text().strip() for r in prod_rows]
+        settings.setValue("products_json", json.dumps(plist))
+        out = out_edit.text().strip()
+        settings.setValue("out", out)
+        prods = product_folders(plist)
+        if not (any(os.path.isdir(p) for p in sources.values()) and prods and out):
             QMessageBox.warning(win, "Consolidate",
-                                "Choose a manual and/or an auto results folder, at "
-                                "least one input product folder and the output CSV.")
+                                "Choose at least one results folder, at least one "
+                                "input product folder and the output CSV.")
             return
         df, dt = d_from.text().strip(), d_to.text().strip()
         for txt in (df, dt):
@@ -844,31 +954,35 @@ def run_gui():
         settings.setValue("date_to", dt)
         settings.setValue("by_date", "true" if by_date.isChecked() else "false")
         log_box.clear()
+        log(f"[INFO] sources: " + ", ".join(f"{k} = {v}" for k, v in sources.items()))
         log(f"[INFO] product folders: {', '.join(prods)}")
         try:
-            n = consolidate({"manual": res, "auto": auto}, prods, out, log,
+            n = consolidate(sources, prods, out, log,
                             df or None, dt or None, by_date.isChecked())
         except Exception as e:
             QMessageBox.critical(win, "Consolidate", f"Failed:\n{e}")
             return
-        QMessageBox.information(win, "Consolidate", f"{n} product(s) written to\n{out}")
+        QMessageBox.information(win, "Consolidate", f"{n} row(s) written to\n{out}")
 
-    run = QPushButton("Consolidate")
     run.clicked.connect(go)
-    grid.addWidget(run, 6, 0, 1, 3)
-    win.resize(820, 480)
+    win.resize(900, 640)
     win.show()
+    win._add_source, win._add_product = add_source, add_product     # for tests
+    win._src_rows, win._prod_rows, win._go = src_rows, prod_rows, go
+    win._out_edit = out_edit
     if own_app:
         app.exec_()
     return win
 
 
 if __name__ == "__main__":
-    if "--results" in sys.argv:
+    if "--results" in sys.argv or "--source" in sys.argv:
         import argparse
         ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-        ap.add_argument("--results", required=True, help="manual RIVAL CSVs")
+        ap.add_argument("--results", default="", help="manual RIVAL CSVs")
         ap.add_argument("--auto", default="", help="automatic matcher results")
+        ap.add_argument("--source", action="append", default=[],
+                        help="another source, name=folder (repeat for more)")
         ap.add_argument("--from", dest="date_from", default=None, help="date of pass from")
         ap.add_argument("--to", dest="date_to", default=None, help="date of pass to")
         ap.add_argument("--by-date", action="store_true",
@@ -877,7 +991,9 @@ if __name__ == "__main__":
                         help="one or more input product folders")
         ap.add_argument("--out", required=True)
         a = ap.parse_args()
-        consolidate({"manual": a.results, "auto": a.auto}, a.products, a.out,
+        srcs = {"manual": a.results, "auto": a.auto}
+        srcs.update(parse_sources(a.source))
+        consolidate({k: v for k, v in srcs.items() if v}, a.products, a.out,
                     date_from=a.date_from, date_to=a.date_to, by_date=a.by_date)
     else:
         run_gui()

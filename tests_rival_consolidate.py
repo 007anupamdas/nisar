@@ -394,6 +394,9 @@ check("tifs without meta are still consolidated; a G1A name fills in the details
        r17["plain_scene"]["sensor"], r17["plain_scene"]["n_points"]),
       (sorted([nm2, "plain_scene"]), "MV", "3", "21-11-2026", "", "2"))
 
+check("extra sources from name=folder", C.parse_sources(["teamC=/x/c", "/y", "auto2 = /z"]),
+      {"teamC": "/x/c", "source2": "/y", "auto2": "/z"})
+
 if failures:
     print(f"{len(failures)} FAILURE(S)")
     for x in failures:
