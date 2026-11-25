@@ -458,6 +458,92 @@ def plot_closest(table, png: str, title: str = '', note: str = '', min_reach: fl
     return png
 
 
+def plot_time_accuracy(table, png: str, title: str = '', note: str = '', min_reach: float = 0.5,
+                       useful: float = 3.0) -> str:
+    """Per sensor, each method once: its median seconds per window (x, log) against
+    its median truth RMSE (y, log, m) over the jobs; filled when it reaches at
+    least min_reach of the truth points, hollow otherwise. Among the methods
+    within `useful` x the best error, those no other one beats on both time and
+    accuracy are joined; they and the most accurate ones are numbered and listed
+    beside the panel."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import matplotlib.ticker as mt
+    t = table.dropna(subset=['s_per_window', 'truth_rmse_m'])
+    t = t[t['s_per_window'] > 0]
+    sensors = [s for s in ('MV', 'HS', 'HV', 'ML') if s in set(t['sensor'])]
+    sensors = [s for s in sensors if t[t['sensor'] == s].groupby('detector')['truth_rmse_m'].median().min() <= 10000.0]
+    if not sensors:
+        return ''
+    fig, axes = plt.subplots(len(sensors), 1, figsize=(13, 4.9 * len(sensors) + 1.4), squeeze=False)
+    axes = axes.T                                    # axes[0]: one per sensor, one sensor per row
+    fig.patch.set_facecolor(SURFACE)
+    nice = [10, 20, 50, 100, 150, 200, 300, 500, 1000, 2000, 5000, 10000, 20000, 50000, 100000]
+    for ax, s in zip(axes[0], sensors):
+        u = t[t['sensor'] == s]
+        n_jobs = u['job'].nunique()
+        g = u.groupby('detector').agg(rmse=('truth_rmse_m', 'median'), spw=('s_per_window', 'median'),
+                                      jobs=('job', 'nunique'), reached=('reached', 'sum'), total=('total', 'sum'))
+        g = g[g['jobs'] >= max(2, n_jobs // 3)]
+        g['reach'] = g['reached'] / g['total']
+        ok = g[g['reach'] >= min_reach]
+        lim = useful * float(ok['rmse'].min()) if len(ok) else 0.0
+        cand = ok[ok['rmse'] <= lim].sort_values('spw')
+        front, best = [], float('inf')               # faster first: kept while more accurate than all faster ones
+        for d, r in cand.iterrows():
+            if r['rmse'] < best:
+                front.append(d)
+                best = r['rmse']
+        low = g[g['reach'] < min_reach]
+        ax.scatter(low['spw'], low['rmse'], s=34, facecolors='none', edgecolors=UNKNOWN, linewidths=1.2, zorder=2,
+                   label=f'reaches < {100 * min_reach:.0f} % of the truth points')
+        rest = ok.drop(index=front)
+        ax.scatter(rest['spw'], rest['rmse'], s=40, color='#86b6ef', edgecolors=SURFACE, linewidths=0.8, zorder=3,
+                   label='method')
+        fr = ok.loc[front]
+        ax.plot(fr['spw'], fr['rmse'], color=INK, lw=1.4, zorder=4)
+        ax.scatter(fr['spw'], fr['rmse'], s=64, color='#1c5cab', edgecolors=SURFACE, linewidths=1.0, zorder=5,
+                   label='no other both faster and more accurate')
+        named = list(dict.fromkeys(front + list(ok.sort_values('rmse').index[:5])))
+        named.sort(key=lambda d: g.loc[d, 'rmse'])
+        lines = []
+        for k, d in enumerate(named, 1):
+            r = g.loc[d]
+            ax.annotate(str(k), (r['spw'], r['rmse']), xytext=(5, 4), textcoords='offset points', fontsize=8,
+                        fontweight='bold', color=INK, zorder=6)
+            lines.append(f"{k:>2}  {d:<18.18} {r['rmse']:>6.0f} m {r['spw']:>6.2f} s"
+                         + ('  *' if d in front else ''))
+        ax.text(1.02, 1.0, 'numbered (* joined):\n' + '\n'.join(lines), transform=ax.transAxes, ha='left',
+                va='top', fontsize=7.5, family='monospace', color=INK)
+        ax.set_xscale('log')
+        ax.set_yscale('log')
+        lo, hi = float(g['rmse'].min()), float(g['rmse'].max())
+        ax.yaxis.set_major_locator(mt.FixedLocator([v for v in nice if lo / 1.5 <= v <= hi * 1.5] or nice))
+        ax.yaxis.set_minor_locator(mt.NullLocator())
+        ax.yaxis.set_major_formatter(mt.FuncFormatter(lambda v, _p: f'{v:g} m' if v < 1000 else f'{v / 1000:g} km'))
+        ax.xaxis.set_major_formatter(mt.FuncFormatter(lambda v, _p: f'{v:g}'))
+        ax.set_xlabel('seconds per window (median over the jobs, log)', fontsize=9, color=MUTED)
+        ax.set_ylabel('error against truth (median over the jobs, log)', fontsize=9, color=MUTED)
+        ax.grid(color='#e7e6e2', lw=0.8, zorder=0)
+        ax.tick_params(colors=MUTED)
+        for sp in ('top', 'right'):
+            ax.spines[sp].set_visible(False)
+        ax.set_title(f'{s}: {len(g)} methods, {n_jobs} jobs', loc='left', fontsize=12, fontweight='bold', color=INK)
+    h, l = axes[0, 0].get_legend_handles_labels()
+    H = fig.get_figheight()
+    fig.legend(h, l, loc='upper left', bbox_to_anchor=(0.005, 1 - 0.55 / H), ncol=3, frameon=False, fontsize=8.5)
+    fig.text(0.005, 1 - 0.1 / H, title or 'Time against accuracy, method by method', ha='left', va='top',
+             fontsize=14, fontweight='bold', color=INK)
+    fig.text(0.995, 0.005, (note + '   ' if note else '') + "Each method's best configuration per job; down and to "
+             f"the left is better. Joined: among those within {useful:g} x the best error, no other method is both "
+             'faster and more accurate.', ha='right', va='bottom', fontsize=8, color=MUTED)
+    fig.tight_layout(rect=(0, 0.3 / H, 0.7, 1 - 1.0 / H), h_pad=2.5)
+    fig.savefig(png, dpi=150, facecolor=SURFACE)
+    plt.close(fig)
+    return png
+
+
 def plot(table, jobs, png: str, min_jobs: int = 2) -> str:
     import matplotlib
     matplotlib.use('Agg')
@@ -576,7 +662,9 @@ def main(argv=None) -> int:
     table['level'] = table['spread_m'].map(level_of)
     top_png = plot_top(table, jobs, os.path.join(out, 'TOP_DETECTORS_DEVIATION.png'))
     lines_png = plot_lines(table, os.path.join(out, 'TOP5_BY_JOB.png'))
-    print(f"{jobs['job'].nunique()} job(s) with truth -> {top_png}, {lines_png}")
+    ta_png = plot_time_accuracy(table, os.path.join(out, 'TIME_VS_ACCURACY.png'),
+                                note=f"{jobs['job'].nunique()} job(s) with truth.")
+    print(f"{jobs['job'].nunique()} job(s) with truth -> {top_png}, {lines_png}, {ta_png}")
     sel, since = recent_jobs(jobs, a.after_job)
     if sel:
         rt = table[table['job'].isin(sel)]
@@ -590,7 +678,10 @@ def main(argv=None) -> int:
         cpng = plot_closest(rt, os.path.join(out, f'CLOSEST_TO_TRUTH_AFTER_{a.after_job}.png'),
                             title=f'Which method is closest to truth, sensor by sensor (jobs above {a.after_job})',
                             note=f'{len(sel) - n_ws} server + {n_ws} workstation job(s).')
-        print(f'{len(sel)} job(s) above {a.after_job} / since {since} -> {png}, {cpng}')
+        tpng = plot_time_accuracy(rt, os.path.join(out, f'TIME_VS_ACCURACY_AFTER_{a.after_job}.png'),
+                                  title=f'Time against accuracy, method by method (jobs above {a.after_job})',
+                                  note=f'{len(sel) - n_ws} server + {n_ws} workstation job(s).')
+        print(f'{len(sel)} job(s) above {a.after_job} / since {since} -> {png}, {cpng}, {tpng}')
     jobs, table = jobs[jobs['level'] != ''], table[table['level'] != '']
     jobs.round(1).to_csv(os.path.join(out, 'DEVIATION_JOBS.csv'), index=False)
     agg = stats(table)

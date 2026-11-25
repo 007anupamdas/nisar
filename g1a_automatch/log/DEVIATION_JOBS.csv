@@ -45,7 +45,37 @@ job,sensor,started,spread_m,n_truth,offset_m,spread_from,level
 > 8 km"
 1101,MV,2026-11-20 23:21,451.1,8.0,11074.7,log: manual points (rms),"low
 < 0.5 km"
+1102,MV,2026-11-21 00:45,1814.4,5.0,89521.5,log: manual points (rms),"medium
+0.5–2 km"
 1104,MV,2026-11-21 03:55,282.6,2.0,8815.1,log: manual points (rms),"low
+< 0.5 km"
+1105,MV,2026-11-21 06:17,55.4,15.0,24.3,log: manual points (rms),"low
+< 0.5 km"
+1106,MV,2026-11-21 08:58,7216.0,15.0,5769.0,log: manual points (rms),"high
+2–8 km"
+1107,MV,2026-11-21 12:50,84.1,10.0,26.1,log: manual points (rms),"low
+< 0.5 km"
+1108,MV,2026-11-21 13:59,759.0,18.0,201.0,log: manual points (rms),"medium
+0.5–2 km"
+1109,MV,2026-11-21 20:00,3938.4,16.0,7111.4,log: manual points (rms),"high
+2–8 km"
+1110,MV,2026-11-21 20:46,3447.0,11.0,7604.6,log: manual points (rms),"high
+2–8 km"
+1112,MV,2026-11-22 02:36,200.1,6.0,8052.4,log: manual points (rms),"low
+< 0.5 km"
+1113,MV,2026-11-22 04:04,1803.4,11.0,7967.4,log: manual points (rms),"medium
+0.5–2 km"
+1114,MV,2026-11-22 04:10,78.6,13.0,32.2,log: manual points (rms),"low
+< 0.5 km"
+1116,MV,2026-11-22 04:24,1068.2,15.0,531.9,log: manual points (rms),"medium
+0.5–2 km"
+1117,MV,2026-11-22 10:35,75.9,17.0,11.4,log: manual points (rms),"low
+< 0.5 km"
+1118,MV,2026-11-22 11:21,6412.5,15.0,5766.0,log: manual points (rms),"high
+2–8 km"
+1120,MV,2026-11-23 16:19,759.0,18.0,201.0,log: manual points (rms),"medium
+0.5–2 km"
+1121,MV,2026-11-23 16:20,75.9,17.0,11.4,log: manual points (rms),"low
 < 0.5 km"
 335_aa,HV,2026-10-07 12:04,470.0,8.0,18051.3,BENCH_JOBS (largest),"low
 < 0.5 km"
