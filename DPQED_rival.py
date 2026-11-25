@@ -6142,6 +6142,30 @@ class QCDashboard(QMainWindow):
         except Exception as e:
             print(f"[STATUS] {e}")
 
+    def log_input_crs(self, layer):
+        """Print the input's CRS as QGIS/GDAL read it -- PROJ string, datum,
+        ellipsoid -- and warn about the case that shifts a scene by ~100 m
+        with no error: a projected CRS (e.g. LCC) on a datum other than WGS84
+        with no datum transformation (TOWGS84) given. ERDAS may apply its
+        own shift there while QGIS applies none, or the other way round."""
+        try:
+            crs = layer.crs()
+            proj = crs.toProj() if hasattr(crs, "toProj") else crs.toProj4()
+            print(f"[CRS] input {crs.authid() or 'no EPSG code'}: {crs.description()}")
+            print(f"[CRS]   proj: {proj}")
+            low = proj.lower()
+            wgs = ("+datum=wgs84" in low or "+ellps=wgs84" in low
+                   or "+towgs84=0,0,0" in low)
+            if not crs.isGeographic() and not wgs:
+                print("[CRS]   WARNING: not on WGS84" + (
+                    " and no +towgs84 -- the datum shift to the WGS84 reference is "
+                    "unknown to QGIS; expect a constant offset of tens to hundreds "
+                    "of metres (compare with ERDAS's datum setting)"
+                    if "+towgs84" not in low else
+                    f" -- datum shift applied from {proj[proj.lower().find('+towgs84'):].split()[0]}"))
+        except Exception as e:
+            print(f"[CRS] could not describe the input CRS: {e}")
+
     def adopt_input_layer(self, layer, path, source=None, naming="folder"):
         """Everything that has to happen once, however the input scene arrives.
 
@@ -6154,6 +6178,7 @@ class QCDashboard(QMainWindow):
         project fall back to its full extent, with no sign of it in the log.
         """
         self.show_input_path(path)
+        self.log_input_crs(layer)
         self.input_path = path
         self.input_source = source or path    # the scene a COG was made from
         self.input_naming = naming
