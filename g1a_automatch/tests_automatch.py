@@ -1219,6 +1219,35 @@ def test_nisar_h5(tmp):
     check('NISAR: footprint from boundingPolygon (no .met)', src, 'h5-boundingPolygon')
 
 
+def window_skip_check(cfg):
+    """Windows mostly on water / featureless ground are not matched."""
+    import numpy as _np
+    import rasterio as _rio
+    from rasterio.io import MemoryFile
+    from rasterio.transform import from_origin
+    import automatch_engine as E
+    m = E.build_detector('sift', cfg, {})
+    m.config.window_size = 256
+    a = _np.full((1024, 1024), 100, _np.uint16)
+    with MemoryFile() as mf:
+        with mf.open(driver='GTiff', height=1024, width=1024, count=1, dtype='uint16', crs='EPSG:32643',
+                     transform=from_origin(500000, 1700000, 10, 10), nodata=0) as d:
+            d.write(a, 1)
+        with mf.open() as src:
+            old = (E.WINDOW_SKIP, E.WINDOW_SKIP_SHARE)
+            try:
+                E.WINDOW_SKIP = lambda e, n: _np.asarray(e) >= 500000 + 0.6 * 10240   # west 60 %: water
+                E.WINDOW_SKIP_SHARE = 0.9
+                on = m._determine_window_strategy(src, src)['windows']
+                E.WINDOW_SKIP_SHARE = 0.0
+                off = m._determine_window_strategy(src, src)['windows']
+            finally:
+                E.WINDOW_SKIP, E.WINDOW_SKIP_SHARE = old
+    cols_on = sorted({w[1] for w in on})
+    check('windows: those 90 % or more on water / featureless ground are not matched (0: all matched)',
+          (len(off), len(on), cols_on), (16, 8, [512, 768]))
+
+
 def lightglue_weights_check():
     """gcp_train's exported LightGlue (and its conditioning) loaded into kornia's matcher."""
     import tempfile
@@ -1290,6 +1319,7 @@ def test_detector_params():
           [(n, mw._matcher_param_str(n, p)) for n, p in mw.matcher_runs() if n == 'lgm'],
           [('lgm', ''), ('lgm', 'lwtg1amv')])
     lightglue_weights_check()
+    window_skip_check(cfg)
     check('params: run count (variants, passes in total)',
           E.count_runs('disk', {'checkpoint': ['depth', 'epipolar'], 'lgm.filter_threshold': [0.1, 0.2]},
                        ['smnn', 'lgm'], 2), (2, 8))

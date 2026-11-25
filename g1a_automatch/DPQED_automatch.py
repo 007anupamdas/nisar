@@ -2644,6 +2644,14 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.interior_edge.setToolTip('A match is inside when no textured pixel lies within this distance (input '
                                       'pixels): larger keeps more of the shore, smaller rejects more')
         self.interior_on.toggled.connect(self.interior_edge.setEnabled)
+        self.interior_skip = QtWidgets.QSpinBox()
+        self.interior_skip.setRange(0, 100)
+        self.interior_skip.setValue(90)
+        self.interior_skip.setSuffix(' %')
+        self.interior_skip.setSpecialValueText('off')
+        self.interior_skip.setToolTip('A window at least this featureless (open water, uniform ground) is not matched '
+                                      'at all: it would only give wrong matches the filter leaves out later. 0: off')
+        self.interior_on.toggled.connect(self.interior_skip.setEnabled)
         self.cell_px = QtWidgets.QLineEdit('64, 128')
         self.cell_px.setMaximumWidth(90)
         self.cell_px.setToolTip('Agreement levels (px, e.g. 64, 128): cells of each size (64: 8 x 8 in a 512 px window); a '
@@ -2656,6 +2664,8 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         hf.addWidget(self.interior_on)
         hf.addWidget(QtWidgets.QLabel('edge distance'))
         hf.addWidget(self.interior_edge)
+        hf.addWidget(QtWidgets.QLabel('skip windows ≥'))
+        hf.addWidget(self.interior_skip)
         hf.addStretch(1)
         f.addRow('Final points (one per sub-tile)', hf)
 
@@ -3005,6 +3015,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
                              if cv not in (None, '') else '64, 128')
         self.interior_on.setChecked(bool(True if j.get('interior_filter') is None else j['interior_filter']))
         self.interior_edge.setValue(float(j.get('interior_edge_px') or 4.0))
+        self.interior_skip.setValue(int(round(100 * float(j.get('interior_skip_share', 0.9) or 0))))
         self.channels.set_checked(list(j['channels'] or []))
         self.detector_params = {k: {p: list(v) for p, v in d.items()}
                                 for k, d in (j.get('detector_params') or {}).items()}
@@ -3122,6 +3133,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             'cross_cell_px': parse_int_list(self.cell_px.text(), 'agreement cells') or [0],
             'interior_filter': self.interior_on.isChecked(),
             'interior_edge_px': self.interior_edge.value(),
+            'interior_skip_share': round(self.interior_skip.value() / 100.0, 2),
             'detectors': dets,
             'matchers': matchers,
             'detector_params': {k: v for k, v in self.detector_params.items() if v},

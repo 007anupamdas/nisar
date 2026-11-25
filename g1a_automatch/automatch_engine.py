@@ -3199,6 +3199,7 @@ class DiskBasedMatcher(BaseMatcher):
         valid_map = (overview != nodata_val).astype(float)  # [overview_h, overview_w]
 
         windows = []
+        skipped = 0
         for x in range(0, nisar_src.height, base):
             for y in range(0, nisar_src.width, base):
                 sx = min(base, nisar_src.height - x)
@@ -3219,9 +3220,18 @@ class DiskBasedMatcher(BaseMatcher):
 
                 valid_frac = region.mean()
                 if valid_frac >= self.config.min_valid_fraction:
+                    if WINDOW_SKIP is not None and WINDOW_SKIP_SHARE > 0 and \
+                            featureless_share(nisar_src, x, y, sx, sy) >= WINDOW_SKIP_SHARE:
+                        skipped += 1             # water / featureless: no matching there at all
+                        continue
                     windows.append((x, y, sx, sy))
                 # else: skip entirely — don't even attempt
 
+        key = (str(getattr(nisar_src, 'name', '')), base)
+        if skipped and key not in _SKIP_TOLD:
+            _SKIP_TOLD.add(key)
+            print(f'[Windows] {os.path.basename(key[0])}: {skipped} of {skipped + len(windows)} window(s) skipped, '
+                  f'{100 * WINDOW_SKIP_SHARE:.0f} % or more featureless (water, uniform ground): not matched')
         return {
             'type': 'VALID_ADAPTIVE',
             'description': f'{len(windows)} valid windows from {base}px grid',
@@ -5516,6 +5526,31 @@ def detector_param_specs(name: str) -> List[ParamSpec]:
     if base in DETECTOR_PARAMS:
         return DETECTOR_PARAMS[base]
     return list(EXTERNAL_DETECTORS.get(base, {}).get('params', []))
+
+
+# Windows mostly on water / featureless ground are not matched: WINDOW_SKIP(E, N)
+# -> keep (bool) is the featureless mask's point test (the job sets it from
+# INTERIOR_MASK_<band>.tif); a window whose share of featureless sample points
+# is at least WINDOW_SKIP_SHARE is skipped (0: never).
+WINDOW_SKIP: Optional[Callable] = None
+WINDOW_SKIP_SHARE: float = 0.9
+_SKIP_TOLD: set = set()
+
+
+def featureless_share(src, row0: int, col0: int, nrows: int, ncols: int, n: int = 8) -> float:
+    """Share of an n x n grid of points over a window (rows / cols of src) that
+    lie in featureless areas (WINDOW_SKIP)."""
+    if WINDOW_SKIP is None:
+        return 0.0
+    rr = row0 + (np.arange(n) + 0.5) * nrows / n
+    cc = col0 + (np.arange(n) + 0.5) * ncols / n
+    C, R = np.meshgrid(cc, rr)
+    E, N = src.transform * (C.ravel(), R.ravel())
+    try:
+        keep = np.asarray(WINDOW_SKIP(np.asarray(E, float), np.asarray(N, float)), bool)
+    except Exception:
+        return 0.0
+    return float(1.0 - keep.mean()) if keep.size else 0.0
 
 
 # Fine-tuned LightGlue weights (gcp_train's export), by name:

@@ -958,6 +958,7 @@ DEFAULT_JOB: Dict = {
     'interior_filter': True,     # leave out matches inside featureless areas (water bodies, uniform blobs);
                                  # their edges kept (automatch_interior)
     'interior_edge_px': 4.0,     # ... farther than this from any textured pixel (input pixels)
+    'interior_skip_share': 0.9,  # a window this featureless (water, uniform ground) is not matched at all; 0: off
 
     # RIVAL export
     'rival_max_points_per_chip': 200,   # 0 = all inliers
@@ -1653,6 +1654,8 @@ _RESULT_NEUTRAL_KEYS = {'output_dir', 'temp_dir', 'resume', 'debug', 'rival_max_
                         'save_match_images', 'weights_cache_dir', 'truth_csv', 'truth_radius_m',
                         'cross_top_n', 'cross_min_agree', 'cross_cell_km', 'cross_keep_per_cell',
                         'cross_max_points', 'final_points', 'interior_filter', 'interior_edge_px', 'cross_cell_px',
+                        'interior_skip_share',  # earlier results (with those windows) stay valid: their matches there
+                                                # are left out when read
                         'temp_per_product'}     # where the cache is, not what is in it
 # (the interior filter only leaves matches out when they are read: a finished
 # sweep point is reused and its matches read again through the filter)
@@ -2085,6 +2088,13 @@ def set_interior_filter(job: Dict, scene, out_root: str) -> None:
             print(f"[Job] featureless interiors: {info['interior_pct']} % of {band} (farther than {o['edge_px']:g} px "
                   f"from texture); matches there are left out -> {path}", flush=True)
         R.POINT_MASK = CF.point_sampler(path, [1], 0, scene.working_crs)
+        import automatch_engine as E
+        share = float(job.get('interior_skip_share', 0.9) or 0.0)
+        E.WINDOW_SKIP_SHARE = share
+        E.WINDOW_SKIP = CF.point_sampler(path, [1], 0, scene.working_crs) if share > 0 else None
+        if share > 0:
+            print(f'[Job] windows {100 * share:.0f} % or more featureless (water, uniform ground) are not matched',
+                  flush=True)
     except Exception as e:
         print(f'[Job] interior filter not set ({type(e).__name__}: {e}); every match kept', flush=True)
 

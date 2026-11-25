@@ -251,6 +251,13 @@ Without filtering, `python automatch_cross.py <job> --cell-px 64 128
 too, then **Run the pack queue** (under *Queued packs*) packs them one after
 another. Stop pauses it; the queue is kept between sessions.
 
+**Windows on water are not matched.** A window that is 90 % or more
+featureless by the same mask (open sea, a large lake, uniform ground) is skipped
+before matching (`interior_skip_share`, 0.9; 0: off; *skip windows ≥* in the
+window): it costs time and gives only wrong matches the filter removes later.
+The log says per pair how many windows were skipped. Earlier results are still
+reused: the matches they have there are left out when read.
+
 **Final points.** `RIVAL_FINAL_<band>.csv` is now one point per sub-tile of
 a grid of `final_points` (24) tiles over the whole scene (the image's extent,
 read through the share mapping; else the matches' extent): of the
