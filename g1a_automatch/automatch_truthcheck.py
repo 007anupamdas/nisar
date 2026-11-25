@@ -81,6 +81,11 @@ def check_run(run: str, truth_csv: str, radius_m: float = 5000.0) -> List[Dict]:
             rows.append({'run': name, 'set': os.path.basename(f)[:-4], **score_file(f, truth, radius_m)})
         except Exception as e:
             print(f'[TruthCheck] {name}: {os.path.basename(f)} not scored ({type(e).__name__}: {e})')
+    try:                                         # the methods close to the manual points, detector by detector
+        import automatch_detplots as DP
+        DP.run(run, truth_csv, quiet=True)
+    except Exception as e:
+        print(f'[TruthCheck] {name}: detector plots not drawn ({type(e).__name__}: {e})')
     try:
         keypoint_plot(run)
     except Exception as e:

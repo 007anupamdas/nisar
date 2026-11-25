@@ -385,7 +385,8 @@ def _job_setting(d: str, key: str, default):
         return default
 
 
-def consistent_points(top: List[Dict], cell_m: float, tol_m: float, need: int) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def consistent_points(top: List[Dict], cell_m: float, tol_m: float, need: int,
+                      all_points: bool = False) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """(one point per consistent cell, the cells): the scene in cells of
     cell_m (64 working pixels: 8 x 8 cells in a 512 px window); in each, the
     top configurations' offsets there (their medians in the cell), and the
@@ -429,6 +430,9 @@ def consistent_points(top: List[Dict], cell_m: float, tol_m: float, need: int) -
         return cand, cells
     d = np.hypot(cand['dE'] - cand['median_dE_m'], cand['dN'] - cand['median_dN_m'])
     cand = cand.assign(_d=d)[d <= tol_m]
+    if all_points:                       # every agreeing point of every configuration, not one per cell
+        return cand.assign(n_agree=cand['agreeing'].astype(int), off_agreed_m=cand['_d'].round(1)).drop(
+            columns=['_d', '_cfg', 'agreeing']).reset_index(drop=True), cells
     best = cand.sort_values('_d').groupby(['cell_i', 'cell_j'], sort=False).head(1)
     best = best.assign(n_agree=best['agreeing'].astype(int), agree_spread_m=best['kept_max_gap_m'],
                        off_agreed_m=best['_d'].round(1))

@@ -2341,6 +2341,12 @@ def _finish_job(job: Dict, out_root: str, scene, manifest: List[Dict], t_job: fl
         RP.report(out_root)
     except Exception as e:
         print(f'[Job] REPORT not written: {type(e).__name__}: {e}')
+    if job['truth_csv']:                     # the methods close to the manual points, detector by detector
+        try:
+            import automatch_detplots as DP
+            DP.run(out_root, job['truth_csv'], quiet=False)
+        except Exception as e:
+            print(f'[Job] DETECTOR_PLOTS not drawn: {type(e).__name__}: {e}')
     if job['truth_csv'] and len(job.get('num_features') or []) > 1:    # a keypoint test: the counts compared
         try:
             import automatch_truthcheck as TC
@@ -2410,6 +2416,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     fin.add_argument('--rerun', choices=('missing', 'failed', 'all'), default='missing',
                      help='missing: the detectors whose weights were missing (default); failed: every failed '
                           'one; all: every detector')
+    sub.add_parser('detplots', help='look vectors detector by detector for the methods close to the manual '
+                                    'points: their agreed points (no thinning), with the manual points '
+                                    '(options: python automatch_detplots.py -h)').add_argument('rest', nargs=argparse.REMAINDER)
     sub.add_parser('truthcheck', help='compare finished runs (one, or a folder of runs: auto steps, tiers) with a '
                                       'truth file without running them again (options: python '
                                       'automatch_truthcheck.py -h)').add_argument('rest', nargs=argparse.REMAINDER)
@@ -2424,6 +2433,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     k.add_argument('rest', nargs=argparse.REMAINDER)
     if argv is None:
         argv = sys.argv[1:]
+    if argv and argv[0] == 'detplots':
+        import automatch_detplots as DP
+        return DP.main(list(argv[1:]))
     if argv and argv[0] == 'truthcheck':
         import automatch_truthcheck as TC
         return TC.main(list(argv[1:]))

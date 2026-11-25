@@ -128,6 +128,20 @@ KeyNet + LightGlue; before, DISK ran every matcher and could fill the top N on
 its own. The cross-check's top N are also N detector families (DISK depth and
 epipolar count as one).
 
+**Detector by detector, against the manual points** (`DETECTOR_PLOTS/`). The
+manual points have their own distortion, so the methods are chosen by how close
+they come to them: each method's best configuration within 1.5 x the best
+truth RMSE, reaching at least half the truth points (at most 8). Among those,
+only their agreement counts: per 64 px cell a method's points are kept where at
+least 2 of them agree there; how the offset changes from cell to cell does not
+matter (no single-offset filter), and nothing is thinned to the 24 / 48 final
+points. One look-vector plot per method with the manual points on it
+(`<detector>_<matcher>_vectors.png`), one with all of them
+(`ALL_AGREED_vectors.png`), and DETECTOR_PLOTS.csv (each method's truth RMSE
+over all its points and over its agreed points). Made at the end of a job with
+a truth file and by *Compare with truth*; by hand:
+`python automatch_job.py detplots <job> [--truth pts.csv] [--within 1.5] [--max 8] [--need 2]`.
+
 **Compare with truth** (run window): a run made without a truth file (e.g.
 *Run auto*) is scored afterwards against one, without matching again: every
 detector + matcher (TRUTH_RANKING), each final point set's truth RMSE (final,

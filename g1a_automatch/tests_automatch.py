@@ -1219,6 +1219,66 @@ def test_nisar_h5(tmp):
     check('NISAR: footprint from boundingPolygon (no .met)', src, 'h5-boundingPolygon')
 
 
+def detplots_check(tmp):
+    """The methods close to the manual points, their agreed points detector by detector (no rigid field, no thinning)."""
+    import numpy as _np
+    import pandas as _pd
+    from pyproj import Transformer
+    import automatch_cross as X
+    import automatch_detplots as DP
+    jd = os.path.join(tmp, 'detplots_job')
+    os.makedirs(jd, exist_ok=True)
+    _pd.DataFrame([{'working_crs': 'EPSG:32643'}]).to_csv(os.path.join(jd, 'RUN_MANIFEST.csv'), index=False)
+    rng = _np.random.default_rng(3)
+
+    def field(E, N):                                       # distortion changing across the scene
+        return 1000.0 + 0.03 * (E - 500000), -400.0 + 0.02 * (N - 1600000)
+    to_ll = Transformer.from_crs('EPSG:32643', 'EPSG:4326', always_xy=True)
+    tE, tN = rng.uniform(500000, 520000, 12), rng.uniform(1600000, 1620000, 12)
+    dE, dN = field(tE, tN)
+    ilo, ila = to_ll.transform(tE, tN)
+    rlo, rla = to_ll.transform(tE - dE, tN - dN)
+    tcsv = os.path.join(jd, 'manual.csv')
+    _pd.DataFrame({'In_X': tE, 'In_Y': tN, 'Ref_X': tE - dE, 'Ref_Y': tN - dN, 'DX_Err': dE, 'DY_Err': dN,
+                   'Row': range(1, 13), 'In_Lon': ilo, 'In_Lat': ila, 'Ref_Lon': rlo, 'Ref_Lat': rla}).to_csv(
+        tcsv, index=False)
+    json.dump({'target_resolution': 10.0, 'truth_csv': tcsv, 'cross_cell_px': [64]},
+              open(os.path.join(jd, 'job_used.json'), 'w'))
+    rk = [('disk_depth', 'lgm', 40.0, 12), ('dog_hardnet', 'ada', 50.0, 12), ('sift', 'mnn', 55.0, 11),
+          ('keynet', 'lgm', 400.0, 12), ('gftt', 'smnn', 30.0, 3)]
+    _pd.DataFrame([dict(rank=i + 1, channel='band3', sweep='win1024_nfauto', detector=d, matcher=m,
+                        ransac='magsac20', truth_rmse_m=r, truth_reached=n, truth_total=12)
+                   for i, (d, m, r, n) in enumerate(rk)]).to_csv(os.path.join(jd, 'TRUTH_RANKING.csv'), index=False)
+
+    def pts(off_region=False):
+        E, N = rng.uniform(500000, 520000, 3000), rng.uniform(1600000, 1620000, 3000)
+        de, dn = field(E, N)
+        de, dn = de + rng.normal(0, 4, 3000), dn + rng.normal(0, 4, 3000)
+        if off_region:                                    # this method wrong in the east
+            de = _np.where(E > 515000, de + 600.0, de)
+        return _pd.DataFrame({'E': E, 'N': N, 'dE': de, 'dN': dn, 'x1-map': E, 'y1-map': N,
+                              'x2-map': E - de, 'y2-map': N - dn})
+    fake = [dict(channel='band3', sweep='win1024_nfauto', detector=d, matcher=m, ransac='magsac20',
+                 points=pts(d == 'sift')) for d, m in (('disk_depth', 'lgm'), ('dog_hardnet', 'ada'), ('sift', 'mnn'))]
+    orig = X._configs
+    X._configs = lambda d, only=None, **k: [c for c in fake if only is None or
+                                             (c['channel'], c['sweep'], c['detector'], c['matcher'], c['ransac']) in only]
+    try:
+        r = DP.run(jd, tcsv, quiet=True)
+    finally:
+        X._configs = orig
+    m = {x['detector']: x for x in r['methods']}
+    check('detector plots: the methods close to the manual points (within 1.5 x the best, reaching half the truth '
+          'points), their agreed points kept whatever the distortion across the scene, a method\'s wrong area '
+          'left out; one look-vector plot each and all together',
+          (sorted(m), m['sift']['points_agreed'] < 0.8 * m['sift']['points_all'],
+           m['disk_depth']['points_agreed'] > 0.9 * m['disk_depth']['points_all'],
+           all(os.path.exists(x['plot']) for x in r['methods']),
+           os.path.exists(os.path.join(jd, 'DETECTOR_PLOTS', 'ALL_AGREED_vectors.png')),
+           float(m['disk_depth']['truth_rmse_agreed_m']) < 30),
+          (['disk_depth', 'dog_hardnet', 'sift'], True, True, True, True, True))
+
+
 def window_skip_check(cfg):
     """Windows mostly on water / featureless ground are not matched."""
     import numpy as _np
@@ -1320,6 +1380,8 @@ def test_detector_params():
           [('lgm', ''), ('lgm', 'lwtg1amv')])
     lightglue_weights_check()
     window_skip_check(cfg)
+    import tempfile as _tf
+    detplots_check(_tf.mkdtemp())
     check('params: run count (variants, passes in total)',
           E.count_runs('disk', {'checkpoint': ['depth', 'epipolar'], 'lgm.filter_threshold': [0.1, 0.2]},
                        ['smnn', 'lgm'], 2), (2, 8))
