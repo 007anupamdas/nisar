@@ -492,6 +492,20 @@ def test_e2e_truth(tmp):
            len(tc) >= 2, os.path.exists(os.path.join(out, 'TRUTH_CHECK.png')),
            [os.path.basename(r) for r in TC.run_folders(par)]),
           (0, False, True, True, True, ['auto_top3_agree2', 'auto_top5_agree3']))
+    # an updated truth file: re-evaluated and the final points picked again, nothing matched again
+    upd = truth_file('truth_updated.csv', 4413.0, -2487.0)
+    res = subprocess.run([sys.executable, os.path.join(HERE, 'automatch_job.py'), 'truthcheck', out, '--truth', upd,
+                          '--redo-final'], capture_output=True, text=True)
+    ju = json.load(open(os.path.join(out, 'job_used.json')))
+    rk2 = pd.read_csv(os.path.join(out, 'TRUTH_RANKING.csv'))
+    check('truthcheck --redo-final: an updated truth file re-scores the run, the final points are picked again '
+          '(nothing matched again), the job now names that truth file and the one before is kept',
+          (res.returncode, 'Processing pair' in res.stdout, 'picked again' in res.stdout,
+           os.path.basename(ju['truth_csv']), os.path.exists(os.path.join(out, 'job_used_before_truth.json')),
+           round(float(rk2.sort_values('rank').iloc[0]['truth_rmse_m']) / 50) * 50),
+          (0, False, True, 'truth_updated.csv', True, 400))
+    with open(os.path.join(out, 'job_used.json'), 'w') as f:          # back to the job's own truth for what follows
+        json.dump(dict(ju, truth_csv=job['truth_csv']), f, indent=2)
     # the GPU service's compare mode re-scores a finished run, nothing matched again
     st = os.path.join(tmp, 'cmp_settings.json')
     md = os.path.join(tmp, 'mode_compare.json')

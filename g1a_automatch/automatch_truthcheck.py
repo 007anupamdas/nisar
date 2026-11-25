@@ -18,7 +18,11 @@ fastest/, fast/, ..., every run folder in it):
 TRUTH_CHECK.csv in the folder given: one row per run and point set, and
 TRUTH_CHECK.png: the point sets' truth RMSE per run.
 
-    python automatch_job.py truthcheck <run folder | folder of runs> --truth pts.csv
+    python automatch_job.py truthcheck <run folder | folder of runs> --truth pts.csv [--redo-final]
+
+--redo-final (an updated truth file): the final points are picked again from
+the saved matches with the new ranking (redo_final), before everything is
+scored; nothing is matched again.
 """
 from __future__ import annotations
 
@@ -61,13 +65,49 @@ def score_file(path: str, truth, radius_m: float) -> Dict:
             'truth_total': s.get('truth_total')}
 
 
-def check_run(run: str, truth_csv: str, radius_m: float = 5000.0) -> List[Dict]:
+def redo_final(run: str, truth_csv: str, res: Dict, crs: str) -> List[str]:
+    """The final points again with this truth, from the saved matches (nothing
+    matched again): RIVAL_BEST follows the new ranking, the cross-check picks its
+    top methods by it and writes the consistent points, the final and rigid
+    picks again, then RIVAL_BEST_FINAL. The job's settings (top N, agreeing,
+    levels, refined points) are kept; job_used.json then names this truth file
+    (the one before is kept as job_used_before_truth.json)."""
+    import json
+    import shutil
+    import automatch_cross as X
+    import automatch_job as J
+    jp = os.path.join(run, 'job_used.json')
+    with open(jp, encoding='utf-8') as f:
+        job = json.load(f)
+    if os.path.abspath(str(job.get('truth_csv') or '')) != os.path.abspath(truth_csv):
+        keep = os.path.join(run, 'job_used_before_truth.json')
+        if not os.path.exists(keep):
+            shutil.copyfile(jp, keep)
+        job['truth_csv'] = truth_csv
+        with open(jp, 'w', encoding='utf-8') as f:
+            json.dump(job, f, indent=2)
+    done = J.refresh_after_compare(run, res)
+    top = int(job.get('cross_top_n') or 5)
+    if top >= 2:
+        X.run(run, top, int(job.get('cross_min_agree') or 0), float(job.get('cross_cell_km') or 25.0),
+              truth_csv=truth_csv, working_crs=crs, keep=int(job.get('cross_keep_per_cell') or 3),
+              max_points=int(500 if job.get('cross_max_points') is None else job['cross_max_points']),
+              final_points=int(job.get('final_points') or 0), quiet=True)
+        done += X.best_finals(run, crs, int(job.get('final_points') or 0))
+    print(f'[TruthCheck] {os.path.basename(os.path.normpath(run))}: final points picked again with '
+          f'{os.path.basename(truth_csv)} (top {top} by it; nothing matched again)', flush=True)
+    return done
+
+
+def check_run(run: str, truth_csv: str, radius_m: float = 5000.0, refinal: bool = False) -> List[Dict]:
     import automatch_truth as T
     name = os.path.basename(os.path.normpath(run))
     crs = T.working_crs_of(run)
     if not crs:
         raise ValueError(f'{name}: working CRS unknown (no job_used.json / matches)')
     res = T.compare(run, truth_csv, radius_m, 'consensus', crs, write=True, quiet=True, rebuild=False)
+    if refinal:
+        redo_final(run, truth_csv, res, crs)
     rows = []
     rk = res.get('ranking')
     if rk is not None and len(rk):
@@ -210,6 +250,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument('folder', help='a run folder, or a folder of runs (auto steps, tiers, jobs)')
     ap.add_argument('--truth', required=True, help='the truth (manual points) CSV')
     ap.add_argument('--radius-km', type=float, default=5.0)
+    ap.add_argument('--redo-final', action='store_true',
+                    help='also pick the final points again with this truth (an updated truth file): the cross-check '
+                         'from the saved matches, its top methods by the new ranking; nothing matched again')
     ap.add_argument('--share-local', default='', help="where the server's share is mounted here, e.g. V:\\")
     ap.add_argument('--share-server', default='', help='the same share on the server, e.g. /maintenance/')
     a = ap.parse_args(argv)
@@ -223,7 +266,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     rows = []
     for r in runs:
         try:
-            rows += check_run(r, a.truth, a.radius_km * 1000.0)
+            rows += check_run(r, a.truth, a.radius_km * 1000.0, a.redo_final)
         except Exception as e:
             print(f'[TruthCheck] {os.path.basename(r)}: not compared ({type(e).__name__}: {e})', flush=True)
     if not rows:

@@ -147,6 +147,14 @@ a truth file and by *Compare with truth*; by hand:
 detector + matcher (TRUTH_RANKING), each final point set's truth RMSE (final,
 rigid, consistent, best final), REPORT with the manual points, and
 TRUTH_CHECK.png over the runs in the output folder (each auto step or tier).
+**An updated truth file:** keep *redo final points* ticked (the default; on
+the command line `--redo-final`). The final points are then picked again from
+the saved matches with the new ranking: RIVAL_BEST, the consistent points, the
+final and rigid picks, RIVAL_BEST_FINAL. Then everything is scored against the
+new truth, the report and the detector plots are drawn again, and nothing is
+matched again. The job's settings (top N, agreeing, levels, refined points)
+are kept. job_used.json then names the new truth file; the one before is kept
+as job_used_before_truth.json.
 Running again *with* the truth file processes the scene again, because the
 truth file also sets the job (window size from its largest error, the search
 range, the band). Command line: `python automatch_job.py truthcheck <run |

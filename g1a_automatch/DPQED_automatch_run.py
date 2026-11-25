@@ -286,14 +286,19 @@ class RunWindow(QtWidgets.QMainWindow):
                                   'points\' truth error, REPORT with the manual points; TRUTH_CHECK.png in the '
                                   'output folder. (Running again with a truth file processes it again: the truth '
                                   'file also sets the window, the search range and the band.)')
+        self.redo_final = QtWidgets.QCheckBox('redo final points')
+        self.redo_final.setChecked(True)
+        self.redo_final.setToolTip('With Compare with truth (e.g. an updated truth file): also pick the final points '
+                                   'again from the saved matches, the top methods by the new ranking; nothing is '
+                                   'matched again')
         self.btn_stop = QtWidgets.QPushButton('Stop')
         self.btn_open = QtWidgets.QPushButton('Open output folder')
         self.btn_presets = QtWidgets.QPushButton('Presets file…')
         self.btn_presets.setToolTip('Write automatch_presets.json (the presets, to edit) or show where it is; '
                                     'it is read when this window opens')
         self.btn_stop.setEnabled(False)
-        for b in (self.btn_check, self.btn_run, self.btn_all, self.btn_auto, self.btn_truth, self.btn_stop,
-                  self.btn_open, self.btn_presets):
+        for b in (self.btn_check, self.btn_run, self.btn_all, self.btn_auto, self.btn_truth, self.redo_final,
+                  self.btn_stop, self.btn_open, self.btn_presets):
             hb.addWidget(b)
         hb.addStretch(1)
         v.addLayout(hb)
@@ -523,7 +528,8 @@ class RunWindow(QtWidgets.QMainWindow):
         for b in (self.btn_run, self.btn_all, self.btn_auto, self.btn_check, self.btn_truth):
             b.setEnabled(False)
         self.btn_stop.setEnabled(True)
-        self.proc.start(sys.executable, ['-u', JOB_SCRIPT, 'truthcheck', out, '--truth', truth])
+        self.proc.start(sys.executable, ['-u', JOB_SCRIPT, 'truthcheck', out, '--truth', truth]
+                        + (['--redo-final'] if self.redo_final.isChecked() else []))
 
     def read(self):
         self._buf += bytes(self.proc.readAllStandardOutput()).decode('utf-8', 'replace')
