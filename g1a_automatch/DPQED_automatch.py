@@ -742,7 +742,7 @@ class PackDialog(QtWidgets.QDialog):
                 'pack/cache': '', 'pack/code': '/maintenance/ICIGDev/GPUPOC/exe/anup/nisar/g1a_automatch/automatch_gpuaas.py',
                 'pack/gpu_mb': 40000,
                 'pack/all_det': False, 'pack/all_match': False, 'pack/server_set': True, 'pack/good_only': True,
-                'pack/speed_fast': True, 'pack/speed_medium': True, 'pack/speed_slow': False}
+                'pack/speed_fast': True, 'pack/speed_medium': True, 'pack/speed_slow': False, 'pack/truth_folder': ''}
 
     def __init__(self, settings, job, parent=None):
         super().__init__(parent)
@@ -817,6 +817,12 @@ class PackDialog(QtWidgets.QDialog):
         f.addRow('Detectors', self.all_det)
         f.addRow('', hs)
         f.addRow('Matchers', self.all_match)
+        self.truth_folder = PathRow('dir')
+        self.truth_folder.setText(get('pack/truth_folder') or '')
+        self.truth_folder.setToolTip('When the job names no truth file: each pack takes its own from this folder '
+                                     '(named after the input\'s file or one of its folders, e.g. the request ID; '
+                                     'a file per band in a product folder too)')
+        f.addRow('Truth folder (optional)', self.truth_folder)
         self.dry = QtWidgets.QCheckBox('only list what would be copied, and its size')
         f.addRow('', self.dry)
         lay.addLayout(f)
@@ -861,6 +867,8 @@ class PackDialog(QtWidgets.QDialog):
             a += ['--set', 'matchers=all']
         if self.dry.isChecked():
             a.append('--dry-run')
+        if self.truth_folder.text().strip() and not self.job.get('truth_csv'):
+            a += ['--truth-folder', self.truth_folder.text().strip()]
         return a, self.job
 
     def _accept(self):
@@ -877,6 +885,7 @@ class PackDialog(QtWidgets.QDialog):
                          ('pack/share_local', self.share_local.text()), ('pack/share_server', self.share_server.text()),
                          ('pack/weights', self.weights.text().strip()), ('pack/cache', self.cache.text().strip()),
                          ('pack/code', self.code.text().strip()), ('pack/gpu_mb', self.gpu_mb.value()),
+                         ('pack/truth_folder', self.truth_folder.text().strip()),
                          ('pack/all_det', self.all_det.isChecked()), ('pack/all_match', self.all_match.isChecked()),
                          ('pack/server_set', self.server_set.isChecked()), ('pack/good_only', self.pack_good.isChecked()),
                          ('pack/speed_fast', self.pack_speeds['fast'].isChecked()),

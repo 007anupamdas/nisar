@@ -309,6 +309,20 @@ def mode_inputs(server_dir: str) -> Dict[str, str]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+def truth_from_folder(job: Dict, folder: str) -> Tuple[Dict, str]:
+    """(the job with its truth file from a truth folder, a note) when it names
+    none: found by its input's file or folder name (automatch_truthcheck), its
+    band first; the other bands' files beside it go with it (pack)."""
+    if job.get('truth_csv') or not folder:
+        return job, ''
+    import automatch_truthcheck as TC
+    got = TC.TruthFolder(folder).find(job.get('input_path') or '',
+                                      [str(c).lower() for c in (job.get('channels') or [])])
+    if not got:
+        return job, f'no truth file for {os.path.basename(job.get("input_path") or "")} in {folder}'
+    return dict(job, truth_csv=got), f'truth file from the truth folder: {got}'
+
+
 def pack(job: Dict, dest: str, server_dir: str, server_weights: str = '', server_cache: str = '',
          dry_run: bool = False, code_path: str = GPUAAS_CODE, url: str = GPUAAS_URL,
          conda_env: str = 'mpad', gpu_mb: int = 40000, notes: Optional[List[str]] = None) -> Dict:
@@ -529,9 +543,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument('--url', default=GPUAAS_URL)
     ap.add_argument('--conda-env', default='mpad')
     ap.add_argument('--gpu-mb', type=int, default=40000, help='max_gpu_mem_required')
+    ap.add_argument('--truth-folder', default='',
+                    help="when the job names no truth file: its own from this folder (named after the input's file "
+                         "or one of its folders, e.g. the request ID; a file per band in a product folder too)")
     a = ap.parse_args(argv)
     import automatch_job as J
     job = J.load_job(a.job, a.set)
+    if a.truth_folder:
+        job, note = truth_from_folder(job, a.truth_folder)
+        if note:
+            log(note)
     # a setting changed for the server only (--set, or the GUI Pack dialog's
     # fields, which remember their last value): say so, with the job's value
     notes = []

@@ -2803,6 +2803,7 @@ def test_truth_per_band(tmp):
         open(os.path.join(d, n), 'w').close()
     b4, plain = os.path.join(d, 'pts_band4.csv'), os.path.join(d, 'plain.csv')
     truth_folder_check(tmp)
+    pack_truth_check(tmp)
     check('truth per band: the suffixes of a channel; the file of each band',
           (T.band_suffixes('band4')[:4],
            os.path.basename(T.truth_for_channel(b4, 'band4')), os.path.basename(T.truth_for_channel(b4, 'band5')),
@@ -2845,6 +2846,24 @@ def truth_folder_check(tmp):
           (os.path.join('G1A_MV_B', 'pts_band5.csv'), os.path.join('269468481121', 'pts_band4.csv'),
            'G1A_HS_007_B28.csv', '', os.path.join('G1A_MV_B', 'pts_band6.csv'),
            os.path.join('G1A_MV_A', 'pts_band4.csv')))
+
+
+def pack_truth_check(tmp):
+    """Pack: a job without a truth file takes its own from a truth folder (a file per band in a product folder)."""
+    import automatch_pack as PK
+    root = os.path.join(tmp, 'truth_pack')
+    os.makedirs(os.path.join(root, '269468481121'), exist_ok=True)
+    for b in (4, 5):
+        open(os.path.join(root, '269468481121', f'pts_band{b}.csv'), 'w').close()
+    job = {'input_path': '/m/input/dqe/g1a/269468481121/input/G1A_MV_x.tif', 'channels': ['band5'], 'truth_csv': ''}
+    j2, note = PK.truth_from_folder(job, root)
+    j3, _ = PK.truth_from_folder(dict(job, truth_csv='/own.csv'), root)
+    import automatch_job as J
+    check('pack: a job naming no truth file takes its own from the truth folder (its band first; the other bands '
+          'go with it); a job naming one keeps it',
+          (os.path.relpath(j2['truth_csv'], root), [os.path.basename(p) for p in J.truth_files_beside(j2['truth_csv'])],
+           j3['truth_csv'], 'truth folder' in note),
+          (os.path.join('269468481121', 'pts_band5.csv'), ['pts_band5.csv', 'pts_band4.csv'], '/own.csv', True))
 
 
 def test_max_error_from_truth(tmp):
