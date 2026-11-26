@@ -3909,15 +3909,21 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             bands = self.channels.checked()
         except Exception:
             bands = []
-        return TC.find_truth(folder, self.in_path.text().strip(), bands)
+        return TC.find_truth(folder, self.in_path.text().strip(), bands,
+                             (self.out_path.text().strip(),))   # also by the output folder's name (request ID)
 
     def show_truth_found(self, *_):
         if self.truth_path.text().strip() or not self.truth_folder.text().strip():
             self.truth_found.setText('')
             return
         t = self.truth_file()
-        self.truth_found.setText(f'truth from the folder: {t}' if t else
-                                 'no truth file for this input in the truth folder')
+        if t:
+            self.truth_found.setText(f'truth from the folder: {t}')
+            return
+        import automatch_truthcheck as TC
+        near = TC.near_truth(self.truth_folder.text().strip(), self.in_path.text().strip())
+        self.truth_found.setText('no truth file for this input in the truth folder'
+                                 + (f' (closest: {", ".join(near)})' if near else ''))
 
     def train_tool_path(self) -> str:
         """gcp_train's window (gcp_train_gui.py): the one chosen before, else beside
@@ -4101,7 +4107,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
                                                               'give each pack its own folder.')
             return
         self._pack_queue.append({'args': args, 'job': job, 'dest': dest, 'dry': dlg.dry.isChecked(),
-                                 'label': f"{os.path.basename(job.get('input_path') or '')} -> {dest}"})
+                                 'label': f"{job.get('input_path') or ''} -> {dest}"})
         self._pack_queue_changed()
         self.lbl_status.setText(f'Pack queued ({len(self._pack_queue)} in the pack queue): Run the pack queue to '
                                 'start')

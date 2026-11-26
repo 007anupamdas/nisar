@@ -309,18 +309,25 @@ def mode_inputs(server_dir: str) -> Dict[str, str]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-def truth_from_folder(job: Dict, folder: str) -> Tuple[Dict, str]:
+def truth_from_folder(job: Dict, folder: str, dest: str = '') -> Tuple[Dict, str]:
     """(the job with its truth file from a truth folder, a note) when it names
     none: found by its input's file or folder name (automatch_truthcheck), its
     band first; the other bands' files beside it go with it (pack)."""
     if job.get('truth_csv') or not folder:
         return job, ''
     import automatch_truthcheck as TC
-    got = TC.TruthFolder(folder).find(job.get('input_path') or '',
-                                      [str(c).lower() for c in (job.get('channels') or [])])
+    got = TC.TruthFolder(folder).find_any(job.get('input_path') or '',     # the input, else the pack's folder
+                                          [str(c).lower() for c in (job.get('channels') or [])], (dest,))
     if not got:
-        return job, f'no truth file for {os.path.basename(job.get("input_path") or "")} in {folder}'
-    return dict(job, truth_csv=got), f'truth file from the truth folder: {got}'
+        import re
+        inp = str(job.get('input_path') or '')
+        tried = [os.path.splitext(os.path.basename(inp))[0]] + [
+            x for x in (inp.replace('\\', '/').split('/')[-4:-1] + str(dest or '').replace('\\', '/').rstrip('/').split('/')[-3:])
+            if len(x) >= 6 and re.search(r'\d', x)]
+        near = TC.TruthFolder(folder).near(inp)
+        return job, (f'no truth file for {inp} in {folder} (names tried: {", ".join(dict.fromkeys(tried))})'
+                     + (f'; closest names there: {", ".join(near)}' if near else '; the folder has no truth files'))
+    return dict(job, truth_csv=got), f'truth file for {job.get("input_path")} from the truth folder: {got}'
 
 
 def pack(job: Dict, dest: str, server_dir: str, server_weights: str = '', server_cache: str = '',
@@ -550,7 +557,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     import automatch_job as J
     job = J.load_job(a.job, a.set)
     if a.truth_folder:
-        job, note = truth_from_folder(job, a.truth_folder)
+        job, note = truth_from_folder(job, a.truth_folder, a.to)
         if note:
             log(note)
     # a setting changed for the server only (--set, or the GUI Pack dialog's

@@ -150,6 +150,7 @@ class TruthIndex:
     def __init__(self, folder: str):
         self.by_key: Dict[str, List[str]] = {}
         root = os.path.normpath(folder or '')
+        self.root = root
         for d, _, files in os.walk(folder or ''):
             # a file also counts under the names of its folders below the truth folder
             # (truth/<product or request ID>/pts_band4.csv)
@@ -180,6 +181,13 @@ class TruthIndex:
                     if re.search(rf'[_\-. ](?:band_?|b)0*{n}(?:\D|$)', os.path.splitext(os.path.basename(g))[0].lower())]
             return sorted(same or got)[0]
         return ''
+
+    def near(self, input_path: str, n: int = 3) -> List[str]:
+        """The truth names closest to an input's name (to say why none matched)."""
+        import difflib
+        stem = os.path.splitext(os.path.basename(str(input_path or '').replace('\\', '/')))[0].lower()
+        names = sorted({os.path.relpath(g, self.root) for v in self.by_key.values() for g in v})
+        return difflib.get_close_matches(stem, names, n, 0.3) or names[:n]
 
 
 def manifest_rows(job: str, level: Optional[int] = None, include_unreliable: bool = False,

@@ -149,9 +149,16 @@ rigid, consistent, best final), REPORT with the manual points, and
 TRUTH_CHECK.png over the runs in the output folder (each auto step or tier).
 **A truth folder instead of a truth file** (both windows, Pack for server,
 Compare with truth): leave the truth file empty and give the folder.
-- **Matching:** the input's own file is found there by its file name or one of
-  its folders (e.g. the request ID); a file per band in a product folder works
-  too.
+- **Matching:** the input's own file is found there by exact names only:
+  - the input's file name;
+  - one of its folders (e.g. the request ID);
+  - else the pack's destination folder (Pack) or the output folder (windows),
+    e.g. `…/g1a/265270485411`.
+
+  A file per band in a product folder works too. A part of the file name is
+  never used.
+- **When none matches:** the full input path, the names tried and the closest
+  truth names are shown.
 - **Shown:** the window says under the field which file it found.
 - **The run:** takes that file and the other bands' files beside it.
 - **Queue:** queued runs keep the folder and find their own.

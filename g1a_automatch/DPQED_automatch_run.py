@@ -529,15 +529,21 @@ class RunWindow(QtWidgets.QMainWindow):
         if not (self.truth_folder.text() and self.input.text()):
             return ''
         import automatch_truthcheck as TC
-        return TC.find_truth(self.truth_folder.text(), self.input.text(), P.parse_bands(self.bands.text()))
+        return TC.find_truth(self.truth_folder.text(), self.input.text(), P.parse_bands(self.bands.text()),
+                             (self.output.text(),))      # also by the output folder's name (e.g. the request ID)
 
     def show_truth_found(self, *_):
         if self.truth.text() or not self.truth_folder.text():
             self.truth_found.setText('')
             return
         t = self.truth_file()
-        self.truth_found.setText(f'truth from the folder: {t}' if t else
-                                 'no truth file for this input in the truth folder')
+        if t:
+            self.truth_found.setText(f'truth from the folder: {t}')
+            return
+        import automatch_truthcheck as TC
+        near = TC.near_truth(self.truth_folder.text(), self.input.text())
+        self.truth_found.setText('no truth file for this input in the truth folder'
+                                 + (f' (closest: {", ".join(near)})' if near else ''))
 
     def compare_truth(self):
         """The finished run(s) in the output folder against the truth file (automatch_truthcheck)."""

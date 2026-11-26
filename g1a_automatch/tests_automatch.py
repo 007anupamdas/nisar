@@ -2893,6 +2893,22 @@ def pack_truth_check(tmp):
           (os.path.relpath(j2['truth_csv'], root), [os.path.basename(p) for p in J.truth_files_beside(j2['truth_csv'])],
            j3['truth_csv'], 'truth folder' in note),
           (os.path.join('269468481121', 'pts_band5.csv'), ['pts_band5.csv', 'pts_band4.csv'], '/own.csv', True))
+    # the request ID only in the pack's destination folder; a truth file named after the scene ID; hints when none
+    flat = os.path.join(tmp, 'truth_flat')
+    os.makedirs(flat, exist_ok=True)
+    for n in ('265270485411.csv', '261124080540_GCP.csv', 'other_999999999.csv'):
+        open(os.path.join(flat, n), 'w').close()
+    ml = {'input_path': 'X:/DPS/G1A/ML/G1A_ML_G_24NOV2026_261124080540_26112403_SPLC00GTD_02_1.tif',
+          'channels': [], 'truth_csv': ''}
+    by_dest, _ = PK.truth_from_folder(ml, flat, 'V:/ICIGDev/GPUPOC/input/dqe/g1a/265270485411')
+    os.remove(os.path.join(flat, '265270485411.csv'))
+    by_scene, _ = PK.truth_from_folder(ml, flat, 'V:/ICIGDev/GPUPOC/input/dqe/g1a/set9')
+    os.remove(os.path.join(flat, '261124080540_GCP.csv'))
+    _, why = PK.truth_from_folder(ml, flat, 'V:/ICIGDev/GPUPOC/input/dqe/g1a/set9')
+    check('pack: the truth file by the pack\'s destination folder (the request ID); never by a part of the file '
+          'name (the scene ID); when none, the closest names are listed',
+          (os.path.basename(by_dest['truth_csv']), by_scene.get('truth_csv', ''), 'closest names' in why),
+          ('265270485411.csv', '', True))
 
 
 def test_max_error_from_truth(tmp):

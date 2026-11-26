@@ -272,6 +272,7 @@ class TruthFolder:
     def __init__(self, folder: str):
         self.by_key: Dict[str, List[str]] = {}
         root = os.path.normpath(folder or '')
+        self.root = root
         for d, _, files in os.walk(folder or ''):
             # a file also counts under the names of its folders below the truth folder
             # (truth/<product or request ID>/pts_band4.csv)
@@ -303,11 +304,30 @@ class TruthFolder:
             return sorted(same or got)[0]
         return ''
 
+    def find_any(self, input_path: str, bands: List[str], also=()) -> str:
+        """find() for the input, else by the names of other folders that go with
+        it: the pack's destination (…/g1a/265270485411), the run's output."""
+        got = self.find(input_path, bands)
+        for extra in also or ():
+            if got:
+                break
+            e = str(extra or '').replace('\\', '/').rstrip('/')
+            if e:
+                got = self.find(e + '/_', bands)          # its folder names, not a file name
+        return got
+
+    def near(self, input_path: str, n: int = 3) -> List[str]:
+        """The truth names closest to an input's name (to say why none matched)."""
+        import difflib
+        stem = os.path.splitext(os.path.basename(str(input_path or '').replace('\\', '/')))[0].lower()
+        names = sorted({os.path.relpath(g, self.root) for v in self.by_key.values() for g in v})
+        return difflib.get_close_matches(stem, names, n, 0.3) or names[:n]
+
 
 _FOLDERS: Dict[str, tuple] = {}
 
 
-def find_truth(folder: str, input_path: str, bands: Optional[List[str]] = None) -> str:
+def find_truth(folder: str, input_path: str, bands: Optional[List[str]] = None, also: tuple = ()) -> str:
     """The truth file of an input in a truth folder ('' when none): the folder
     is read once and again after 30 s (the windows call this as you type)."""
     import time
@@ -317,7 +337,17 @@ def find_truth(folder: str, input_path: str, bands: Optional[List[str]] = None) 
     if got is None or time.time() - got[0] > 30:
         got = (time.time(), TruthFolder(folder))
         _FOLDERS[folder] = got
-    return got[1].find(input_path, [str(b).lower() for b in (bands or [])])
+    return got[1].find_any(input_path, [str(b).lower() for b in (bands or [])], also)
+
+
+def near_truth(folder: str, input_path: str, n: int = 3) -> List[str]:
+    """The truth names in a folder closest to an input's name (why none matched)."""
+    if not folder or not os.path.isdir(folder):
+        return []
+    import time
+    if folder not in _FOLDERS:                           # read once (cached, as find_truth)
+        _FOLDERS[folder] = (time.time(), TruthFolder(folder))
+    return _FOLDERS[folder][1].near(input_path, n)
 
 
 def truth_for(run: str, truth: str = '', folder: Optional[TruthFolder] = None) -> str:
