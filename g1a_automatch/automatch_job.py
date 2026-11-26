@@ -1304,19 +1304,22 @@ def auto_resolution(job: Dict) -> Tuple[Dict, str]:
             utm = f'EPSG:{(32600 if lat >= 0 else 32700) + zone}'
             t, _, _ = calculate_default_transform(src.crs, utm, src.width, src.height, *src.bounds)
             warped = float(abs(t.a))
+            tags = {str(k).upper(): v for k, v in (src.tags() or {}).items()}
     except Exception:
         return job, ''
     import automatch_presets as P
     sensor = P.sensor_of(job['input_path'])
     res, keys = P.meta_resolution(job['input_path'])
+    tag = next((k for k in ('OUTPUTRESOLUTIONACROSS', 'OUTPUT_RESOLUTION') if P._res_value(tags.get(k, ''))), '')
     if res:
-        why = f'from the product metadata: {keys}; the lon/lat grid is about {warped:.0f} m'
-    elif P.SENSOR_RES_M.get(sensor):
-        res = P.SENSOR_RES_M[sensor]
-        why = (f'{sensor} pixel size as in RIVAL (no pixel size in the product metadata); the lon/lat grid is '
-               f'about {warped:.0f} m')
+        why = f'from the product metadata: {keys}; the tif grid is about {warped:.0f} m'
+    elif tag:
+        res, why = round(P._res_value(tags[tag]), 3), f'from the tif tag {tag}; its grid is about {warped:.0f} m'
+    elif warped > 0:
+        res, why = round(warped, 1), 'from the tif: its lon/lat pixel on the UTM grid (no resolution in the metadata)'
     else:
-        res, why = round(warped, 1), 'the input is in lon/lat: its pixel size on the UTM grid'
+        res = P.SENSOR_RES_M.get(sensor) or 10.0
+        why = f'{sensor or "unknown sensor"} pixel size as in RIVAL (none in the metadata or the tif)'
     return dict(job, target_resolution=res), f'working resolution {res:g} m ({why})'
 
 

@@ -263,29 +263,61 @@ def product_meta(path: str) -> Dict[str, str]:
     return {}
 
 
-_RES_KEY = re.compile(r'(resolution|gsd|pixel_?size|pixel_?spacing|spatial_?res|sampling)', re.I)
+TXT_RES_KEYS = ('OutputResolutionAcross',)          # the product's .txt metadata (key = value)
+XML_RES_TAGS = ('OUTPUT_RESOLUTION',)               # the product's .xml metadata
+
+
+def _res_value(v) -> Optional[float]:
+    m = re.match(r'\s*([0-9]+(?:\.[0-9]+)?)\s*(m|metres?|meters?|km)?\s*$', str(v), re.I)
+    if not m:
+        return None
+    x = float(m.group(1)) * (1000.0 if (m.group(2) or '').lower() == 'km' else 1.0)
+    return x if 1.0 <= x <= 5000.0 else None        # metres; a value in degrees is left out
 
 
 def meta_resolution(path: str) -> Tuple[Optional[float], str]:
-    """(pixel size in metres, the metadata key(s) it came from) from the
-    product's own metadata (BAND_META.txt / *meta*.txt beside the input):
-    keys naming resolution / GSD / pixel size / spacing with a value in
-    metres (along and across are averaged); (None, '') when none."""
-    meta = product_meta(path)
-    vals, keys = [], []
-    for k, v in meta.items():
-        if not _RES_KEY.search(str(k)):
-            continue
-        m = re.match(r'\s*([0-9]+(?:\.[0-9]+)?)\s*(m|metres?|meters?|km)?\s*$', str(v), re.I)
-        if not m:
-            continue
-        x = float(m.group(1)) * (1000.0 if (m.group(2) or '').lower() == 'km' else 1.0)
-        if 1.0 <= x <= 5000.0:              # metres; a value in degrees is left out
-            vals.append(x)
-            keys.append(k)
-    if not vals:
+    """(pixel size in metres, where it came from) from the product's own
+    metadata beside the input (its folder, then the folder above): a .txt
+    with OutputResolutionAcross = <m>, else an .xml with OUTPUT_RESOLUTION
+    (element or attribute); (None, '') when neither has it."""
+    import glob
+    here = os.path.dirname(os.path.abspath(path)) if path else ''
+    if not here or not os.path.isdir(here):
         return None, ''
-    return round(float(sum(vals) / len(vals)), 3), ', '.join(keys)
+    folders = [here] + ([os.path.dirname(here)] if os.path.dirname(here) != here else [])
+    stem = os.path.splitext(os.path.basename(path))[0].lower()
+
+    def files(ext):                       # the input's own metadata first
+        out = []
+        for d in folders:
+            fs = sorted(glob.glob(os.path.join(d, '*' + ext)) + glob.glob(os.path.join(d, '*' + ext.upper())))
+            fs = [f for f in dict.fromkeys(fs) if not f.lower().endswith('.aux.xml')]
+            out += sorted(fs, key=lambda f: (not os.path.basename(f).lower().startswith(stem[:12]), f))
+        return out
+    for f in files('.txt'):
+        try:
+            with open(f, encoding='utf-8', errors='replace') as h:
+                for line in h:
+                    k, sep, v = line.partition('=')
+                    if sep and k.strip() in TXT_RES_KEYS:
+                        x = _res_value(v)
+                        if x:
+                            return round(x, 3), f'{k.strip()} in {os.path.basename(f)}'
+        except OSError:
+            continue
+    for f in files('.xml'):
+        try:
+            with open(f, encoding='utf-8', errors='replace') as h:
+                text = h.read(4_000_000)
+        except OSError:
+            continue
+        for tag in XML_RES_TAGS:
+            m = (re.search(rf'<(?:\w+:)?{tag}\b[^>]*>\s*([^<]+?)\s*<', text, re.I)
+                 or re.search(rf'\b{tag}\s*=\s*["\']([^"\']+)["\']', text, re.I))
+            x = _res_value(m.group(1)) if m else None
+            if x:
+                return round(x, 3), f'{tag} in {os.path.basename(f)}'
+    return None, ''
 
 
 def scene_centre(path: str) -> Optional[Tuple[float, float]]:

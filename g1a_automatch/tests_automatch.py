@@ -2977,38 +2977,46 @@ def auto_windows_check(tmp):
 
 
 def auto_resolution_check(tmp):
-    """A lon/lat input: the pixel size from its product metadata, else the
-    sensor's (as in RIVAL), else its UTM grid's; a projected input or a
-    given target_resolution unchanged (not the 10 m the run used to take)."""
+    """A lon/lat input: the pixel size from its .txt metadata
+    (OutputResolutionAcross), else its .xml (OUTPUT_RESOLUTION), else the
+    tif's tags, else the tif's grid in metres; a projected input or a given
+    target_resolution unchanged (not the 10 m the run used to take)."""
     import numpy as _np
     import rasterio as _rio
     from rasterio.transform import from_origin as _fo
     import automatch_job as J
 
-    def tif(folder, name, crs='EPSG:4326', px=0.0018):
+    def tif(folder, name, crs='EPSG:4326', px=0.0018, tags=None):
         os.makedirs(folder, exist_ok=True)
         p = os.path.join(folder, name)
         with _rio.open(p, 'w', driver='GTiff', width=40, height=40, count=1, dtype='uint16', crs=crs,
                        transform=_fo(78.0 if crs == 'EPSG:4326' else 500000.0,
                                      20.0 if crs == 'EPSG:4326' else 2200000.0, px, px)) as d:
             d.write(_np.ones((1, 40, 40), 'uint16'))
+            if tags:
+                d.update_tags(**tags)
         return p
-    hs = tif(os.path.join(tmp, 'res_hs'), 'G1AHS026111205EX000006_S081557_ort.tif')
-    hv = tif(os.path.join(tmp, 'res_hv'), 'G1AHV026111204EX000004_ort.tif')
-    with open(os.path.join(tmp, 'res_hv', 'BAND_META.txt'), 'w') as f:
-        f.write('SatID=G1A\nSensor=HV\nPixelResolution = 318.5\nStripCenterLat=20.0\n')
-    unk = tif(os.path.join(tmp, 'res_unk'), 'scene.tif')
+    hv = tif(os.path.join(tmp, 'res_txt'), 'G1AHV026111204EX000004_ort.tif')
+    with open(os.path.join(tmp, 'res_txt', 'BAND_META.txt'), 'w') as f:
+        f.write('SatID=G1A\nSensor=HV\nOutputResolutionAlong = 330\nOutputResolutionAcross = 318.5\n')
+    hs = tif(os.path.join(tmp, 'res_xml'), 'G1AHS026111205EX000006_ort.tif')
+    with open(os.path.join(tmp, 'res_xml', 'G1AHS026111205EX000006_meta.xml'), 'w') as f:
+        f.write('<?xml version="1.0"?><PRODUCT><SENSOR>HS</SENSOR><OUTPUT_RESOLUTION>191.2</OUTPUT_RESOLUTION></PRODUCT>')
+    tg = tif(os.path.join(tmp, 'res_tag'), 'G1AML026111204E_ort.tif', tags={'OUTPUT_RESOLUTION': '1180'})
+    grid = tif(os.path.join(tmp, 'res_grid'), 'G1AHS026111205EX000009_ort.tif')
     utm = tif(os.path.join(tmp, 'res_utm'), 'G1AHS_utm.tif', crs='EPSG:32644', px=191.0)
-    j1, n1 = J.auto_resolution({'input_path': hs})
-    j2, n2 = J.auto_resolution({'input_path': hv})
-    j3, _ = J.auto_resolution({'input_path': unk})
-    j4, n4 = J.auto_resolution({'input_path': utm})
-    j5, n5 = J.auto_resolution({'input_path': hs, 'target_resolution': 100})
-    check('working resolution of a lon/lat input: HS 191 m (as in RIVAL), HV 318.5 m from its BAND_META, an '
-          'unknown sensor its UTM grid (~190 m, not 10 m); projected or given unchanged',
-          (j1['target_resolution'], 'RIVAL' in n1, j2['target_resolution'], 'metadata' in n2,
-           150 < j3['target_resolution'] < 230, j4.get('target_resolution'), n4, j5['target_resolution'], n5),
-          (191.0, True, 318.5, True, True, None, '', 100, ''))
+    j1, n1 = J.auto_resolution({'input_path': hv})
+    j2, n2 = J.auto_resolution({'input_path': hs})
+    j3, n3 = J.auto_resolution({'input_path': tg})
+    j4, n4 = J.auto_resolution({'input_path': grid})
+    j5, n5 = J.auto_resolution({'input_path': utm})
+    j6, n6 = J.auto_resolution({'input_path': hs, 'target_resolution': 100})
+    check('working resolution of a lon/lat input: .txt OutputResolutionAcross 318.5, .xml OUTPUT_RESOLUTION '
+          '191.2, the tif tag 1180, else the tif grid (~190 m, not 10 m); projected or given unchanged',
+          (j1['target_resolution'], 'OutputResolutionAcross' in n1, j2['target_resolution'], 'OUTPUT_RESOLUTION' in n2,
+           j3['target_resolution'], 'tif tag' in n3, 150 < j4['target_resolution'] < 230, 'from the tif' in n4,
+           j5.get('target_resolution'), n5, j6['target_resolution'], n6),
+          (318.5, True, 191.2, True, 1180.0, True, True, True, None, '', 100, ''))
 
 
 def test_max_error_from_truth(tmp):

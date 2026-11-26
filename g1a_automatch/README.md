@@ -652,9 +652,13 @@ is set), so the defaults suit any pixel size.
 An input in lon/lat (a G1A `_ort` / `_sys` product: its pixel size is in
 degrees) takes its working resolution, in this order, from:
 
-1. **The product's metadata.** BAND_META.txt or `*meta*.txt` beside the input:
-   a key naming resolution, GSD, pixel size or spacing, with a value in metres.
-2. **The sensor's pixel size, as set in RIVAL:**
+1. **The product's .txt metadata** beside the input (its folder, then the one
+   above): `OutputResolutionAcross = <m>`.
+2. **The product's .xml metadata:** `OUTPUT_RESOLUTION`.
+3. **The tif:** its `OutputResolutionAcross` / `OUTPUT_RESOLUTION` tag, else
+   its lon/lat pixel measured in metres on the UTM grid it is warped onto.
+4. **Only if none of these can be read,** the sensor's pixel size as set in
+   RIVAL:
 
    | Sensor | Pixel size | Bands |
    |---|---|---|
@@ -662,8 +666,6 @@ degrees) takes its working resolution, in this order, from:
    | HS | 191 m | 256: 900–2500 nm |
    | HV | 320 m | 158: 375–1000 nm |
    | ML | 1180 m | 6: 7350–13250 nm |
-
-3. **The UTM grid it is warped onto.**
 
 Before this, such inputs ran with 10 m. RANSAC and the detectors' agreement
 then allowed only 10–15 m on 191–320 m pixels, so the cross-check was never
