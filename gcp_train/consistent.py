@@ -149,20 +149,36 @@ class TruthIndex:
 
     def __init__(self, folder: str):
         self.by_key: Dict[str, List[str]] = {}
+        root = os.path.normpath(folder or '')
         for d, _, files in os.walk(folder or ''):
+            # a file also counts under the names of its folders below the truth folder
+            # (truth/<product or request ID>/pts_band4.csv)
+            subs = [x for x in os.path.relpath(d, root).replace('\\', '/').split('/') if x not in ('', '.')]
             for f in files:
                 if f.lower().endswith(('.csv', '.txt')):
-                    self.by_key.setdefault(_truth_key(f), []).append(os.path.join(d, f))
+                    p = os.path.join(d, f)
+                    for k in dict.fromkeys([_truth_key(f)] + [_truth_key(x) for x in subs] + [x.lower() for x in subs]):
+                        self.by_key.setdefault(k, []).append(p)
 
     def find(self, input_path: str, band: str = '') -> str:
+        """The truth file of an input: by its file name, else one of its folders
+        (e.g. the request ID); a name that matches files in more than one folder
+        (pts_band4.csv in every product folder, a folder 'MV') is ambiguous and
+        not used. The input's band first (band4, B4, band_4)."""
+        import re
         p = str(input_path or '').replace('\\', '/')
         keys = [os.path.splitext(os.path.basename(p))[0].lower()]
-        keys += [x.lower() for x in p.split('/')[-4:-1] if x and x.lower() not in ('input', 'inputs', 'data')][::-1]
+        # the input's folders only when specific (a request ID, a product: digits, 6+ characters), not 'MV', 'ADRIN'
+        keys += [x.lower() for x in p.split('/')[-4:-1]
+                 if len(x) >= 6 and re.search(r'\d', x) and x.lower() not in ('input', 'inputs', 'data')][::-1]
+        nums = [m.group(1) for b in ([band] if band else []) for m in [re.search(r'(\d+)', str(b))] if m]
         for k in keys:
             got = self.by_key.get(_truth_key(k)) or self.by_key.get(k)
-            if got:
-                same_band = [g for g in got if band and re.search(rf'[_-]{band}(\D|$)', os.path.basename(g).lower())]
-                return sorted(same_band or got)[0]
+            if not got or len({os.path.dirname(g) for g in got}) > 1:
+                continue
+            same = [g for g in got for n in nums
+                    if re.search(rf'[_\-. ](?:band_?|b)0*{n}(?:\D|$)', os.path.splitext(os.path.basename(g))[0].lower())]
+            return sorted(same or got)[0]
         return ''
 
 

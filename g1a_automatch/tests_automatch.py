@@ -2802,6 +2802,7 @@ def test_truth_per_band(tmp):
     for n in ('pts_band4.csv', 'pts_band5.csv', 'pts_B2.csv', 'plain.csv', 'plain_band6.csv'):
         open(os.path.join(d, n), 'w').close()
     b4, plain = os.path.join(d, 'pts_band4.csv'), os.path.join(d, 'plain.csv')
+    truth_folder_check(tmp)
     check('truth per band: the suffixes of a channel; the file of each band',
           (T.band_suffixes('band4')[:4],
            os.path.basename(T.truth_for_channel(b4, 'band4')), os.path.basename(T.truth_for_channel(b4, 'band5')),
@@ -2811,6 +2812,39 @@ def test_truth_per_band(tmp):
            T.channel_of_run(os.path.join('out', 'HH_toS1', 'filtered_x'))),
           (['band4', 'BAND4', 'band_4', 'b4'], 'pts_band4.csv', 'pts_band5.csv', 'pts_B2.csv', 'pts_band4.csv',
            'plain_band6.csv', 'plain.csv', 'band5', 'HH'))
+
+
+def truth_folder_check(tmp):
+    """A truth folder with many files: product folders with a file per band, flat files, a generic folder."""
+    import automatch_truth as T
+    import automatch_truthcheck as TC
+    root = os.path.join(tmp, 'truth_many')
+    for prod in ('G1A_MV_A', 'G1A_MV_B', '269468481121'):
+        os.makedirs(os.path.join(root, prod), exist_ok=True)
+        for b in (4, 5, 6):
+            open(os.path.join(root, prod, f'pts_band{b}.csv'), 'w').close()
+    for k in range(47):
+        open(os.path.join(root, f'G1A_HS_{k:03d}_B28.csv'), 'w').close()
+    os.makedirs(os.path.join(root, 'MV'), exist_ok=True)           # a generic folder: must not match an MV input
+    open(os.path.join(root, 'MV', 'notes.csv'), 'w').close()
+    open(os.path.join(root, 'MV', 'other.csv'), 'w').close()
+    tf = TC.TruthFolder(root)
+    a = tf.find('X:/DPS/G1A/MV/G1A_MV_B.tif', ['band5'])
+    r = tf.find('/m/input/dqe/g1a/269468481121/input/G1A_MV_x.tif', ['band4'])
+    flat = tf.find('/h/G1A_HS_007.tif', ['band28'])
+    none = tf.find('X:/DPS/G1A/MV/G1A_MV_unknown.tif', ['band4'])
+    sib = T.truth_for_channel(a, 'band6')
+    sys.path.insert(0, os.path.join(os.path.dirname(HERE), 'gcp_train'))
+    import consistent as CP
+    gi = CP.TruthIndex(root).find('X:/DPS/G1A/MV/G1A_MV_A.tif', 'band4')
+    check('truth folder: product folders with a file per band, flat files and a generic folder: each input finds '
+          'its own (by file or folder name, its band first, the other bands beside it); a name in several folders '
+          'is not used',
+          (os.path.relpath(a, root), os.path.relpath(r, root), os.path.basename(flat), none,
+           os.path.relpath(sib, root), os.path.relpath(gi, root)),
+          (os.path.join('G1A_MV_B', 'pts_band5.csv'), os.path.join('269468481121', 'pts_band4.csv'),
+           'G1A_HS_007_B28.csv', '', os.path.join('G1A_MV_B', 'pts_band6.csv'),
+           os.path.join('G1A_MV_A', 'pts_band4.csv')))
 
 
 def test_max_error_from_truth(tmp):

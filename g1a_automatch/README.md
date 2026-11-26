@@ -165,8 +165,15 @@ stem and the band at the end, in one folder: `pts_band4.csv`, `pts_band5.csv`,
 - **Job folders:** list them all, e.g. the server's output through the share
   mapping and the workstation's output.
 - **Truth folder:** each job's truth file is found there by its input's file
-  name or one of its folders (e.g. the request ID), the job's band first. A
-  job without one there uses the truth file it names.
+  name or one of its folders (e.g. the request ID), the job's band first
+  (band4, B4). A job without one there uses the truth file it names.
+  - **Layouts:** files named after the product, or product folders holding a
+    file per band (`truth/<product or request ID>/pts_band4.csv, pts_band5.csv
+    …`), any number of them.
+  - **Ambiguous names are not used:** a name found in more than one folder
+    (`pts_band4.csv` in every product folder), and generic folder names of the
+    input (`MV`, `ADRIN`: only names with a digit and at least 6 characters
+    count, like a request ID or a product).
 - **Which jobs run:** only those whose truth file changed since they were last
   compared, or were never compared (*every job* to redo all).
 - **Final points:** redone with the new truth when ticked.
