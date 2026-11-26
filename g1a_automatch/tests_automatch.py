@@ -2267,9 +2267,11 @@ def test_gui_queue():
         w.run_job()
         check('gui queue: Run starts at once', started, [('run', os.path.join(out['a'], 'job_gui.json'))])
         w.out_path.setText(out['b'])
+        w.win_auto.setChecked(False)
         w.windows.setText('512')
         e = w.queue_run()
         check('gui queue: a run queued while one runs waits', (len(started), len(w._run_queue)), (1, 1))
+        w.win_auto.setChecked(False)
         w.windows.setText('1024')
         with open(e['path'], encoding='utf-8') as f:
             check('gui queue: the queued run keeps its own copy of the settings', json.load(f)['window_sizes'], [512])
@@ -2296,6 +2298,7 @@ def test_gui_queue():
         w.queue_list.setCurrentRow(0)
         w._queue_edit()
         in_form = (w.out_path.text(), len(w._run_queue), w.use_not_before.isChecked())
+        w.win_auto.setChecked(False)
         w.windows.setText('768')
         e2 = w.queue_run()                       # still not before +3 h: waits
         with open(e2['path'], encoding='utf-8') as f:
@@ -2406,6 +2409,7 @@ def test_gui_dialog():
               (dlg.table.rowCount(), w.det_table.item(w._row_of('sift'), 4).text(),
                'x.pth\thttp://h/x.pth' in dlg.missing_text()), (2, '1 missing', True))
         dlg.close()
+        w.win_auto.setChecked(False)
         w.windows.setText('1024, 3072')
         w.max_feat.setValue(32000)
         check('gui: keypoints per window shown, capped sizes flagged',
@@ -2611,6 +2615,30 @@ def test_gui_dialog():
         check('gui: Train matchers opens gcp_train\'s window as its own program (found beside g1a_automatch)',
               (bool(tcmd) and tcmd[-1].replace('\\', '/').endswith('gcp_train/gcp_train_gui.py'),
                any(b.text() == 'Train matchers…' for b in w.findChildren(G.QtWidgets.QPushButton))), (True, True))
+        w._pack_queue = []
+        w._pack_queue_changed()
+        pq = w.pack_dialog(run=False)
+        pq.local.setText('V:\\ICIGDev\\GPUPOC\\input\\dqe\\g1a\\set20')
+        pq.gpu_mb.setValue(24000)
+        pq._queue_accept()
+        w.pack_queue_list.setCurrentRow(0)
+        w._pack_queue_edit()
+        w.win_auto.setChecked(False)
+        w.windows.setText('2048')
+        ed = w._pack_queue_save(run=False)
+        edited_args = (ed.local.text().endswith('set20'), ed.gpu_mb.value(), ed.btn_queue.isVisible())
+        ed.accept()
+        saved = w._pack_queue[0]
+        check('gui pack queue: a queued pack edited (its job back in the window: window size 2048) and saved in its '
+              'place with its pack settings; the window size auto or given',
+              (edited_args, saved['job']['window_sizes'], len(w._pack_queue), saved['args'][saved['args'].index('--gpu-mb') + 1],
+               w.btn_pack_save.isVisible()),
+              ((True, 24000, False), [2048], 1, '24000', False))
+        w.win_auto.setChecked(True)
+        check('gui: window sizes auto by default; ticked -> the job says auto',
+              w.get_job()['window_sizes'], ['auto'])
+        w._pack_queue = []
+        w._pack_queue_changed()
         check('gui pack queue: packs queued with their settings, run one after another, the queue kept',
               ([d.replace('\\', '/').rsplit('/', 1)[-1] for d in started], w._pack_queue, w._pack_queue_on,
                json.loads(w.settings.value('pack_queue'))),
@@ -2833,6 +2861,7 @@ def test_truth_per_band(tmp):
     b4, plain = os.path.join(d, 'pts_band4.csv'), os.path.join(d, 'plain.csv')
     truth_folder_check(tmp)
     pack_truth_check(tmp)
+    auto_windows_check(tmp)
     check('truth per band: the suffixes of a channel; the file of each band',
           (T.band_suffixes('band4')[:4],
            os.path.basename(T.truth_for_channel(b4, 'band4')), os.path.basename(T.truth_for_channel(b4, 'band5')),
@@ -2925,6 +2954,25 @@ def pack_truth_check(tmp):
           'name (the scene ID); when none, the closest names are listed',
           (os.path.basename(by_dest['truth_csv']), by_scene.get('truth_csv', ''), 'closest names' in why),
           ('265270485411.csv', '', True))
+
+
+def auto_windows_check(tmp):
+    """Window sizes 'auto': the sensor's, the larger above its truth error level; given sizes kept."""
+    import pandas as _pd
+    import automatch_job as J
+    big = os.path.join(tmp, 'pts_big.csv')
+    _pd.DataFrame({'In_X': [0, 1], 'In_Y': [0, 1], 'Ref_X': [0, 0], 'Ref_Y': [0, 0], 'DX_Err': [25000.0, 1000.0],
+                   'DY_Err': [0.0, 0.0], 'Row': [1, 2], 'In_Lon': [75.0, 75.1], 'In_Lat': [15.0, 15.1],
+                   'Ref_Lon': [74.77, 75.09], 'Ref_Lat': [15.0, 15.1]}).to_csv(big, index=False)
+    mv, n1 = J.auto_windows({'input_path': '/d/G1A_MV_x.tif', 'window_sizes': ['auto']})
+    hs, _ = J.auto_windows({'input_path': '/d/G1AHS026111205EX000002.tif', 'window_sizes': ['auto']})
+    mvb, n2 = J.auto_windows({'input_path': '/d/G1A_MV_x.tif', 'window_sizes': ['auto'], 'truth_csv': big})
+    man, n3 = J.auto_windows({'input_path': '/d/G1A_MV_x.tif', 'window_sizes': [512, 1024]})
+    unk, _ = J.auto_windows({'input_path': '/d/other.tif', 'window_sizes': ['auto']})
+    check('window sizes auto: the sensor\'s (MV 1024, HS 512), the larger above its truth error level (MV 2048 '
+          'above 20 km), 1024 for an unknown sensor; sizes given are kept',
+          (mv['window_sizes'], hs['window_sizes'], mvb['window_sizes'], man['window_sizes'], unk['window_sizes'],
+           'auto' in n1, n3), ([1024], [512], [2048], [512, 1024], [1024], True, ''))
 
 
 def test_max_error_from_truth(tmp):

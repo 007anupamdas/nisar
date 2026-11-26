@@ -789,7 +789,9 @@ class PackDialog(QtWidgets.QDialog):
         # one place for the window sizes: the main window (a second, remembered
         # field here once replaced a job's [256, ..., 1024] with [2048])
         self.windows_info = QtWidgets.QLabel(
-            f"{fmt_list(job['window_sizes'])} px, at most {job['max_num_features']} keypoints per window "
+            ("auto (the sensor's window, chosen when packing)" if 'auto' in [str(x) for x in job['window_sizes']]
+             else f"{fmt_list(job['window_sizes'])} px")
+            + f", at most {job['max_num_features']} keypoints per window "
             f"(from the main window)")
         f.addRow('Window sizes', self.windows_info)
         self.all_det = QtWidgets.QCheckBox('every detector the server offers (kornia + imcui)')
@@ -842,6 +844,36 @@ class PackDialog(QtWidgets.QDialog):
     def _queue_accept(self):
         self.queued = True
         self._accept()
+
+    def apply_args(self, args):
+        """Fill the dialog from a queued pack's arguments (Edit in the pack queue)."""
+        a = list(args or [])
+
+        def val(flag):
+            return a[a.index(flag) + 1] if flag in a and a.index(flag) + 1 < len(a) else None
+        for flag, w in (('--to', self.local), ('--server-dir', self.server), ('--server-weights', self.weights),
+                        ('--code-path', self.code), ('--server-cache', self.cache)):
+            v = val(flag)
+            if v is not None:
+                w.setText(v)
+        if val('--gpu-mb'):
+            self.gpu_mb.setValue(int(float(val('--gpu-mb'))))
+        if val('--truth-folder') is not None:
+            self.truth_folder.setText(val('--truth-folder'))
+        sets = [a[i + 1] for i, x in enumerate(a) if x == '--set' and i + 1 < len(a)]
+        self.all_det.setChecked('detectors=all' in sets)
+        self.server_set.setChecked(any(x.startswith('detectors=[') for x in sets))
+        self.all_match.setChecked('matchers=all' in sets)
+        self.dry.setChecked('--dry-run' in a)
+
+    def set_editing(self):
+        """A queued pack being edited: one button that saves it back in its place."""
+        self.queued = True
+        self.btn_queue.setVisible(False)
+        b = self.findChild(QtWidgets.QDialogButtonBox)
+        if b is not None and b.button(BTN_OK) is not None:
+            b.button(BTN_OK).setText('Save to pack queue')
+        self.setWindowTitle('Pack for the GPU server -- editing a queued pack')
 
     def _suggest_server(self, text):
         """V:\\X\\Y -> /maintenance/X/Y with the share mapping."""
@@ -2861,7 +2893,16 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
     def _build_offset_tab(self):
         f = self._form_tab('Windows & offsets')
         self.windows = QtWidgets.QLineEdit()
-        f.addRow('Window sizes (px)', self.windows)
+        self.windows.setToolTip('Window sizes in px (e.g. 1024 or 512, 1024), used when auto is not ticked')
+        self.win_auto = QtWidgets.QCheckBox('auto (by sensor)')
+        self.win_auto.setToolTip('The sensor\'s window, from the input\'s name: MV / C3 1024 px (2048 when the '
+                                 'truth\'s largest error is above 20 km), HS 512 (1024 above 40 km), HV 512 (1024 '
+                                 'above 80 km), ML 512 (1024 above 30 km). Untick to give the sizes yourself')
+        self.win_auto.toggled.connect(lambda on: self.windows.setEnabled(not on))
+        hw = QtWidgets.QHBoxLayout()
+        hw.addWidget(self.win_auto)
+        hw.addWidget(self.windows, 1)
+        f.addRow('Window sizes (px)', hw)
         self.nfeat = QtWidgets.QLineEdit()
         f.addRow('Keypoints per window (list, "auto")', self.nfeat)
         self.kp_density = QtWidgets.QSpinBox()
@@ -3093,10 +3134,22 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self.btn_pack_queue.clicked.connect(self._pack_queue_start)
         prow.addWidget(self.btn_pack_queue)
         prow.addStretch(1)
-        for label, slot in (('Up', self._pack_queue_up), ('Remove', self._pack_queue_remove)):
+        for label, slot in (('Up', self._pack_queue_up), ('Down', self._pack_queue_down),
+                            ('Edit', self._pack_queue_edit), ('Remove', self._pack_queue_remove)):
             b = QtWidgets.QPushButton(label)
             b.clicked.connect(slot)
             prow.addWidget(b)
+        self.btn_pack_save = QtWidgets.QPushButton('Save to pack queue…')
+        self.btn_pack_save.setToolTip('The pack being edited back in its place: the job as it is now in this window '
+                                      '(window size, input, band, truth …) with its pack settings (in the dialog)')
+        self.btn_pack_save.clicked.connect(self._pack_queue_save)
+        self.btn_pack_cancel = QtWidgets.QPushButton('Cancel edit')
+        self.btn_pack_cancel.clicked.connect(self._pack_queue_cancel)
+        for b in (self.btn_pack_save, self.btn_pack_cancel):
+            b.setVisible(False)
+            prow.addWidget(b)
+        self.pack_queue_list.itemDoubleClicked.connect(lambda *_: self._pack_queue_edit())
+        self._pack_editing = None
         f.addRow(prow)
         try:
             self._pack_queue = json.loads(self.settings.value('pack_queue') or '[]')
@@ -3141,7 +3194,11 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         self._refresh_param_summaries()
         self.smnn.setText(fmt_list(j['smnn_thresholds']))
         self.weights_cache.setText(j['weights_cache_dir'])
-        self.windows.setText(fmt_list(j['window_sizes']))
+        auto = any(str(w).strip().lower() in ('auto', 'none', '') for w in (j['window_sizes'] or ['auto']))
+        self.win_auto.setChecked(auto)
+        self.windows.setText(fmt_list([w for w in j['window_sizes'] if str(w).strip().lower() not in
+                                       ('auto', 'none', '')]) or ('' if auto else '1024'))
+        self.windows.setEnabled(not auto)
         self.nfeat.setText(fmt_list(j['num_features']))
         self.kp_density.setValue(int(j['keypoint_density']))
         self.max_feat.setValue(int(j.get('max_num_features') or 32000))
@@ -3256,7 +3313,8 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             'detector_params': {k: v for k, v in self.detector_params.items() if v},
             'smnn_thresholds': parse_float_list(self.smnn.text(), 'SMNN thresholds'),
             'weights_cache_dir': self.weights_cache.text(),
-            'window_sizes': parse_int_list(self.windows.text(), 'window sizes'),
+            'window_sizes': ['auto'] if self.win_auto.isChecked() else parse_int_list(self.windows.text(),
+                                                                                      'window sizes'),
             'num_features': parse_int_list(self.nfeat.text(), 'keypoints', allow_auto=True) or [None],
             'keypoint_density': self.kp_density.value(),
             'max_num_features': self.max_feat.value(),
@@ -4139,6 +4197,8 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             self.log.appendPlainText('--- pack queue: all packed')
             return
         e = self._pack_queue.pop(0)
+        if e is self._pack_editing:
+            self._pack_queue_cancel()
         self._pack_queue_changed()
         self.log.appendPlainText(f"--- pack queue: {e['label']} ({len(self._pack_queue)} more)")
         if not self._start_pack_item(e['args'], e['job'], e['dest'], e.get('dry', False)):
@@ -4152,6 +4212,68 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             q[i - 1], q[i] = q[i], q[i - 1]
             self._pack_queue_changed()
             self.pack_queue_list.setCurrentRow(i - 1)
+
+    def _pack_queue_down(self):
+        i = self.pack_queue_list.currentRow()
+        if 0 <= i < len(self._pack_queue) - 1:
+            q = self._pack_queue
+            q[i + 1], q[i] = q[i], q[i + 1]
+            self._pack_queue_changed()
+            self.pack_queue_list.setCurrentRow(i + 1)
+
+    def _pack_queue_edit(self, *_):
+        """A queued pack's job back in this window (change the window size, input, band, truth …), then
+        'Save to pack queue…' opens the Pack dialog with its settings and puts it back in its place."""
+        i = self.pack_queue_list.currentRow()
+        if not 0 <= i < len(self._pack_queue):
+            return
+        self._pack_editing = self._pack_queue[i]
+        self.set_job(self._pack_editing['job'])
+        for b in (self.btn_pack_save, self.btn_pack_cancel):
+            b.setVisible(True)
+        self.log.appendPlainText(f"--- pack queue: editing {self._pack_editing['label']}: change the job here (window "
+                                 f"size, input, band, truth …), then Save to pack queue…")
+        self.lbl_status.setText('Editing a queued pack: change the job, then Save to pack queue…')
+
+    def _pack_queue_cancel(self):
+        self._pack_editing = None
+        for b in (self.btn_pack_save, self.btn_pack_cancel):
+            b.setVisible(False)
+
+    def _pack_queue_save(self, *_, run=True):
+        """The Pack dialog with the edited pack's settings; Save puts it back in its place. run=False: the
+        dialog unshown (tests)."""
+        e = self._pack_editing
+        if e is None or not any(x is e for x in self._pack_queue):
+            QtWidgets.QMessageBox.information(self, 'Pack queue', 'That pack has already run (or was removed).')
+            self._pack_queue_cancel()
+            return None
+        try:
+            job = self.get_job()
+        except ValueError as err:
+            QtWidgets.QMessageBox.warning(self, 'Pack queue', str(err))
+            return None
+        dlg = PackDialog(self.settings, job, self)
+        dlg.apply_args(e['args'])
+        dlg.set_editing()
+
+        def saved():
+            args, job2 = dlg.args()
+            dest = dlg.local.text()
+            k = next((n for n, x in enumerate(self._pack_queue) if x is e), None)
+            if k is None:
+                return
+            self._pack_queue[k] = {'args': args, 'job': job2, 'dest': dest, 'dry': dlg.dry.isChecked(),
+                                   'label': f"{job2.get('input_path') or ''} -> {dest}"}
+            self._pack_queue_changed()
+            self.pack_queue_list.setCurrentRow(k)
+            self._pack_queue_cancel()
+            self.log.appendPlainText(f"--- pack queue: saved {self._pack_queue[k]['label']} (windows "
+                                     f"{', '.join(str(w) for w in job2.get('window_sizes') or [])} px)")
+        dlg.accepted.connect(saved)
+        if run:
+            dlg.exec() if hasattr(dlg, 'exec') else dlg.exec_()
+        return dlg
 
     def _pack_queue_remove(self):
         i = self.pack_queue_list.currentRow()

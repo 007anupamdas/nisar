@@ -317,10 +317,28 @@ Without filtering, `python automatch_cross.py <job> --cell-px 64 128
 --final-points 24` (or `<folder of jobs> --batch --jobs 1064-1080
 --recompute`) redoes only the consistent points and final picks.
 
+**Window sizes: auto or given.** In the full window, *auto (by sensor)*
+(ticked by default) chooses each run's window from the input's name, the same
+as automatch_run. Pack turns it into the actual size, and the log says which:
+| Sensor | Window | Above this largest truth error |
+|---|---|---|
+| MV, C3 | 1024 px | 20 km: 2048 px |
+| HS | 512 px | 40 km: 1024 px |
+| HV | 512 px | 80 km: 1024 px |
+| ML | 512 px | 30 km: 1024 px |
+
+An unknown sensor gets 1024 px. Untick it to type the sizes yourself (e.g.
+1024, or 512, 1024).
+
 **Pack queue.** In *Pack for server…*, **Add to pack queue** keeps that pack
 (the job as it is, with the pack settings); load the next scene and add it
 too, then **Run the pack queue** (under *Queued packs*) packs them one after
 another. Stop pauses it; the queue is kept between sessions.
+- **Edit** (or double-click) loads a queued pack's job back into the window,
+  to change the window size, input, band, truth …
+- **Save to pack queue…** then opens the Pack dialog with that pack's
+  settings, and puts it back in its place.
+- **Up** / **Down** reorder, **Remove** takes it out.
 
 **Windows on water are not matched.** A window that is 90 % or more
 featureless by the same mask (open sea, a large lake, uniform ground) is skipped

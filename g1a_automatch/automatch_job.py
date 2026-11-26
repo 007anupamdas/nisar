@@ -897,7 +897,8 @@ DEFAULT_JOB: Dict = {
     'weights_cache_dir': '',     # offline imcui weights (see prefetch_imw_weights.py)
 
     # sweep
-    'window_sizes': [1024],
+    'window_sizes': ['auto'],    # 'auto': the sensor's window (automatch_presets.SENSOR_WINDOWS; the larger one
+                                 # when the truth's largest error is above the sensor's level), else px
     'num_features': [None],      # None = from keypoint_density and window size
     'keypoint_density': 9000,    # keypoints per megapixel of window
     'max_num_features': 32000,   # cap per window; raise it to keep the density at large windows
@@ -1281,6 +1282,29 @@ def truth_files_beside(truth_csv: str) -> List[str]:
     return out
 
 
+def auto_windows(job: Dict) -> Tuple[Dict, str]:
+    """(the job with 'auto' window sizes resolved, a note): the sensor's window from
+    the input's name (MV / C3 1024, HS / HV / ML 512), its larger one when the
+    truth's largest error is above the sensor's level (automatch_presets.
+    window_for_truth); 1024 when the sensor is unknown."""
+    ws = list(job.get('window_sizes') or ['auto'])
+    if not any(str(w).strip().lower() in ('auto', 'none', '') for w in ws):
+        return job, ''
+    import automatch_presets as P
+    sensor = P.sensor_of(job.get('input_path') or '')
+    rule = P.SENSOR_WINDOWS.get(sensor)
+    base = [rule[0]] if rule else [1024]
+    chosen, why = P.window_for_truth(sensor, job.get('truth_csv') or '', base) if rule else (base, '')
+    out = []
+    for w in ws:
+        for v in (chosen if str(w).strip().lower() in ('auto', 'none', '') else [int(w)]):
+            if v not in out:
+                out.append(int(v))
+    note = (why or (f'window {chosen[0]} px: the {sensor} window' if rule else
+                    'window 1024 px: sensor not known from the file name')) + ' (window sizes: auto)'
+    return dict(job, window_sizes=out), note
+
+
 def channels_from_truth(job: Dict) -> Tuple[Dict, str]:
     """(the job matching the bands its truth file names, a note) when
     channels_from_truth is on and the truth file's name carries a band;
@@ -1312,6 +1336,10 @@ def preflight(job: Dict, check_weights: bool = True) -> Dict:
     job, note = channels_from_truth(job)
     if note:
         info['channels'] = job['channels']
+        warnings.append(note)
+    job, note = auto_windows(job)
+    if note:
+        info['window_sizes'] = job['window_sizes']
         warnings.append(note)
 
     if not job['input_path'] or not os.path.exists(job['input_path']):
@@ -2119,6 +2147,9 @@ def run_job(job: Dict) -> Dict:
     if note:
         print(f'[Job] {note}', flush=True)
     job, note = channels_from_truth(job)
+    if note:
+        print(f'[Job] {note}', flush=True)
+    job, note = auto_windows(job)
     if note:
         print(f'[Job] {note}', flush=True)
     pf = preflight(job, check_weights=False)   # warmup stops a detector whose weights are missing
