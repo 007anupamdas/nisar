@@ -135,12 +135,20 @@ class InputIndex:
 
 
 def _truth_key(name: str) -> str:
-    """A truth file's name as the product it is for: 'pts_267403451_band4.csv' -> '267403451'."""
-    s = os.path.splitext(os.path.basename(name))[0].lower()
-    s = re.sub(r'^(pts|gt|truth|gcp|manual)[_-]+', '', s)
-    s = re.sub(r'[_-]+(pts|gt|truth|gcp|manual)$', '', s)
-    s = re.sub(r'[_-]+b(and)?\d+$', '', s)
-    return s
+    """A truth file's name as the product it is for: 'pts_267403451_band4.csv',
+    '265270485411_rival_band2.csv', '<product>_rival_band4.csv' -> the ID / product
+    (the words pts, gt, truth, gcp(s), manual, rival, (tie)points and the band
+    taken off either end, in any order)."""
+    import re
+    k = os.path.splitext(os.path.basename(name))[0].lower()
+    words = r'(?:pts|gt|truth|gcps?|manual|rival|tiepoints|points)'
+    while True:
+        k2 = re.sub(rf'^{words}[_\-. ]+', '', k)
+        k2 = re.sub(rf'[_\-. ]+{words}$', '', k2)
+        k2 = re.sub(r'[_\-. ]+b(?:and)?_?\d+$', '', k2)
+        if k2 == k or not k2:
+            return k2 or k
+        k = k2
 
 
 class TruthIndex:

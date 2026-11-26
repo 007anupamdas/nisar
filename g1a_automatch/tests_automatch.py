@@ -2893,6 +2893,22 @@ def pack_truth_check(tmp):
           (os.path.relpath(j2['truth_csv'], root), [os.path.basename(p) for p in J.truth_files_beside(j2['truth_csv'])],
            j3['truth_csv'], 'truth folder' in note),
           (os.path.join('269468481121', 'pts_band5.csv'), ['pts_band5.csv', 'pts_band4.csv'], '/own.csv', True))
+    # the names in use: <request ID>_rival_band<n>.csv, <product>_rival_band<n>.csv
+    rv = os.path.join(tmp, 'truth_rival')
+    os.makedirs(rv, exist_ok=True)
+    for n in ('265270485411_rival_band2.csv', '265270485411_rival_band4.csv',
+              'G1A_MV_G_12NOV2026_261112085149_26111206_SPLC00GTD_01_1_rival_band4.csv'):
+        open(os.path.join(rv, n), 'w').close()
+    jr, _ = PK.truth_from_folder({'input_path': 'X:/DPS/G1A/Incremental_TnE/SAC/265270485411/'
+                                                'G1A_ML_G_24NOV2026_261124080540_26112403_SPLC00GTD_02_1.tif',
+                                  'channels': ['band4'], 'truth_csv': ''}, rv, 'V:/x/g1a/265270485411')
+    jp, _ = PK.truth_from_folder({'input_path': 'X:/a/G1A_MV_G_12NOV2026_261112085149_26111206_SPLC00GTD_01_1.tif',
+                                  'channels': [], 'truth_csv': ''}, rv)
+    check('truth folder: <request ID>_rival_band<n>.csv and <product>_rival_band<n>.csv found (rival, pts, gt, gcp '
+          '... and the band taken off the name), the job\'s band first, the other bands beside it',
+          (os.path.basename(jr['truth_csv']), J.truth_bands(jr['truth_csv']), os.path.basename(jp['truth_csv'])),
+          ('265270485411_rival_band4.csv', ['band2', 'band4'],
+           'G1A_MV_G_12NOV2026_261112085149_26111206_SPLC00GTD_01_1_rival_band4.csv'))
     # the request ID only in the pack's destination folder; a truth file named after the scene ID; hints when none
     flat = os.path.join(tmp, 'truth_flat')
     os.makedirs(flat, exist_ok=True)
