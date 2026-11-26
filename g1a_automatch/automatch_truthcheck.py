@@ -304,6 +304,22 @@ class TruthFolder:
         return ''
 
 
+_FOLDERS: Dict[str, tuple] = {}
+
+
+def find_truth(folder: str, input_path: str, bands: Optional[List[str]] = None) -> str:
+    """The truth file of an input in a truth folder ('' when none): the folder
+    is read once and again after 30 s (the windows call this as you type)."""
+    import time
+    if not folder or not input_path or not os.path.isdir(folder):
+        return ''
+    got = _FOLDERS.get(folder)
+    if got is None or time.time() - got[0] > 30:
+        got = (time.time(), TruthFolder(folder))
+        _FOLDERS[folder] = got
+    return got[1].find(input_path, [str(b).lower() for b in (bands or [])])
+
+
 def truth_for(run: str, truth: str = '', folder: Optional[TruthFolder] = None) -> str:
     """The truth file of a run: the one given, else its own in the truth folder
     (by its input's name), else the one its job names (if it is here)."""

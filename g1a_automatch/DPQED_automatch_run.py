@@ -180,6 +180,14 @@ class RunWindow(QtWidgets.QMainWindow):
                                      'uses these references instead of the L8 ones')
         f.addRow('Output folder', self.output)
         f.addRow('Ground truth (optional)', self.truth)
+        self.truth_folder = PathRow(True, 'Truth folder (optional)')
+        self.truth_folder.setToolTip('When no truth file is chosen above: the input\'s own from this folder, named '
+                                     'after its file or one of its folders (e.g. the request ID); a file per band in '
+                                     'a product folder too')
+        f.addRow('Truth folder (optional)', self.truth_folder)
+        self.truth_found = QtWidgets.QLabel('')
+        self.truth_found.setStyleSheet('color: gray')
+        f.addRow('', self.truth_found)
         f.addRow('Weights folder (optional)', self.weights)
         f.addRow('Cache folder (optional)', self.cache)
         self.sensor = QtWidgets.QComboBox()
@@ -366,10 +374,13 @@ class RunWindow(QtWidgets.QMainWindow):
         self.btn_open.clicked.connect(self.open_output)
         self.btn_presets.clicked.connect(self.presets_file)
         self.input.edit.textChanged.connect(self.refresh)
+        for row in (self.input, self.truth, self.truth_folder):
+            row.edit.textChanged.connect(self.show_truth_found)
+        self.bands.textChanged.connect(self.show_truth_found)
         self.sensor.currentIndexChanged.connect(self.refresh)
         for key, row in (('input', self.input), ('reference', self.reference), ('reference_c1', self.reference_c1),
                          ('output', self.output), ('truth', self.truth), ('weights', self.weights),
-                         ('cache', self.cache)):
+                         ('cache', self.cache), ('truth_folder', self.truth_folder)):
             row.edit.setText(self.settings.value(key, '') or '')
         self.device.setCurrentText(self.settings.value('device', 'all') or 'all')
         self.cloud.setChecked(str(self.settings.value('cloud', 'true')).lower() == 'true')
@@ -415,9 +426,12 @@ class RunWindow(QtWidgets.QMainWindow):
         ref, why = P.reference_for(self.input.text(), self.reference.text(), self.reference_c1.text())
         self.log.appendPlainText(f'--- references: {why}: {ref}')
         out = os.path.join(self.output.text(), sub) if sub else self.output.text()
-        job, note = P.job_for(s, self.input.text(), ref, out, self.truth.text(),
+        truth = self.truth_file()
+        if truth and not self.truth.text():
+            self.log.appendPlainText(f'--- truth from the truth folder: {truth}')
+        job, note = P.job_for(s, self.input.text(), ref, out, truth,
                            [] if crisp else P.parse_bands(self.bands.text()),
-                           None if self.truth.text() else self.max_err.value(),
+                           None if truth else self.max_err.value(),
                            self.device.currentText(), self.cloud.isChecked(), self.weights.text(), self.presets,
                            crispest=1 if crisp else 0,
                            top_n=(top_agree[0] if top_agree else None if mode else self.top_n.value()),
@@ -486,7 +500,7 @@ class RunWindow(QtWidgets.QMainWindow):
             json.dump(job, f, indent=2)
         for key, row in (('input', self.input), ('reference', self.reference), ('reference_c1', self.reference_c1),
                          ('output', self.output), ('truth', self.truth), ('weights', self.weights),
-                         ('cache', self.cache)):
+                         ('cache', self.cache), ('truth_folder', self.truth_folder)):
             self.settings.setValue(key, row.text())
         self.settings.setValue('device', self.device.currentText())
         self.settings.setValue('mode', self.mode.currentText())
@@ -508,16 +522,39 @@ class RunWindow(QtWidgets.QMainWindow):
         self.btn_stop.setEnabled(True)
         self.proc.start(sys.executable, ['-u', JOB_SCRIPT, kind, path])
 
+    def truth_file(self) -> str:
+        """The truth file: the one chosen, else the input's own in the truth folder ('' when none)."""
+        if self.truth.text():
+            return self.truth.text()
+        if not (self.truth_folder.text() and self.input.text()):
+            return ''
+        import automatch_truthcheck as TC
+        return TC.find_truth(self.truth_folder.text(), self.input.text(), P.parse_bands(self.bands.text()))
+
+    def show_truth_found(self, *_):
+        if self.truth.text() or not self.truth_folder.text():
+            self.truth_found.setText('')
+            return
+        t = self.truth_file()
+        self.truth_found.setText(f'truth from the folder: {t}' if t else
+                                 'no truth file for this input in the truth folder')
+
     def compare_truth(self):
         """The finished run(s) in the output folder against the truth file (automatch_truthcheck)."""
         if self.proc is not None:
             return
-        out, truth = self.output.text().strip(), self.truth.text().strip()
-        if not (out and os.path.isdir(out) and truth and os.path.isfile(truth)):
+        out, truth = self.output.text().strip(), self.truth_file().strip()
+        if not truth and self.truth_folder.text() and out and os.path.isdir(out):     # each run its own from the folder
+            truth = ''
+            folder_args = ['--truth-folder', self.truth_folder.text()]
+        else:
+            folder_args = ['--truth', truth]
+        if not (out and os.path.isdir(out) and (folder_args[0] == '--truth-folder' or (truth and os.path.isfile(truth)))):
             QtWidgets.QMessageBox.warning(self, 'Compare with truth', 'Set the output folder of the finished run(s) '
-                                                                      'and the ground truth file.')
+                                                                      'and the ground truth file (or a truth folder).')
             return
-        self.log.appendPlainText(f'--- compare with truth: {out} against {truth} (nothing is run again)')
+        against = truth or ("each run's own in " + self.truth_folder.text())
+        self.log.appendPlainText(f'--- compare with truth: {out} against {against} (nothing is run again)')
         self._kind, self._buf, self._current = 'truthcheck', '', ('', out)
         self.bar.setRange(0, 0)
         self.proc = QtCore.QProcess(self)
@@ -528,8 +565,8 @@ class RunWindow(QtWidgets.QMainWindow):
         for b in (self.btn_run, self.btn_all, self.btn_auto, self.btn_check, self.btn_truth):
             b.setEnabled(False)
         self.btn_stop.setEnabled(True)
-        self.proc.start(sys.executable, ['-u', JOB_SCRIPT, 'truthcheck', out, '--truth', truth]
-                        + (['--redo-final'] if self.redo_final.isChecked() else []))
+        self.proc.start(sys.executable, ['-u', JOB_SCRIPT, 'truthcheck', out] + folder_args
+                        + (['--redo-final', '--all'] if self.redo_final.isChecked() else ['--all']))
 
     def read(self):
         self._buf += bytes(self.proc.readAllStandardOutput()).decode('utf-8', 'replace')
@@ -712,6 +749,7 @@ class RunWindow(QtWidgets.QMainWindow):
         """The window's settings, to queue and restore."""
         return {'input': self.input.text(), 'reference': self.reference.text(),
                 'reference_c1': self.reference_c1.text(), 'output': self.output.text(), 'truth': self.truth.text(),
+                'truth_folder': self.truth_folder.text(),
                 'weights': self.weights.text(), 'cache': self.cache.text(),
                 'sensor': self.sensor.currentText(), 'mode': self.mode.currentText(),
                 'bands': self.bands.text(), 'crispest': self.crispest.isChecked(), 'max_err': self.max_err.value(),
@@ -723,7 +761,7 @@ class RunWindow(QtWidgets.QMainWindow):
     def set_fields(self, f: dict):
         for key, row in (('input', self.input), ('reference', self.reference), ('reference_c1', self.reference_c1),
                          ('output', self.output), ('truth', self.truth), ('weights', self.weights),
-                         ('cache', self.cache)):
+                         ('cache', self.cache), ('truth_folder', self.truth_folder)):
             row.edit.setText(f.get(key, ''))
         self.sensor.setCurrentText(f.get('sensor', self.sensor.currentText()))
         self.mode.setCurrentText(f.get('mode', self.mode.currentText()))

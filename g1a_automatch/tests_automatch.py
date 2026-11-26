@@ -1898,6 +1898,22 @@ def test_gui_run(tmp):
     check('run window: a queued run edited in place (its settings and what to do saved back in its place), '
           'moved down',
           edited, ('/q/out_a', '5', 'Run all 4 tiers', '/q/out_b', 2, False))
+    tdir = os.path.join(tmp, 'rw_truth', '269468481121')
+    os.makedirs(tdir, exist_ok=True)
+    import pandas as _pdt
+    _pdt.DataFrame({'In_X': [1.0], 'In_Y': [1.0], 'Ref_X': [0.0], 'Ref_Y': [0.0], 'DX_Err': [900.0],
+                    'DY_Err': [0.0], 'Row': [1], 'In_Lon': [75.0], 'In_Lat': [15.0], 'Ref_Lon': [74.99],
+                    'Ref_Lat': [15.0]}).to_csv(os.path.join(tdir, 'pts_band3.csv'), index=False)
+    w.truth.edit.setText('')
+    w.truth_folder.edit.setText(os.path.join(tmp, 'rw_truth'))
+    w.input.edit.setText('/q/input/dqe/g1a/269468481121/input/G1A_MV_a.tif')
+    w.bands.setText('3')
+    jt = w.job('fastest', 'fastest')
+    check('run window: no truth file chosen -> the input\'s own from the truth folder (by its request-ID folder), '
+          'shown under the field',
+          (os.path.relpath(jt.get('truth_csv', ''), os.path.join(tmp, 'rw_truth')), 'pts_band3.csv' in
+           w.truth_found.text()), (os.path.join('269468481121', 'pts_band3.csv'), True))
+    w.truth_folder.edit.setText('')
     w._wq = w._wq[:nq]
     w._queue_show()
     w.set_fields(f0)
@@ -2567,6 +2583,19 @@ def test_gui_dialog():
             w._pack_next()                        # queue empty: done
         finally:
             w._start_pack_item = orig_item
+        tfd = os.path.join(tempfile.mkdtemp(), 'truth', 'G1A_MV_prod7')
+        os.makedirs(tfd)
+        open(os.path.join(tfd, 'pts_band4.csv'), 'w').close()
+        old_in, old_truth = w.in_path.text(), w.truth_path.text()
+        w.truth_path.setText('')
+        w.truth_folder.setText(os.path.dirname(tfd))
+        w.in_path.setText('/x/G1A_MV_prod7.tif')
+        found = (w.truth_file(), w.truth_found.text())
+        w.truth_folder.setText('')
+        w.in_path.setText(old_in)
+        w.truth_path.setText(old_truth)
+        check('gui: no ground truth CSV chosen -> the input\'s own from the truth folder (by its file name), shown',
+              (os.path.basename(found[0]), 'pts_band4.csv' in found[1]), ('pts_band4.csv', True))
         tdlg = w.truthcheck_dialog(run=False)
         tdlg.folders.clear()
         tdlg._add('V:/ICIGDev/GPUPOC/output')

@@ -147,6 +147,15 @@ a truth file and by *Compare with truth*; by hand:
 detector + matcher (TRUTH_RANKING), each final point set's truth RMSE (final,
 rigid, consistent, best final), REPORT with the manual points, and
 TRUTH_CHECK.png over the runs in the output folder (each auto step or tier).
+**A truth folder instead of a truth file** (both windows, Pack for server,
+Compare with truth): leave the truth file empty and give the folder.
+- **Matching:** the input's own file is found there by its file name or one of
+  its folders (e.g. the request ID); a file per band in a product folder works
+  too.
+- **Shown:** the window says under the field which file it found.
+- **The run:** takes that file and the other bands' files beside it.
+- **Queue:** queued runs keep the folder and find their own.
+
 **Several truth files for one image, one per band.** Name them with a common
 stem and the band at the end, in one folder: `pts_band4.csv`, `pts_band5.csv`,
 `pts_band6.csv` (or `<id>_B4.csv` …).

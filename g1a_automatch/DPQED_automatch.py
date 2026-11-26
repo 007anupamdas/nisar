@@ -2695,6 +2695,17 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
                                         '(TRUTH_BY_DETECTOR_MATCHER.csv). Evaluation only: it does not '
                                         'steer the matching.')
         f.addRow('Ground truth CSV (optional)', self.truth_path)
+        self.truth_folder = PathRow('dir')
+        self.truth_folder.setText(self.settings.value('truth_folder', '') or '')
+        self.truth_folder.edit.setToolTip('When no ground truth CSV is chosen above: the input\'s own from this folder, '
+                                          'named after its file or one of its folders (e.g. the request ID); a file '
+                                          'per band in a product folder too')
+        f.addRow('Truth folder (optional)', self.truth_folder)
+        self.truth_found = QtWidgets.QLabel('')
+        self.truth_found.setStyleSheet('color: gray')
+        f.addRow('', self.truth_found)
+        for w_ in (self.truth_path.edit, self.truth_folder.edit, self.in_path.edit):
+            w_.textChanged.connect(self.show_truth_found)
         self.truth_radius = QtWidgets.QDoubleSpinBox()
         self.truth_radius.setRange(0.5, 100.0)
         self.truth_radius.setSuffix(' km')
@@ -3228,7 +3239,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             'temp_dir': self.tmp_path.text(),
             'temp_per_product': bool(self.tmp_path.text().strip()),
             'manual_gcp_csv': self.gcp_path.text(),
-            'truth_csv': self.truth_path.text().strip(),
+            'truth_csv': self.truth_file(),
             'truth_radius_m': self.truth_radius.value() * 1000.0,
             'cross_top_n': self.cross_top.value(),
             'cross_min_agree': self.cross_agree.value(),
@@ -3884,6 +3895,29 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
     def _start_simple(self, args, kind):
         self.log.appendPlainText('--- ' + ' '.join(args))
         self._start(args, kind)
+
+    def truth_file(self) -> str:
+        """The ground truth: the CSV chosen, else the input's own in the truth folder ('' when none)."""
+        if self.truth_path.text().strip():
+            return self.truth_path.text().strip()
+        folder = self.truth_folder.text().strip()
+        self.settings.setValue('truth_folder', folder)
+        if not (folder and self.in_path.text().strip()):
+            return ''
+        import automatch_truthcheck as TC
+        try:
+            bands = self.channels.checked()
+        except Exception:
+            bands = []
+        return TC.find_truth(folder, self.in_path.text().strip(), bands)
+
+    def show_truth_found(self, *_):
+        if self.truth_path.text().strip() or not self.truth_folder.text().strip():
+            self.truth_found.setText('')
+            return
+        t = self.truth_file()
+        self.truth_found.setText(f'truth from the folder: {t}' if t else
+                                 'no truth file for this input in the truth folder')
 
     def train_tool_path(self) -> str:
         """gcp_train's window (gcp_train_gui.py): the one chosen before, else beside
