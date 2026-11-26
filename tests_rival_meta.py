@@ -1,0 +1,971 @@
+"""Exercise DPQED_rival's sidecar parsing without QGIS.
+
+The pure helpers in DPQED_rival.py sit between explicit markers; this execs that
+exact slice, so what is tested is the code that ships, not a copy of it.
+"""
+import ast
+import json
+import math
+import os
+import re
+import sys
+import xml.etree.ElementTree as ET
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+SRC  = os.path.join(HERE, "DPQED_rival.py")
+
+BEGIN = "# ── BEGIN PURE HELPERS"
+END   = "# ── END PURE HELPERS"
+
+
+def load_helpers():
+    text = open(SRC, encoding="utf-8").read()
+    # Every module-level UPPER_CASE literal the helpers may reference. Parsed
+    # from the AST rather than matched line by line, so a multi-line list like
+    # SHP_FIELDS is picked up as readily as a scalar, and nothing is executed.
+    consts = {}
+    for node in ast.parse(text).body:
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if not isinstance(target, ast.Name) or not target.id.isupper():
+                continue
+            try:
+                consts[target.id] = ast.literal_eval(node.value)
+            except (ValueError, TypeError, SyntaxError):
+                pass
+    for required in ("BAND_SPLIT_HZ", "BAND_UNKNOWN", "META_SUFFIXES_TEXT",
+                     "META_SUFFIX_XML", "DEGREE_TILE_SIZE", "RASTER_EXTS",
+                     "SHP_FIELDS"):
+        assert required in consts, f"constant {required} not found"
+    body = text[text.index(BEGIN):text.index(END)]
+    ns = dict(consts, os=os, re=re, json=json, math=math, ET=ET, print=print)
+    exec(compile(body, SRC, "exec"), ns)
+    return ns
+
+
+H = load_helpers()
+failures = []
+
+
+def check(label, got, want):
+    ok = got == want
+    print(f"{'PASS' if ok else 'FAIL'}  {label}: {got!r}")
+    if not ok:
+        failures.append(f"{label}: got {got!r}, want {want!r}")
+
+
+# ── 1. LSAR: the real ASF ISO XML in this repo ────────────────────────────────
+xml_name = ("NISAR_L2_PR_GSLC_028_084_A_010_4005_DHDH_A_"
+            "20260819T001734_20260819T001808_P05023_N_F_J_001.h5.iso.xml")
+xml_path = os.path.join(HERE, xml_name)
+rec = H["parse_meta_iso_xml"](open(xml_path, encoding="utf-8").read(), xml_name)
+
+check("iso band (centre freq 1.239 GHz)", rec["band"], "LSAR")
+check("iso crs", rec["crs"], "EPSG:32644")
+check("iso source", rec["source"], "iso-xml")
+check("iso granule", rec["granule"], xml_name[:-len(".iso.xml")])
+check("iso ring vertices (40 distinct + closing repeat)", len(rec["ring"]), 41)
+check("iso distinct vertices", len(set(rec["ring"])), 40)
+check("iso first vertex", rec["ring"][0], (79.4687993811434, 16.0411147145733))
+check("iso ring is closed", rec["ring"][0] == rec["ring"][-1], True)
+lons = [v[0] for v in rec["ring"]]
+lats = [v[1] for v in rec["ring"]]
+check("iso lon range plausible", 76.0 < min(lons) and max(lons) < 80.0, True)
+check("iso lat range plausible", 15.0 < min(lats) and max(lats) < 19.0, True)
+
+# The frame is a slanted swath: its convex bbox is much larger than the polygon.
+# That is exactly why the ring is kept instead of four corners.
+ring = H["close_ring"](rec["ring"])
+area = abs(sum(ring[i][0] * ring[i + 1][1] - ring[i + 1][0] * ring[i][1]
+               for i in range(len(ring) - 1))) / 2.0
+bbox = (max(lons) - min(lons)) * (max(lats) - min(lats))
+print(f"      ring area {area:.4f} deg^2 vs bbox {bbox:.4f} deg^2 "
+      f"({100 * area / bbox:.1f}% of bbox)")
+check("ring is tighter than its bbox", area < 0.8 * bbox, True)
+check("iso wkt starts as polygon",
+      H["ring_wkt"](rec["ring"]).startswith("POLYGON(("), True)
+
+# ── 2. SSAR: the real '.met' JSON sidecar in this repo ────────────────────────
+met_name = ("NISAR_S2_PR_GSLC_028_084_A_010_3700_DHNA_A_"
+            "20260819T001733_20260819T001810_P00500_M_F_I_001.met")
+met = H["parse_meta_text"](
+    open(os.path.join(HERE, met_name), encoding="utf-8").read(), met_name)
+
+check("met band (Sensor field)", met["band"], "SSAR")
+check("met crs (EPSG field)", met["crs"], "EPSG:32644")
+check("met source prefers the swath", met["source"], "met-json (image)")
+check("met granule is the bare product id", met["granule"],
+      met_name[:-len(".met")])
+check("met ring is the 4 Image corners", met["ring"],
+      [(76.534748, 17.614687), (78.827076, 18.171194),
+       (79.385351, 15.993327), (77.112174, 15.446038)])
+
+# Image* is the slanted swath; Prod* is the north-up grid the raster spans.
+# Preferring Image* is what stops the tool offering a tile whose data does not
+# reach the picked point.
+def shoelace(r):
+    r = H["close_ring"](r)
+    return abs(sum(r[i][0] * r[i + 1][1] - r[i + 1][0] * r[i][1]
+                   for i in range(len(r) - 1))) / 2.0
+
+met_obj = json.load(open(os.path.join(HERE, met_name), encoding="utf-8"))
+prod = H["parse_meta_json"](
+    {k: v for k, v in met_obj.items() if not k.startswith("Image")}, met_name)
+check("Prod* used when Image* absent", prod["source"], "met-json (product-grid)")
+print(f"      Image swath {shoelace(met['ring']):.4f} deg^2 vs "
+      f"Prod grid {shoelace(prod['ring']):.4f} deg^2")
+check("swath is tighter than the product grid",
+      shoelace(met["ring"]) < 0.8 * shoelace(prod["ring"]), True)
+
+check("met missing all corners rejected",
+      H["parse_meta_json"]({"Sensor": "SSAR"}, "empty.met"), None)
+check("malformed JSON rejected",
+      H["parse_meta_text"]('{"Sensor": ', "bad.met"), None)
+
+# ── 3. legacy gdalinfo-style text sidecar (unchanged path) ────────────────────
+TEXT = """Driver: GTiff/GeoTIFF
+Files: NISAR_SSAR_GSLC_demo1.tif
+Size is 10980, 10980
+Corner Coordinates:
+Upper Left  (  77.0000000,  17.5000000)
+Lower Left  (  77.0000000,  17.0000000)
+Upper Right (  77.5000000,  17.5000000)
+Lower Right (  77.5000000,  17.0000000)
+"""
+t = H["parse_meta_text"](TEXT, "NISAR_SSAR_GSLC_demo.met")
+check("text corners in UL,UR,LR,LL order", t["ring"],
+      [(77.0, 17.5), (77.5, 17.5), (77.5, 17.0), (77.0, 17.0)])
+check("text band from SSAR in name", t["band"], "SSAR")
+check("text granule", t["granule"], "NISAR_SSAR_GSLC_demo1.tif")
+check("text source", t["source"], "text")
+
+# no band tag anywhere -> UNK, never a guess
+plain = H["parse_meta_text"](TEXT.replace("SSAR", "XXXX"), "plain.met")
+check("untagged text -> UNK", plain["band"], "UNK")
+
+# centre frequency in a text sidecar is honoured too
+freq = H["parse_meta_text"](
+    TEXT.replace("SSAR", "XXXX") + "Center frequency: 3200000000.0\n", "f.met")
+check("text band from 3.2 GHz", freq["band"], "SSAR")
+freq_l = H["parse_meta_text"](
+    TEXT.replace("SSAR", "XXXX") + "Center frequency: 1.239e9\n", "fl.met")
+check("text band from 1.239 GHz", freq_l["band"], "LSAR")
+
+# a sidecar missing a corner is rejected, not half-parsed
+broken = H["parse_meta_text"](
+    "\n".join(l for l in TEXT.splitlines() if "Lower Right" not in l), "bad.met")
+check("incomplete corners rejected", broken, None)
+check("malformed xml rejected", H["parse_meta_iso_xml"]("<not-xml", "x.iso.xml"), None)
+check("xml without posList rejected",
+      H["parse_meta_iso_xml"]("<a xmlns='urn:x'><b/></a>", "y.iso.xml"), None)
+
+# ── 4. band helpers ──────────────────────────────────────────────────────────
+check("band_from_frequency 1.239e9", H["band_from_frequency"](1.239e9), "LSAR")
+check("band_from_frequency 1.2935e9", H["band_from_frequency"](1.2935e9), "LSAR")
+check("band_from_frequency 3.2e9", H["band_from_frequency"](3.2e9), "SSAR")
+check("band_from_frequency junk", H["band_from_frequency"]("n/a"), None)
+check("band_from_frequency zero", H["band_from_frequency"](0), None)
+check("band_from_name lsar lowercase", H["band_from_name"]("nisar_lsar_gslc.h5"), "LSAR")
+check("band_from_name absent", H["band_from_name"]("cartosat_ortho.tif"), None)
+
+# ── 5. posList shapes ─────────────────────────────────────────────────────────
+check("posList comma triples",
+      H["parse_pos_list"]("1 2 3,4 5 6,7 8 9"), [(1.0, 2.0), (4.0, 5.0), (7.0, 8.0)])
+check("posList whitespace triples",
+      H["parse_pos_list"]("1 2 3 4 5 6 7 8 9"), [(1.0, 2.0), (4.0, 5.0), (7.0, 8.0)])
+check("posList whitespace pairs",
+      H["parse_pos_list"]("1 2 3 4 5 6 7 8"),
+      [(1.0, 2.0), (3.0, 4.0), (5.0, 6.0), (7.0, 8.0)])
+check("posList empty", H["parse_pos_list"](""), [])
+
+# ── 6. sidecar routing and raster matching ────────────────────────────────────
+check("routes .iso.xml", H["is_meta_file"](xml_name), "iso-xml")
+check("routes .met", H["is_meta_file"]("SCENE_A.met"), "text")
+check("routes legacy _meta.txt", H["is_meta_file"]("scene_meta.txt"), "text")
+check("ignores the .h5 itself", H["is_meta_file"]("SCENE_A.h5"), None)
+check("ignores others", H["is_meta_file"]("scene.tif"), None)
+
+# '<product>.h5' and '<product>.met' share a stem; the XML sidecar hangs off the
+# .h5 name, so both must reduce to the same thing.
+check("stem drops .h5.iso.xml", H["meta_base_stem"](xml_name),
+      xml_name[:-len(".h5.iso.xml")])
+check("stem drops .met", H["meta_base_stem"]("SCENE_A.met"), "SCENE_A")
+check(".met and .h5.iso.xml agree on the stem",
+      H["meta_base_stem"]("SCENE_A.met") == H["meta_base_stem"]("SCENE_A.h5.iso.xml"),
+      True)
+check("stem drops legacy _meta.txt", H["meta_base_stem"]("SCENE_A_meta.txt"), "SCENE_A")
+
+files = ["SCENE_A.tif", "SCENE_B1.tif", "SCENE_B.met", "SCENE_B.h5", "notes.txt"]
+check("exact stem match", H["match_raster"](files, "SCENE_A"), "SCENE_A.tif")
+check("h52tif '<product>1.tif' prefix match",
+      H["match_raster"](files, "SCENE_B"), "SCENE_B1.tif")
+check("granule name fallback",
+      H["match_raster"](["OTHER.tif"], "NOPE", "OTHER.h5"), "OTHER.tif")
+check("no raster -> None", H["match_raster"](files, "SCENE_Z"), None)
+check("an .h5 alone is not a raster",
+      H["match_raster"](["SCENE_B.h5"], "SCENE_B", "SCENE_B.h5"), None)
+
+# What sits in the reference folder is the '.tif'; the '.h5' the metadata names
+# need not exist. Pin every naming shape either band's raster turns up as.
+for label, meta_name, rec_for in (
+        ("LSAR", xml_name, rec),
+        ("SSAR", met_name, met)):
+    stem = H["meta_base_stem"](meta_name)
+    for shape in (".tif", ".h5.tif", "1.tif", ".TIF"):
+        folder_tif = stem + shape
+        check(f"{label} raster named '<product>{shape}'",
+              H["match_raster"]([folder_tif, "unrelated.tif"], stem,
+                                rec_for["granule"]),
+              folder_tif)
+
+# ── 7. C1: the footprint is the tile name ────────────────────────────────────
+# 'N16E73.tif' is the cell whose SOUTH-WEST corner is 16 N, 73 E.
+tile = H["parse_degree_tile"]("N16E73.tif")
+check("N16E73 ring (UL,UR,LR,LL)", tile["ring"],
+      [(73.0, 17.0), (74.0, 17.0), (74.0, 16.0), (73.0, 16.0)])
+check("tile source", tile["source"], "tile-name (1 deg)")
+check("tile has no band", tile["band"], "UNK")
+check("three-digit lon", H["parse_degree_tile"]("N16E073.tif")["ring"][0], (73.0, 17.0))
+check("southern hemisphere", H["parse_degree_tile"]("S34E018.tif")["ring"][3],
+      (18.0, -34.0))
+check("western hemisphere", H["parse_degree_tile"]("N40W105.tif")["ring"][3],
+      (-105.0, 40.0))
+check("suffix after the token is ignored",
+      H["parse_degree_tile"]("N16E73_ORTHO_v2.tif")["ring"][3], (73.0, 16.0))
+
+# Reported from a real C1 folder: degree counts are not zero-padded.
+check("unpadded latitude 'N8E76_ortho.tif'",
+      H["parse_degree_tile"]("N8E76_ortho.tif")["ring"],
+      [(76.0, 9.0), (77.0, 9.0), (77.0, 8.0), (76.0, 8.0)])
+check("unpadded latitude, padded longitude",
+      H["parse_degree_tile"]("N8E076.tif")["ring"][3], (76.0, 8.0))
+check("unpadded longitude", H["parse_degree_tile"]("N16E7.tif")["ring"][3],
+      (7.0, 16.0))
+check("lowercase token", H["parse_degree_tile"]("n8e76_ortho.tif")["ring"][3],
+      (76.0, 8.0))
+check("a three-digit latitude is not a tile",
+      H["parse_degree_tile"]("N123E45.tif"), None)
+check("a four-digit longitude is not a tile",
+      H["parse_degree_tile"]("N16E7300.tif"), None)
+# An N8 tile cannot meet a 16-18 N scene; the bounds are what makes that legible
+# rather than an empty dropdown.
+n8   = H["parse_degree_tile"]("N8E76_ortho.tif")["ring"]
+n9   = H["parse_degree_tile"]("N9E76_ortho.tif")["ring"]
+check("bounds over several tiles", H["rings_bounds"]([n8, n9]),
+      (76.0, 8.0, 77.0, 10.0))
+check("bounds of nothing", H["rings_bounds"]([]), None)
+check("bounds read as lat then lon", H["format_bounds"]((76.0, 8.0, 77.0, 10.0)),
+      "8.000..10.000 lat, 76.000..77.000 lon")
+check("bounds of nothing reads as empty", H["format_bounds"](None), "empty")
+
+check("unpadded names still detect as degree-tile",
+      H["detect_reference_mode"](["N8E76_ortho.tif", "N9E76_ortho.tif"]),
+      "degree-tile")
+check("not a tile", H["parse_degree_tile"]("cartosat_ortho.tif"), None)
+check("a NISAR granule is not a tile", H["parse_degree_tile"](xml_name), None)
+check("out-of-range lat rejected", H["parse_degree_tile"]("N95E073.tif"), None)
+
+# ── 8. L8: a shapefile index names the rasters ───────────────────────────────
+# The real L8 index.shp stores tif names under 'FileName'.
+check("'FileName' wins over other plausible fields",
+      H["rank_name_fields"](["OBJECTID", "Shape_Area", "FileName",
+                             "path", "acq_date"])[0], "FileName")
+check("matching is case-insensitive on the field name",
+      H["rank_name_fields"](["FILENAME", "name"])[0], "FILENAME")
+
+fields = ["OBJECTID", "geom_area", "FILENAME", "path", "acq_date"]
+check("name-ish attributes rank first", H["rank_name_fields"](fields)[0], "FILENAME")
+ranked = H["rank_name_fields"](fields)
+check("hinted attributes all rank above unhinted ones",
+      ranked.index("path") < ranked.index("acq_date")
+      and ranked.index("OBJECTID") < ranked.index("acq_date")
+      and ranked.index("OBJECTID") < ranked.index("geom_area"), True)
+
+scenes = ["LC08_144048_20240102.tif", "LC08_144049_20240102.TIF"]
+check("index value: bare stem",
+      H["resolve_index_name"]("LC08_144048_20240102", scenes), scenes[0])
+check("index value: filename",
+      H["resolve_index_name"]("LC08_144048_20240102.tif", scenes), scenes[0])
+check("index value: a path from another machine",
+      H["resolve_index_name"](r"D:\\refs\\L8\\LC08_144048_20240102.tif", scenes),
+      scenes[0])
+check("index value: case-insensitive extension",
+      H["resolve_index_name"]("LC08_144049_20240102.tif", scenes), scenes[1])
+check("index value naming a missing raster",
+      H["resolve_index_name"]("LC08_999999_20240102.tif", scenes), None)
+check("index value blank", H["resolve_index_name"]("   ", scenes), None)
+check("index value null", H["resolve_index_name"](None, scenes), None)
+
+# L8 tif names carry no structure, so the index attribute is the only link --
+# and with many features the lookup is built once and reused.
+lookup = H["build_name_lookup"](scenes)
+check("prebuilt lookup resolves the same",
+      H["resolve_index_name"]("LC08_144048_20240102.tif", lookup), scenes[0])
+check("prebuilt lookup, case-insensitive",
+      H["resolve_index_name"]("lc08_144049_20240102.TIF", lookup), scenes[1])
+check("prebuilt lookup, absent raster",
+      H["resolve_index_name"]("LC08_000000_20240102.tif", lookup), None)
+
+check("prefers index.shp", H["pick_index_shapefile"](["tiles.shp", "index.shp"]),
+      "index.shp")
+check("falls back to the only shapefile",
+      H["pick_index_shapefile"](["tiles.shp"]), "tiles.shp")
+check("no shapefile", H["pick_index_shapefile"](["a.tif", "b.met"]), None)
+
+# ── 9. picking the mode from a folder listing ────────────────────────────────
+check("L8 folder -> index",
+      H["detect_reference_mode"](["LC08_a.tif", "LC08_b.tif", "index.shp",
+                                  "index.dbf", "index.shx"]), "index-shp")
+check("NISAR folder -> sidecar",
+      H["detect_reference_mode"]([met_name, xml_name, "a.tif"]), "sidecar")
+check("C1 folder -> degree-tile",
+      H["detect_reference_mode"](["N16E73.tif", "N16E74.tif", "N17E73.tif"]),
+      "degree-tile")
+# An index or sidecar states the real footprint; a tile name only implies a
+# nominal cell, so the name must never win over either.
+check("index beats a sidecar",
+      H["detect_reference_mode"](["a.tif", "a.met", "index.shp"]), "index-shp")
+check("sidecar beats a tile name",
+      H["detect_reference_mode"](["N16E73.tif", "N16E73.met"]), "sidecar")
+check("rasters with nothing to place them",
+      H["detect_reference_mode"](["scene_a.tif", "readme.txt"]), None)
+check("empty folder", H["detect_reference_mode"]([]), None)
+
+# ── 10. shapefile export records ─────────────────────────────────────────────
+# dx/dy are In - Ref, matching the table's Error columns, the CSV and dqe_imw.
+# quiver.py forms Ref - In, so the two point opposite ways -- stated in the
+# docstring and pinned here so it cannot drift silently.
+row = H["quiver_row"](3, 325010.0, 1900007.0, 325000.0, 1900000.0,
+                      (78.5, 17.2), (78.4999, 17.1999))
+check("row index is 1-based as passed", row["row"], 3)
+check("dx is In - Ref", row["dx"], 10.0)
+check("dy is In - Ref", row["dy"], 7.0)
+check("magnitude", round(row["mag"], 4), round((10.0 ** 2 + 7.0 ** 2) ** 0.5, 4))
+check("lon/lat carried for both sides",
+      (row["in_lon"], row["in_lat"], row["ref_lon"], row["ref_lat"]),
+      (78.5, 17.2, 78.4999, 17.1999))
+
+# bearing is a compass angle: 0 north, 90 east, so it can rotate a marker
+for (dx, dy), want in (((0, 1), 0.0), ((1, 0), 90.0),
+                       ((0, -1), 180.0), ((-1, 0), 270.0)):
+    b = H["quiver_row"](1, dx, dy, 0.0, 0.0)["bearing"]
+    check(f"bearing of ({dx},{dy})", round(b, 6), want)
+
+check("no lon/lat available -> None, not 0",
+      (H["quiver_row"](1, 1.0, 1.0, 0.0, 0.0)["in_lon"],
+       H["quiver_row"](1, 1.0, 1.0, 0.0, 0.0)["ref_lat"]), (None, None))
+
+# every field the writer declares must be produced, and DBF caps names at 10
+fields = [name for name, _ in H["SHP_FIELDS"]]
+check("every declared field is produced",
+      sorted(fields) == sorted(row.keys()), True)
+check("no field name exceeds the DBF 10-character limit",
+      max(len(f) for f in fields) <= 10, True)
+check("field names are unique", len(set(fields)), len(fields))
+
+# ── 11. accuracy statistics ──────────────────────────────────────────────────
+# The original CE90 summed the squares without dividing by n, so the figure
+# grew as sqrt(n) with the number of picks: ten picks at RMSE 4.132/6.292
+# reported 23.8 m against a true 11.42 m. Pinned so it cannot come back.
+st = H["accuracy_stats"]([3.0] * 10, [4.0] * 10)
+check("rmse_x is a mean, not a sum", round(st["rmse_x"], 6), 3.0)
+check("rmse_y is a mean, not a sum", round(st["rmse_y"], 6), 4.0)
+check("ce90 = 2.146 * sigma", round(st["ce90"], 4),
+      round(2.146 * ((3.0 ** 2 + 4.0 ** 2) / 2.0) ** 0.5, 4))
+check("ce90 is 1.5175 x the radial rmse", round(st["ce90"], 4),
+      round(1.51745 * (3.0 ** 2 + 4.0 ** 2) ** 0.5, 4))
+
+# the same errors repeated more times describe the same accuracy
+st_wide = H["accuracy_stats"]([3.0] * 40, [4.0] * 40)
+check("ce90 does not grow with the number of picks",
+      round(st_wide["ce90"], 9), round(st["ce90"], 9))
+
+# the reported case, to the figures the analyst read off the panel
+rx, ry = 4.132, 6.292
+st_real = H["accuracy_stats"]([rx] * 10, [ry] * 10)
+check("the 10-pick case reads 11.4 m, not 23.8",
+      round(st_real["ce90"], 2), 11.42)
+
+# RMSE is about zero: a systematic shift is an error, not something to remove
+st_bias = H["accuracy_stats"]([5.0] * 6, [0.0] * 6)
+check("a pure bias is not subtracted out", round(st_bias["rmse_x"], 6), 5.0)
+
+# the circularity caveat
+check("equal axes are circular", H["accuracy_stats"]([3.0], [3.0])["circular"],
+      True)
+check("4.132/6.292 = 0.657 is inside the NSSDA band", st_real["circular"], True)
+check("a 10:1 ellipse is flagged",
+      H["accuracy_stats"]([1.0], [10.0])["circular"], False)
+
+# an empty panel, and a mismatched pair, are zeros rather than an exception
+check("no picks", H["accuracy_stats"]([], []),
+      {"n": 0, "rmse_x": 0.0, "rmse_y": 0.0, "ce90": 0.0, "circular": True})
+check("mismatched lengths", H["accuracy_stats"]([1.0, 2.0], [1.0])["n"], 0)
+check("all-zero errors do not divide by zero",
+      H["accuracy_stats"]([0.0], [0.0])["ce90"], 0.0)
+
+# ── 12. the UTM zone a geographic scene is measured in ───────────────────────
+# A scene with no projected CRS used to leave the working CRS at the hard-coded
+# UTM 44N, wherever on Earth it was. The zone comes from the scene's centre now.
+print("\n-- working CRS for a geographic input --")
+check("Hyderabad, 78.5E -> UTM 44N", H["utm_epsg_for"](78.5, 17.4), 32644)
+check("the Gulf, 58.0E -> UTM 40N", H["utm_epsg_for"](58.0, 26.1), 32640)
+check("southern hemisphere takes the 327xx band",
+      H["utm_epsg_for"](58.0, -26.1), 32740)
+# zone boundaries are half-open on the west: 6E starts zone 32, 5.999 ends 31
+check("just west of a boundary", H["utm_epsg_for"](5.999, 50.0), 32631)
+check("on the boundary", H["utm_epsg_for"](6.0, 50.0), 32632)
+check("zone 1 at the antimeridian", H["utm_epsg_for"](-180.0, 0.0), 32601)
+check("zone 60 at the far edge", H["utm_epsg_for"](179.999, 0.0), 32660)
+check("+180 exactly clamps to 60 rather than overflowing to 61",
+      H["utm_epsg_for"](180.0, 0.0), 32660)
+# the equator belongs to the northern band, by the >= in the helper
+check("the equator reads north", H["utm_epsg_for"](78.5, 0.0), 32644)
+
+# UTM is undefined at the poles: a wrong zone there would be silent, so refuse
+check("above 84 N there is no zone", H["utm_epsg_for"](78.5, 85.0), None)
+check("below 80 S there is no zone", H["utm_epsg_for"](78.5, -80.1), None)
+check("84 N itself is still in", H["utm_epsg_for"](78.5, 84.0), 32644)
+check("an out-of-range longitude is refused",
+      H["utm_epsg_for"](181.0, 17.4), None)
+
+# ── 13. which table rows become a numbered GCP on the input canvas ───────────
+print("\n-- GCPs drawn on the input canvas --")
+table = [("325010.000", "1900007.000"),   # 1: a pick
+         ("0.000", "0.000"),              # 2: a fresh row, not a point at (0,0)
+         ("325020.000", "1900000.000"),   # 3: a pick
+         (None, None),                    # 4: an empty row
+         ("325030.", ""),                 # 5: mid-typing
+         ("0.000", "1900050.000")]        # 6: on the false easting, still a pick
+got = H["gcp_points"](table)
+check("only the rows carrying a pick", [n for n, _, _ in got], [1, 3, 6])
+check("numbered by their table row, not by position in the result",
+      got[1], (3, 325020.0, 1900000.0))
+# (0, 0) is where a new row starts and, in UTM, several hundred km from the
+# scene -- a mark there would be a stray cross with a number on it
+check("a fresh row is not a point at the projection origin",
+      [n for n, _, _ in H["gcp_points"]([("0.000", "0.000")])], [])
+check("one zero axis is still a real position",
+      H["gcp_points"]([("0.000", "1900050.000")]), [(1, 0.0, 1900050.0)])
+check("nothing marked yet", H["gcp_points"]([]), [])
+check("a short row is skipped, not an IndexError",
+      H["gcp_points"]([("1.0",)]), [])
+
+# ── 14. clicking a GCP picks the nearest one inside the reach ────────────────
+print("\n-- which GCP a click lands on --")
+pts = [(1, 100.0, 100.0), (3, 110.0, 100.0), (6, 100.0, 140.0)]
+check("a click on one of them", H["nearest_gcp"](pts, 100.2, 99.8, 5.0),
+      (1, 100.0, 100.0))
+check("between two, the nearer wins", H["nearest_gcp"](pts, 106.0, 100.0, 8.0),
+      (3, 110.0, 100.0))
+check("nothing within reach", H["nearest_gcp"](pts, 100.0, 120.0, 5.0), None)
+check("exactly on the radius still counts",
+      H["nearest_gcp"](pts, 105.0, 100.0, 5.0), (1, 100.0, 100.0))
+# two picks on the same ground must resolve the same way every time, or a
+# click would land on whichever row happened to come first out of the table
+check("a tie goes to the lower row",
+      H["nearest_gcp"]([(7, 5.0, 5.0), (2, 5.0, 5.0)], 5.0, 5.0, 1.0),
+      (2, 5.0, 5.0))
+check("nothing marked yet", H["nearest_gcp"]([], 0.0, 0.0, 10.0), None)
+check("a zero radius still matches an exact hit",
+      H["nearest_gcp"](pts, 100.0, 100.0, 0.0), (1, 100.0, 100.0))
+
+# ── 15. placing a point in a raster's own grid, and judging the pixel ────────
+print("\n-- the reference pixel probe --")
+# GDAL order: (originX, pixelW, rowRot, originY, colRot, pixelH), pixelH < 0
+gt = (300000.0, 10.0, 0.0, 1900000.0, 0.0, -10.0)
+check("the origin is pixel (0, 0)", H["pixel_for_point"](gt, 300000.0, 1900000.0),
+      (0, 0))
+check("half a pixel in is still (0, 0)",
+      H["pixel_for_point"](gt, 300005.0, 1899995.0), (0, 0))
+check("one pixel east and south",
+      H["pixel_for_point"](gt, 300010.0, 1899990.0), (1, 1))
+check("north of the origin floors negative rather than wrapping",
+      H["pixel_for_point"](gt, 300000.0, 1900010.0), (0, -1))
+# a rotated grid read as though it were north-up puts the point somewhere
+# plausible and wrong, which is worse than declining to place it
+check("a rotated grid is refused",
+      H["pixel_for_point"]((300000.0, 10.0, 2.0, 1900000.0, 0.0, -10.0),
+                           300000.0, 1900000.0), None)
+check("a zero pixel size is refused",
+      H["pixel_for_point"]((300000.0, 0.0, 0.0, 1900000.0, 0.0, -10.0),
+                           300000.0, 1900000.0), None)
+check("a malformed transform is refused", H["pixel_for_point"]((1, 2, 3), 0, 0),
+      None)
+
+FILL = (0, 3)
+check("an ordinary value is data", H["is_data_value"](127.0, None, FILL), True)
+check("the declared nodata is fill", H["is_data_value"](-9999.0, -9999.0, FILL),
+      False)
+check("0 is fill", H["is_data_value"](0, None, FILL), False)
+check("3 is fill too, per the corner_coord definition",
+      H["is_data_value"](3, None, FILL), False)
+# NaN != NaN, so testing it against a nodata value KEEPS it -- the same trap
+# that once rendered a whole scene black here
+check("NaN is fill however it was declared",
+      H["is_data_value"](float("nan"), -9999.0, FILL), False)
+check("an int band and a float band agree",
+      H["is_data_value"](0, 0.0, FILL), False)
+check("a value that cannot be read as a number is not data",
+      H["is_data_value"]("nodata", None, FILL), False)
+check("with no fill list, only nodata and NaN are fill",
+      H["is_data_value"](0.0, None, ()), True)
+
+# ── 16. where the next reference mark is expected to be ──────────────────────
+print("\n-- predicting the reference mark --")
+# the first pick has nothing to go on and must not be nudged anywhere
+check("no errors yet", H["predicted_offset"]([]), None)
+check("one error is its own prediction",
+      H["predicted_offset"]([(30.0, -10.0)]), (30.0, -10.0))
+check("the mean of several",
+      H["predicted_offset"]([(30.0, -10.0), (10.0, -30.0)]), (20.0, -20.0))
+check("last follows the most recent",
+      H["predicted_offset"]([(30.0, -10.0), (10.0, -30.0)], "last"),
+      (10.0, -30.0))
+# one bad pick drags the mean a long way; the median is why the option exists
+check("the median ignores an outlier",
+      H["predicted_offset"]([(10.0, 10.0), (11.0, 11.0), (900.0, 900.0)],
+                            "median"), (11.0, 11.0))
+check("an even count averages the middle pair",
+      H["predicted_offset"]([(10.0, 10.0), (20.0, 20.0)], "median"),
+      (15.0, 15.0))
+check("unreadable rows are skipped, not fatal",
+      H["predicted_offset"]([("x", "y"), (4.0, 6.0)]), (4.0, 6.0))
+check("every row unreadable is the same as none",
+      H["predicted_offset"]([(None, None)]), None)
+
+# the whole point, in the table's own convention: dx = In - Ref, so
+# Ref = In - (dx, dy). A reference 30 m west and 10 m north of its input
+# predicts the next one 30 m west and 10 m north of ITS input.
+in1, ref1 = (1000.0, 1000.0), (970.0, 1010.0)
+err = (in1[0] - ref1[0], in1[1] - ref1[1])
+off = H["predicted_offset"]([err])
+in2 = (2000.0, 2000.0)
+check("the next mark carries the same offset",
+      (in2[0] - off[0], in2[1] - off[1]), (1970.0, 2010.0))
+
+# ── 17. the CSV record: the six columns, then row and lon/lat ────────────────
+print("\n-- the exported CSV row --")
+cells = ["325010.000", "1900007.000", "325000.000", "1900000.000", "10.000", "7.000"]
+rec = H["csv_record"](3, cells, (78.5, 17.2), (78.4999, 17.1999))
+# the original six keep their position, so a file read by column index is safe
+check("the six table columns come first, unchanged", rec[:6], cells)
+check("then the row number, matching the canvas and the shapefile", rec[6], "3")
+check("then both ends in lon/lat",
+      rec[7:], ["78.50000000", "17.20000000", "78.49990000", "17.19990000"])
+
+# an unmarked end is blank, NOT a transformed (0, 0) -- that is a real place on
+# Earth and would read as a measurement
+half = H["csv_record"](1, cells, (78.5, 17.2), None)
+check("an unmarked reference leaves its lon/lat empty", half[9:], ["", ""])
+check("the marked end is still written", half[7:9],
+      ["78.50000000", "17.20000000"])
+check("neither end marked", H["csv_record"](1, cells, None, None)[7:],
+      ["", "", "", ""])
+
+# a short or ragged row pads rather than raising: the export must not fall over
+# on a half-built table
+check("a short row is padded to six", H["csv_record"](1, ["1", "2"], None, None)[:6],
+      ["1", "2", "", "", "", ""])
+check("a None cell becomes empty",
+      H["csv_record"](1, [None] * 6, None, None)[:6], [""] * 6)
+check("a non-numeric lon/lat is dropped rather than written",
+      H["csv_record"](1, cells, ("x", "y"), None)[7:9], ["", ""])
+
+# ── 18. a sidecar found by 'meta' in its NAME, not by a fixed suffix ─────────
+print("\n-- sidecars labelled META/meta --")
+check("the existing suffixes still win", H["is_meta_file"]("scene.met"), "text")
+check("and the ISO one", H["is_meta_file"]("scene.h5.iso.xml"), "iso-xml")
+check("_META.txt beside the tif", H["is_meta_file"]("G1A_ort_META.txt"), "text")
+check("lower case too", H["is_meta_file"]("G1A_ort_meta.txt"), "text")
+check("META in the middle", H["is_meta_file"]("G1A_META_v2.txt"), "text")
+check("an XML one parses as ISO", H["is_meta_file"]("G1A_META.xml"), "iso-xml")
+check("a bare METADATA.xml", H["is_meta_file"]("METADATA.xml"), "iso-xml")
+# the extension decides, so these keep being what they are
+check("a raster with meta in its name is still a raster",
+      H["is_meta_file"]("G1A_metadata_ort.tif"), None)
+check("an index with meta in its name is still an index",
+      H["is_meta_file"]("L8_meta_index.shp"), None)
+check("no extension, so not a file to parse (a 'meta' DIRECTORY)",
+      H["is_meta_file"]("meta"), None)
+check("no meta in the name at all", H["is_meta_file"]("readme_notes.rtf"), None)
+
+# the stem has to come back out, or the sidecar cannot be tied to its raster
+check("<scene>_META.txt -> <scene>",
+      H["meta_base_stem"]("G1A_ort_ADRIN_META.txt"), "G1A_ort_ADRIN")
+check("META_<scene>.txt -> <scene>",
+      H["meta_base_stem"]("META_G1A_ort_ADRIN.txt"), "G1A_ort_ADRIN")
+check("<scene>_METADATA.xml -> <scene>, the label taken whole",
+      H["meta_base_stem"]("G1A_ort_METADATA.xml"), "G1A_ort")
+check("a file named only for being metadata names no raster",
+      H["meta_base_stem"]("METADATA.xml"), "")
+check("the known suffixes are unchanged",
+      H["meta_base_stem"]("scene.h5.iso.xml"), "scene")
+
+# an empty stem is a prefix of EVERY name, so it must not reach the prefix pass
+files = ["alpha.tif", "beta.tif"]
+check("an empty stem matches no raster rather than the first",
+      H["match_raster"](files, ""), None)
+check("a real stem still matches", H["match_raster"](files, "beta"), "beta.tif")
+check("and the prefix fallback still works",
+      H["match_raster"](["beta1.tif"], "beta"), "beta1.tif")
+# with a granule name to go on, an empty stem can still resolve
+check("an empty stem plus a granule name resolves",
+      H["match_raster"](files, "", granule="alpha.h5"), "alpha.tif")
+
+# ── 19. which CRS the shapefile geometry goes out in ─────────────────────────
+print("\n-- the shapefile's export CRS --")
+f = H["portable_authid"]
+check("an EPSG code travels", f("EPSG:32644"), True)
+check("an ESRI code travels", f("ESRI:102024"), True)
+check("so does IGNF", f("IGNF:LAMB93"), True)
+# what QGIS mints for a CRS it stored locally: a code in shape only
+check("a QGIS user CRS does not", f("USER:100001"), False)
+check("nor a custom one", f("CUSTOM:1"), False)
+check("no code at all does not", f(""), False)
+check("nor does None", f(None), False)
+check("nor an authority with nothing after the colon", f("EPSG:"), False)
+check("nor a bare word", f("EPSG"), False)
+
+g = H["prj_is_usable"]
+check("a WKT1 projected CRS is usable", g('PROJCS["Lambert",GEOGCS["x"]]'), True)
+check("a WKT2 one too", g('PROJCRS["Lambert",BASEGEOGCRS["x"]]'), True)
+check("leading whitespace and a BOM do not hide it",
+      g('\ufeff  \n geogcs["WGS 84"]'), True)
+# the reported failure: no '.prj' at all, or one holding nothing
+check("an empty file is not usable", g(""), False)
+check("whitespace is not usable", g("   \n "), False)
+check("and neither is prose", g("unknown"), False)
+
+f = H["export_crs_choice"]
+# a normal projected CRS with an EPSG code: written as it is
+check("an EPSG-coded CRS is written as it is",
+      f("working", True, "EPSG:32644"), (False, None))
+# the reported LCC case: QGIS draws it, prints a WKT for it, and still leaves
+# the shapefile with no '.prj' -- so a WKT is not evidence and is not asked for
+lonlat, why = f("working", True, "USER:100001")
+check("a locally-stored CRS falls back to lon/lat", lonlat, True)
+check("and names the code it will not trust", "USER:100001" in why, True)
+check("a CRS with no code at all falls back too",
+      f("working", True, "")[0], True)
+check("and says so", "no authority code" in f("working", True, "")[1], True)
+check("an invalid working CRS also falls back", f("working", False, "EPSG:32644")[0],
+      True)
+check("the override always writes lon/lat", f("wgs84", True, "EPSG:32644")[0], True)
+check("and names itself as the reason", f("wgs84", True, "EPSG:32644")[1],
+      "SHP_EXPORT_CRS='wgs84'")
+
+# ── 20. when a press on a canvas starts a new row ────────────────────────────
+print("\n-- starting rows by marking --")
+f = H["pick_starts_new_row"]
+#       on_input has_row has_in has_ref near  keep
+check("no row selected: a press on the input starts one",
+      f(True,  False, False, False, False), True)
+check("no row selected: so does a press on the reference",
+      f(False, False, False, False, False), True)
+check("an empty selected row is filled, not skipped",
+      f(True,  True,  False, False, False), False)
+check("a row with only its input is still open",
+      f(True,  True,  True,  False, False), False)
+check("a row started from the reference takes its input",
+      f(True,  True,  False, True,  False), False)
+check("a complete row: the next input press is the next point",
+      f(True,  True,  True,  True,  False), True)
+check("but a press on its own input mark refines it",
+      f(True,  True,  True,  True,  True),  False)
+check("and Shift always marks the selected row",
+      f(True,  True,  True,  True,  False, True), False)
+check("a complete row's reference is corrected, never a new row",
+      f(False, True,  True,  True,  False), False)
+
+# ── 21. the statistics file ──────────────────────────────────────────────────
+print("\n-- statistics written with an export --")
+f = H["error_summary"]
+# dx: 3, 5 -> mean 4, sample std sqrt(2), rmse sqrt(17); dy: 4, 0
+st = f([(3.0, 4.0), (5.0, 0.0)])
+near = lambda a, b: abs(a - b) < 1e-9
+check("n", st["n"], 2)
+check("mean is the bias", (st["mean_x"], st["mean_y"]), (4.0, 2.0))
+check("std is the sample std about the mean",
+      near(st["std_x"], 2 ** 0.5) and near(st["std_y"], 8 ** 0.5), True)
+check("rmse is about zero, bias included",
+      near(st["rmse_x"], 17 ** 0.5) and near(st["rmse_y"], 8 ** 0.5), True)
+check("radial: |(3,4)| = 5 and |(5,0)| = 5",
+      (st["mean_r"], st["max_r"], st["rmse_r"]), (5.0, 5.0, 5.0))
+check("CE90 is the same figure the panel shows",
+      st["ce90"], H["accuracy_stats"]([3.0, 5.0], [4.0, 0.0])["ce90"])
+check("one point has no scatter, not a division by zero",
+      f([(1.0, 1.0)])["std_x"], 0.0)
+check("nothing marked writes just the count",
+      H["stats_rows"](f([])), [("n_points", "0", "", "fully marked rows only")])
+names = [r[0] for r in H["stats_rows"](st)]
+check("every figure asked for is in the file",
+      all(k in names for k in ("mean_dx", "std_dx", "rmse_dx", "ce90",
+                               "mean_dy", "std_dy", "rmse_dy")), True)
+uneven = H["stats_rows"](f([(10.0, 1.0), (-10.0, -1.0)]))
+check("uneven axes are flagged beside CE90",
+      "NOT met" in dict((r[0], r[3]) for r in uneven)["axis_ratio"], True)
+check("the file sits beside the export, either kind",
+      (H["stats_path_for"]("/a/picks.csv"), H["stats_path_for"]("/a/picks.shp")),
+      ("/a/picks_stats.csv", "/a/picks_stats.csv"))
+
+# ── 22. export names come from the input's folder ──────────────────────────
+print("\n-- export file names --")
+f = H["export_paths"]
+check("named after the folder the input sits in, all four files",
+      f("/out", "/data/NISAR_L2_0042/G1A_ort.tif"),
+      {"csv": "/out/csv/NISAR_L2_0042_rival.csv",
+       "shp": "/out/shp/NISAR_L2_0042_rival.shp",
+       "stats": "/out/stats/NISAR_L2_0042_rival_stats.csv",
+       "plots": "/out/plots/NISAR_L2_0042_rival_vectors.png"})
+check("not the file name", "G1A_ort" in f("/out", "/data/scene_a/G1A_ort.tif")["csv"],
+      False)
+check("a folder name with dots is kept whole",
+      f("/out", "/d/NISAR.L2.v1/a.tif")["csv"], "/out/csv/NISAR.L2.v1_rival.csv")
+check("no input loaded still gives a name", f("/out", None)["shp"], "/out/shp/rival.shp")
+check("an input at the filesystem root still gives a name",
+      f("/out", "/a.tif")["csv"], "/out/csv/rival.csv")
+check("csv/ and shp/ exports both put stats in the one stats/ folder",
+      (H["stats_path_for"]("/out/csv/a_rival.csv"), H["stats_path_for"]("/out/shp/a_rival.shp")),
+      ("/out/stats/a_rival_stats.csv", "/out/stats/a_rival_stats.csv"))
+check("an export elsewhere keeps its stats beside it",
+      H["stats_path_for"]("/a/picks.csv"), "/a/picks_stats.csv")
+check("the stats file the export writes is the one named here",
+      H["stats_path_for"](f("/out", "/d/x/a.tif")["shp"]), f("/out", "/d/x/a.tif")["stats"])
+
+# ── 23. scene rasters in an input folder, and the COG name ───────────────────
+print("\n-- input folder --")
+f = H["pick_scene_tifs"]
+names = ["266697511_GTD_ABC_1.tif", "266697511_ITD_ABC_1.TIF",
+         "266697511_GTD_ABC_1_Height.tif", "266697511_GTD_ABC_1_SatEle.tif",
+         "266697511_GTD.tif", "266697511_GTD_ABC_2.tif", "BAND_META.txt",
+         "266697511_GTD_ABC_1_b1-2_cog.tif", "x_itd_y_1.tiff"]
+check("only *GTD_*_1 / *ITD_*_1 are the scene",
+      f(names), ["266697511_GTD_ABC_1.tif", "266697511_ITD_ABC_1.TIF",
+                 "x_itd_y_1.tiff"])
+check("an empty folder has no scene", f([]), [])
+check("the COG is named for its bands, beside the source",
+      H["cog_path_for"]("/d/266697511_ITD_A_1.tif", [3, 1], ""),
+      "/d/266697511_ITD_A_1_b3-1_cog.tif")
+
+# ── 23b. exports named after the band evaluated ─────────────────────────────
+print("\n-- evaluated band --")
+cog = "/d/X_GTD_A_1_b6-4-3_cog.tif"
+check("COG source bands from its name", H["cog_source_bands"](cog), [6, 4, 3])
+check("a plain tif is not a COG", H["cog_source_bands"]("/d/X_GTD_A_1.tif"), None)
+check("COG band 1 in grey is scene band 6", H["evaluated_bands"](cog, [1, 1, 1]), [6])
+check("COG band 3 in grey is scene band 3", H["evaluated_bands"](cog, [3, 3, 3]), [3])
+check("a composite keeps its order", H["evaluated_bands"](cog, [1, 2, 3]), [6, 4, 3])
+check("a plain tif's bands are its own", H["evaluated_bands"]("/d/a.tif", [5, 5, 5]), [5])
+check("one band tags band6", H["band_tag"]([6]), "band6")
+check("COG 2-4-5, band 1 shown -> band2",
+      H["export_paths"]("/out", "/data/P42/X.tif", "folder",
+          H["band_tag"](H["evaluated_bands"]("/d/X_1_b2-4-5_cog.tif", [1, 1, 1])))["csv"],
+      os.path.join("/out", "csv", "P42_rival_band2.csv"))
+check("no band, no tag", H["band_tag"]([]), "")
+check("export named folder + band",
+      H["export_paths"]("/out", "/data/P42/X_GTD_A_1.tif", "folder", "band6")["csv"],
+      os.path.join("/out", "csv", "P42_rival_band6.csv"))
+check("stats follow the band name",
+      H["export_paths"]("/out", "/data/P42/X.tif", "file", "band2")["stats"],
+      os.path.join("/out", "stats", "X_rival_band2_stats.csv"))
+check("without a band the name is unchanged",
+      H["export_paths"]("/out", "/data/P42/X.tif")["csv"],
+      os.path.join("/out", "csv", "P42_rival.csv"))
+
+# ── 23c. row view width from the input's resolution; plot title ──────────
+print("\n-- row zoom and look vectors --")
+w = H["row_view_width"]
+check("10x of 1:1: 800 px of a 5.8 m scene", round(w(5.8, 800), 1), 464.0)
+check("191 m HS pixels get a wide view", w(191.0, 800), 15280.0)
+check("the input at its gentler zoom (2x): 191 m HS", w(191.0, 800, 2.0), 76400.0)
+check("clamped below", w(0.5, 800), 200.0)
+check("clamped above", w(1000.0, 4000), 200000.0)
+check("unknown pixel size", w(None, 800), None)
+import tempfile as _tf
+_d = _tf.mkdtemp()
+open(os.path.join(_d, "BAND_META.txt"), "w").write(
+    "SatID = G1A\nSensor = MV\nImgDirection = Descending\nSessionNumber = 026111104\nStripNumber = 6\n"
+    "DateOfPass = 17-NOV-2026\nProdULLat = 28.35\nProdULLon = 71.84\nProdURLat = 28.35\n"
+    "ProdURLon = 88.93\nProdLRLat = 25.53\nProdLRLon = 88.93\nProdLLLat = 25.53\n"
+    "ProdLLLon = 71.84\n")
+check("title as the matcher's: Sat: Sensor date session/strip",
+      H["scene_title"](os.path.join(_d, "X_GTD_A_1.tif")), "G1A: MV Direction: Descending DOP: 17-Nov-2026 Session: 026111104 Strip: 6")
+check("product corners from BAND_META", H["prod_corners"](os.path.join(_d, "X.tif"))[1],
+      (88.93, 28.35))
+_x = _tf.mkdtemp()
+open(os.path.join(_x, "P_ort_META.xml"), "w").write(
+    "<AISD><IMAGE><SATID>G1A</SATID><SENSORNAME>HS</SENSORNAME>"
+    "<STRIPID>000006</STRIPID><SESSION_NUMBER>026111104</SESSION_NUMBER>"
+    "</IMAGE></AISD>")
+check("title from a special product's XML", H["scene_title"](os.path.join(_x, "P_ort.tif")),
+      "G1A: HS Session: 026111104 Strip: 6")
+_t = _tf.mkdtemp(); os.makedirs(os.path.join(_t, "META"))
+open(os.path.join(_t, "META", "BAND_META.txt"), "w").write(
+    "SatID = G1A\nSensor = LISS4\nDateOfPass = 03-JAN-2026\n")
+check("Load Input TIF: meta in a META/ subfolder still found",
+      H["scene_title"](os.path.join(_t, "scene.tif")), "G1A: LISS4 DOP: 03-Jan-2026")
+_u = _tf.mkdtemp()
+open(os.path.join(_u, "scene.xml"), "w").write(
+    "<r><SATID>G1A</SATID><SENSORNAME>HS</SENSORNAME><UL_LAT>17</UL_LAT><UL_LON>78</UL_LON>"
+    "<UR_LAT>17</UR_LAT><UR_LON>79</UR_LON><LR_LAT>16</LR_LAT><LR_LON>79</LR_LON>"
+    "<LL_LAT>16</LL_LAT><LL_LON>78</LL_LON></r>")
+open(os.path.join(_u, "notes.txt"), "w").write("ULLAT = 1")
+check("an XML named after the tif (no 'meta' in it) is read",
+      (H["scene_title"](os.path.join(_u, "scene.tif")),
+       H["prod_corners"](os.path.join(_u, "scene.tif"))[0]), ("G1A: HS", (78.0, 17.0)))
+check("an unrelated text file is not", [os.path.basename(p) for p in
+      H["input_meta_files"](os.path.join(_u, "scene.tif"))], ["scene.xml"])
+check("no metadata: title from the product name",
+      H["scene_title"](os.path.join(_tf.mkdtemp(),
+          "G1AHS026111104EX000006_S062321_E063509_11112026DIP_DQ_ort_b6_cog.tif")),
+      "G1A: HS DOP: 11-Nov-2026 Session: 026111104 Strip: 6")
+_c = _tf.mkdtemp(); _cog = os.path.join(_c, "x_b2_cog.tif")
+open(_cog + ".source.txt", "w").write("/srv/P/x.tif")
+check("a COG names the scene it came from", H["cog_source_of"](_cog), "/srv/P/x.tif")
+check("anything else is its own source", H["cog_source_of"]("/a/b.tif"), "/a/b.tif")
+check("latitude ticks every whole degree", H["degree_ticks"](25.53, 28.35), [26.0, 27.0, 28.0])
+check("latitude ticks on a 1-degree scene still exist", len(H["degree_ticks"](16.2, 16.9)) >= 2, True)
+_st_m = H["error_summary"]([(30.0, -40.0), (10.0, 20.0)])
+check("errors under 1 km: title in metres", H["vectors_title"]("T", _st_m),
+      "T\nRMSE 31.6 m N / 22.4 m E")
+check("errors under 1 km: footer in metres", H["vectors_footer"](_st_m).startswith(
+      "Mean -10.0 m N / 20.0 m E"), True)
+_st_k = H["error_summary"]([(2500.0, 600.0), (2000.0, 500.0)])
+check("errors over 1 km: km", H["vectors_title"]("", _st_k), "RMSE 0.552 km N / 2.264 km E")
+_u, _s = H["usable_bands"](256)
+_w = H["band_wavelengths"](256)
+check("HS: 256 bands 900-2500 nm, absorption windows left out",
+      (_s, round(_w[0]), round(_w[-1]),
+       any(1330 <= _w[b - 1] <= 1490 for b in _u), any(1780 <= _w[b - 1] <= 1990 for b in _u),
+       any(1550 <= _w[b - 1] <= 1750 for b in _u)), ("HS", 900, 2500, False, False, True))
+_u, _s = H["usable_bands"](158)
+_w = H["band_wavelengths"](158)
+check("HV: 158 bands 375-1000 nm, blue edge and 940 nm left out",
+      (_s, any(_w[b - 1] < 420 for b in _u), any(925 <= _w[b - 1] <= 980 for b in _u),
+       any(600 <= _w[b - 1] <= 700 for b in _u)), ("HV", False, False, True))
+check("MV (6 bands): all scored, no sensor table", H["usable_bands"](6), ([1, 2, 3, 4, 5, 6], None))
+check("no metadata, no title", H["scene_title"](os.path.join(_tf.mkdtemp(), "a.tif")), "")
+try:
+    import matplotlib  # noqa: F401
+    png = os.path.join(_d, "S_rival_band6_vectors.png")
+    rows = [{"in_x": 500000.0 + 20000 * i, "in_y": 3000000.0 + 3000 * i,
+             "dx": 100.0 + 40 * i, "dy": -50.0 + 10 * i} for i in range(6)]
+    st = H["error_summary"]([(r["dx"], r["dy"]) for r in rows])
+    import pyproj as _pp
+    _f = _pp.Transformer.from_crs(32644, 4326, always_xy=True).transform
+    _b = _pp.Transformer.from_crs(4326, 32644, always_xy=True).transform
+    H["plot_look_vectors"](rows, png, "G1A: HS", st,
+                           (480000.0, 640000.0, 2990000.0, 3025000.0), None, _f, _b)
+    check("look-vector plot written", os.path.getsize(png) > 10000, True)
+    H["plot_look_vectors"](rows, png, "", st, (480000.0, 500000.0, 2900000.0, 3100000.0))
+    check("tall scene plot written", os.path.getsize(png) > 10000, True)
+except ImportError:
+    print("  (matplotlib missing: plot not exercised)")
+
+check("by default the COG is local, under the product folder's name",
+      H["cog_path_for"]("//server/prod/266697511/266697511_ITD_A_1.tif", [2], "/home/u/RIVAL_cog"),
+      os.path.join("/home/u/RIVAL_cog", "266697511", "266697511_ITD_A_1_b2_cog.tif"))
+check("COG_CACHE_DIR is the default", H["cog_path_for"]("/srv/p/x.tif", [1]).startswith(
+      os.path.expanduser(H["COG_CACHE_DIR"])), True)
+
+f = H["corners_from_meta_text"]
+check("corners from key = value (BAND_META)", f(
+    "ProdULLat = 28.3\nProdULLon = 71.8\nProdURLat = 28.3\nProdURLon = 88.9\n"
+    "ProdLRLat = 25.5\nProdLRLon = 88.9\nProdLLLat = 25.5\nProdLLLon = 71.8\n")[2], (88.9, 25.5))
+check("corners from XML tags with underscores, -9999 skipped", f(
+    "<UL_LAT>-9999.</UL_LAT><UL_LAT>17</UL_LAT><UL_LON>78</UL_LON><UR_LAT>17</UR_LAT>"
+    "<UR_LON>79</UR_LON><LR_LAT>16</LR_LAT><LR_LON>79</LR_LON><LL_LAT>16</LL_LAT>"
+    "<LL_LON>78</LL_LON>")[0], (78.0, 17.0))
+check("incomplete corners", f("ULLAT = 1\nULLON = 2"), None)
+
+# ── 23d. session logs ─────────────────────────────────────────────────────
+import datetime as _dtm
+si = H["session_identity"]
+check("RDP to a shared server: the workstation is CLIENTNAME",
+      si({"USERNAME": "anupam", "COMPUTERNAME": "QGISSRV", "CLIENTNAME": "WS-12"}),
+      ("anupam", "WS-12", "QGISSRV"))
+check("on its own workstation (console session)",
+      si({"USERNAME": "anupam", "COMPUTERNAME": "WS-12", "CLIENTNAME": "Console"}),
+      ("anupam", "WS-12", "WS-12"))
+lf = H["log_file_name"]
+when = _dtm.datetime(2026, 11, 19, 9, 5, 7)
+check("log name on a shared server", lf("anupam", "WS-12", "QGISSRV", when, 4242),
+      "RIVAL_20261119_090507_anupam_WS-12@QGISSRV_4242.log")
+check("log name locally", lf("a b", "WS-12", "WS-12", when, 1),
+      "RIVAL_20261119_090507_a-b_WS-12_1.log")
+import io as _io
+_buf, _fh = _io.StringIO(), _io.StringIO()
+t = H["TeeLog"](_buf, _fh)
+t.write("[A] one\n[B] two")
+t.write(" more\n")
+check("tee: console unchanged", _buf.getvalue(), "[A] one\n[B] two more\n")
+check("tee: file lines time-stamped once each",
+      [l[9:] for l in _fh.getvalue().splitlines()], ["[A] one", "[B] two more"])
+_q = _tf.mkdtemp()
+try:
+    import os as _os
+    _os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt5.QtGui import QGuiApplication
+    _app = QGuiApplication.instance() or QGuiApplication([])
+    pq = os.path.join(_q, "Q_vectors.png")
+    rows = [{"in_x": 500000.0 + 20000 * i, "in_y": 3000000.0 + 3000 * i,
+             "dx": 100.0 + 40 * i, "dy": -50.0 + 10 * i} for i in range(6)]
+    H["plot_look_vectors_qt"](rows, pq, "G1A: HS", H["error_summary"](
+        [(r["dx"], r["dy"]) for r in rows]), (480000.0, 640000.0, 2990000.0, 3025000.0))
+    check("without matplotlib: the Qt look-vector plot is written", os.path.getsize(pq) > 5000, True)
+except ImportError:
+    print("  (PyQt5 missing: Qt plot not exercised)")
+
+# ── 24. remembered display bands ─────────────────────────────────────────────
+print("\n-- display bands --")
+f = H["parse_band_choice"]
+check("a saved R,G,B reads back", f("34,22,11", 155), [34, 22, 11])
+check("a single band is allowed", f("5", 155), [5])
+check("nothing saved", f("", 155), None)
+check("a band beyond this product's count is refused", f("34,22,160", 155), None)
+check("more than three channels is refused", f("1,2,3,4", 155), None)
+check("junk is refused", f("a,b", 155), None)
+check("each band count is its own product type",
+      (H["band_choice_key"](155), H["band_choice_key"](4)),
+      ("cog_rgb/155", "cog_rgb/4"))
+check("first guess: 1, 2, 3", H["default_rgb"](155), [1, 2, 3])
+check("first guess on two bands", H["default_rgb"](2), [1, 2])
+
+# ── 25. export names for a hand-picked TIF ───────────────────────────────────
+print("\n-- export names: file vs folder --")
+f = H["export_paths"]
+check("Load Input TIF names exports after the file",
+      f("/out", "/data/scenes/G1A_ort.tif", "file")["csv"], "/out/csv/G1A_ort_rival.csv")
+check("dots in a file name survive; only the extension goes",
+      f("/out", "/d/NISAR_L2.v1.tif", "file")["shp"], "/out/shp/NISAR_L2.v1_rival.shp")
+check("Load Input Folder still names them after the folder",
+      f("/out", "/data/scenes/G1A_ort.tif")["csv"], "/out/csv/scenes_rival.csv")
+check("no input, either way: 'rival'", f("/out", None, "file")["csv"], "/out/csv/rival.csv")
+
+# ── 26. errors as true east/north on the ground ──────────────────────────────
+print("\n-- ground east/north errors --")
+f = H["ground_offset"]
+# (in lon/lat, ref lon/lat, east, north), from PROJ's geodesic (pyproj.Geod)
+vectors = [
+    ((86.50285883468196, 16.367465862502733), (86.5, 17.0), 305.4342679178204, -69999.93364473985),
+    ((81.0021986141857, 30.00191362466756), (81.0, 30.0), 212.13203435596424, 212.13203435596427),
+    ((77.99224356694103, -8.02124151720587), (78.0, -8.0), -855.0503583141716, -2349.231551964771),
+]
+for i, (inn, ref, e, n) in enumerate(vectors, 1):
+    ge, gn = f(inn, ref)
+    check(f"case {i}: matches PROJ's geodesic to a millimetre",
+          abs(ge - e) < 1e-3 and abs(gn - n) < 1e-3, True)
+check("RIVAL ships measuring on the ground, not the grid", H.get("ERROR_FRAME"), "ground")
+check("a pick on its reference is zero", f((80.0, 17.0), (80.0, 17.0)), (0.0, 0.0))
+e, n = f((80.0, 17.001), (80.0, 17.0))
+check("due north is all north", (round(e, 6), n > 0), (0.0, True))
+
+print()
+if failures:
+    print(f"{len(failures)} FAILURE(S)")
+    for f in failures:
+        print("  -", f)
+    sys.exit(1)
+print("all checks passed")
