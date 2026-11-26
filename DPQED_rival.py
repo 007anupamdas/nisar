@@ -2124,6 +2124,43 @@ class TeeLog:
     def __getattr__(self, name):
         return getattr(self.stream, name)
 
+
+# GISAT-1 sensors by band count: (name, first nm, last nm, resolution m).
+# HS and HV are evenly spaced; MV and ML have few bands, all usable.
+SENSOR_BANDS = {256: ("HS", 900.0, 2500.0, 191.0),
+                158: ("HV", 375.0, 1000.0, 320.0)}
+# Atmospheric absorption and detector-edge windows: bands here look like
+# noise or haze and are never picked automatically.
+BAD_WINDOWS_NM = ((0.0, 420.0),       # HV blue edge: little signal, much haze
+                  (750.0, 770.0),     # O2-A
+                  (925.0, 980.0),     # water vapour 940
+                  (1110.0, 1160.0),   # water vapour 1130
+                  (1330.0, 1490.0),   # water vapour 1400 -- opaque
+                  (1780.0, 1990.0),   # water vapour 1900 -- opaque
+                  (2400.0, 99999.0))  # SWIR edge: detector noise
+
+
+def band_wavelengths(n):
+    """Centre wavelength (nm) of each band of an n-band GISAT-1 cube, or None."""
+    spec = SENSOR_BANDS.get(int(n))
+    if not spec:
+        return None
+    _name, lo, hi, _res = spec
+    step = (hi - lo) / max(n - 1, 1)
+    return [lo + i * step for i in range(n)]
+
+
+def usable_bands(n):
+    """(usable 1-based bands, sensor name) for an n-band cube: the absorption
+    and edge windows (BAD_WINDOWS_NM) left out of the automatic pick. All
+    bands for a sensor not in SENSOR_BANDS."""
+    wl = band_wavelengths(n)
+    if wl is None:
+        return list(range(1, int(n) + 1)), None
+    keep = [i + 1 for i, w in enumerate(wl)
+            if not any(a <= w <= b for a, b in BAD_WINDOWS_NM)]
+    return keep, SENSOR_BANDS[int(n)][0]
+
 # ── END PURE HELPERS ──────────────────────────────────────────────────────────
 
 
@@ -5896,10 +5933,20 @@ class QCDashboard(QMainWindow):
         if not AUTO_PICK_BANDS or n < 2:
             return []
         try:
-            rows = band_quality(src)
+            use, sensor = usable_bands(n)
+            if sensor:
+                wl = band_wavelengths(n)
+                print(f"[COG] {sensor}: {n} bands {wl[0]:.0f}-{wl[-1]:.0f} nm; "
+                      f"{n - len(use)} in absorption / edge windows left out, "
+                      f"{len(use)} scored")
+            rows = band_quality(src, bands=use if sensor else None)
+            if sensor:
+                for r in rows:
+                    r["wavelength_nm"] = round(wl[r["band"] - 1], 1)
             top = sorted(rows, key=lambda r: -r["score"])[:5]
             print("[COG] band quality, best first: " + ", ".join(
-                f"{r['band']} ({r['score']:.1f}, {r['detail_db']:+.1f} dB, "
+                f"{r['band']}" + (f" [{r['wavelength_nm']:.0f} nm]" if "wavelength_nm" in r else "")
+                + f" ({r['score']:.1f}, {r['detail_db']:+.1f} dB, "
                 f"banding {r.get('banding_pct', 0):.1f}%)"
                 for r in top))
             return rows

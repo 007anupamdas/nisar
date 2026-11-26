@@ -834,6 +834,18 @@ check("errors under 1 km: footer in metres", H["vectors_footer"](_st_m).startswi
       "Mean -10.0 m N / 20.0 m E"), True)
 _st_k = H["error_summary"]([(2500.0, 600.0), (2000.0, 500.0)])
 check("errors over 1 km: km", H["vectors_title"]("", _st_k), "RMSE 0.552 km N / 2.264 km E")
+_u, _s = H["usable_bands"](256)
+_w = H["band_wavelengths"](256)
+check("HS: 256 bands 900-2500 nm, absorption windows left out",
+      (_s, round(_w[0]), round(_w[-1]),
+       any(1330 <= _w[b - 1] <= 1490 for b in _u), any(1780 <= _w[b - 1] <= 1990 for b in _u),
+       any(1550 <= _w[b - 1] <= 1750 for b in _u)), ("HS", 900, 2500, False, False, True))
+_u, _s = H["usable_bands"](158)
+_w = H["band_wavelengths"](158)
+check("HV: 158 bands 375-1000 nm, blue edge and 940 nm left out",
+      (_s, any(_w[b - 1] < 420 for b in _u), any(925 <= _w[b - 1] <= 980 for b in _u),
+       any(600 <= _w[b - 1] <= 700 for b in _u)), ("HV", False, False, True))
+check("MV (6 bands): all scored, no sensor table", H["usable_bands"](6), ([1, 2, 3, 4, 5, 6], None))
 check("no metadata, no title", H["scene_title"](os.path.join(_tf.mkdtemp(), "a.tif")), "")
 try:
     import matplotlib  # noqa: F401
