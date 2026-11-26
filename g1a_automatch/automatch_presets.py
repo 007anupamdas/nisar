@@ -408,7 +408,7 @@ def window_for_truth(sensor: str, truth_csv: str, default: List[int]) -> Tuple[L
 
 def truth_band(truth_csv: str) -> str:
     """The band a truth file's name carries (pts_band28.csv / pts_B28.csv), else ''."""
-    m = re.search(r'[_\-. ](?:band_?|b)(\d+)$', os.path.splitext(os.path.basename(truth_csv or ''))[0], re.I)
+    m = re.search(r'(?:band_?|(?<=[_\-. ])b)(\d+)$', os.path.splitext(os.path.basename(truth_csv or ''))[0], re.I)
     return f'band{int(m.group(1))}' if m else ''
 
 
@@ -452,8 +452,8 @@ def job_for(sensor: str, input_path: str, reference_dir: str, output_dir: str, t
         job['window_sizes'], why = window_for_truth(sensor, truth_csv, job.get('window_sizes') or [1024])
         if why:
             note = (note + ' ' if note else '') + f'[{why}]'
-    if bands:                                # the user's bands
-        job.update(channels=list(bands), auto_bands=0, channels_from_truth=False)
+    if bands:                                # the user's bands, unless the truth file's name says others
+        job.update(channels=list(bands), auto_bands=0, channels_from_truth=bool(truth_csv and truth_band(truth_csv)))
     elif crispest:                           # asked for: the N bands with the most detail
         job.update(channels=[], auto_bands=int(crispest), channels_from_truth=False)
     elif truth_csv and truth_band(truth_csv):

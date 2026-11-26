@@ -204,8 +204,9 @@ class RunWindow(QtWidgets.QMainWindow):
         self.bands = QtWidgets.QLineEdit()
         self.bands.setPlaceholderText('e.g. 28 or 28, 50')
         self.bands.setMaximumWidth(160)
-        self.bands.setToolTip('The band(s) to match: yours to name. Empty is accepted only with crispest ticked, '
-                              'or with a truth file whose name ends in the band (pts_band28.csv)')
+        self.bands.setToolTip('The band(s) to match. A truth file whose name ends in a band (pts_band28.csv, '
+                              'ptsband28.csv, pts_B28.csv) sets it, over what is typed here; empty is accepted with '
+                              'such a truth file or with crispest ticked')
         self.kp_test = QtWidgets.QCheckBox('keypoint test (also 5000 / MP)')
         self.kp_test.setToolTip('Run each detector twice in the same job: at the usual keypoint density and at '
                                 '5000 per megapixel (one window size), each in its own sweep folder '

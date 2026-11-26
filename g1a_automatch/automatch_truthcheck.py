@@ -268,6 +268,7 @@ def _truth_key(name: str) -> str:
         k2 = re.sub(rf'^{words}[_\-. ]+', '', k)
         k2 = re.sub(rf'[_\-. ]+{words}$', '', k2)
         k2 = re.sub(r'[_\-. ]+b(?:and)?_?\d+$', '', k2)
+        k2 = re.sub(r'(?<=[a-z0-9])band_?\d+$', '', k2)        # ..band50 with nothing before 'band'
         if k2 == k or not k2:
             return k2 or k
         k = k2
@@ -308,7 +309,7 @@ class TruthFolder:
             if not got or len({os.path.dirname(g) for g in got}) > 1:
                 continue
             same = [g for g in got for n in nums
-                    if re.search(rf'[_\-. ](?:band_?|b)0*{n}(?:\D|$)', os.path.splitext(os.path.basename(g))[0].lower())]
+                    if re.search(rf'(?:band_?|(?<=[_\-. ])b)0*{n}(?:\D|$)', os.path.splitext(os.path.basename(g))[0].lower())]
             return sorted(same or got)[0]
         return ''
 

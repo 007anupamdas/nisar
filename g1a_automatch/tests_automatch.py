@@ -2875,6 +2875,7 @@ def test_truth_per_band(tmp):
     pack_truth_check(tmp)
     auto_windows_check(tmp)
     auto_resolution_check(tmp)
+    band_from_truth_name_check(tmp)
     check('truth per band: the suffixes of a channel; the file of each band',
           (T.band_suffixes('band4')[:4],
            os.path.basename(T.truth_for_channel(b4, 'band4')), os.path.basename(T.truth_for_channel(b4, 'band5')),
@@ -2986,6 +2987,28 @@ def auto_windows_check(tmp):
           'above 20 km), 1024 for an unknown sensor; sizes given are kept',
           (mv['window_sizes'], hs['window_sizes'], mvb['window_sizes'], man['window_sizes'], unk['window_sizes'],
            'auto' in n1, n3), ([1024], [512], [2048], [512, 1024], [1024], True, ''))
+
+
+def band_from_truth_name_check(tmp):
+    """The band the truth file's name ends in (.._band50, ..band50, .._B50), with
+    or without a band chosen; full window / Pack / automatch_run alike."""
+    import automatch_job as J
+    import automatch_presets as P
+    d = os.path.join(tmp, 'bandname')
+    os.makedirs(d, exist_ok=True)
+    paths = {}
+    for n in ('265270485411_rival_band50', 'ptsband50', 'pts_B50'):
+        paths[n] = os.path.join(d, n + '.csv')
+        open(paths[n], 'w').write('In_X,In_Y\n')
+    got = [J.channels_from_truth({'truth_csv': p, 'channels': []})[0]['channels'] for p in paths.values()]
+    over, note = J.channels_from_truth({'truth_csv': paths['pts_B50'], 'channels': ['band28']})
+    names = [P.truth_band(p) for p in paths.values()]
+    run, _ = P.job_for('HS', os.path.join(d, 'G1AHS026111205EX000006_ort.tif'), d, d, paths['ptsband50'],
+                       ['band28'])
+    check('band from the truth file name (.._band50, ..band50, .._B50), also over a band chosen (full window, '
+          'Pack, automatch_run)',
+          (got, names, over['channels'], 'selected: band28' in note, J.channels_from_truth(run)[0]['channels']),
+          ([['band50']] * 3, ['band50'] * 3, ['band50'], True, ['band50']))
 
 
 def auto_resolution_check(tmp):

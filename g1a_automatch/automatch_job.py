@@ -1240,7 +1240,7 @@ def max_error_from_truth(job: Dict) -> Tuple[Dict, str]:
     return dict(job, max_expected_error_m=new), note
 
 
-TRUTH_BAND = re.compile(r'^(.*?)([_\-. ])(?:band_?|b)(\d+)$', re.I)
+TRUTH_BAND = re.compile(r'^(.*?)([_\-. ]?)(?:band_?|(?<=[_\-. ])b)(\d+)$', re.I)   # .._band50, ..band50, .._b50
 
 
 def truth_bands(truth_csv: str) -> List[str]:
@@ -1348,8 +1348,10 @@ def auto_windows(job: Dict) -> Tuple[Dict, str]:
 
 def channels_from_truth(job: Dict) -> Tuple[Dict, str]:
     """(the job matching the bands its truth file names, a note) when
-    channels_from_truth is on and the truth file's name carries a band;
-    otherwise the job unchanged (its selected channels) and ''."""
+    channels_from_truth is on and the truth file's name carries a band
+    (pts_band50.csv, ptsband50.csv, pts_B50.csv and their per-band siblings):
+    they replace the selected bands, whether given or not; otherwise the job
+    unchanged (its selected channels) and ''."""
     if not job.get('channels_from_truth', True):
         return job, ''
     bands = truth_bands(job.get('truth_csv') or '')
