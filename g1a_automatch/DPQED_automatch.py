@@ -793,7 +793,26 @@ class PackDialog(QtWidgets.QDialog):
              else f"{fmt_list(job['window_sizes'])} px")
             + f", at most {job['max_num_features']} keypoints per window "
             f"(from the main window)")
-        f.addRow('Window sizes', self.windows_info)
+        # editing a queued pack: its window sizes can be changed here
+        self.win_auto = QtWidgets.QCheckBox('auto (by sensor)')
+        self.win_auto.setChecked('auto' in [str(x) for x in job['window_sizes']])
+        self.win_edit = QtWidgets.QLineEdit(', '.join(str(x) for x in job['window_sizes'] if str(x) != 'auto')
+                                            or '1024')
+        self.win_edit.setPlaceholderText('e.g. 512 or 512, 1024')
+        self.win_edit.setEnabled(not self.win_auto.isChecked())
+        self.win_auto.toggled.connect(lambda on: self.win_edit.setEnabled(not on))
+        self.win_note = QtWidgets.QLabel(f"px, at most {job['max_num_features']} keypoints per window")
+        wrow = QtWidgets.QWidget()
+        wl = QtWidgets.QHBoxLayout(wrow)
+        wl.setContentsMargins(0, 0, 0, 0)
+        for x in (self.windows_info, self.win_auto, self.win_edit, self.win_note):
+            wl.addWidget(x)
+        wl.addStretch(1)
+        for x in (self.win_auto, self.win_edit, self.win_note):
+            x.setVisible(False)
+        self.editing = False
+        f.addRow('Window sizes', wrow)
+        self.btn_in_window = None
         self.all_det = QtWidgets.QCheckBox('every detector the server offers (kornia + imcui)')
         self.all_det.setChecked(str(get('pack/all_det')).lower() == 'true')
         self.all_match = QtWidgets.QCheckBox('every matcher each detector offers')
@@ -866,14 +885,34 @@ class PackDialog(QtWidgets.QDialog):
         self.all_match.setChecked('matchers=all' in sets)
         self.dry.setChecked('--dry-run' in a)
 
-    def set_editing(self):
-        """A queued pack being edited: one button that saves it back in its place."""
+    def set_editing(self, in_window=None):
+        """A queued pack being edited: its window sizes editable here, one button that saves it back
+        in its place; in_window: a slot for 'Other job settings…' (the job back in the main window)."""
         self.queued = True
+        self.editing = True
         self.btn_queue.setVisible(False)
+        self.windows_info.setVisible(False)
+        for x in (self.win_auto, self.win_edit, self.win_note):
+            x.setVisible(True)
         b = self.findChild(QtWidgets.QDialogButtonBox)
         if b is not None and b.button(BTN_OK) is not None:
             b.button(BTN_OK).setText('Save to pack queue')
+        if b is not None and in_window is not None:
+            self.btn_in_window = b.addButton('Other job settings…', _DBB.ButtonRole.ActionRole
+                                             if QT_API != 'PyQt5' else _DBB.ActionRole)
+            self.btn_in_window.setToolTip('Load this pack\'s job into the main window to change its input, band, '
+                                          'truth, detectors …; then Save to pack queue… there')
+            self.btn_in_window.clicked.connect(lambda: (self.reject(), in_window()))
         self.setWindowTitle('Pack for the GPU server -- editing a queued pack')
+
+    def window_sizes(self):
+        """The window sizes chosen here (editing): ['auto'] or the sizes typed."""
+        if self.win_auto.isChecked():
+            return ['auto']
+        ws = [w for w in parse_int_list(self.win_edit.text(), 'Window sizes') if w]
+        if not ws:
+            raise ValueError('Window sizes: give at least one size (e.g. 512), or tick auto.')
+        return ws
 
     def _suggest_server(self, text):
         """V:\\X\\Y -> /maintenance/X/Y with the share mapping."""
@@ -901,6 +940,8 @@ class PackDialog(QtWidgets.QDialog):
             a.append('--dry-run')
         if self.truth_folder.text().strip() and not self.job.get('truth_csv'):
             a += ['--truth-folder', self.truth_folder.text().strip()]
+        if self.editing:
+            return a, dict(self.job, window_sizes=self.window_sizes())
         return a, self.job
 
     def _accept(self):
@@ -4221,18 +4262,31 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             self._pack_queue_changed()
             self.pack_queue_list.setCurrentRow(i + 1)
 
-    def _pack_queue_edit(self, *_):
-        """A queued pack's job back in this window (change the window size, input, band, truth …), then
-        'Save to pack queue…' opens the Pack dialog with its settings and puts it back in its place."""
+    def _pack_queue_edit(self, *_, run=True):
+        """Edit a queued pack: the Pack dialog opens with its settings and its window sizes (auto or given);
+        Save to pack queue puts it back in its place. 'Other job settings…' there loads its job into this
+        window instead (input, band, truth, detectors …). run=False: the dialog unshown (tests)."""
+        if not self._pack_queue:
+            QtWidgets.QMessageBox.information(self, 'Pack queue', 'The pack queue is empty: add a pack with '
+                                              'Pack for server… -> Add to pack queue.')
+            return None
         i = self.pack_queue_list.currentRow()
         if not 0 <= i < len(self._pack_queue):
+            i = 0
+            self.pack_queue_list.setCurrentRow(0)
+        e = self._pack_queue[i]
+        return self._pack_edit_dialog(e, dict(e['job']), run=run, in_window=lambda: self._pack_queue_in_window(e))
+
+    def _pack_queue_in_window(self, e):
+        """A queued pack's job back in this window; Save to pack queue… (beside the queue) puts it back."""
+        if not any(x is e for x in self._pack_queue):
             return
-        self._pack_editing = self._pack_queue[i]
-        self.set_job(self._pack_editing['job'])
+        self._pack_editing = e
+        self.set_job(e['job'])
         for b in (self.btn_pack_save, self.btn_pack_cancel):
             b.setVisible(True)
-        self.log.appendPlainText(f"--- pack queue: editing {self._pack_editing['label']}: change the job here (window "
-                                 f"size, input, band, truth …), then Save to pack queue…")
+        self.log.appendPlainText(f"--- pack queue: editing {e['label']} here: change the job (input, band, truth "
+                                 f"…), then Save to pack queue…")
         self.lbl_status.setText('Editing a queued pack: change the job, then Save to pack queue…')
 
     def _pack_queue_cancel(self):
@@ -4241,8 +4295,8 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             b.setVisible(False)
 
     def _pack_queue_save(self, *_, run=True):
-        """The Pack dialog with the edited pack's settings; Save puts it back in its place. run=False: the
-        dialog unshown (tests)."""
+        """'Save to pack queue…' beside the queue: the job as it is now in this window, into the Pack
+        dialog with the edited pack's settings; Save puts it back in its place. run=False: unshown (tests)."""
         e = self._pack_editing
         if e is None or not any(x is e for x in self._pack_queue):
             QtWidgets.QMessageBox.information(self, 'Pack queue', 'That pack has already run (or was removed).')
@@ -4253,9 +4307,12 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         except ValueError as err:
             QtWidgets.QMessageBox.warning(self, 'Pack queue', str(err))
             return None
+        return self._pack_edit_dialog(e, job, run=run)
+
+    def _pack_edit_dialog(self, e, job, run=True, in_window=None):
         dlg = PackDialog(self.settings, job, self)
         dlg.apply_args(e['args'])
-        dlg.set_editing()
+        dlg.set_editing(in_window)
 
         def saved():
             args, job2 = dlg.args()
@@ -4270,6 +4327,7 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             self._pack_queue_cancel()
             self.log.appendPlainText(f"--- pack queue: saved {self._pack_queue[k]['label']} (windows "
                                      f"{', '.join(str(w) for w in job2.get('window_sizes') or [])} px)")
+            self.lbl_status.setText('Queued pack saved in its place')
         dlg.accepted.connect(saved)
         if run:
             dlg.exec() if hasattr(dlg, 'exec') else dlg.exec_()

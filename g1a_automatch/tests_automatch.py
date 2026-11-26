@@ -2617,12 +2617,24 @@ def test_gui_dialog():
                any(b.text() == 'Train matchers…' for b in w.findChildren(G.QtWidgets.QPushButton))), (True, True))
         w._pack_queue = []
         w._pack_queue_changed()
+        w.win_auto.setChecked(True)
         pq = w.pack_dialog(run=False)
         pq.local.setText('V:\\ICIGDev\\GPUPOC\\input\\dqe\\g1a\\set20')
         pq.gpu_mb.setValue(24000)
         pq._queue_accept()
-        w.pack_queue_list.setCurrentRow(0)
-        w._pack_queue_edit()
+        w.pack_queue_list.setCurrentRow(-1)
+        ed0 = w._pack_queue_edit(run=False)          # Edit opens the Pack dialog itself (nothing selected: the first)
+        ed0_shown = (ed0 is not None and ed0.local.text().endswith('set20'), ed0.gpu_mb.value(),
+                     ed0.win_auto.isChecked(), ed0.btn_ok_text() if hasattr(ed0, 'btn_ok_text') else None,
+                     ed0.btn_in_window is not None)
+        ed0.win_auto.setChecked(False)
+        ed0.win_edit.setText('512, 1024')
+        ed0.accept()
+        check('gui pack queue: Edit opens the Pack dialog with the pack\'s settings (the first when none is selected); '
+              'its window sizes changed there (auto -> 512, 1024) and saved in its place',
+              (ed0_shown, w._pack_queue[0]['job']['window_sizes'], len(w._pack_queue)),
+              ((True, 24000, True, None, True), [512, 1024], 1))
+        w._pack_queue_in_window(w._pack_queue[0])     # 'Other job settings…': the job back in this window
         w.win_auto.setChecked(False)
         w.windows.setText('2048')
         ed = w._pack_queue_save(run=False)
