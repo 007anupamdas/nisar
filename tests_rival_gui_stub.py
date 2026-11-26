@@ -2718,6 +2718,7 @@ h = types.SimpleNamespace(
 saved36 = (R.QgsGeometry, R.ring_wkt)
 R.ring_wkt = lambda ring: ring
 h._tiles_containing = R.QCDashboard._tiles_containing.__get__(h)
+h._ref_source = R.QCDashboard._ref_source
 holds = R.QCDashboard._current_ref_holds.__get__(h)
 for inside, data, want in ((True, True, True), (True, None, True),
                            (True, False, False), (False, True, False)):
@@ -2829,5 +2830,34 @@ v._write_vector_plot = lambda p: 1 / 0
 assert R.QCDashboard.write_vector_plot(v, png40) is None and shown, shown
 R.QMessageBox, R.QgsPointXY = _mb40, _qp
 print("Export writes plots/<name>_vectors.png; a failure is shown, never silent")
+
+# ── 41. the reference drawn at the input's resolution ─────────────────────
+import types
+d41 = tempfile.mkdtemp()
+ref41 = os.path.join(d41, "LC8_B8.tif")
+with rasterio.open(ref41, "w", driver="GTiff", width=300, height=300, count=1,
+                   dtype="uint16", crs="EPSG:32643",
+                   transform=from_origin(500000, 2000000, 15, 15)) as d:
+    d.write(np.arange(90000, dtype="uint16").reshape(1, 300, 300))
+sys.modules.pop("osgeo", None)
+try:
+    from osgeo import gdal as _g41
+    have_gdal = True
+except ImportError:
+    have_gdal = False
+v41 = types.SimpleNamespace(cb_ref_res=MagicMock(isChecked=lambda: True),
+                            _input_pixel_m=lambda: 191.0, _cog_folder=lambda: d41)
+out41 = R.QCDashboard._ref_display_path(v41, ref41)
+with rasterio.open(out41) as d:
+    assert out41 != ref41 and abs(d.transform.a - 191.0) < 1, d.transform
+    assert d.transform.c == 500000 and d.transform.f == 2000000 and d.crs.to_epsg() == 32643
+assert R.QCDashboard._ref_display_path(v41, ref41) == out41     # cached, reused
+print("L8 15 m reference averaged to the HS 191 m input: same origin and CRS, cached")
+v41._input_pixel_m = lambda: 20.0
+assert R.QCDashboard._ref_display_path(v41, ref41) == ref41
+v41.cb_ref_res = MagicMock(isChecked=lambda: False)
+v41._input_pixel_m = lambda: 191.0
+assert R.QCDashboard._ref_display_path(v41, ref41) == ref41
+print("an input about as fine as the reference, or the option off: the tile as it is")
 
 print("\nstubbed integration OK")

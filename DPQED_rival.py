@@ -275,6 +275,10 @@ SYNC_TILE_DEBOUNCE_MS = 150
 # widget's size and DPI and quietly does nothing on a canvas that has not been
 # laid out yet, which leaves the view at the origin with the raster off-screen.
 REF_VIEW_WIDTH_M = 2000.0
+# Draw the reference at the input's resolution (the L8 15 m pan averaged to
+# 42 m for MV, 191 m HS, 320 m HV, 1180 m ML) so the two canvases show the same
+# level of detail. A cached copy; picks land where they would on the original.
+REF_MATCH_INPUT_RES = True
 
 # Map tools offered on both canvases, in button order. "mark" is the measuring
 # tool -- it is what fills the table; the rest only move the view.
@@ -2956,6 +2960,18 @@ class QCDashboard(QMainWindow):
         # Marking on one canvas jumps the other to the predicted spot and puts
         # a provisional cross there. Good for a well-behaved scene; under heavy
         # distortion the prediction misleads, so it can be switched off.
+        self.cb_ref_res = QCheckBox("Ref at input res")
+        self.cb_ref_res.setToolTip(
+            "Draw the reference averaged to the input's pixel size (e.g. L8 15 m\n"
+            "-> 191 m for HS), so both show the same detail. Applies to the next\n"
+            "tile loaded.")
+        try:
+            self.cb_ref_res.setChecked(str(self._settings().value(
+                "ref_input_res", "true" if REF_MATCH_INPUT_RES else "false")).lower() != "false")
+        except Exception:
+            self.cb_ref_res.setChecked(REF_MATCH_INPUT_RES)
+        self.cb_ref_res.toggled.connect(lambda on: self._settings().setValue(
+            "ref_input_res", "true" if on else "false"))
         self.cb_auto_mark = QCheckBox("Auto-mark")
         self.cb_auto_mark.setToolTip(
             "On: marking a point on one canvas moves the other to where the\n"
@@ -3025,7 +3041,7 @@ class QCDashboard(QMainWindow):
                    self.btn_del, self.btn_clear, self.btn_out_folder,
                    self.btn_cog_folder, self.btn_log_folder]
                   + [self.tool_buttons[m] for m in MAP_TOOLS]
-                  + [self.cb_sync, self.cb_auto_mark]):
+                  + [self.cb_sync, self.cb_auto_mark, self.cb_ref_res]):
             btn_layout.addWidget(w)
 
         main_layout = QVBoxLayout()
@@ -3372,12 +3388,95 @@ class QCDashboard(QMainWindow):
             print(f"[RESET NORM] Error: {e}")
 
     # ── REFERENCE TIF LOADER ─────────────────────────────────────────────────
+    @staticmethod
+    def _ref_source(lyr):
+        """The reference tile a layer shows -- the original, also when the
+        layer draws a copy resampled to the input's resolution."""
+        try:
+            v = lyr.customProperty("rival_source")
+            return v if isinstance(v, str) and v else lyr.source()
+        except Exception:
+            return lyr.source()
+
+    def _ref_display_path(self, tif_path):
+        """The file to draw for a reference tile: the tile itself, or -- with
+        REF_MATCH_INPUT_RES and an input coarser than the reference (L8 pan
+        15 m against MV 42 m, HS 191 m, HV 320 m, ML 1180 m) -- a copy
+        averaged to the input's pixel size, cached locally beside the COGs,
+        so both canvases show the same level of detail. Same grid origin and
+        CRS, so picks on it are where they would be on the original."""
+        cb = getattr(self, "cb_ref_res", None)
+        on = REF_MATCH_INPUT_RES if cb is None else bool(cb.isChecked())
+        in_px = self._input_pixel_m() if on else None
+        if not in_px:
+            return tif_path
+        try:
+            try:
+                from osgeo import gdal
+            except ImportError:
+                gdal = None
+            if gdal is not None:
+                src = gdal.Open(tif_path)
+                gt = src.GetGeoTransform()
+                srs = src.GetSpatialRef()
+                geographic = srs is not None and srs.IsGeographic()
+            else:                                   # rasterio (tests, outside QGIS)
+                import rasterio
+                with rasterio.open(tif_path) as r:
+                    gt = r.transform.to_gdal()
+                    geographic = bool(r.crs and r.crs.is_geographic)
+            px, py = abs(gt[1]), abs(gt[5])
+            if geographic:
+                px, py = px * 111320.0, py * 111320.0
+            if in_px < 1.5 * max(px, py):
+                return tif_path                     # already about as coarse
+            res_m = int(round(in_px))
+            k = res_m / max(px, py)                 # in the tile's own units
+            dst_dir = os.path.join(self._cog_folder(), f"ref_{res_m}m")
+            os.makedirs(dst_dir, exist_ok=True)
+            dst = os.path.join(dst_dir, os.path.splitext(os.path.basename(tif_path))[0]
+                               + f"_{res_m}m.tif")
+            if (os.path.exists(dst)
+                    and os.path.getmtime(dst) >= os.path.getmtime(tif_path)):
+                return dst
+            print(f"[REF] {os.path.basename(tif_path)}: {max(px, py):.0f} m -> "
+                  f"{res_m} m (input resolution) ...")
+            tmp = dst + ".part.tif"
+            if gdal is not None:
+                gdal.Translate(tmp, src, format="GTiff", xRes=abs(gt[1]) * k,
+                               yRes=abs(gt[5]) * k, resampleAlg="average",
+                               creationOptions=["TILED=YES", "COMPRESS=DEFLATE",
+                                                "BIGTIFF=IF_SAFER"])
+                src = None
+            else:
+                import rasterio
+                from rasterio.enums import Resampling
+                with rasterio.open(tif_path) as r:
+                    h = max(1, int(math.ceil(r.height / k)))
+                    w = max(1, int(math.ceil(r.width / k)))
+                    data = r.read(out_shape=(r.count, h, w), resampling=Resampling.average)
+                    prof = r.profile.copy()
+                    prof.pop("blockxsize", None)
+                    prof.pop("blockysize", None)
+                    prof.update(driver="GTiff", height=h, width=w, tiled=False,
+                                compress="deflate",
+                                transform=r.transform * r.transform.scale(k, k))
+                with rasterio.open(tmp, "w", **prof) as o:
+                    o.write(data)
+            os.replace(tmp, dst)
+            return dst
+        except Exception as e:
+            print(f"[REF] keeping full resolution: {e}")
+            return tif_path
+
     def _load_ref_layer(self, tif_path, set_extent=True):
         """Single entry point for all reference TIF loads."""
-        self.ensure_overviews(tif_path)
+        shown = self._ref_display_path(tif_path)
+        self.ensure_overviews(shown)
         self.canvas_right.setRenderFlag(False)
         try:
-            lyr = QgsRasterLayer(tif_path, "Reference_TIF")
+            lyr = QgsRasterLayer(shown, "Reference_TIF")
+            lyr.setCustomProperty("rival_source", tif_path)
             if not lyr.isValid():
                 print(f"[LOAD] Failed: {tif_path}")
                 self.canvas_right.setLayers([])
@@ -4453,7 +4552,7 @@ class QCDashboard(QMainWindow):
         lyr = self.current_ref_layer
         if lyr is None or not lyr.isValid():
             return False
-        path = lyr.source()
+        path = self._ref_source(lyr)
         inside = self._tiles_containing(QgsGeometry.fromPointXY(pt), [path])
         if not inside:
             return False
@@ -4468,7 +4567,7 @@ class QCDashboard(QMainWindow):
             self.canvas_right.refresh()
             return False
         if (self.current_ref_layer and self.current_ref_layer.isValid()
-                and os.path.normpath(self.current_ref_layer.source())
+                and os.path.normpath(self._ref_source(self.current_ref_layer))
                 == os.path.normpath(best)):
             return True          # already showing; do not reload on every drag
         try:
@@ -5176,7 +5275,7 @@ class QCDashboard(QMainWindow):
             if nat:
                 line += (f"  {nat[4]} ({nat[0]:.7f}, {nat[1]:.7f})"
                          f"  pixel col {nat[2]:.1f} line {nat[3]:.1f}"
-                         f"  [{os.path.basename(lyr.source())}]")
+                         f"  [{os.path.basename(self._ref_source(lyr))}]")
             print(line)
         gx, gy = p.x() - q.x(), p.y() - q.y()
         print(f"[TRACE]   grid error   dx {gx:.1f} dy {gy:.1f} "
