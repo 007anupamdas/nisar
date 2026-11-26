@@ -504,6 +504,29 @@ def test_e2e_truth(tmp):
            os.path.basename(ju['truth_csv']), os.path.exists(os.path.join(out, 'job_used_before_truth.json')),
            round(float(rk2.sort_values('rank').iloc[0]['truth_rmse_m']) / 50) * 50),
           (0, False, True, 'truth_updated.csv', True, 400))
+    # all jobs at once: each one's truth found in a truth folder by its input's file name; only changed ones redone
+    tfold = os.path.join(tmp, 'truth_folder')
+    os.makedirs(tfold, exist_ok=True)
+    shutil.copyfile(upd, os.path.join(tfold, 'pts_G1A_SYNTH_L1_band1.csv'))
+    import automatch_truthcheck as TC
+    tf = TC.TruthFolder(tfold)
+    by_folder = TC.TruthFolder(tfold)
+    by_folder.by_key['269468481121'] = ['/t/269468481121.csv']
+    cmd = [sys.executable, os.path.join(HERE, 'automatch_job.py'), 'truthcheck', out, '--truth-folder', tfold,
+           '--redo-final']
+    r1 = subprocess.run(cmd, capture_output=True, text=True)
+    r2 = subprocess.run(cmd, capture_output=True, text=True)
+    import time as _time
+    _time.sleep(1.1)
+    os.utime(os.path.join(tfold, 'pts_G1A_SYNTH_L1_band1.csv'))
+    r3 = subprocess.run(cmd, capture_output=True, text=True)
+    check('truthcheck over folders: each job\'s truth found in the truth folder by its input\'s file name (or its '
+          'folder, e.g. the request ID), the band first; unchanged truth left alone, an updated one redone',
+          (os.path.basename(tf.find(job['input_path'], ['band1'])),
+           by_folder.find('/x/input/dqe/g1a/269468481121/input/G1A_MV_x.tif', ['band4']),
+           '1 run(s) compared' in r1.stdout, 'truth unchanged' in r2.stdout and '0 run(s) compared' in r2.stdout,
+           '1 run(s) compared' in r3.stdout),
+          ('pts_G1A_SYNTH_L1_band1.csv', '/t/269468481121.csv', True, True, True))
     with open(os.path.join(out, 'job_used.json'), 'w') as f:          # back to the job's own truth for what follows
         json.dump(dict(ju, truth_csv=job['truth_csv']), f, indent=2)
     # the GPU service's compare mode re-scores a finished run, nothing matched again
@@ -1940,7 +1963,7 @@ def test_gui_cloud():
         tools = [a.text().replace('&&', '&') for a in w.menuBar().actions()[0].menu().actions()]
         check('gui: the analysis tools in their own row and in the Tools menu; the version in the title',
               (w.btn_cloud_sweep.parentWidget() is not None, tools, G.AUTOMATCH_VERSION in w.windowTitle()),
-              (True, ['Benchmark & cross-check…', 'Finish a job…', 'Report…', 'Filter points…', 'Targeting…', 'Train matchers…', 'Cloud mask test…',
+              (True, ['Benchmark & cross-check…', 'Finish a job…', 'Report…', 'Filter points…', 'Compare with truth…', 'Targeting…', 'Train matchers…', 'Cloud mask test…',
                       'Cloud sweep…'], True))
         w.in_path.setText(img)
         w.cloud_conf.setValue(0.8)
@@ -2527,6 +2550,17 @@ def test_gui_dialog():
             w._pack_next()                        # queue empty: done
         finally:
             w._start_pack_item = orig_item
+        tdlg = w.truthcheck_dialog(run=False)
+        tdlg.folders.clear()
+        tdlg._add('V:/ICIGDev/GPUPOC/output')
+        tdlg._add('D:/g1a/automatch')
+        tdlg.truth_folder.setText('D:/g1a/truth')
+        targs = tdlg.args()
+        check('gui: Compare with truth over server and workstation jobs, truth from a truth folder, final points redone',
+              (targs[:3], targs[targs.index('--truth-folder') + 1], '--redo-final' in targs, '--all' in targs,
+               '--share-local' in targs), (['truthcheck', 'V:/ICIGDev/GPUPOC/output', 'D:/g1a/automatch'],
+                                            'D:/g1a/truth', True, False, True))
+        tdlg.close()
         tcmd = w.train_tool(start=False)
         check('gui: Train matchers opens gcp_train\'s window as its own program (found beside g1a_automatch)',
               (bool(tcmd) and tcmd[-1].replace('\\', '/').endswith('gcp_train/gcp_train_gui.py'),

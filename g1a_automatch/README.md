@@ -147,6 +147,19 @@ a truth file and by *Compare with truth*; by hand:
 detector + matcher (TRUTH_RANKING), each final point set's truth RMSE (final,
 rigid, consistent, best final), REPORT with the manual points, and
 TRUTH_CHECK.png over the runs in the output folder (each auto step or tier).
+**All jobs at once, server and workstation** (full window: Tools →
+**Compare with truth…**):
+- **Job folders:** list them all, e.g. the server's output through the share
+  mapping and the workstation's output.
+- **Truth folder:** each job's truth file is found there by its input's file
+  name or one of its folders (e.g. the request ID), the job's band first. A
+  job without one there uses the truth file it names.
+- **Which jobs run:** only those whose truth file changed since they were last
+  compared, or were never compared (*every job* to redo all).
+- **Final points:** redone with the new truth when ticked.
+- Command line: `python automatch_job.py truthcheck <folder> [<folder> ...]
+  --truth-folder <truth> --redo-final [--all] --share-local V:\ --share-server /maintenance/`.
+
 **An updated truth file:** keep *redo final points* ticked (the default; on
 the command line `--redo-final`). The final points are then picked again from
 the saved matches with the new ranking: RIVAL_BEST, the consistent points, the

@@ -1170,6 +1170,98 @@ class FinishDialog(QtWidgets.QDialog):
         return a
 
 
+class TruthCheckDialog(QtWidgets.QDialog):
+    """Compare finished jobs with their truth files, nothing matched again
+    (automatch_job truthcheck): server and workstation job folders, a truth
+    folder (truth files named after each input's file or folder), optionally
+    the final points picked again with the new truth."""
+
+    def __init__(self, settings, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('Compare finished jobs with truth')
+        self.settings = settings
+        f = QtWidgets.QFormLayout(self)
+        self.folders = QtWidgets.QListWidget()
+        self.folders.setMaximumHeight(80)
+        self.folders.setToolTip('Job output folders, or folders of them: the server\'s output (through the share '
+                                'mapping) and the workstation\'s; auto steps and tiers too')
+        for p in json.loads(settings.value('truthcheck_folders', '[]') or '[]'):
+            self.folders.addItem(p)
+        bl = QtWidgets.QVBoxLayout()
+        b_add, b_rem = QtWidgets.QPushButton('Add…'), QtWidgets.QPushButton('Remove')
+        b_add.clicked.connect(self._add)
+        b_rem.clicked.connect(lambda: [self.folders.takeItem(self.folders.row(i)) for i in self.folders.selectedItems()])
+        bl.addWidget(b_add)
+        bl.addWidget(b_rem)
+        bl.addStretch(1)
+        hl = QtWidgets.QHBoxLayout()
+        hl.addWidget(self.folders, 1)
+        hl.addLayout(bl)
+        f.addRow('Job folders', hl)
+        self.truth_folder = PathRow('dir')
+        self.truth_folder.setText(settings.value('truthcheck_truth_folder', '') or '')
+        self.truth_folder.setToolTip('The truth files, each named after its input: the image\'s file name or one of '
+                                     'its folders (e.g. the request ID); pts_<name>_band4.csv also matches. A job '
+                                     'without one there uses the truth file it names')
+        f.addRow('Truth folder', self.truth_folder)
+        self.truth_file = PathRow('file')
+        self.truth_file.setText('')
+        self.truth_file.setToolTip('Or one truth file for every job given (e.g. one job folder)')
+        f.addRow('or one truth file', self.truth_file)
+        self.redo = QtWidgets.QCheckBox('redo the final points with the new truth (from the saved matches)')
+        self.redo.setChecked(True)
+        self.all = QtWidgets.QCheckBox('every job with a truth file (not only those whose truth file changed)')
+        f.addRow(self.redo)
+        f.addRow(self.all)
+        self.share_local = QtWidgets.QLineEdit(settings.value('pack/share_local', 'V:\\'))
+        self.share_server = QtWidgets.QLineEdit(settings.value('pack/share_server', '/maintenance/'))
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(self.share_local)
+        row.addWidget(QtWidgets.QLabel('here  =  on the server'))
+        row.addWidget(self.share_server)
+        f.addRow('Share mapping', row)
+        bb = _DBB(BTN_OK | BTN_CANCEL)
+        bb.button(BTN_OK).setText('Compare')
+        bb.accepted.connect(self._ok)
+        bb.rejected.connect(self.reject)
+        f.addRow(bb)
+
+    def _add(self, path: str = ''):
+        p = path or QtWidgets.QFileDialog.getExistingDirectory(self, 'Job folder, or a folder of jobs')
+        if p:
+            self.folders.addItem(p)
+
+    def paths(self):
+        return [self.folders.item(i).text() for i in range(self.folders.count())]
+
+    def _ok(self):
+        if not self.paths():
+            QtWidgets.QMessageBox.warning(self, 'Compare with truth', 'Add at least one job folder.')
+            return
+        if not (self.truth_folder.text().strip() or self.truth_file.text().strip()):
+            QtWidgets.QMessageBox.warning(self, 'Compare with truth', 'Choose the truth folder (or one truth file).')
+            return
+        self.settings.setValue('truthcheck_folders', json.dumps(self.paths()))
+        self.settings.setValue('truthcheck_truth_folder', self.truth_folder.text().strip())
+        self.settings.setValue('pack/share_local', self.share_local.text().strip())
+        self.settings.setValue('pack/share_server', self.share_server.text().strip())
+        self.accept()
+
+    def args(self):
+        a = ['truthcheck'] + self.paths()
+        if self.truth_file.text().strip():
+            a += ['--truth', self.truth_file.text().strip()]
+        if self.truth_folder.text().strip():
+            a += ['--truth-folder', self.truth_folder.text().strip()]
+        if self.redo.isChecked():
+            a.append('--redo-final')
+        if self.all.isChecked():
+            a.append('--all')
+        if self.share_local.text().strip() and self.share_server.text().strip():
+            a += ['--share-local', self.share_local.text().strip(), '--share-server', self.share_server.text().strip()]
+        return a
+
+
 class FilterDialog(QtWidgets.QDialog):
     """Filter finished jobs (automatch_job filter): matches on cloud and
     inside featureless areas (water bodies, uniform blobs) left out, the job
@@ -2370,7 +2462,8 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
                      ('Stop', self.stop), ('Open output', self.open_output), ('Pack for server…', self.pack_dialog))
         analysis = (('Benchmark & cross-check…', self.bench_dialog), ('Finish a job…', self.finish_dialog),
                     ('Report…', self.report_dialog), ('Filter points…', self.filter_dialog),
-                    ('Targeting…', self.target_dialog), ('Train matchers…', self.train_tool),
+                    ('Compare with truth…', self.truthcheck_dialog), ('Targeting…', self.target_dialog),
+                    ('Train matchers…', self.train_tool),
                     ('Cloud mask test…', self.cloud_dialog), ('Cloud sweep…', self.cloud_sweep_dialog))
         menu = self.menuBar().addMenu('Tools')
         for row_items, title in ((job_tools, ''), (analysis, 'Analysis:')):
@@ -3499,6 +3592,10 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
             self._show_preflight(ev)
         elif kind == 'pack':
             self._pack_finished(code)
+        elif kind == 'truthcheck':
+            self.lbl_status.setText('Compared with truth: each job\'s TRUTH_RANKING, REPORT/, DETECTOR_PLOTS/ (and its '
+                                    'final points, when redone) — see Log.' if code == 0
+                                    else 'Compare with truth: not done — see Log.')
         elif kind == 'filter':
             self.lbl_status.setText('Filter done: each job\'s FILTERED/ (RIVAL_FINAL, REPORT) — see Log.'
                                     if code == 0 else 'Filter: not done — see Log.')
@@ -3764,6 +3861,15 @@ class AutoMatchWindow(QtWidgets.QMainWindow):
         if run:
             dlg.show()
             self._last_filter_dialog = dlg
+        return dlg
+
+    def truthcheck_dialog(self, *_, run=True):
+        """Finished jobs against their truth files, nothing matched again; run=False returns it unshown (tests)."""
+        dlg = TruthCheckDialog(self.settings, self)
+        dlg.accepted.connect(lambda: self._start_simple(dlg.args(), 'truthcheck'))
+        if run:
+            dlg.show()
+            self._last_truthcheck_dialog = dlg
         return dlg
 
     def _start_simple(self, args, kind):

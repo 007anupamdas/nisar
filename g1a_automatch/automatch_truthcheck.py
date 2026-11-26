@@ -106,6 +106,11 @@ def check_run(run: str, truth_csv: str, radius_m: float = 5000.0, refinal: bool 
     if not crs:
         raise ValueError(f'{name}: working CRS unknown (no job_used.json / matches)')
     res = T.compare(run, truth_csv, radius_m, 'consensus', crs, write=True, quiet=True, rebuild=False)
+    try:                                         # which truth file this run was last compared with
+        with open(os.path.join(run, 'TRUTH_SOURCE.txt'), 'w', encoding='utf-8') as f:
+            f.write(os.path.abspath(truth_csv) + '\n')
+    except OSError:
+        pass
     if refinal:
         redo_final(run, truth_csv, res, crs)
     rows = []
@@ -245,13 +250,94 @@ def plot(df, png: str) -> str:
     return png
 
 
+def _truth_key(name: str) -> str:
+    """A truth file's name as the product it is for: 'pts_267403451_band4.csv' -> '267403451'."""
+    import re
+    k = os.path.splitext(os.path.basename(name))[0].lower()
+    k = re.sub(r'^(pts|gt|truth|gcp|manual)[_-]+', '', k)
+    k = re.sub(r'[_-]+(pts|gt|truth|gcp|manual)$', '', k)
+    return re.sub(r'[_-]+b(and)?\d+$', '', k)
+
+
+class TruthFolder:
+    """The truth files of one folder (and below), found for a job by its input's
+    file name or one of its folders (e.g. the request ID); the job's band first."""
+
+    def __init__(self, folder: str):
+        self.by_key: Dict[str, List[str]] = {}
+        for d, _, files in os.walk(folder or ''):
+            for f in files:
+                if f.lower().endswith(('.csv', '.txt')):
+                    self.by_key.setdefault(_truth_key(f), []).append(os.path.join(d, f))
+
+    def find(self, input_path: str, bands: List[str]) -> str:
+        import re
+        p = str(input_path or '').replace('\\', '/')
+        keys = [os.path.splitext(os.path.basename(p))[0].lower()]
+        keys += [x.lower() for x in p.split('/')[-4:-1] if x and x.lower() not in ('input', 'inputs', 'data')][::-1]
+        for k in keys:
+            got = self.by_key.get(_truth_key(k)) or self.by_key.get(k)
+            if got:
+                same = [g for g in got for b in bands if re.search(rf'[_-]{b}(\D|$)', os.path.basename(g).lower())]
+                return sorted(same or got)[0]
+        return ''
+
+
+def truth_for(run: str, truth: str = '', folder: Optional[TruthFolder] = None) -> str:
+    """The truth file of a run: the one given, else its own in the truth folder
+    (by its input's name), else the one its job names (if it is here)."""
+    import json
+    if truth:
+        return truth
+    try:
+        with open(os.path.join(run, 'job_used.json'), encoding='utf-8') as f:
+            j = json.load(f)
+    except (OSError, ValueError):
+        return ''
+    if folder is not None:
+        got = folder.find(j.get('input_path') or '', [str(c).lower() for c in (j.get('channels') or [])])
+        if got:
+            return got
+    own = str(j.get('truth_csv') or '')
+    return own if own and os.path.exists(own) else ''
+
+
+def changed(run: str, truth_csv: str) -> bool:
+    """The run has not been compared with this truth file as it is now: no
+    ranking, another truth file named, or the file is newer than the ranking."""
+    import json
+    rk = os.path.join(run, 'TRUTH_RANKING.csv')
+    if not os.path.exists(rk):
+        return True
+    named = ''
+    try:
+        with open(os.path.join(run, 'TRUTH_SOURCE.txt'), encoding='utf-8') as f:
+            named = f.read().strip()
+    except OSError:
+        try:
+            with open(os.path.join(run, 'job_used.json'), encoding='utf-8') as f:
+                named = str(json.load(f).get('truth_csv') or '')
+        except (OSError, ValueError):
+            pass
+    if os.path.basename(named).lower() != os.path.basename(truth_csv).lower():
+        return True
+    return os.path.getmtime(truth_csv) > os.path.getmtime(rk)
+
+
 def main(argv: Optional[List[str]] = None) -> int:
-    ap = argparse.ArgumentParser(description='Compare finished runs with a truth file, without running them again.')
-    ap.add_argument('folder', help='a run folder, or a folder of runs (auto steps, tiers, jobs)')
-    ap.add_argument('--truth', required=True, help='the truth (manual points) CSV')
+    ap = argparse.ArgumentParser(description='Compare finished runs with truth files, without running them again.')
+    ap.add_argument('folders', nargs='+', help='run folders, or folders of runs (server outputs through the share, '
+                                               'workstation outputs, auto steps, tiers)')
+    ap.add_argument('--truth', default='', help='one truth file for every run (else --truth-folder)')
+    ap.add_argument('--truth-folder', default='',
+                    help="the truth files, named after each input (its file name or one of its folders, e.g. the "
+                         "request ID); a run without one there uses the truth file its job names")
+    ap.add_argument('--all', action='store_true',
+                    help='every run with a truth file (default: only those whose truth file changed since their '
+                         'last comparison, or that were never compared)')
     ap.add_argument('--radius-km', type=float, default=5.0)
     ap.add_argument('--redo-final', action='store_true',
-                    help='also pick the final points again with this truth (an updated truth file): the cross-check '
+                    help='also pick the final points again with the truth (an updated truth file): the cross-check '
                          'from the saved matches, its top methods by the new ranking; nothing matched again')
     ap.add_argument('--share-local', default='', help="where the server's share is mounted here, e.g. V:\\")
     ap.add_argument('--share-server', default='', help='the same share on the server, e.g. /maintenance/')
@@ -259,25 +345,43 @@ def main(argv: Optional[List[str]] = None) -> int:
     import pandas as pd
     import automatch_cross as X
     X.SHARE = (a.share_local, a.share_server)
-    runs = run_folders(a.folder)
-    if not runs:
-        print(f'[TruthCheck] no finished run (job_used.json) in {a.folder}')
-        return 1
-    rows = []
-    for r in runs:
-        try:
-            rows += check_run(r, a.truth, a.radius_km * 1000.0, a.redo_final)
-        except Exception as e:
-            print(f'[TruthCheck] {os.path.basename(r)}: not compared ({type(e).__name__}: {e})', flush=True)
-    if not rows:
-        return 1
-    df = pd.DataFrame(rows)
-    df.to_csv(os.path.join(a.folder, 'TRUTH_CHECK.csv'), index=False)
-    png = plot(df, os.path.join(a.folder, 'TRUTH_CHECK.png'))
-    print(f'[TruthCheck] {len(runs)} run(s) compared -> {os.path.join(a.folder, "TRUTH_CHECK.csv")}'
-          + (f', {png}' if png else ''), flush=True)
-    return 0
-
+    if not a.truth and not a.truth_folder:
+        ap.error('give --truth or --truth-folder')
+    tf = TruthFolder(a.truth_folder) if a.truth_folder else None
+    rows, done, skipped = [], [], []
+    for folder in a.folders:
+        runs = run_folders(folder)
+        if not runs:
+            print(f'[TruthCheck] no finished run (job_used.json) in {folder}')
+        frows = []
+        for r in runs:
+            name = os.path.basename(os.path.normpath(r))
+            t = truth_for(r, a.truth, tf)
+            if not t:
+                skipped.append(f'{name} (no truth file)')
+                continue
+            if not a.all and not a.truth and not changed(r, t):
+                skipped.append(f'{name} (truth unchanged)')
+                continue
+            print(f'[TruthCheck] {name}: {os.path.basename(t)}', flush=True)
+            try:
+                frows += check_run(r, t, a.radius_km * 1000.0, a.redo_final)
+                done.append(name)
+            except Exception as e:
+                print(f'[TruthCheck] {name}: not compared ({type(e).__name__}: {e})', flush=True)
+        if frows:
+            df = pd.DataFrame(frows)
+            df.to_csv(os.path.join(folder, 'TRUTH_CHECK.csv'), index=False)
+            png = plot(df, os.path.join(folder, 'TRUTH_CHECK.png')) if df['run'].nunique() <= 12 else ''
+            print(f'[TruthCheck] {folder}: {df["run"].nunique()} run(s) -> TRUTH_CHECK.csv' + (f', {png}' if png else ''),
+                  flush=True)
+        rows += frows
+    if skipped:
+        print(f'[TruthCheck] left alone: {len(skipped)} run(s): ' + ', '.join(skipped[:20])
+              + (' ...' if len(skipped) > 20 else ''), flush=True)
+    print(f'[TruthCheck] {len(done)} run(s) compared' + (' (final points picked again)' if a.redo_final else ''),
+          flush=True)
+    return 0 if done or not rows else 1
 
 if __name__ == '__main__':
     sys.exit(main())
