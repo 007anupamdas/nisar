@@ -2862,6 +2862,7 @@ def test_truth_per_band(tmp):
     truth_folder_check(tmp)
     pack_truth_check(tmp)
     auto_windows_check(tmp)
+    auto_resolution_check(tmp)
     check('truth per band: the suffixes of a channel; the file of each band',
           (T.band_suffixes('band4')[:4],
            os.path.basename(T.truth_for_channel(b4, 'band4')), os.path.basename(T.truth_for_channel(b4, 'band5')),
@@ -2973,6 +2974,41 @@ def auto_windows_check(tmp):
           'above 20 km), 1024 for an unknown sensor; sizes given are kept',
           (mv['window_sizes'], hs['window_sizes'], mvb['window_sizes'], man['window_sizes'], unk['window_sizes'],
            'auto' in n1, n3), ([1024], [512], [2048], [512, 1024], [1024], True, ''))
+
+
+def auto_resolution_check(tmp):
+    """A lon/lat input: the pixel size from its product metadata, else the
+    sensor's (as in RIVAL), else its UTM grid's; a projected input or a
+    given target_resolution unchanged (not the 10 m the run used to take)."""
+    import numpy as _np
+    import rasterio as _rio
+    from rasterio.transform import from_origin as _fo
+    import automatch_job as J
+
+    def tif(folder, name, crs='EPSG:4326', px=0.0018):
+        os.makedirs(folder, exist_ok=True)
+        p = os.path.join(folder, name)
+        with _rio.open(p, 'w', driver='GTiff', width=40, height=40, count=1, dtype='uint16', crs=crs,
+                       transform=_fo(78.0 if crs == 'EPSG:4326' else 500000.0,
+                                     20.0 if crs == 'EPSG:4326' else 2200000.0, px, px)) as d:
+            d.write(_np.ones((1, 40, 40), 'uint16'))
+        return p
+    hs = tif(os.path.join(tmp, 'res_hs'), 'G1AHS026111205EX000006_S081557_ort.tif')
+    hv = tif(os.path.join(tmp, 'res_hv'), 'G1AHV026111204EX000004_ort.tif')
+    with open(os.path.join(tmp, 'res_hv', 'BAND_META.txt'), 'w') as f:
+        f.write('SatID=G1A\nSensor=HV\nPixelResolution = 318.5\nStripCenterLat=20.0\n')
+    unk = tif(os.path.join(tmp, 'res_unk'), 'scene.tif')
+    utm = tif(os.path.join(tmp, 'res_utm'), 'G1AHS_utm.tif', crs='EPSG:32644', px=191.0)
+    j1, n1 = J.auto_resolution({'input_path': hs})
+    j2, n2 = J.auto_resolution({'input_path': hv})
+    j3, _ = J.auto_resolution({'input_path': unk})
+    j4, n4 = J.auto_resolution({'input_path': utm})
+    j5, n5 = J.auto_resolution({'input_path': hs, 'target_resolution': 100})
+    check('working resolution of a lon/lat input: HS 191 m (as in RIVAL), HV 318.5 m from its BAND_META, an '
+          'unknown sensor its UTM grid (~190 m, not 10 m); projected or given unchanged',
+          (j1['target_resolution'], 'RIVAL' in n1, j2['target_resolution'], 'metadata' in n2,
+           150 < j3['target_resolution'] < 230, j4.get('target_resolution'), n4, j5['target_resolution'], n5),
+          (191.0, True, 318.5, True, True, None, '', 100, ''))
 
 
 def test_max_error_from_truth(tmp):

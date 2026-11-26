@@ -649,6 +649,28 @@ RANSAC thresholds and consensus tolerance are given **in pixels** of the
 working resolution (the input's native resolution unless `target_resolution`
 is set), so the defaults suit any pixel size.
 
+An input in lon/lat (a G1A `_ort` / `_sys` product: its pixel size is in
+degrees) takes its working resolution, in this order, from:
+
+1. **The product's metadata.** BAND_META.txt or `*meta*.txt` beside the input:
+   a key naming resolution, GSD, pixel size or spacing, with a value in metres.
+2. **The sensor's pixel size, as set in RIVAL:**
+
+   | Sensor | Pixel size | Bands |
+   |---|---|---|
+   | MV | 42 m | 6: 485–860 nm |
+   | HS | 191 m | 256: 900–2500 nm |
+   | HV | 320 m | 158: 375–1000 nm |
+   | ML | 1180 m | 6: 7350–13250 nm |
+
+3. **The UTM grid it is warped onto.**
+
+Before this, such inputs ran with 10 m. RANSAC and the detectors' agreement
+then allowed only 10–15 m on 191–320 m pixels, so the cross-check was never
+reliable and auto never passed on HS / HV. The run, preflight and Pack log the
+resolution chosen and where it came from. Results from the old 10 m runs are
+not reused.
+
 ## Errors that vary across the scene (internal distortion)
 
 Scenes with a large scale or warp error do not have "an" error: in the manual

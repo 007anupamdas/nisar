@@ -94,7 +94,7 @@ SENSOR_BANDS_NM = {
     'MV': [485.0, 555.0, 650.0, 815.0, 725.0, 860.0],
     'HV': (375.0, 1000.0),
     'HS': (900.0, 2500.0),
-    'ML': None,                       # thermal (7.35-13.25 um)
+    'ML': (7350.0, 13250.0),          # thermal: 6 bands, no red / green / NIR
 }
 TARGET_NM = {'red': 650.0, 'green': 560.0, 'nir': 860.0}
 MAX_OFFSET_NM = 40.0                  # a band further than this from the target does not stand in for it

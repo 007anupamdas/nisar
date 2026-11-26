@@ -1282,6 +1282,44 @@ def truth_files_beside(truth_csv: str) -> List[str]:
     return out
 
 
+def auto_resolution(job: Dict) -> Tuple[Dict, str]:
+    """(job, note): a lon/lat raster input with no target_resolution gets the
+    sensor's pixel size (automatch_presets.SENSOR_RES_M, as set in RIVAL),
+    else the metres of the UTM grid it is warped onto. Without this the run
+    took 10 m: RANSAC and the detectors' agreement then allowed 10-15 m on
+    191-320 m pixels (HS / HV), nothing agreed, and auto never passed."""
+    if job.get('target_resolution') or not job.get('input_path') or not os.path.isfile(job['input_path']):
+        return job, ''
+    if not str(job['input_path']).lower().endswith(('.tif', '.tiff', '.vrt', '.img')):
+        return job, ''
+    try:
+        import rasterio as rio
+        from rasterio.warp import calculate_default_transform, transform_bounds
+        with rio.open(job['input_path']) as src:
+            if src.crs is None or src.crs.is_projected:
+                return job, ''
+            b = transform_bounds(src.crs, 'EPSG:4326', *src.bounds)
+            lon, lat = (b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0
+            zone = int((lon + 180.0) // 6.0) % 60 + 1
+            utm = f'EPSG:{(32600 if lat >= 0 else 32700) + zone}'
+            t, _, _ = calculate_default_transform(src.crs, utm, src.width, src.height, *src.bounds)
+            warped = float(abs(t.a))
+    except Exception:
+        return job, ''
+    import automatch_presets as P
+    sensor = P.sensor_of(job['input_path'])
+    res, keys = P.meta_resolution(job['input_path'])
+    if res:
+        why = f'from the product metadata: {keys}; the lon/lat grid is about {warped:.0f} m'
+    elif P.SENSOR_RES_M.get(sensor):
+        res = P.SENSOR_RES_M[sensor]
+        why = (f'{sensor} pixel size as in RIVAL (no pixel size in the product metadata); the lon/lat grid is '
+               f'about {warped:.0f} m')
+    else:
+        res, why = round(warped, 1), 'the input is in lon/lat: its pixel size on the UTM grid'
+    return dict(job, target_resolution=res), f'working resolution {res:g} m ({why})'
+
+
 def auto_windows(job: Dict) -> Tuple[Dict, str]:
     """(the job with 'auto' window sizes resolved, a note): the sensor's window from
     the input's name (MV / C3 1024, HS / HV / ML 512), its larger one when the
@@ -1340,6 +1378,10 @@ def preflight(job: Dict, check_weights: bool = True) -> Dict:
     job, note = auto_windows(job)
     if note:
         info['window_sizes'] = job['window_sizes']
+        warnings.append(note)
+    job, note = auto_resolution(job)
+    if note:
+        info['working_resolution_m'] = job['target_resolution']
         warnings.append(note)
 
     if not job['input_path'] or not os.path.exists(job['input_path']):
@@ -2150,6 +2192,9 @@ def run_job(job: Dict) -> Dict:
     if note:
         print(f'[Job] {note}', flush=True)
     job, note = auto_windows(job)
+    if note:
+        print(f'[Job] {note}', flush=True)
+    job, note = auto_resolution(job)
     if note:
         print(f'[Job] {note}', flush=True)
     pf = preflight(job, check_weights=False)   # warmup stops a detector whose weights are missing

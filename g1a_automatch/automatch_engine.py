@@ -1659,6 +1659,18 @@ class InputScene:
                     b = transform_bounds(src.crs, 'EPSG:4326', *src.bounds)
                     self.working_crs = f'EPSG:{utm_epsg_for((b[0] + b[2]) / 2, (b[1] + b[3]) / 2)}'
                 self.native_res = abs(src.transform.a) if src.crs.is_projected else None
+                self.res_from_degrees = False
+                if not src.crs.is_projected:
+                    # lon/lat (a G1A _ort / _sys product): the pixel size in metres of the
+                    # UTM grid it is warped onto (the warp's own default), not a guess
+                    try:
+                        from rasterio.warp import calculate_default_transform
+                        t, _, _ = calculate_default_transform(src.crs, self.working_crs, src.width,
+                                                              src.height, *src.bounds)
+                        self.native_res = round(float(abs(t.a)), 3)
+                        self.res_from_degrees = True
+                    except Exception as e:
+                        print(f'[Input] pixel size in metres unknown ({type(e).__name__}: {e})')
                 self.source_crs = _crs_string(src.crs)
             self.channels = [f'band{i}' for i in range(1, n + 1)]
             self.band_descriptions = {f'band{i}': (descs[i - 1] if i - 1 < len(descs) else None)

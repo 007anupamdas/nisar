@@ -263,6 +263,31 @@ def product_meta(path: str) -> Dict[str, str]:
     return {}
 
 
+_RES_KEY = re.compile(r'(resolution|gsd|pixel_?size|pixel_?spacing|spatial_?res|sampling)', re.I)
+
+
+def meta_resolution(path: str) -> Tuple[Optional[float], str]:
+    """(pixel size in metres, the metadata key(s) it came from) from the
+    product's own metadata (BAND_META.txt / *meta*.txt beside the input):
+    keys naming resolution / GSD / pixel size / spacing with a value in
+    metres (along and across are averaged); (None, '') when none."""
+    meta = product_meta(path)
+    vals, keys = [], []
+    for k, v in meta.items():
+        if not _RES_KEY.search(str(k)):
+            continue
+        m = re.match(r'\s*([0-9]+(?:\.[0-9]+)?)\s*(m|metres?|meters?|km)?\s*$', str(v), re.I)
+        if not m:
+            continue
+        x = float(m.group(1)) * (1000.0 if (m.group(2) or '').lower() == 'km' else 1.0)
+        if 1.0 <= x <= 5000.0:              # metres; a value in degrees is left out
+            vals.append(x)
+            keys.append(k)
+    if not vals:
+        return None, ''
+    return round(float(sum(vals) / len(vals)), 3), ', '.join(keys)
+
+
 def scene_centre(path: str) -> Optional[Tuple[float, float]]:
     """(lon, lat) of the input's centre: from its metadata, else its raster bounds."""
     meta = product_meta(path)
@@ -314,6 +339,13 @@ def parse_bands(text: str) -> List[str]:
         if t:
             out.append(f'band{int(t)}' if t.isdigit() else t)
     return out
+
+
+# Pixel size (m) per G1A sensor, as set in RIVAL: the working resolution of a
+# lon/lat input (an _ort / _sys product), whose pixel size is in degrees.
+# MV: 6 bands 485-860 nm; HS: 256 bands 900-2500 nm; HV: 158 bands 375-1000 nm;
+# ML: 6 bands 7350-13250 nm.
+SENSOR_RES_M = {'MV': 42.0, 'HS': 191.0, 'HV': 320.0, 'ML': 1180.0}
 
 
 # The window per sensor, and the larger one once the largest truth error passes a level:

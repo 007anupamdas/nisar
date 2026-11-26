@@ -361,6 +361,10 @@ def pack(job: Dict, dest: str, server_dir: str, server_weights: str = '', server
     if note:
         log(note)
         notes.append(note)
+    job, note = J.auto_resolution(job)             # a lon/lat input: the sensor's pixel size, not 10 m
+    if note:
+        log(note)
+        notes.append(note)
     for p in [x for x in J.truth_files_beside(job.get('truth_csv') or '') if x != job.get('truth_csv')]:
         plan.append((os.path.abspath(p), os.path.join(dest, 'truth', os.path.basename(p))))
     settings = dict(job)
