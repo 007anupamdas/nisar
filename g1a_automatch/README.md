@@ -147,6 +147,19 @@ a truth file and by *Compare with truth*; by hand:
 detector + matcher (TRUTH_RANKING), each final point set's truth RMSE (final,
 rigid, consistent, best final), REPORT with the manual points, and
 TRUTH_CHECK.png over the runs in the output folder (each auto step or tier).
+**Several truth files for one image, one per band.** Name them with a common
+stem and the band at the end, in one folder: `pts_band4.csv`, `pts_band5.csv`,
+`pts_band6.csv` (or `<id>_B4.csv` …).
+- **Which bands run:** choose any one of them as the truth file (run window:
+  *Ground truth*; full window: the truth field) and leave the band empty. The
+  job matches every band the files name (`channels_from_truth`).
+- **Scoring:** each band is ranked, cross-checked and scored against its own
+  file. So are the report (one MANUAL row per file), Compare with truth and
+  the per-method plots (`<band>_<method>_vectors.png`).
+- **Window and search range:** from the largest error over all the files.
+- **With a truth folder,** the job's band picks its file first, and the
+  others are found beside it.
+
 **All jobs at once, server and workstation** (full window: Tools →
 **Compare with truth…**):
 - **Job folders:** list them all, e.g. the server's output through the share

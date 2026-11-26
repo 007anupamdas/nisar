@@ -120,10 +120,16 @@ def check_run(run: str, truth_csv: str, radius_m: float = 5000.0, refinal: bool 
         rows.append({'run': name, 'set': f"best single: {b['detector']} + {b['matcher']}",
                      'truth_rmse_m': float(b['truth_rmse_m']), 'truth_reached': int(b['truth_reached']),
                      'truth_total': int(b['truth_total'])})
-    truth = T.truth_in_crs(T.load_truth(truth_csv), crs)
+    import re
+    truths: Dict[str, object] = {}
     for f in point_sets(run):
         try:
-            rows.append({'run': name, 'set': os.path.basename(f)[:-4], **score_file(f, truth, radius_m)})
+            m = re.search(r'_(band\d+)(?:_|\.|$)', os.path.basename(f))
+            tc = T.truth_for_channel(truth_csv, m.group(1)) if m else truth_csv   # per band: its own file
+            if tc not in truths:
+                truths[tc] = T.truth_in_crs(T.load_truth(tc), crs)
+            rows.append({'run': name, 'set': os.path.basename(f)[:-4], 'truth_file': os.path.basename(tc),
+                         **score_file(f, truths[tc], radius_m)})
         except Exception as e:
             print(f'[TruthCheck] {name}: {os.path.basename(f)} not scored ({type(e).__name__}: {e})')
     try:                                         # the methods close to the manual points, detector by detector

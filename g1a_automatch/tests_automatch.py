@@ -1079,6 +1079,23 @@ def test_report(tmp):
     pd.DataFrame({'In_X': [1, 2, 3], 'In_Y': [1, 2, 3], 'Ref_X': [0, 0, 0], 'Ref_Y': [0, 0, 0],
                   'DX_Err': [990.0, 1010.0, 1000.0], 'DY_Err': [-510.0, -490.0, -500.0]}).to_csv(tcsv, index=False)
     rows = RP.report(out, quiet=True, truth_csv=tcsv)
+    # truth measured per band: each band's file scored against its own manual points
+    out2 = os.path.join(tmp, 'report_bands')
+    os.makedirs(out2, exist_ok=True)
+    for band, (oe, on) in (('band4', (1000.0, -500.0)), ('band5', (-300.0, 700.0))):
+        pb = pd.DataFrame({'x1-map': E, 'y1-map': N, 'x2-map': E - (oe + rng.normal(0, 30, n)),
+                           'y2-map': N - (on + rng.normal(0, 30, n))})
+        R.write_rival_csv(pb, 'EPSG:32643', os.path.join(out2, f'RIVAL_FINAL_{band}.csv'))
+        pd.DataFrame({'In_X': [1, 2, 3], 'In_Y': [1, 2, 3], 'Ref_X': [0, 0, 0], 'Ref_Y': [0, 0, 0],
+                      'DX_Err': [oe - 10, oe + 10, oe], 'DY_Err': [on - 10, on + 10, on]}).to_csv(
+            os.path.join(tmp, f'pts_{band}.csv'), index=False)
+    rb = RP.report(out2, quiet=True, truth_csv=os.path.join(tmp, 'pts_band4.csv'))
+    fin = {r['file']: r for r in rb if str(r['file']).startswith('RIVAL_FINAL')}
+    check('report: truth measured per band (pts_band4.csv, pts_band5.csv): each band against its own manual points',
+          (sorted(r['file'] for r in rb if str(r['file']).startswith('MANUAL')),
+           abs(fin['RIVAL_FINAL_band4.csv']['mean_dx_vs_manual_m']) < 20,
+           abs(fin['RIVAL_FINAL_band5.csv']['mean_dx_vs_manual_m']) < 20),
+          (['MANUAL (pts_band4.csv)', 'MANUAL (pts_band5.csv)'], True, True))
     check('report: the manual points\' statistics as a row, each file\'s difference to them near 0 here',
           (rows[-1]['file'].startswith('MANUAL'), rows[-1]['n'], abs(rows[0]['mean_dx_vs_manual_m']) < 20,
            abs(rows[0]['ce90_vs_manual_m']) < 60), (True, 3, True, True))

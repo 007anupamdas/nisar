@@ -331,7 +331,9 @@ def window_for_truth(sensor: str, truth_csv: str, default: List[int]) -> Tuple[L
         return list(default), ''
     try:
         import automatch_report as RP
-        worst = float(RP.manual_stats(truth_csv).get('max_dist_m') or 0.0) / 1000.0
+        from automatch_job import truth_files_beside             # every band's file
+        worst = max(float(RP.manual_stats(f).get('max_dist_m') or 0.0)
+                    for f in (truth_files_beside(truth_csv) or [truth_csv])) / 1000.0
     except Exception:
         return list(default), ''
     small, big, level = rule

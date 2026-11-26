@@ -27,6 +27,7 @@ import math
 import os
 import struct
 import sys
+import re
 from typing import Dict, List, Optional
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -472,19 +473,43 @@ def report(job_dir: str, all_files: bool = False, quiet: bool = False, truth_csv
         jd = os.path.dirname(os.path.normpath(jd))
     ctx = plot_context(jd, truth_csv) if files else {}
     ctx['manual'] = manual
-    rows = []
+    per_truth: Dict[str, tuple] = {truth_csv: (ctx, manual)}
+
+    def band_ctx(p):
+        """(ctx, manual, truth file) of a point file: its band's own truth file when
+        the truth is measured per band (pts_band4.csv, pts_band5.csv ...)."""
+        m = re.search(r'_(band\d+)(?:_|\.|$)', os.path.basename(p))
+        if not (m and truth_csv):
+            return ctx, manual, truth_csv
+        import automatch_truth as T
+        tc = T.truth_for_channel(truth_csv, m.group(1))
+        if tc not in per_truth:
+            c = dict(ctx)
+            try:
+                if ctx.get('crs'):
+                    c['truth'] = T.truth_in_crs(T.load_truth(tc), ctx['crs'])[['E', 'N', 'dE', 'dN']].copy()
+                c['manual'] = manual_stats(tc)
+            except Exception as e:
+                print(f'[Report] manual points {os.path.basename(tc)} unreadable: {type(e).__name__}: {e}')
+            per_truth[tc] = (c, c.get('manual'))
+        return per_truth[tc][0], per_truth[tc][1], tc
+    rows, used = [], {}
     for p in files:
         try:
-            rows.append(report_file(p, out, ctx))
+            c, man, tc = band_ctx(p)
+            r = report_file(p, out, c)
+            if man:
+                for k in COMPARE:
+                    if r.get(k) is not None and man.get(k) is not None:
+                        r[f'{k.replace("_m", "")}_vs_manual_m'] = round(float(r[k]) - float(man[k]), 3)
+                used[tc] = man
+            rows.append(r)
         except Exception as e:
             print(f'[Report] {os.path.basename(p)}: {type(e).__name__}: {e}')
             rows.append({'file': os.path.basename(p), 'error': f'{type(e).__name__}: {e}'})
-    if manual and rows:
-        for r in rows:
-            for k in COMPARE:
-                if r.get(k) is not None and manual.get(k) is not None:
-                    r[f'{k.replace("_m", "")}_vs_manual_m'] = round(float(r[k]) - float(manual[k]), 3)
-        rows.append({'file': f'MANUAL ({os.path.basename(truth_csv)})', **manual})
+    if rows:
+        for tc, man in (used.items() if used else ([(truth_csv, manual)] if manual else [])):
+            rows.append({'file': f'MANUAL ({os.path.basename(tc)})', **man})
     if rows:
         os.makedirs(out, exist_ok=True)
         pd.DataFrame(rows).to_csv(os.path.join(out, 'REPORT_STATS.csv'), index=False)
@@ -494,10 +519,10 @@ def report(job_dir: str, all_files: bool = False, quiet: bool = False, truth_csv
                     print(f"[Report] {r['file']}: {r['n']} points, mean dE {r.get('mean_dx_m')} m dN "
                           f"{r.get('mean_dy_m')} m, RMSE E {r['rmse_x_m']} N {r['rmse_y_m']} m, CE90 {r['ce90_m']} m"
                           f" -> {os.path.basename(r['shapefile'])}, {os.path.basename(r['vectors_png'])}")
-            if manual:
-                print(f"[Report] manual points: {manual['n']}, mean dE {manual.get('mean_dx_m')} m dN "
-                      f"{manual.get('mean_dy_m')} m, RMSE E {manual['rmse_x_m']} N {manual['rmse_y_m']} m, CE90 "
-                      f"{manual['ce90_m']} m (each file's difference to these: *_vs_manual_m)")
+            for tc, man in (used.items() if used else ([(truth_csv, manual)] if manual else [])):
+                print(f"[Report] manual points ({os.path.basename(tc)}): {man['n']}, mean dE {man.get('mean_dx_m')} m "
+                      f"dN {man.get('mean_dy_m')} m, RMSE E {man['rmse_x_m']} N {man['rmse_y_m']} m, CE90 "
+                      f"{man['ce90_m']} m (each file's difference to these: *_vs_manual_m)")
             print(f'[Report] {len(rows)} row(s): shapefiles, look-vector plots and REPORT_STATS.csv in {out}')
     elif not quiet:
         print(f'[Report] no RIVAL CSV in {job_dir}')

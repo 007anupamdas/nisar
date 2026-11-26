@@ -46,9 +46,12 @@ def close_to_manual(ranking: pd.DataFrame, within: float = 1.5, max_n: int = 8,
     if r.empty:
         return r
     r['family'] = r['detector'].map(family)
-    best = r.sort_values('rank').groupby('family', sort=False).head(1)
-    lim = within * float(best['truth_rmse_m'].min())
-    return best[best['truth_rmse_m'] <= lim].sort_values('truth_rmse_m').head(max_n).reset_index(drop=True)
+    out = []
+    for _, rc in r.groupby('channel', sort=False):        # each band on its own (truth per band)
+        best = rc.sort_values('rank').groupby('family', sort=False).head(1)
+        lim = within * float(best['truth_rmse_m'].min())
+        out.append(best[best['truth_rmse_m'] <= lim].sort_values('truth_rmse_m').head(max_n))
+    return pd.concat(out).reset_index(drop=True) if out else r.iloc[0:0]
 
 
 def run(job_dir: str, truth_csv: str = '', within: float = 1.5, max_n: int = 8, need: int = 2,
@@ -62,13 +65,16 @@ def run(job_dir: str, truth_csv: str = '', within: float = 1.5, max_n: int = 8, 
         raise ValueError('needs the truth ranking (a job with a truth file, or Compare with truth first)')
     crs = T.working_crs_of(job_dir)
     sel = close_to_manual(pd.read_csv(rk_path), within, max_n)
-    if len(sel) < 2:
-        raise ValueError(f'{len(sel)} method(s) close to the manual points: need two to compare')
+    if len(sel) < 2 or sel.groupby('channel').size().max() < 2:
+        raise ValueError(f'{len(sel)} method(s) close to the manual points: need two in a band to compare')
     out = {'job': job_dir, 'methods': []}
     plots = os.path.join(job_dir, 'DETECTOR_PLOTS')
     os.makedirs(plots, exist_ok=True)
-    rows, every = [], []
+    rows = []
+    multi = sel['channel'].nunique() > 1          # several bands (truth per band): each its own plots
     for ch, s in sel.groupby('channel'):
+        every = []
+        pre = f'{ch}_' if multi else ''
         keys = {(str(r.channel), str(r.sweep), str(r.detector), str(r.matcher), str(r.ransac))
                 for r in s.itertuples()}
         cfgs = [c for c in X._configs(job_dir, only=keys) if c['channel'] == str(ch)]
@@ -79,10 +85,11 @@ def run(job_dir: str, truth_csv: str = '', within: float = 1.5, max_n: int = 8, 
         res = float(T.job_resolution(job_dir) or 10.0)
         L = int(cell_px or (X._job_cell_px(job_dir) or [64])[0])
         pts, cells = X.consistent_points(cfgs, L * res, tol, max(2, min(int(need), len(cfgs))), all_points=True)
-        truth = T.truth_in_crs(T.load_truth(truth_csv), crs)
-        ctx = RP.plot_context(job_dir, truth_csv)
+        tch = T.truth_for_channel(truth_csv, str(ch))         # per band: its own truth file
+        truth = T.truth_in_crs(T.load_truth(tch), crs)
+        ctx = RP.plot_context(job_dir, tch)
         try:
-            ctx['manual'] = RP.manual_stats(truth_csv)
+            ctx['manual'] = RP.manual_stats(tch)
         except Exception:
             pass
         for c in cfgs:
@@ -92,7 +99,8 @@ def run(job_dir: str, truth_csv: str = '', within: float = 1.5, max_n: int = 8, 
             row = {'channel': ch, 'detector': c['detector'], 'matcher': c['matcher'], 'ransac': c['ransac'],
                    'sweep': c['sweep'], 'truth_rmse_all_m': round(float(rk['truth_rmse_m']), 1),
                    'truth_reached_all': int(rk['truth_reached']), 'points_all': int(len(c['points'])),
-                   'points_agreed': int(len(mine)), 'cell_px': L, 'tolerance_m': round(tol, 1)}
+                   'points_agreed': int(len(mine)), 'cell_px': L, 'tolerance_m': round(tol, 1),
+                   'truth_file': os.path.basename(tch)}
             if len(mine):
                 sc, _ = T.score_config({'points': mine.assign(chip=c['detector'])[['E', 'N', 'dE', 'dN', 'chip']]},
                                        truth, 5000.0)
@@ -101,14 +109,14 @@ def run(job_dir: str, truth_csv: str = '', within: float = 1.5, max_n: int = 8, 
                 p = [{'In_X': e, 'In_Y': n, 'DX_Err': de, 'DY_Err': dn} for e, n, de, dn in
                      zip(mine['E'], mine['N'], mine['dE'], mine['dN'])]
                 every += p
-                name = re.sub(r'[^A-Za-z0-9._+-]+', '_', f"{c['detector']}_{c['matcher']}")
+                name = re.sub(r'[^A-Za-z0-9._+-]+', '_', f"{pre}{c['detector']}_{c['matcher']}")
                 png = os.path.join(plots, f'{name}_vectors.png')
                 RP.plot_vectors(p, png, st=RP.stats(p), ctx=dict(ctx, title=(ctx.get('title') or '') + (
                     f"   {c['detector']} + {c['matcher']}: {len(mine)} agreed point(s)")))
                 row['plot'] = png
             rows.append(row)
         if every:
-            RP.plot_vectors(every, os.path.join(plots, 'ALL_AGREED_vectors.png'), st=RP.stats(every),
+            RP.plot_vectors(every, os.path.join(plots, f'{pre}ALL_AGREED_vectors.png'), st=RP.stats(every),
                             ctx=dict(ctx, title=(ctx.get('title') or '') + f'   {len(cfgs)} methods close to the '
                                                  f'manual points: {len(every)} agreed point(s)'))
     df = pd.DataFrame(rows)

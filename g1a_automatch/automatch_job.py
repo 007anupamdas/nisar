@@ -1225,10 +1225,12 @@ def max_error_from_truth(job: Dict) -> Tuple[Dict, str]:
     try:
         import automatch_truth as T
         from pyproj import Geod
-        t = T.load_truth(job['truth_csv'])
-        _, _, dist = Geod(ellps='WGS84').inv(t['in_lon'].to_numpy(), t['in_lat'].to_numpy(),
-                                             t['ref_lon'].to_numpy(), t['ref_lat'].to_numpy())
-        worst = float(max(abs(d) for d in dist))
+        worst = 0.0
+        for tf in truth_files_beside(job['truth_csv']):       # every band's file (pts_band4.csv, pts_band5.csv ...)
+            t = T.load_truth(tf)
+            _, _, dist = Geod(ellps='WGS84').inv(t['in_lon'].to_numpy(), t['in_lat'].to_numpy(),
+                                                 t['ref_lon'].to_numpy(), t['ref_lat'].to_numpy())
+            worst = max(worst, float(max(abs(d) for d in dist)))
     except Exception as e:
         return job, f'max_expected_error_m kept ({type(e).__name__} reading the truth: {e})'
     new = max(5000.0, math.ceil(worst * 4.0 / 3.0 / 1000.0 - 0.1) * 1000.0)     # 20.03 km -> 20, not 21
